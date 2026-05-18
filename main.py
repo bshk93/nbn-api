@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 DATA_DIR = Path("/var/lib/nothing-but-stats")
 TOKENS_FILE = DATA_DIR / "tokens.json"
+TRADING_BLOCK_FILE = DATA_DIR / "trading-block.json"
 
 VALID_TEAMS = {
     "ATL", "BKN", "BOS", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW",
@@ -126,6 +127,45 @@ def put_picks(team: str, body: dict, _: dict = Depends(require_role("rosters")))
     path = team_path(team, "picks")
     headers, _ = read_csv(path)
     write_csv(path, headers, body.get("rows", []))
+    return {"ok": True}
+
+
+# ── Trading Block ────────────────────────────────────────────────────────────
+
+def load_trading_block() -> dict:
+    if not TRADING_BLOCK_FILE.exists():
+        return {t: [] for t in sorted(VALID_TEAMS)}
+    return json.loads(TRADING_BLOCK_FILE.read_text())
+
+
+def save_trading_block(data: dict):
+    TRADING_BLOCK_FILE.write_text(json.dumps(data, indent=2))
+
+
+class TradingBlockEntry(BaseModel):
+    player: str
+    notes: str = ""
+
+
+@app.get("/api/trading-block")
+def get_trading_block():
+    return load_trading_block()
+
+
+@app.put("/api/trading-block/{team}")
+def put_trading_block(
+    team: str,
+    body: list[TradingBlockEntry],
+    info: dict = Depends(get_token_info),
+):
+    team = team.upper()
+    if team not in VALID_TEAMS:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    if not has_role(info, team.lower()) and not has_role(info, "admin"):
+        raise HTTPException(status_code=403, detail=f"'{team.lower()}' role required")
+    data = load_trading_block()
+    data[team] = [e.model_dump() for e in body]
+    save_trading_block(data)
     return {"ok": True}
 
 
