@@ -12,6 +12,7 @@ from pydantic import BaseModel
 DATA_DIR = Path("/var/lib/nothing-but-stats")
 TOKENS_FILE = DATA_DIR / "tokens.json"
 TRADING_BLOCK_FILE = DATA_DIR / "trading-block.json"
+PLAYER_BIOS_FILE   = DATA_DIR / "player-bios.json"
 
 VALID_TEAMS = {
     "ATL", "BKN", "BOS", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW",
@@ -166,6 +167,62 @@ def put_trading_block(
     data = load_trading_block()
     data[team] = [e.model_dump() for e in body]
     save_trading_block(data)
+    return {"ok": True}
+
+
+# ── Players ──────────────────────────────────────────────────────────────────
+
+def load_player_bios() -> dict:
+    if not PLAYER_BIOS_FILE.exists():
+        return {}
+    return json.loads(PLAYER_BIOS_FILE.read_text())
+
+
+def save_player_bios(data: dict):
+    PLAYER_BIOS_FILE.write_text(json.dumps(data, indent=2))
+
+
+class PlayerBio(BaseModel):
+    name: str
+    pos: str = ""
+    dob: str = ""
+    college: str = ""
+    country: str = ""
+    draft_year: Optional[int] = None
+    draft_round: Optional[int] = None
+    draft_pick: Optional[int] = None
+    photo_url: str = ""
+
+
+class PlayerCreate(PlayerBio):
+    slug: str
+
+
+@app.get("/api/players")
+def get_players():
+    return load_player_bios()
+
+
+@app.post("/api/players")
+def create_player(body: PlayerCreate, _: dict = Depends(require_admin)):
+    slug = body.slug.strip().lower()
+    if not slug:
+        raise HTTPException(status_code=422, detail="slug is required")
+    bios = load_player_bios()
+    if slug in bios:
+        raise HTTPException(status_code=409, detail="Player already exists")
+    data = body.model_dump()
+    data.pop("slug")
+    bios[slug] = data
+    save_player_bios(bios)
+    return {"ok": True, "slug": slug}
+
+
+@app.put("/api/players/{slug}")
+def update_player(slug: str, body: PlayerBio, _: dict = Depends(require_admin)):
+    bios = load_player_bios()
+    bios[slug] = body.model_dump()
+    save_player_bios(bios)
     return {"ok": True}
 
 
