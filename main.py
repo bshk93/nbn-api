@@ -182,9 +182,12 @@ def save_player_bios(data: dict):
     PLAYER_BIOS_FILE.write_text(json.dumps(data, indent=2))
 
 
+VALID_POSITIONS = {"PG", "SG", "SF", "PF", "C"}
+
+
 class PlayerBio(BaseModel):
     name: str
-    pos: str = ""
+    pos: list[str] = []
     dob: str = ""
     college: str = ""
     country: str = ""
@@ -208,6 +211,9 @@ def create_player(body: PlayerCreate, _: dict = Depends(require_admin)):
     slug = body.slug.strip().lower()
     if not slug:
         raise HTTPException(status_code=422, detail="slug is required")
+    invalid_pos = [p for p in body.pos if p not in VALID_POSITIONS]
+    if invalid_pos:
+        raise HTTPException(status_code=422, detail=f"Invalid positions: {invalid_pos}")
     bios = load_player_bios()
     if slug in bios:
         raise HTTPException(status_code=409, detail="Player already exists")
@@ -220,6 +226,9 @@ def create_player(body: PlayerCreate, _: dict = Depends(require_admin)):
 
 @app.put("/api/players/{slug}")
 def update_player(slug: str, body: PlayerBio, _: dict = Depends(require_admin)):
+    invalid_pos = [p for p in body.pos if p not in VALID_POSITIONS]
+    if invalid_pos:
+        raise HTTPException(status_code=422, detail=f"Invalid positions: {invalid_pos}")
     bios = load_player_bios()
     bios[slug] = body.model_dump()
     save_player_bios(bios)
