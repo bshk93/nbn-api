@@ -155,8 +155,6 @@ def pick_to_response(p: dict) -> dict:
     protected = int(p["PROTECTED"]) if p.get("PROTECTED") else None
     if pick is not None and protected is not None:
         conveys = pick > protected
-    elif pick is not None:
-        conveys = True
     else:
         conveys = None
     swap_owner = p.get("SWAP_OWNER", "").strip() or None
