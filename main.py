@@ -31,7 +31,7 @@ PLAYER_BIOS_FILE   = DATA_DIR / "player-bios.json"
 CAP_LEVELS_FILE    = DATA_DIR / "cap-levels.json"
 PICKS_FILE         = DATA_DIR / "draft-picks.csv"
 
-PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "NOTES"]
+PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PROTECTED", "NOTES"]
 
 VALID_TEAMS = {
     "ATL", "BKN", "BOS", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW",
@@ -149,13 +149,23 @@ def save_picks(picks: list[dict]):
 
 
 def pick_to_response(p: dict) -> dict:
+    pick      = int(p["PICK"])      if p.get("PICK")      else None
+    protected = int(p["PROTECTED"]) if p.get("PROTECTED") else None
+    if pick is not None and protected is not None:
+        conveys = pick > protected
+    elif pick is not None:
+        conveys = True
+    else:
+        conveys = None
     return {
-        "year":  int(p["YEAR"]),
-        "round": int(p["ROUND"]),
-        "orig":  p["ORIG"],
-        "owner": p["OWNER"],
-        "pick":  int(p["PICK"]) if p.get("PICK") else None,
-        "notes": p.get("NOTES", ""),
+        "year":      int(p["YEAR"]),
+        "round":     int(p["ROUND"]),
+        "orig":      p["ORIG"],
+        "owner":     p["OWNER"],
+        "pick":      pick,
+        "protected": protected,
+        "conveys":   conveys,
+        "notes":     p.get("NOTES", ""),
     }
 
 
@@ -175,6 +185,7 @@ def get_team_picks(team: str):
 class PickUpsert(BaseModel):
     owner: str
     pick: Optional[int] = None
+    protected: Optional[int] = None
     notes: str = ""
 
 
@@ -195,16 +206,18 @@ def upsert_pick(
 
     picks = load_picks()
     updated = {"YEAR": str(year), "ROUND": str(rnd), "ORIG": orig,
-               "OWNER": owner, "PICK": str(body.pick) if body.pick is not None else "",
-               "NOTES": body.notes}
+               "OWNER": owner,
+               "PICK":      str(body.pick)      if body.pick      is not None else "",
+               "PROTECTED": str(body.protected) if body.protected is not None else "",
+               "NOTES":     body.notes}
 
     for i, p in enumerate(picks):
         if p.get("YEAR") == str(year) and p.get("ROUND") == str(rnd) and p.get("ORIG", "").upper() == orig:
             old_owner = p.get("OWNER", "")
             picks[i] = updated
             save_picks(picks)
-            action = f"traded to {owner}" if old_owner.upper() != owner else f"updated"
-            log_write(info, f"PUT picks {year} R{rnd} {orig} — {action} pick={body.pick} notes={body.notes!r}")
+            action = f"traded to {owner}" if old_owner.upper() != owner else "updated"
+            log_write(info, f"PUT picks {year} R{rnd} {orig} — {action} pick={body.pick} protected={body.protected} notes={body.notes!r}")
             return pick_to_response(updated)
 
     # New pick
