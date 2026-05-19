@@ -25,10 +25,13 @@ def log_write(info: dict, action: str):
     logger.info("[%s] %s", name, action)
 
 DATA_DIR = Path("/var/lib/nothing-but-stats")
-TOKENS_FILE = DATA_DIR / "tokens.json"
+TOKENS_FILE        = DATA_DIR / "tokens.json"
 TRADING_BLOCK_FILE = DATA_DIR / "trading-block.json"
 PLAYER_BIOS_FILE   = DATA_DIR / "player-bios.json"
 CAP_LEVELS_FILE    = DATA_DIR / "cap-levels.json"
+PICKS_FILE         = DATA_DIR / "draft-picks.csv"
+
+PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "NOTES"]
 
 VALID_TEAMS = {
     "ATL", "BKN", "BOS", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW",
@@ -134,20 +137,95 @@ def put_roster(team: str, body: dict, info: dict = Depends(require_role("rosters
 
 # ── Picks ────────────────────────────────────────────────────────────────────
 
+def load_picks() -> list[dict]:
+    if not PICKS_FILE.exists():
+        return []
+    _, rows = read_csv(PICKS_FILE)
+    return rows
+
+
+def save_picks(picks: list[dict]):
+    write_csv(PICKS_FILE, PICKS_HEADERS, picks)
+
+
+def pick_to_response(p: dict) -> dict:
+    return {
+        "year":  int(p["YEAR"]),
+        "round": int(p["ROUND"]),
+        "orig":  p["ORIG"],
+        "owner": p["OWNER"],
+        "pick":  int(p["PICK"]) if p.get("PICK") else None,
+        "notes": p.get("NOTES", ""),
+    }
+
+
+@app.get("/api/picks")
+def get_all_picks():
+    return [pick_to_response(p) for p in load_picks()]
+
+
 @app.get("/api/picks/{team}")
-def get_picks(team: str):
-    path = team_path(team, "picks")
-    headers, rows = read_csv(path)
-    return {"headers": headers, "rows": rows}
+def get_team_picks(team: str):
+    team = team.upper()
+    if team not in VALID_TEAMS:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    return [pick_to_response(p) for p in load_picks() if p.get("OWNER", "").upper() == team]
 
 
-@app.put("/api/picks/{team}")
-def put_picks(team: str, body: dict, info: dict = Depends(require_role("rosters"))):
-    path = team_path(team, "picks")
-    headers, _ = read_csv(path)
-    rows = body.get("rows", [])
-    write_csv(path, headers, rows)
-    log_write(info, f"PUT picks/{team.upper()} — {len(rows)} rows")
+class PickUpsert(BaseModel):
+    owner: str
+    pick: Optional[int] = None
+    notes: str = ""
+
+
+@app.put("/api/picks/{year}/{rnd}/{orig}")
+def upsert_pick(
+    year: int, rnd: int, orig: str,
+    body: PickUpsert,
+    info: dict = Depends(require_role("rosters")),
+):
+    orig = orig.upper()
+    if orig not in VALID_TEAMS:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    if rnd not in (1, 2):
+        raise HTTPException(status_code=422, detail="Round must be 1 or 2")
+    owner = body.owner.upper()
+    if owner not in VALID_TEAMS:
+        raise HTTPException(status_code=422, detail=f"Unknown owner team: {owner}")
+
+    picks = load_picks()
+    updated = {"YEAR": str(year), "ROUND": str(rnd), "ORIG": orig,
+               "OWNER": owner, "PICK": str(body.pick) if body.pick is not None else "",
+               "NOTES": body.notes}
+
+    for i, p in enumerate(picks):
+        if p.get("YEAR") == str(year) and p.get("ROUND") == str(rnd) and p.get("ORIG", "").upper() == orig:
+            old_owner = p.get("OWNER", "")
+            picks[i] = updated
+            save_picks(picks)
+            action = f"traded to {owner}" if old_owner.upper() != owner else f"updated"
+            log_write(info, f"PUT picks {year} R{rnd} {orig} — {action} pick={body.pick} notes={body.notes!r}")
+            return pick_to_response(updated)
+
+    # New pick
+    picks.append(updated)
+    picks.sort(key=lambda p: (p["YEAR"], p["ROUND"], p["ORIG"]))
+    save_picks(picks)
+    log_write(info, f"PUT picks {year} R{rnd} {orig} (new) — owner={owner}")
+    return pick_to_response(updated)
+
+
+@app.delete("/api/picks/{year}/{rnd}/{orig}")
+def delete_pick(year: int, rnd: int, orig: str, info: dict = Depends(require_admin)):
+    orig = orig.upper()
+    picks = load_picks()
+    new_picks = [p for p in picks
+                 if not (p.get("YEAR") == str(year) and p.get("ROUND") == str(rnd)
+                         and p.get("ORIG", "").upper() == orig)]
+    if len(new_picks) == len(picks):
+        raise HTTPException(status_code=404, detail="Pick not found")
+    save_picks(new_picks)
+    log_write(info, f"DELETE picks {year} R{rnd} {orig}")
     return {"ok": True}
 
 
