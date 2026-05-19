@@ -1,7 +1,9 @@
 import csv
 import io
 import json
+import logging
 import secrets
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -9,10 +11,24 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+logging.basicConfig(
+    stream=sys.stdout,
+    level=logging.INFO,
+    format="%(asctime)s  %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
+logger = logging.getLogger("nbn-api")
+
+
+def log_write(info: dict, action: str):
+    name = info.get("name", "unknown")
+    logger.info("[%s] %s", name, action)
+
 DATA_DIR = Path("/var/lib/nothing-but-stats")
 TOKENS_FILE = DATA_DIR / "tokens.json"
 TRADING_BLOCK_FILE = DATA_DIR / "trading-block.json"
 PLAYER_BIOS_FILE   = DATA_DIR / "player-bios.json"
+CAP_LEVELS_FILE    = DATA_DIR / "cap-levels.json"
 
 VALID_TEAMS = {
     "ATL", "BKN", "BOS", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW",
@@ -106,11 +122,13 @@ def get_roster(team: str):
 
 
 @app.put("/api/roster/{team}")
-def put_roster(team: str, body: dict, _: dict = Depends(require_role("rosters"))):
+def put_roster(team: str, body: dict, info: dict = Depends(require_role("rosters"))):
     path = team_path(team, "roster")
     existing_headers, _ = read_csv(path)
     headers = body.get("headers") or existing_headers
-    write_csv(path, headers, body.get("rows", []))
+    rows = body.get("rows", [])
+    write_csv(path, headers, rows)
+    log_write(info, f"PUT roster/{team.upper()} — {len(rows)} rows")
     return {"ok": True}
 
 
@@ -124,10 +142,12 @@ def get_picks(team: str):
 
 
 @app.put("/api/picks/{team}")
-def put_picks(team: str, body: dict, _: dict = Depends(require_role("rosters"))):
+def put_picks(team: str, body: dict, info: dict = Depends(require_role("rosters"))):
     path = team_path(team, "picks")
     headers, _ = read_csv(path)
-    write_csv(path, headers, body.get("rows", []))
+    rows = body.get("rows", [])
+    write_csv(path, headers, rows)
+    log_write(info, f"PUT picks/{team.upper()} — {len(rows)} rows")
     return {"ok": True}
 
 
@@ -167,6 +187,7 @@ def put_trading_block(
     data = load_trading_block()
     data[team] = [e.model_dump() for e in body]
     save_trading_block(data)
+    log_write(info, f"PUT trading-block/{team} — {len(body)} players")
     return {"ok": True}
 
 
@@ -195,6 +216,12 @@ class PlayerBio(BaseModel):
     draft_round: Optional[int] = None
     draft_pick: Optional[int] = None
     photo_url: str = ""
+    height: str = ""
+    weight: Optional[int] = None
+    wingspan: str = ""
+    type: str = ""
+    cap_holds: str = ""
+    salaries: dict[str, str] = {}
 
 
 class PlayerCreate(PlayerBio):
@@ -207,7 +234,7 @@ def get_players():
 
 
 @app.post("/api/players")
-def create_player(body: PlayerCreate, _: dict = Depends(require_admin)):
+def create_player(body: PlayerCreate, info: dict = Depends(require_admin)):
     slug = body.slug.strip().lower()
     if not slug:
         raise HTTPException(status_code=422, detail="slug is required")
@@ -221,18 +248,59 @@ def create_player(body: PlayerCreate, _: dict = Depends(require_admin)):
     data.pop("slug")
     bios[slug] = data
     save_player_bios(bios)
+    log_write(info, f"POST players — created {slug!r} ({body.name})")
     return {"ok": True, "slug": slug}
 
 
 @app.put("/api/players/{slug}")
-def update_player(slug: str, body: PlayerBio, _: dict = Depends(require_admin)):
+def update_player(slug: str, body: PlayerBio, info: dict = Depends(require_role("rosters"))):
     invalid_pos = [p for p in body.pos if p not in VALID_POSITIONS]
     if invalid_pos:
         raise HTTPException(status_code=422, detail=f"Invalid positions: {invalid_pos}")
     bios = load_player_bios()
     bios[slug] = body.model_dump()
     save_player_bios(bios)
+    log_write(info, f"PUT players/{slug} ({body.name})")
     return {"ok": True}
+
+
+# ── Team map ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/team-map")
+def get_team_map():
+    result = {}
+    for team in VALID_TEAMS:
+        path = DATA_DIR / f"{team.lower()}-roster.csv"
+        if not path.exists():
+            continue
+        _, rows = read_csv(path)
+        for row in rows:
+            slug = row.get("SLUG", "").strip()
+            if slug and row.get("TYPE", "").strip() != "dead":
+                result[slug] = team
+    return result
+
+
+# ── Cap levels ───────────────────────────────────────────────────────────────
+
+class CapLevel(BaseModel):
+    cap: int
+    apron1: int
+    apron2: int
+
+@app.get("/api/cap-levels")
+def get_cap_levels():
+    if not CAP_LEVELS_FILE.exists():
+        return {}
+    return json.loads(CAP_LEVELS_FILE.read_text())
+
+@app.put("/api/cap-levels/{season}")
+def put_cap_level(season: str, body: CapLevel, info: dict = Depends(require_role("rosters"))):
+    levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
+    levels[season] = body.model_dump()
+    CAP_LEVELS_FILE.write_text(json.dumps(levels, indent=2))
+    log_write(info, f"PUT cap-levels/{season} — cap={body.cap} apron1={body.apron1} apron2={body.apron2}")
+    return levels[season]
 
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
@@ -256,7 +324,7 @@ def list_tokens(_: dict = Depends(require_admin)):
 
 
 @app.post("/api/tokens")
-def create_token(body: TokenCreate, _: dict = Depends(require_admin)):
+def create_token(body: TokenCreate, info: dict = Depends(require_admin)):
     invalid = [r for r in body.roles if r not in VALID_ROLES]
     if invalid:
         raise HTTPException(status_code=422, detail=f"Invalid roles: {invalid}")
@@ -264,14 +332,17 @@ def create_token(body: TokenCreate, _: dict = Depends(require_admin)):
     tokens = load_tokens()
     tokens[token] = {"name": body.name, "roles": body.roles}
     save_tokens(tokens)
+    log_write(info, f"POST tokens — created token for {body.name!r} roles={body.roles}")
     return {"token": token, "name": body.name, "roles": body.roles}
 
 
 @app.delete("/api/tokens/{token}")
-def delete_token(token: str, _: dict = Depends(require_admin)):
+def delete_token(token: str, info: dict = Depends(require_admin)):
     tokens = load_tokens()
     if token not in tokens:
         raise HTTPException(status_code=404, detail="Token not found")
+    deleted_name = tokens[token].get("name", "?")
     del tokens[token]
     save_tokens(tokens)
+    log_write(info, f"DELETE tokens — removed token for {deleted_name!r}")
     return {"ok": True}
