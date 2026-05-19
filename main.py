@@ -4,6 +4,7 @@ import json
 import logging
 import secrets
 import sys
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -32,6 +33,7 @@ CAP_LEVELS_FILE    = DATA_DIR / "cap-levels.json"
 PICKS_FILE         = DATA_DIR / "draft-picks.csv"
 
 PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PROTECTED", "SWAP_OWNER", "NOTES"]
+_picks_lock = threading.Lock()
 
 VALID_TEAMS = {
     "ATL", "BKN", "BOS", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW",
@@ -207,7 +209,6 @@ def upsert_pick(
     if owner not in VALID_TEAMS:
         raise HTTPException(status_code=422, detail=f"Unknown owner team: {owner}")
 
-    picks = load_picks()
     swap_owner = body.swap_owner.upper() if body.swap_owner else ""
     if swap_owner and swap_owner not in VALID_TEAMS:
         raise HTTPException(status_code=422, detail=f"Unknown swap_owner team: {swap_owner}")
@@ -218,33 +219,36 @@ def upsert_pick(
                "SWAP_OWNER": swap_owner,
                "NOTES":      body.notes}
 
-    for i, p in enumerate(picks):
-        if p.get("YEAR") == str(year) and p.get("ROUND") == str(rnd) and p.get("ORIG", "").upper() == orig:
-            old_owner = p.get("OWNER", "")
-            picks[i] = updated
-            save_picks(picks)
-            action = f"traded to {owner}" if old_owner.upper() != owner else "updated"
-            log_write(info, f"PUT picks {year} R{rnd} {orig} — {action} pick={body.pick} protected={body.protected} swap_owner={swap_owner or None} notes={body.notes!r}")
-            return pick_to_response(updated)
+    with _picks_lock:
+        picks = load_picks()
+        for i, p in enumerate(picks):
+            if p.get("YEAR") == str(year) and p.get("ROUND") == str(rnd) and p.get("ORIG", "").upper() == orig:
+                old_owner = p.get("OWNER", "")
+                picks[i] = updated
+                save_picks(picks)
+                action = f"traded to {owner}" if old_owner.upper() != owner else "updated"
+                log_write(info, f"PUT picks {year} R{rnd} {orig} — {action} pick={body.pick} protected={body.protected} swap_owner={swap_owner or None} notes={body.notes!r}")
+                return pick_to_response(updated)
 
-    # New pick
-    picks.append(updated)
-    picks.sort(key=lambda p: (p["YEAR"], p["ROUND"], p["ORIG"]))
-    save_picks(picks)
-    log_write(info, f"PUT picks {year} R{rnd} {orig} (new) — owner={owner}")
-    return pick_to_response(updated)
+        # New pick
+        picks.append(updated)
+        picks.sort(key=lambda p: (p["YEAR"], p["ROUND"], p["ORIG"]))
+        save_picks(picks)
+        log_write(info, f"PUT picks {year} R{rnd} {orig} (new) — owner={owner}")
+        return pick_to_response(updated)
 
 
 @app.delete("/api/picks/{year}/{rnd}/{orig}")
 def delete_pick(year: int, rnd: int, orig: str, info: dict = Depends(require_admin)):
     orig = orig.upper()
-    picks = load_picks()
-    new_picks = [p for p in picks
-                 if not (p.get("YEAR") == str(year) and p.get("ROUND") == str(rnd)
-                         and p.get("ORIG", "").upper() == orig)]
-    if len(new_picks) == len(picks):
-        raise HTTPException(status_code=404, detail="Pick not found")
-    save_picks(new_picks)
+    with _picks_lock:
+        picks = load_picks()
+        new_picks = [p for p in picks
+                     if not (p.get("YEAR") == str(year) and p.get("ROUND") == str(rnd)
+                             and p.get("ORIG", "").upper() == orig)]
+        if len(new_picks) == len(picks):
+            raise HTTPException(status_code=404, detail="Pick not found")
+        save_picks(new_picks)
     log_write(info, f"DELETE picks {year} R{rnd} {orig}")
     return {"ok": True}
 
