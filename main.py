@@ -32,7 +32,7 @@ PLAYER_BIOS_FILE   = DATA_DIR / "player-bios.json"
 CAP_LEVELS_FILE    = DATA_DIR / "cap-levels.json"
 PICKS_FILE         = DATA_DIR / "draft-picks.csv"
 
-PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PROTECTED", "SWAP_OWNER", "NOTES"]
+PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PLAYER", "PROTECTED", "SWAP_OWNER", "NOTES"]
 _picks_lock = threading.Lock()
 
 VALID_TEAMS = {
@@ -161,6 +161,7 @@ def pick_to_response(p: dict) -> dict:
         "orig":          p["ORIG"],
         "owner":         p["OWNER"],
         "pick":          pick,
+        "player":        p.get("PLAYER", "").strip() or None,
         "protected":     protected,
         "conveys":       conveys,
         "swap_owner":    swap_owner,
@@ -204,6 +205,7 @@ def get_team_picks(team: str):
 class PickUpsert(BaseModel):
     owner: str
     pick: Optional[int] = None
+    player: Optional[str] = None
     protected: Optional[int] = None
     swap_owner: Optional[str] = None
     notes: str = ""
@@ -230,6 +232,7 @@ def upsert_pick(
     updated = {"YEAR": str(year), "ROUND": str(rnd), "ORIG": orig,
                "OWNER":      owner,
                "PICK":       str(body.pick)      if body.pick      is not None else "",
+               "PLAYER":     body.player.strip() if body.player    else "",
                "PROTECTED":  str(body.protected) if body.protected is not None else "",
                "SWAP_OWNER": swap_owner,
                "NOTES":      body.notes}
