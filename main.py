@@ -153,27 +153,42 @@ def save_picks(picks: list[dict]):
 def pick_to_response(p: dict) -> dict:
     pick      = int(p["PICK"])      if p.get("PICK")      else None
     protected = int(p["PROTECTED"]) if p.get("PROTECTED") else None
-    if pick is not None and protected is not None:
-        conveys = pick > protected
-    else:
-        conveys = None
+    conveys = (pick > protected) if (pick is not None and protected is not None) else None
     swap_owner = p.get("SWAP_OWNER", "").strip() or None
     return {
-        "year":       int(p["YEAR"]),
-        "round":      int(p["ROUND"]),
-        "orig":       p["ORIG"],
-        "owner":      p["OWNER"],
-        "pick":       pick,
-        "protected":  protected,
-        "conveys":    conveys,
-        "swap_owner": swap_owner,
-        "notes":      p.get("NOTES", ""),
+        "year":          int(p["YEAR"]),
+        "round":         int(p["ROUND"]),
+        "orig":          p["ORIG"],
+        "owner":         p["OWNER"],
+        "pick":          pick,
+        "protected":     protected,
+        "conveys":       conveys,
+        "swap_owner":    swap_owner,
+        "swap_conveys":  None,   # filled in by enrich_swap_conveys
+        "notes":         p.get("NOTES", ""),
     }
+
+
+def enrich_swap_conveys(picks: list[dict]) -> None:
+    # Build (year, round, owner) -> pick number for cross-referencing
+    owner_pick = {}
+    for p in picks:
+        if p["pick"] is not None:
+            owner_pick[(p["year"], p["round"], p["owner"])] = p["pick"]
+    for p in picks:
+        if p["swap_owner"] and p["pick"] is not None:
+            swap_num = owner_pick.get((p["year"], p["round"], p["swap_owner"]))
+            if swap_num is not None:
+                # swap conveys when this pick is better (lower #) than swap_owner's own pick
+                p["swap_conveys"] = p["pick"] < swap_num
+        # else stays None
 
 
 @app.get("/api/picks")
 def get_all_picks():
-    return [pick_to_response(p) for p in load_picks()]
+    picks = [pick_to_response(p) for p in load_picks()]
+    enrich_swap_conveys(picks)
+    return picks
 
 
 @app.get("/api/picks/{team}")
@@ -181,7 +196,9 @@ def get_team_picks(team: str):
     team = team.upper()
     if team not in VALID_TEAMS:
         raise HTTPException(status_code=404, detail="Unknown team")
-    return [pick_to_response(p) for p in load_picks() if p.get("OWNER", "").upper() == team]
+    all_picks = [pick_to_response(p) for p in load_picks()]
+    enrich_swap_conveys(all_picks)
+    return [p for p in all_picks if p["owner"] == team]
 
 
 class PickUpsert(BaseModel):
@@ -226,14 +243,18 @@ def upsert_pick(
                 save_picks(picks)
                 action = f"traded to {owner}" if old_owner.upper() != owner else "updated"
                 log_write(info, f"PUT picks {year} R{rnd} {orig} — {action} pick={body.pick} protected={body.protected} swap_owner={swap_owner or None} notes={body.notes!r}")
-                return pick_to_response(updated)
+                responses = [pick_to_response(p) for p in picks]
+                enrich_swap_conveys(responses)
+                return next(r for r in responses if r["orig"] == orig and r["year"] == year and r["round"] == rnd)
 
         # New pick
         picks.append(updated)
         picks.sort(key=lambda p: (p["YEAR"], p["ROUND"], p["ORIG"]))
         save_picks(picks)
         log_write(info, f"PUT picks {year} R{rnd} {orig} (new) — owner={owner}")
-        return pick_to_response(updated)
+        responses = [pick_to_response(p) for p in picks]
+        enrich_swap_conveys(responses)
+        return next(r for r in responses if r["orig"] == orig and r["year"] == year and r["round"] == rnd)
 
 
 @app.delete("/api/picks/{year}/{rnd}/{orig}")
