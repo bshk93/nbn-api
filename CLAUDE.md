@@ -41,6 +41,10 @@ curl -X POST https://nbn.today/api/tokens \
 
 → **[docs/transactions.md](docs/transactions.md)** — all 6 types, what each mutates, request shapes
 
+## Docs discipline
+
+Keep `CLAUDE.md` and `docs/` in sync with every code change. If a change affects an endpoint, a data field, a transaction type, or any behavior described in the docs, update the relevant doc in the same commit.
+
 ## Key design notes
 
 - All writes are synchronous; no database. Concurrent writes to the same file are guarded by `_txn_lock` and `_picks_lock` threading locks.
