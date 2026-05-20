@@ -350,7 +350,7 @@ class PlayerBio(BaseModel):
     weight: Optional[int] = None
     wingspan: str = ""
     type: str = ""
-    cap_holds: str = ""
+    cap_holds: dict[str, str] = {}
     salaries: dict[str, str] = {}
     guaranteed: dict[str, str] = {}
     guarantee_dates: dict[str, str] = {}  # season → "YYYY-MM-DD" after which salary is fully guaranteed
@@ -582,7 +582,7 @@ def _build_team_map() -> dict[str, str]:
 class ContractIn(BaseModel):
     type: str = "player"  # "player" or "two-way"
     salaries: dict[str, str] = {}
-    cap_holds: str = ""
+    cap_holds: dict[str, str] = {}
 
 
 class SignDetails(BaseModel):
@@ -651,27 +651,20 @@ class TradeIn(BaseModel):
     legality: str = "tbd"
 
 
-def _parse_cap_holds(s: str) -> list[tuple[str, str]]:
-    if not s or not s.strip():
-        return []
-    result = []
-    for part in s.split(','):
-        part = part.strip()
-        if ':' in part:
-            year, typ = part.split(':', 1)
-            result.append((year.strip(), typ.strip()))
-    return result
-
-
-def _serialize_cap_holds(holds: list[tuple[str, str]]) -> str:
-    return ','.join(f"{year}:{typ}" for year, typ in holds)
-
 
 def _season_start(s: str) -> int:
     try:
         return int(s.split('-')[0])
     except Exception:
         return 0
+
+
+def _current_season_str() -> str:
+    now = datetime.now(timezone.utc)
+    y = now.year % 100
+    if now.month < 7:
+        return f"{y-1:02d}-{y:02d}"
+    return f"{y:02d}-{(y+1) % 100:02d}"
 
 
 def _apply_option(details: OptionDetails, info: dict) -> Optional[str]:
@@ -693,9 +686,9 @@ def _apply_option(details: OptionDetails, info: dict) -> Optional[str]:
         raise HTTPException(status_code=422, detail=f"Player {details.player!r} is not on any roster")
 
     bio = bios[details.player]
-    holds = _parse_cap_holds(bio.get("cap_holds", ""))
+    holds = bio.get("cap_holds") or {}
 
-    if not any(yr == details.year and typ == details.option_type for yr, typ in holds):
+    if holds.get(details.year) != details.option_type:
         raise HTTPException(
             status_code=422,
             detail=f"Player {details.player!r} has no {details.option_type} for year {details.year!r}",
@@ -703,9 +696,8 @@ def _apply_option(details: OptionDetails, info: dict) -> Optional[str]:
 
     if details.decision == "accept":
         # Remove the option entry; salary for that year is now fully guaranteed
-        holds = [(yr, typ) for yr, typ in holds
-                 if not (yr == details.year and typ == details.option_type)]
-        bio["cap_holds"] = _serialize_cap_holds(holds)
+        bio["cap_holds"] = {yr: typ for yr, typ in holds.items()
+                            if yr != details.year}
     else:
         # Decline: wipe option year + all future years from salaries
         key = _season_start(details.year)
@@ -714,12 +706,10 @@ def _apply_option(details: OptionDetails, info: dict) -> Optional[str]:
         # Write cap hold salary for the option year if provided
         if details.cap_hold_amount:
             bio["salaries"][details.year] = details.cap_hold_amount
-        # Remove option entry and any cap_holds at or after the option year
-        holds = [(yr, typ) for yr, typ in holds
-                 if not (yr == details.year and typ == details.option_type)
-                 and _season_start(yr) < key]
-        holds.append((details.year, details.cap_hold_type))
-        bio["cap_holds"] = _serialize_cap_holds(holds)
+        # Remove option entry and any cap_holds at or after the option year, then add new hold
+        bio["cap_holds"] = {yr: typ for yr, typ in holds.items()
+                            if yr != details.year and _season_start(yr) < key}
+        bio["cap_holds"][details.year] = details.cap_hold_type
 
     save_player_bios(bios)
     log_write(info, f"TXN option — {details.player} {details.decision} {details.option_type} {details.year}")
@@ -737,19 +727,16 @@ def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[
     if not team:
         raise HTTPException(status_code=422, detail=f"Player {details.player!r} is not on any roster")
 
-    # Determine current season start year (NBA season starts in October)
-    today = datetime.now(timezone.utc)
-    current_season_start = today.year - 1 if today.month < 10 else today.year
+    cur_season = _current_season_str()
 
     bio = bios[details.player]
-    holds = _parse_cap_holds(bio.get("cap_holds", ""))
-    holds_map = {yr: typ for yr, typ in holds}
+    holds_map = bio.get("cap_holds") or {}
     guaranteed = bio.get("guaranteed", {})
     guarantee_dates = bio.get("guarantee_dates", {})
 
     dead_cap: dict[str, str] = {}
     for season, salary in bio.get("salaries", {}).items():
-        if _season_start(season) < current_season_start:
+        if season < cur_season:
             continue
         hold_type = holds_map.get(season)
         if hold_type in ("TEAM_OPT", "UFA", "RFA"):
@@ -769,8 +756,8 @@ def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[
     existing_dead = bio.get("dead_cap") or {}
     existing_dead.update(dead_cap)
     bio["dead_cap"] = existing_dead
-    bio["salaries"] = {}
-    bio["cap_holds"] = ""
+    bio["salaries"] = {k: v for k, v in bio["salaries"].items() if k < cur_season}
+    bio["cap_holds"] = {}
     bio["guaranteed"] = {}
     bio["guarantee_dates"] = {}
     bio["type"] = "dead"
@@ -803,7 +790,9 @@ def _apply_convert_twoway(details: ConvertTwoWayDetails, info: dict) -> str:
 
     # Update bio: promote to player, replace contract
     bio["type"] = "player"
-    bio["salaries"] = details.contract.salaries
+    cur_season = _current_season_str()
+    past = {k: v for k, v in bio.get("salaries", {}).items() if k < cur_season}
+    bio["salaries"] = {**past, **details.contract.salaries}
     bio["cap_holds"] = details.contract.cap_holds
     bio.pop("guaranteed", None)
     bio.pop("guarantee_dates", None)
@@ -852,7 +841,10 @@ def _apply_sign(details: SignDetails, info: dict):
     # Migrate old dead players whose dead cap was stored in salaries
     if bio.get("type") == "dead" and bio.get("salaries") and not bio.get("dead_cap"):
         bio["dead_cap"] = bio["salaries"]
-    bio["salaries"] = details.contract.salaries
+        bio["salaries"] = {}
+    cur_season = _current_season_str()
+    past = {k: v for k, v in bio.get("salaries", {}).items() if k < cur_season}
+    bio["salaries"] = {**past, **details.contract.salaries}
     bio["cap_holds"] = details.contract.cap_holds
     bio["type"] = details.contract.type
     save_player_bios(bios)
@@ -894,8 +886,11 @@ def _apply_pick(details: PickDetails, info: dict):
     bio = bios[details.player]
     if bio.get("type") == "dead" and bio.get("salaries") and not bio.get("dead_cap"):
         bio["dead_cap"] = bio["salaries"]
+        bio["salaries"] = {}
     if details.contract.salaries:
-        bio["salaries"] = details.contract.salaries
+        cur_season = _current_season_str()
+        past = {k: v for k, v in bio.get("salaries", {}).items() if k < cur_season}
+        bio["salaries"] = {**past, **details.contract.salaries}
         bio["cap_holds"] = details.contract.cap_holds
     bio["type"] = details.contract.type
     save_player_bios(bios)
