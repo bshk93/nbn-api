@@ -52,7 +52,7 @@ VALID_ROLES = {"admin", "rosters", "curator"} | {t.lower() for t in VALID_TEAMS}
 CURATOR_FIELDS = {
     "name", "pos", "dob", "college", "country",
     "draft_year", "draft_round", "draft_pick",
-    "photo_url", "height", "weight", "wingspan", "jersey_number",
+    "photo_url", "height", "weight", "wingspan", "jersey_number", "retired",
 }
 
 app = FastAPI()
@@ -369,6 +369,7 @@ class PlayerBio(BaseModel):
     guaranteed: dict[str, str] = {}
     guarantee_dates: dict[str, str] = {}  # season → "YYYY-MM-DD" after which salary is fully guaranteed
     jersey_number: Optional[str] = None
+    retired: bool = False
 
 
 class PlayerCreate(PlayerBio):
