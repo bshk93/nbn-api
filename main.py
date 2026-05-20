@@ -47,7 +47,13 @@ VALID_TEAMS = {
     "OKC", "ORL", "PHI", "PHX", "POR", "SAC", "SAS", "TOR", "UTA", "WAS",
 }
 
-VALID_ROLES = {"admin", "rosters"} | {t.lower() for t in VALID_TEAMS}
+VALID_ROLES = {"admin", "rosters", "curator"} | {t.lower() for t in VALID_TEAMS}
+
+CURATOR_FIELDS = {
+    "name", "pos", "dob", "college", "country",
+    "draft_year", "draft_round", "draft_pick",
+    "photo_url", "height", "weight", "wingspan", "jersey_number",
+}
 
 app = FastAPI()
 
@@ -95,6 +101,14 @@ def require_admin(info: dict = Depends(get_token_info)) -> dict:
     if not has_role(info, "admin"):
         raise HTTPException(status_code=403, detail="Admin role required")
     return info
+
+
+def require_any_role(*roles: str):
+    def check(info: dict = Depends(get_token_info)) -> dict:
+        if not has_role(info, "admin") and not any(has_role(info, r) for r in roles):
+            raise HTTPException(status_code=403, detail=f"One of {list(roles)} role required")
+        return info
+    return check
 
 
 def read_csv(path: Path) -> tuple[list[str], list[dict]]:
@@ -386,12 +400,19 @@ def create_player(body: PlayerCreate, info: dict = Depends(require_role("rosters
 
 
 @app.put("/api/players/{slug}")
-def update_player(slug: str, body: PlayerBio, info: dict = Depends(require_role("rosters"))):
+def update_player(slug: str, body: PlayerBio, info: dict = Depends(require_any_role("rosters", "curator"))):
     invalid_pos = [p for p in body.pos if p not in VALID_POSITIONS]
     if invalid_pos:
         raise HTTPException(status_code=422, detail=f"Invalid positions: {invalid_pos}")
     bios = load_player_bios()
-    bios[slug] = body.model_dump()
+    if has_role(info, "curator") and not has_role(info, "rosters") and not has_role(info, "admin"):
+        existing = bios.get(slug, {})
+        update_data = body.model_dump()
+        for field in CURATOR_FIELDS:
+            existing[field] = update_data[field]
+        bios[slug] = existing
+    else:
+        bios[slug] = body.model_dump()
     save_player_bios(bios)
     log_write(info, f"PUT players/{slug} ({body.name})")
     return {"ok": True}
@@ -462,7 +483,7 @@ def get_ovr_current():
 
 
 @app.put("/api/ovr/{slug}")
-def put_ovr(slug: str, body: OvrEntry, info: dict = Depends(require_role("rosters"))):
+def put_ovr(slug: str, body: OvrEntry, info: dict = Depends(require_any_role("rosters", "curator"))):
     if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', body.date):
         raise HTTPException(status_code=422, detail="date must be YYYY-MM-DD")
     if not (50 <= body.ovr <= 99):
@@ -479,7 +500,7 @@ def put_ovr(slug: str, body: OvrEntry, info: dict = Depends(require_role("roster
 
 
 @app.put("/api/ovr/{slug}/history")
-def put_ovr_history(slug: str, body: list[OvrEntry], info: dict = Depends(require_role("rosters"))):
+def put_ovr_history(slug: str, body: list[OvrEntry], info: dict = Depends(require_any_role("rosters", "curator"))):
     bad_dates = [e.date for e in body if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', e.date)]
     if bad_dates:
         raise HTTPException(status_code=422, detail=f"bad date format: {bad_dates}")
@@ -510,6 +531,39 @@ def post_ovr_batch(body: list[OvrBatchEntry], info: dict = Depends(require_admin
         save_ovr(history)
     log_write(info, f"POST ovr/batch — {len(body)} entries")
     return {"ok": True, "count": len(body)}
+
+
+# ── Trading block helpers ─────────────────────────────────────────────────────
+
+def _display_name(canonical: str) -> str:
+    """Convert 'LAST, FIRST' bio name to title-case 'First Last', mirroring JS displayNameFromBio."""
+    if not canonical:
+        return ''
+    if ',' in canonical:
+        last, _, first = canonical.partition(',')
+        return f"{first.strip()} {last.strip()}".title()
+    return canonical.title()
+
+
+def _scrub_trading_block(removals: dict[str, set[str]], bios: dict) -> None:
+    """Remove players from their source teams' trading block entries after a trade or release.
+
+    removals: {team_abbr: {slug, ...}}
+    """
+    data = load_trading_block()
+    changed = False
+    for team, slugs in removals.items():
+        display_names = {_display_name(bios[s].get('name', '')) for s in slugs if s in bios}
+        display_names.discard('')
+        if not display_names:
+            continue
+        original = data.get(team, [])
+        updated = [e for e in original if e.get('player') not in display_names]
+        if len(updated) != len(original):
+            data[team] = updated
+            changed = True
+    if changed:
+        save_trading_block(data)
 
 
 # ── Team map ─────────────────────────────────────────────────────────────────
@@ -769,6 +823,7 @@ def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[
     rows = [r for r in rows if r.get("SLUG", "").strip() != details.player]
     write_csv(path, headers, rows)
 
+    _scrub_trading_block({team: {details.player}}, bios)
     log_write(info, f"TXN release — {details.player} from {team}")
     return team, dead_cap
 
@@ -1032,6 +1087,13 @@ def _apply_trade(details: TradeIn, info: dict) -> list[str]:
                         if asset.swap_with is not None:
                             p["SWAP_OWNER"] = asset.swap_with
     save_picks(picks)
+
+    trade_removals: dict[str, set[str]] = {}
+    for xfer in details.transfers:
+        for asset in xfer.assets:
+            if asset.type == "player":
+                trade_removals.setdefault(xfer.from_team, set()).add(asset.slug)
+    _scrub_trading_block(trade_removals, bios)
 
     teams = sorted({xfer.from_team for xfer in details.transfers} | {xfer.to_team for xfer in details.transfers})
     log_write(info, f"TXN trade — {' / '.join(teams)}: {len(seen_players)} players, {len(seen_picks)} picks")
