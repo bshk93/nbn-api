@@ -17,7 +17,6 @@ All transaction endpoints require the `rosters` role.
 }
 ```
 
-`ovr` is only used by `sign` and `pick` (to set the player's OVR in the roster CSV). It is ignored by other types.
 
 ---
 
@@ -42,7 +41,7 @@ Adds player to a team roster and sets their contract.
 
 **Mutates:**
 - `player-bios.json` → sets `salaries`, `cap_holds`, `type`
-- `{team}-roster.csv` → appends `{SLUG, OVR, TYPE}` row
+- `{team}-roster.csv` → appends `{SLUG, TYPE}` row
 - If player was previously `"dead"` and had dead cap in `salaries` (old format), migrates it to `dead_cap` before overwriting
 
 **Validation:** player must not already be on any roster.
