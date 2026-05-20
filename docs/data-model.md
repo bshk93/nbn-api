@@ -84,10 +84,9 @@ New format (post-migration):
 | Column | Description | Example |
 |---|---|---|
 | `SLUG` | Player slug | `barnes-scottie` |
-| `OVR` | Overall rating | `86` |
 | `TYPE` | `"two-way"` or `""` | |
 
-All other player data (name, pos, age, salary) is joined from `player-bios.json` at render time.
+All other player data (name, pos, age, ovr, salary) is joined from `player-bios.json` and `ovr-history.json` at render time. OVR is **not** stored in the roster CSV — it comes exclusively from `ovr-history.json`.
 
 One file per team: `atl-roster.csv`, `bkn-roster.csv`, … `was-roster.csv`.
 

@@ -44,6 +44,6 @@ curl -X POST https://nbn.today/api/tokens \
 ## Key design notes
 
 - All writes are synchronous; no database. Concurrent writes to the same file are guarded by `_txn_lock` and `_picks_lock` threading locks.
-- `player-bios.json` is the source of truth for all player identity and contract data. Roster CSVs only store `SLUG` + `OVR` (+ optional `TYPE`); everything else is joined from bios at render time.
+- `player-bios.json` is the source of truth for all player identity and contract data. Roster CSVs only store `SLUG` + optional `TYPE`; everything else is joined from bios at render time.
 - Dead cap is stored in `bio["dead_cap"]` (dict keyed by season). Old players released before this field existed may have dead cap in `bio["salaries"]` instead — the frontend handles both.
 - OVR history is separate from bios: `ovr-history.json` keyed by slug, each value a list of `{date, ovr}` entries.
