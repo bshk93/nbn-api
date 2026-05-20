@@ -626,6 +626,11 @@ class ReleaseDetails(BaseModel):
     player: str
 
 
+class ConvertTwoWayDetails(BaseModel):
+    player: str
+    contract: ContractIn
+
+
 class TradeAsset(BaseModel):
     type: str                        # "player" or "pick"
     slug: Optional[str] = None
@@ -777,6 +782,43 @@ def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[
 
     log_write(info, f"TXN release — {details.player} from {team}")
     return team, dead_cap
+
+
+def _apply_convert_twoway(details: ConvertTwoWayDetails, info: dict) -> str:
+    """Converts a two-way contract to a standard player contract. Returns the player's team."""
+    bios = load_player_bios()
+    if details.player not in bios:
+        raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
+
+    bio = bios[details.player]
+    if bio.get("type") != "two-way":
+        raise HTTPException(status_code=422, detail=f"Player {details.player!r} is not on a two-way contract")
+
+    team_map = _build_team_map()
+    team = team_map.get(details.player)
+    if not team:
+        raise HTTPException(status_code=422, detail=f"Player {details.player!r} is not on any roster")
+
+    # Update bio: promote to player, replace contract
+    bio["type"] = "player"
+    bio["salaries"] = details.contract.salaries
+    bio["cap_holds"] = details.contract.cap_holds
+    bio.pop("guaranteed", None)
+    bio.pop("guarantee_dates", None)
+    save_player_bios(bios)
+
+    # Update roster CSV: clear TYPE field (two-way → standard player)
+    roster_path = DATA_DIR / f"{team.lower()}-roster.csv"
+    if roster_path.exists():
+        headers, rows = read_csv(roster_path)
+        for row in rows:
+            if row.get("SLUG") == details.player:
+                row["TYPE"] = ""
+                break
+        write_csv(roster_path, headers, rows)
+
+    log_write(info, f"TXN convert_twoway — {details.player} ({team})")
+    return team
 
 
 def _apply_sign(details: SignDetails, ovr: int, info: dict):
@@ -1001,7 +1043,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid date; use YYYY-MM-DD")
 
-    if body.type not in ("sign", "pick", "option", "release", "trade"):
+    if body.type not in ("sign", "pick", "option", "release", "trade", "convert_twoway"):
         raise HTTPException(status_code=422, detail=f"Unsupported transaction type: {body.type!r}")
 
     with _txn_lock:
@@ -1044,6 +1086,14 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             teams = _apply_trade(details, info)
             stored_details = details.model_dump()
             stored_details["teams"] = teams
+        elif body.type == "convert_twoway":
+            try:
+                details = ConvertTwoWayDetails(**body.details)
+            except Exception as e:
+                raise HTTPException(status_code=422, detail=f"Invalid convert_twoway details: {e}")
+            team = _apply_convert_twoway(details, info)
+            stored_details = details.model_dump()
+            stored_details["team"] = team
         else:
             raise HTTPException(status_code=422, detail=f"Unsupported transaction type: {body.type!r}")
 
