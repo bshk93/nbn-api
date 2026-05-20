@@ -767,7 +767,10 @@ def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[
         # Fully or partially guaranteed (including PLAYER_OPT years)
         dead_cap[season] = guaranteed.get(season, salary)
 
-    bio["salaries"] = dead_cap
+    existing_dead = bio.get("dead_cap") or {}
+    existing_dead.update(dead_cap)
+    bio["dead_cap"] = existing_dead
+    bio["salaries"] = {}
     bio["cap_holds"] = ""
     bio["guaranteed"] = {}
     bio["guarantee_dates"] = {}
@@ -847,6 +850,9 @@ def _apply_sign(details: SignDetails, ovr: int, info: dict):
     write_csv(path, headers, rows)
 
     bio = bios[details.player]
+    # Migrate old dead players whose dead cap was stored in salaries
+    if bio.get("type") == "dead" and bio.get("salaries") and not bio.get("dead_cap"):
+        bio["dead_cap"] = bio["salaries"]
     bio["salaries"] = details.contract.salaries
     bio["cap_holds"] = details.contract.cap_holds
     bio["type"] = details.contract.type
@@ -887,6 +893,8 @@ def _apply_pick(details: PickDetails, ovr: int, info: dict):
     write_csv(path, headers, rows)
 
     bio = bios[details.player]
+    if bio.get("type") == "dead" and bio.get("salaries") and not bio.get("dead_cap"):
+        bio["dead_cap"] = bio["salaries"]
     if details.contract.salaries:
         bio["salaries"] = details.contract.salaries
         bio["cap_holds"] = details.contract.cap_holds
