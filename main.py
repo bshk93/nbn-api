@@ -2,9 +2,11 @@ import csv
 import io
 import json
 import logging
+import re
 import secrets
 import sys
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -29,11 +31,15 @@ DATA_DIR = Path("/var/lib/nothing-but-stats")
 TOKENS_FILE        = DATA_DIR / "tokens.json"
 TRADING_BLOCK_FILE = DATA_DIR / "trading-block.json"
 PLAYER_BIOS_FILE   = DATA_DIR / "player-bios.json"
+OVR_FILE           = DATA_DIR / "ovr-history.json"
 CAP_LEVELS_FILE    = DATA_DIR / "cap-levels.json"
 PICKS_FILE         = DATA_DIR / "draft-picks.csv"
+TRANSACTIONS_FILE  = DATA_DIR / "transactions.json"
 
 PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PLAYER", "PROTECTED", "SWAP_OWNER", "NOTES"]
 _picks_lock = threading.Lock()
+_txn_lock   = threading.Lock()
+_ovr_lock   = threading.Lock()
 
 VALID_TEAMS = {
     "ATL", "BKN", "BOS", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW",
@@ -261,7 +267,7 @@ def upsert_pick(
 
 
 @app.delete("/api/picks/{year}/{rnd}/{orig}")
-def delete_pick(year: int, rnd: int, orig: str, info: dict = Depends(require_admin)):
+def delete_pick(year: int, rnd: int, orig: str, info: dict = Depends(require_role("rosters"))):
     orig = orig.upper()
     with _picks_lock:
         picks = load_picks()
@@ -346,6 +352,9 @@ class PlayerBio(BaseModel):
     type: str = ""
     cap_holds: str = ""
     salaries: dict[str, str] = {}
+    guaranteed: dict[str, str] = {}
+    guarantee_dates: dict[str, str] = {}  # season → "YYYY-MM-DD" after which salary is fully guaranteed
+    jersey_number: Optional[str] = None
 
 
 class PlayerCreate(PlayerBio):
@@ -358,7 +367,7 @@ def get_players():
 
 
 @app.post("/api/players")
-def create_player(body: PlayerCreate, info: dict = Depends(require_admin)):
+def create_player(body: PlayerCreate, info: dict = Depends(require_role("rosters"))):
     slug = body.slug.strip().lower()
     if not slug:
         raise HTTPException(status_code=422, detail="slug is required")
@@ -386,6 +395,121 @@ def update_player(slug: str, body: PlayerBio, info: dict = Depends(require_role(
     save_player_bios(bios)
     log_write(info, f"PUT players/{slug} ({body.name})")
     return {"ok": True}
+
+
+class JerseyUpdate(BaseModel):
+    jersey_number: Optional[str] = None
+
+
+@app.put("/api/players/{slug}/jersey")
+def update_jersey(slug: str, body: JerseyUpdate, info: dict = Depends(get_token_info)):
+    bios = load_player_bios()
+    if slug not in bios:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    is_admin   = has_role(info, "admin")
+    is_rosters = has_role(info, "rosters")
+    team_roles = {r.upper() for r in info.get("roles", []) if r.upper() in VALID_TEAMS}
+
+    if not is_admin and not is_rosters:
+        if not team_roles:
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        team_map = _build_team_map()
+        player_team = team_map.get(slug)
+        if not player_team or player_team not in team_roles:
+            raise HTTPException(status_code=403, detail="Player is not on your roster")
+
+    if body.jersey_number is not None and not re.fullmatch(r'\d{1,2}', body.jersey_number):
+        raise HTTPException(status_code=422, detail="jersey_number must be 1–2 digits")
+    bios[slug]["jersey_number"] = body.jersey_number
+    save_player_bios(bios)
+    log_write(info, f"PUT players/{slug}/jersey — {body.jersey_number}")
+    return {"ok": True}
+
+
+# ── OVR history ──────────────────────────────────────────────────────────────
+
+def load_ovr() -> dict:
+    if not OVR_FILE.exists():
+        return {}
+    return json.loads(OVR_FILE.read_text())
+
+
+def save_ovr(data: dict):
+    OVR_FILE.write_text(json.dumps(data, indent=2))
+
+
+class OvrEntry(BaseModel):
+    date: str
+    ovr: int
+
+
+class OvrBatchEntry(BaseModel):
+    slug: str
+    date: str
+    ovr: int
+
+
+@app.get("/api/ovr")
+def get_ovr():
+    return load_ovr()
+
+
+@app.get("/api/ovr/current")
+def get_ovr_current():
+    history = load_ovr()
+    return {slug: entries[-1]["ovr"] for slug, entries in history.items() if entries}
+
+
+@app.put("/api/ovr/{slug}")
+def put_ovr(slug: str, body: OvrEntry, info: dict = Depends(require_role("rosters"))):
+    if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', body.date):
+        raise HTTPException(status_code=422, detail="date must be YYYY-MM-DD")
+    if not (50 <= body.ovr <= 99):
+        raise HTTPException(status_code=422, detail="ovr must be 50–99")
+    with _ovr_lock:
+        history = load_ovr()
+        entries = history.get(slug, [])
+        entries.append({"date": body.date, "ovr": body.ovr})
+        entries.sort(key=lambda e: e["date"])
+        history[slug] = entries
+        save_ovr(history)
+    log_write(info, f"PUT ovr/{slug} — {body.date} {body.ovr}")
+    return {"ok": True}
+
+
+@app.put("/api/ovr/{slug}/history")
+def put_ovr_history(slug: str, body: list[OvrEntry], info: dict = Depends(require_role("rosters"))):
+    bad_dates = [e.date for e in body if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', e.date)]
+    if bad_dates:
+        raise HTTPException(status_code=422, detail=f"bad date format: {bad_dates}")
+    bad_ovr = [e.ovr for e in body if not (50 <= e.ovr <= 99)]
+    if bad_ovr:
+        raise HTTPException(status_code=422, detail="ovr must be 50–99")
+    entries = sorted([{"date": e.date, "ovr": e.ovr} for e in body], key=lambda e: e["date"])
+    with _ovr_lock:
+        history = load_ovr()
+        history[slug] = entries
+        save_ovr(history)
+    log_write(info, f"PUT ovr/{slug}/history — {len(entries)} entries")
+    return {"ok": True}
+
+
+@app.post("/api/ovr/batch")
+def post_ovr_batch(body: list[OvrBatchEntry], info: dict = Depends(require_admin)):
+    bad_dates = [e.slug for e in body if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', e.date)]
+    if bad_dates:
+        raise HTTPException(status_code=422, detail=f"bad date format for: {bad_dates}")
+    with _ovr_lock:
+        history = load_ovr()
+        for entry in body:
+            entries = history.get(entry.slug, [])
+            entries.append({"date": entry.date, "ovr": entry.ovr})
+            entries.sort(key=lambda e: e["date"])
+            history[entry.slug] = entries
+        save_ovr(history)
+    log_write(info, f"POST ovr/batch — {len(body)} entries")
+    return {"ok": True, "count": len(body)}
 
 
 # ── Team map ─────────────────────────────────────────────────────────────────
@@ -425,6 +549,557 @@ def put_cap_level(season: str, body: CapLevel, info: dict = Depends(require_role
     CAP_LEVELS_FILE.write_text(json.dumps(levels, indent=2))
     log_write(info, f"PUT cap-levels/{season} — cap={body.cap} apron1={body.apron1} apron2={body.apron2}")
     return levels[season]
+
+
+# ── Transactions ─────────────────────────────────────────────────────────────
+
+def _load_transactions() -> list[dict]:
+    if not TRANSACTIONS_FILE.exists():
+        return []
+    return json.loads(TRANSACTIONS_FILE.read_text())
+
+
+def _append_transaction(txn: dict):
+    txns = _load_transactions()
+    txns.append(txn)
+    TRANSACTIONS_FILE.write_text(json.dumps(txns, indent=2))
+
+
+def _build_team_map() -> dict[str, str]:
+    result = {}
+    for team in VALID_TEAMS:
+        path = DATA_DIR / f"{team.lower()}-roster.csv"
+        if not path.exists():
+            continue
+        _, rows = read_csv(path)
+        for row in rows:
+            slug = row.get("SLUG", "").strip()
+            if slug and row.get("TYPE", "").strip() != "dead":
+                result[slug] = team
+    return result
+
+
+class ContractIn(BaseModel):
+    type: str = "player"  # "player" or "two-way"
+    salaries: dict[str, str] = {}
+    cap_holds: str = ""
+
+
+class SignDetails(BaseModel):
+    player: str
+    team: str
+    contract: ContractIn
+
+
+class PickIn(BaseModel):
+    year: int
+    round: int
+    orig: str
+    pick_number: Optional[int] = None
+
+
+class PickDetails(BaseModel):
+    player: str
+    team: str
+    pick: PickIn
+    contract: ContractIn
+
+
+class TransactionIn(BaseModel):
+    type: str
+    date: str
+    description: str = ""
+    ovr: Optional[int] = None
+    details: dict
+
+
+class OptionDetails(BaseModel):
+    player: str
+
+class ReleaseDetails(BaseModel):
+    player: str
+    decision: str       # "accept" or "decline"
+    option_type: str    # "PLAYER_OPT" or "TEAM_OPT"
+    year: str           # e.g. "26-27"
+    cap_hold_type: str = "UFA"
+
+
+class TradeAsset(BaseModel):
+    type: str                        # "player" or "pick"
+    slug: Optional[str] = None
+    year: Optional[int] = None
+    round: Optional[int] = None
+    orig: Optional[str] = None
+    protection: Optional[int] = None  # if set, replaces PROTECTED on the pick
+    swap_with: Optional[str] = None   # if set, replaces SWAP_OWNER on the pick
+
+
+class TradeTransfer(BaseModel):
+    from_team: str
+    to_team: str
+    assets: list[TradeAsset]
+
+
+class TradeIn(BaseModel):
+    transfers: list[TradeTransfer]
+    legality: str = "tbd"
+
+
+def _parse_cap_holds(s: str) -> list[tuple[str, str]]:
+    if not s or not s.strip():
+        return []
+    result = []
+    for part in s.split(','):
+        part = part.strip()
+        if ':' in part:
+            year, typ = part.split(':', 1)
+            result.append((year.strip(), typ.strip()))
+    return result
+
+
+def _serialize_cap_holds(holds: list[tuple[str, str]]) -> str:
+    return ','.join(f"{year}:{typ}" for year, typ in holds)
+
+
+def _season_start(s: str) -> int:
+    try:
+        return int(s.split('-')[0])
+    except Exception:
+        return 0
+
+
+def _apply_option(details: OptionDetails, info: dict) -> Optional[str]:
+    """Applies an option decision. Returns the player's current team for storage."""
+    if details.option_type not in ("PLAYER_OPT", "TEAM_OPT"):
+        raise HTTPException(status_code=422, detail="option_type must be PLAYER_OPT or TEAM_OPT")
+    if details.decision not in ("accept", "decline"):
+        raise HTTPException(status_code=422, detail="decision must be 'accept' or 'decline'")
+    if details.cap_hold_type not in ("UFA", "RFA"):
+        raise HTTPException(status_code=422, detail="cap_hold_type must be UFA or RFA")
+
+    bios = load_player_bios()
+    if details.player not in bios:
+        raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
+
+    team_map = _build_team_map()
+    team = team_map.get(details.player)
+    if not team:
+        raise HTTPException(status_code=422, detail=f"Player {details.player!r} is not on any roster")
+
+    bio = bios[details.player]
+    holds = _parse_cap_holds(bio.get("cap_holds", ""))
+
+    if not any(yr == details.year and typ == details.option_type for yr, typ in holds):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Player {details.player!r} has no {details.option_type} for year {details.year!r}",
+        )
+
+    if details.decision == "accept":
+        # Remove the option entry; salary for that year is now fully guaranteed
+        holds = [(yr, typ) for yr, typ in holds
+                 if not (yr == details.year and typ == details.option_type)]
+        bio["cap_holds"] = _serialize_cap_holds(holds)
+    else:
+        # Decline: wipe option year + all future years from salaries
+        key = _season_start(details.year)
+        bio["salaries"] = {yr: amt for yr, amt in bio.get("salaries", {}).items()
+                           if _season_start(yr) < key}
+        # Remove option entry and any cap_holds at or after the option year
+        holds = [(yr, typ) for yr, typ in holds
+                 if not (yr == details.year and typ == details.option_type)
+                 and _season_start(yr) < key]
+        holds.append((details.year, details.cap_hold_type))
+        bio["cap_holds"] = _serialize_cap_holds(holds)
+
+    save_player_bios(bios)
+    log_write(info, f"TXN option — {details.player} {details.decision} {details.option_type} {details.year}")
+    return team
+
+
+def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[str, dict]:
+    """Removes player from roster, converts guaranteed salary to dead cap. Returns (team, dead_cap)."""
+    bios = load_player_bios()
+    if details.player not in bios:
+        raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
+
+    team_map = _build_team_map()
+    team = team_map.get(details.player)
+    if not team:
+        raise HTTPException(status_code=422, detail=f"Player {details.player!r} is not on any roster")
+
+    # Determine current season start year (NBA season starts in October)
+    today = datetime.now(timezone.utc)
+    current_season_start = today.year - 1 if today.month < 10 else today.year
+
+    bio = bios[details.player]
+    holds = _parse_cap_holds(bio.get("cap_holds", ""))
+    holds_map = {yr: typ for yr, typ in holds}
+    guaranteed = bio.get("guaranteed", {})
+    guarantee_dates = bio.get("guarantee_dates", {})
+
+    dead_cap: dict[str, str] = {}
+    for season, salary in bio.get("salaries", {}).items():
+        if _season_start(season) < current_season_start:
+            continue
+        hold_type = holds_map.get(season)
+        if hold_type in ("TEAM_OPT", "UFA", "RFA"):
+            continue
+        if hold_type == "NON_GTD":
+            gtd_date = guarantee_dates.get(season)
+            if gtd_date and txn_date >= gtd_date:
+                # Released on or after guarantee date → full salary is now dead cap
+                dead_cap[season] = salary
+            elif guaranteed.get(season):
+                dead_cap[season] = guaranteed[season]
+            # else: $0 dead cap, skip
+            continue
+        # Fully or partially guaranteed (including PLAYER_OPT years)
+        dead_cap[season] = guaranteed.get(season, salary)
+
+    bio["salaries"] = dead_cap
+    bio["cap_holds"] = ""
+    bio["guaranteed"] = {}
+    bio["guarantee_dates"] = {}
+    bio["type"] = "dead"
+    save_player_bios(bios)
+
+    # Remove from roster CSV
+    path = DATA_DIR / f"{team.lower()}-roster.csv"
+    headers, rows = read_csv(path)
+    rows = [r for r in rows if r.get("SLUG", "").strip() != details.player]
+    write_csv(path, headers, rows)
+
+    log_write(info, f"TXN release — {details.player} from {team}")
+    return team, dead_cap
+
+
+def _apply_sign(details: SignDetails, ovr: int, info: dict):
+    bios = load_player_bios()
+    if details.player not in bios:
+        raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
+
+    team = details.team.upper()
+    if team not in VALID_TEAMS:
+        raise HTTPException(status_code=422, detail=f"Unknown team: {team!r}")
+
+    team_map = _build_team_map()
+    if details.player in team_map:
+        existing = team_map[details.player]
+        raise HTTPException(status_code=409, detail=f"Player {details.player!r} is already on {existing}")
+
+    path = DATA_DIR / f"{team.lower()}-roster.csv"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Roster file not found for {team}")
+    headers, rows = read_csv(path)
+    if "SLUG" not in headers:
+        raise HTTPException(status_code=422, detail=f"Roster for {team} uses legacy format; migrate before using transactions")
+
+    row_type = "two-way" if details.contract.type == "two-way" else ""
+    rows.append({"SLUG": details.player, "OVR": str(ovr) if ovr is not None else "", "TYPE": row_type})
+    write_csv(path, headers, rows)
+
+    bio = bios[details.player]
+    bio["salaries"] = details.contract.salaries
+    bio["cap_holds"] = details.contract.cap_holds
+    bio["type"] = details.contract.type
+    save_player_bios(bios)
+
+    log_write(info, f"TXN sign — {details.player} → {team}")
+
+
+def _apply_pick(details: PickDetails, ovr: int, info: dict):
+    bios = load_player_bios()
+    if details.player not in bios:
+        raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
+
+    team = details.team.upper()
+    if team not in VALID_TEAMS:
+        raise HTTPException(status_code=422, detail=f"Unknown team: {team!r}")
+
+    team_map = _build_team_map()
+    if details.player in team_map:
+        existing = team_map[details.player]
+        raise HTTPException(status_code=409, detail=f"Player {details.player!r} is already on {existing}")
+
+    orig = details.pick.orig.upper()
+    if orig not in VALID_TEAMS:
+        raise HTTPException(status_code=422, detail=f"Unknown orig team: {orig!r}")
+    if details.pick.round not in (1, 2):
+        raise HTTPException(status_code=422, detail="Pick round must be 1 or 2")
+
+    path = DATA_DIR / f"{team.lower()}-roster.csv"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Roster file not found for {team}")
+    headers, rows = read_csv(path)
+    if "SLUG" not in headers:
+        raise HTTPException(status_code=422, detail=f"Roster for {team} uses legacy format; migrate before using transactions")
+
+    row_type = "two-way" if details.contract.type == "two-way" else ""
+    rows.append({"SLUG": details.player, "OVR": str(ovr) if ovr is not None else "", "TYPE": row_type})
+    write_csv(path, headers, rows)
+
+    bio = bios[details.player]
+    if details.contract.salaries:
+        bio["salaries"] = details.contract.salaries
+        bio["cap_holds"] = details.contract.cap_holds
+    bio["type"] = details.contract.type
+    save_player_bios(bios)
+
+    pick = details.pick
+    updated_row = {
+        "YEAR": str(pick.year), "ROUND": str(pick.round), "ORIG": orig,
+        "OWNER": team,
+        "PICK": str(pick.pick_number) if pick.pick_number is not None else "",
+        "PLAYER": details.player,
+        "PROTECTED": "", "SWAP_OWNER": "", "NOTES": "",
+    }
+    with _picks_lock:
+        picks = load_picks()
+        for i, p in enumerate(picks):
+            if (p.get("YEAR") == str(pick.year) and p.get("ROUND") == str(pick.round)
+                    and p.get("ORIG", "").upper() == orig):
+                picks[i] = updated_row
+                save_picks(picks)
+                log_write(info, f"TXN pick — {details.player} → {team} ({pick.year} R{pick.round} {orig})")
+                return
+        picks.append(updated_row)
+        picks.sort(key=lambda p: (p["YEAR"], p["ROUND"], p["ORIG"]))
+        save_picks(picks)
+
+    log_write(info, f"TXN pick — {details.player} → {team} ({pick.year} R{pick.round} {orig} — new row)")
+
+
+def _apply_trade(details: TradeIn, info: dict) -> list[str]:
+    if len(details.transfers) < 2:
+        raise HTTPException(status_code=422, detail="A trade requires at least 2 transfers")
+
+    # Normalise and validate teams
+    for xfer in details.transfers:
+        xfer.from_team = xfer.from_team.upper()
+        xfer.to_team   = xfer.to_team.upper()
+        if xfer.from_team not in VALID_TEAMS:
+            raise HTTPException(status_code=422, detail=f"Unknown team: {xfer.from_team!r}")
+        if xfer.to_team not in VALID_TEAMS:
+            raise HTTPException(status_code=422, detail=f"Unknown team: {xfer.to_team!r}")
+        for asset in xfer.assets:
+            if asset.type not in ("player", "pick"):
+                raise HTTPException(status_code=422, detail=f"Unknown asset type: {asset.type!r}")
+            if asset.swap_with:
+                asset.swap_with = asset.swap_with.upper()
+                if asset.swap_with not in VALID_TEAMS:
+                    raise HTTPException(status_code=422, detail=f"Unknown swap_with team: {asset.swap_with!r}")
+
+    # Dedup check — each asset may appear in at most one transfer
+    seen_players: set[str] = set()
+    seen_picks: set[tuple] = set()
+    for xfer in details.transfers:
+        for asset in xfer.assets:
+            if asset.type == "player":
+                if not asset.slug:
+                    raise HTTPException(status_code=422, detail="Player asset missing slug")
+                if asset.slug in seen_players:
+                    raise HTTPException(status_code=422, detail=f"Player {asset.slug!r} appears in multiple transfers")
+                seen_players.add(asset.slug)
+            else:
+                if not all([asset.year, asset.round, asset.orig]):
+                    raise HTTPException(status_code=422, detail="Pick asset missing year/round/orig")
+                asset.orig = asset.orig.upper()
+                key = (asset.year, asset.round, asset.orig)
+                if key in seen_picks:
+                    raise HTTPException(status_code=422, detail=f"Pick {asset.year} R{asset.round} {asset.orig} appears in multiple transfers")
+                seen_picks.add(key)
+
+    # Load data once for validation
+    bios     = load_player_bios()
+    team_map = _build_team_map()
+    picks    = load_picks()
+    pick_index = {(int(p["YEAR"]), int(p["ROUND"]), p["ORIG"].upper()): p for p in picks}
+
+    # Validate all assets before touching any file
+    for xfer in details.transfers:
+        for asset in xfer.assets:
+            if asset.type == "player":
+                if asset.slug not in bios:
+                    raise HTTPException(status_code=422, detail=f"Unknown player: {asset.slug!r}")
+                actual_team = team_map.get(asset.slug)
+                if actual_team != xfer.from_team:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Player {asset.slug!r} is on {actual_team or 'no team'}, not {xfer.from_team}",
+                    )
+            else:
+                key = (asset.year, asset.round, asset.orig)
+                pick_row = pick_index.get(key)
+                if not pick_row:
+                    raise HTTPException(status_code=422, detail=f"Pick {asset.year} R{asset.round} {asset.orig} not found")
+                if pick_row["OWNER"].upper() != xfer.from_team:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Pick {asset.year} R{asset.round} {asset.orig} is owned by {pick_row['OWNER']}, not {xfer.from_team}",
+                    )
+
+    # ── Mutations ────────────────────────────────────────────────────────────
+    # Roster changes: collect all moves first (list of (from, to, row))
+    roster_moves: list[tuple[str, str, dict]] = []
+    for xfer in details.transfers:
+        for asset in xfer.assets:
+            if asset.type == "player":
+                path = DATA_DIR / f"{xfer.from_team.lower()}-roster.csv"
+                headers, rows = read_csv(path)
+                matching = [r for r in rows if r.get("SLUG", "").strip() == asset.slug]
+                if matching:
+                    roster_moves.append((xfer.from_team, xfer.to_team, headers, matching[0]))
+
+    # Apply roster moves: remove from source, add to dest
+    roster_cache: dict[str, tuple[list, list]] = {}
+    for from_team, to_team, headers, row in roster_moves:
+        if from_team not in roster_cache:
+            path = DATA_DIR / f"{from_team.lower()}-roster.csv"
+            roster_cache[from_team] = list(read_csv(path))
+        if to_team not in roster_cache:
+            path = DATA_DIR / f"{to_team.lower()}-roster.csv"
+            roster_cache[to_team] = list(read_csv(path))
+
+        src_hdrs, src_rows = roster_cache[from_team]
+        dst_hdrs, dst_rows = roster_cache[to_team]
+        roster_cache[from_team] = (src_hdrs, [r for r in src_rows if r.get("SLUG", "").strip() != row.get("SLUG")])
+        dst_rows.append(row)
+        roster_cache[to_team] = (dst_hdrs, dst_rows)
+
+    for team, (hdrs, rows) in roster_cache.items():
+        write_csv(DATA_DIR / f"{team.lower()}-roster.csv", hdrs, rows)
+
+    # Pick changes
+    for xfer in details.transfers:
+        for asset in xfer.assets:
+            if asset.type == "pick":
+                for p in picks:
+                    if (int(p["YEAR"]) == asset.year and int(p["ROUND"]) == asset.round
+                            and p["ORIG"].upper() == asset.orig):
+                        p["OWNER"] = xfer.to_team
+                        if asset.protection is not None:
+                            p["PROTECTED"] = str(asset.protection)
+                        if asset.swap_with is not None:
+                            p["SWAP_OWNER"] = asset.swap_with
+    save_picks(picks)
+
+    teams = sorted({xfer.from_team for xfer in details.transfers} | {xfer.to_team for xfer in details.transfers})
+    log_write(info, f"TXN trade — {' / '.join(teams)}: {len(seen_players)} players, {len(seen_picks)} picks")
+    return teams
+
+
+@app.post("/api/transactions")
+def create_transaction(body: TransactionIn, info: dict = Depends(require_role("rosters"))):
+    try:
+        datetime.strptime(body.date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid date; use YYYY-MM-DD")
+
+    if body.type not in ("sign", "pick", "option", "release", "trade"):
+        raise HTTPException(status_code=422, detail=f"Unsupported transaction type: {body.type!r}")
+
+    with _txn_lock:
+        if body.type == "sign":
+            try:
+                details = SignDetails(**body.details)
+            except Exception as e:
+                raise HTTPException(status_code=422, detail=f"Invalid sign details: {e}")
+            _apply_sign(details, body.ovr, info)
+            stored_details = details.model_dump()
+        elif body.type == "pick":
+            try:
+                details = PickDetails(**body.details)
+            except Exception as e:
+                raise HTTPException(status_code=422, detail=f"Invalid pick details: {e}")
+            _apply_pick(details, body.ovr, info)
+            stored_details = details.model_dump()
+        elif body.type == "option":
+            try:
+                details = OptionDetails(**body.details)
+            except Exception as e:
+                raise HTTPException(status_code=422, detail=f"Invalid option details: {e}")
+            team = _apply_option(details, info)
+            stored_details = details.model_dump()
+            stored_details["team"] = team
+        elif body.type == "release":
+            try:
+                details = ReleaseDetails(**body.details)
+            except Exception as e:
+                raise HTTPException(status_code=422, detail=f"Invalid release details: {e}")
+            team, dead_cap = _apply_release(details, body.date, info)
+            stored_details = details.model_dump()
+            stored_details["team"] = team
+            stored_details["dead_cap"] = dead_cap
+        elif body.type == "trade":
+            try:
+                details = TradeIn(**body.details)
+            except Exception as e:
+                raise HTTPException(status_code=422, detail=f"Invalid trade details: {e}")
+            teams = _apply_trade(details, info)
+            stored_details = details.model_dump()
+            stored_details["teams"] = teams
+        else:
+            raise HTTPException(status_code=422, detail=f"Unsupported transaction type: {body.type!r}")
+
+        txn = {
+            "id": secrets.token_hex(8),
+            "type": body.type,
+            "date": body.date,
+            "created_by": info.get("name", "unknown"),
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "description": body.description,
+            "details": stored_details,
+        }
+        _append_transaction(txn)
+
+    return txn
+
+
+@app.get("/api/transactions")
+def list_transactions(
+    team: Optional[str] = None,
+    type: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+):
+    txns = _load_transactions()
+
+    if team:
+        t_upper = team.upper()
+        def _team_match(t):
+            d = t.get("details", {})
+            if d.get("team", "").upper() == t_upper:
+                return True
+            return t_upper in [x.upper() for x in d.get("teams", [])]
+        txns = [t for t in txns if _team_match(t)]
+
+    if type:
+        txns = [t for t in txns if t.get("type") == type]
+
+    txns = sorted(txns, key=lambda t: (t.get("date", ""), t.get("created_at", "")), reverse=True)
+    total = len(txns)
+    return {"transactions": txns[offset: offset + limit], "total": total}
+
+
+@app.get("/api/transactions/{txn_id}")
+def get_transaction(txn_id: str):
+    for t in _load_transactions():
+        if t.get("id") == txn_id:
+            return t
+    raise HTTPException(status_code=404, detail="Transaction not found")
+
+
+@app.delete("/api/transactions/{txn_id}")
+def delete_transaction(txn_id: str, info: dict = Depends(require_role("rosters"))):
+    with _txn_lock:
+        txns = _load_transactions()
+        filtered = [t for t in txns if t.get("id") != txn_id]
+        if len(filtered) == len(txns):
+            raise HTTPException(status_code=404, detail="Transaction not found")
+        TRANSACTIONS_FILE.write_text(json.dumps(filtered, indent=2))
+    log_write(info, f"TXN delete — {txn_id}")
+    return {"deleted": txn_id}
 
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
