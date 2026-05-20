@@ -609,7 +609,6 @@ class TransactionIn(BaseModel):
     type: str
     date: str
     description: str = ""
-    ovr: Optional[int] = None
     details: dict
 
 
@@ -824,7 +823,7 @@ def _apply_convert_twoway(details: ConvertTwoWayDetails, info: dict) -> str:
     return team
 
 
-def _apply_sign(details: SignDetails, ovr: int, info: dict):
+def _apply_sign(details: SignDetails, info: dict):
     bios = load_player_bios()
     if details.player not in bios:
         raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
@@ -846,7 +845,7 @@ def _apply_sign(details: SignDetails, ovr: int, info: dict):
         raise HTTPException(status_code=422, detail=f"Roster for {team} uses legacy format; migrate before using transactions")
 
     row_type = "two-way" if details.contract.type == "two-way" else ""
-    rows.append({"SLUG": details.player, "OVR": str(ovr) if ovr is not None else "", "TYPE": row_type})
+    rows.append({"SLUG": details.player, "TYPE": row_type})
     write_csv(path, headers, rows)
 
     bio = bios[details.player]
@@ -861,7 +860,7 @@ def _apply_sign(details: SignDetails, ovr: int, info: dict):
     log_write(info, f"TXN sign — {details.player} → {team}")
 
 
-def _apply_pick(details: PickDetails, ovr: int, info: dict):
+def _apply_pick(details: PickDetails, info: dict):
     bios = load_player_bios()
     if details.player not in bios:
         raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
@@ -889,7 +888,7 @@ def _apply_pick(details: PickDetails, ovr: int, info: dict):
         raise HTTPException(status_code=422, detail=f"Roster for {team} uses legacy format; migrate before using transactions")
 
     row_type = "two-way" if details.contract.type == "two-way" else ""
-    rows.append({"SLUG": details.player, "OVR": str(ovr) if ovr is not None else "", "TYPE": row_type})
+    rows.append({"SLUG": details.player, "TYPE": row_type})
     write_csv(path, headers, rows)
 
     bio = bios[details.player]
@@ -1060,14 +1059,14 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
                 details = SignDetails(**body.details)
             except Exception as e:
                 raise HTTPException(status_code=422, detail=f"Invalid sign details: {e}")
-            _apply_sign(details, body.ovr, info)
+            _apply_sign(details, info)
             stored_details = details.model_dump()
         elif body.type == "pick":
             try:
                 details = PickDetails(**body.details)
             except Exception as e:
                 raise HTTPException(status_code=422, detail=f"Invalid pick details: {e}")
-            _apply_pick(details, body.ovr, info)
+            _apply_pick(details, info)
             stored_details = details.model_dump()
         elif body.type == "option":
             try:
