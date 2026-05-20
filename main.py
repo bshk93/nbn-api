@@ -1222,6 +1222,115 @@ def delete_transaction(txn_id: str, info: dict = Depends(require_role("rosters")
     return {"deleted": txn_id}
 
 
+# ── Trade validation ─────────────────────────────────────────────────────────
+
+ROSTER_MAX = 15
+
+
+class TradeValidateInput(BaseModel):
+    transfers: list[TradeTransfer]
+    is_sign_and_trade: bool = False
+    exceptions: dict[str, Optional[str]] = {}  # team → exception being used
+
+
+class CheckResult(BaseModel):
+    check: str
+    passed: bool
+    message: str
+
+
+class TradeValidationResult(BaseModel):
+    legal: bool
+    checks: list[CheckResult]
+    fact_sheet: dict
+
+
+def _build_trade_context(trade: TradeValidateInput) -> dict:
+    bios = load_player_bios()
+
+    players_out: dict[str, list[str]] = {}
+    players_in: dict[str, list[str]] = {}
+    for xfer in trade.transfers:
+        from_team = xfer.from_team.upper()
+        to_team = xfer.to_team.upper()
+        for asset in xfer.assets:
+            if asset.type == "player" and asset.slug:
+                players_out.setdefault(from_team, []).append(asset.slug)
+                players_in.setdefault(to_team, []).append(asset.slug)
+
+    teams: dict[str, dict] = {}
+    for team in set(players_out) | set(players_in):
+        path = DATA_DIR / f"{team.lower()}-roster.csv"
+        rows = read_csv(path)[1] if path.exists() else []
+
+        non_standard_on_roster = {
+            r["SLUG"].strip() for r in rows
+            if r.get("SLUG", "").strip() and r.get("TYPE", "").strip() in ("two-way", "dead")
+        }
+        count_before = sum(
+            1 for r in rows
+            if r.get("SLUG", "").strip() and r.get("TYPE", "").strip() not in ("two-way", "dead")
+        )
+
+        out_slugs = players_out.get(team, [])
+        in_slugs = players_in.get(team, [])
+
+        out_standard = sum(1 for s in out_slugs if s not in non_standard_on_roster)
+        in_standard = sum(
+            1 for s in in_slugs
+            if bios.get(s, {}).get("type", "") not in ("two-way", "dead")
+        )
+
+        teams[team] = {
+            "team": team,
+            "standard_count_before": count_before,
+            "standard_count_after": count_before - out_standard + in_standard,
+            "players_out": out_slugs,
+            "players_in": in_slugs,
+        }
+
+    return {
+        "teams": teams,
+        "is_sign_and_trade": trade.is_sign_and_trade,
+        "exceptions": trade.exceptions,
+    }
+
+
+def _check_roster_size(ctx: dict) -> CheckResult:
+    violations = [
+        f"{tc['team']}: would have {tc['standard_count_after']} players (max {ROSTER_MAX})"
+        for tc in ctx["teams"].values()
+        if tc["standard_count_after"] > ROSTER_MAX
+    ]
+    if violations:
+        return CheckResult(
+            check="roster_size",
+            passed=False,
+            message="Roster limit exceeded — release a player first: " + "; ".join(violations),
+        )
+    return CheckResult(
+        check="roster_size",
+        passed=True,
+        message=f"All rosters within the {ROSTER_MAX}-player limit",
+    )
+
+
+_TRADE_CHECKS = [
+    _check_roster_size,
+]
+
+
+@app.post("/api/validate/trade")
+def validate_trade(body: TradeValidateInput):
+    ctx = _build_trade_context(body)
+    results = [fn(ctx) for fn in _TRADE_CHECKS]
+    return TradeValidationResult(
+        legal=all(r.passed for r in results),
+        checks=results,
+        fact_sheet=ctx,
+    )
+
+
 # ── Auth ─────────────────────────────────────────────────────────────────────
 
 @app.get("/api/me")
