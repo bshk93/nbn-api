@@ -13,7 +13,6 @@ All transaction endpoints require the `rosters` role.
   "type": "sign",
   "date": "YYYY-MM-DD",
   "description": "optional free text",
-  "ovr": 86,
   "details": { ... }
 }
 ```
