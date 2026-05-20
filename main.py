@@ -615,13 +615,15 @@ class TransactionIn(BaseModel):
 
 class OptionDetails(BaseModel):
     player: str
-
-class ReleaseDetails(BaseModel):
-    player: str
     decision: str       # "accept" or "decline"
     option_type: str    # "PLAYER_OPT" or "TEAM_OPT"
     year: str           # e.g. "26-27"
     cap_hold_type: str = "UFA"
+    cap_hold_amount: Optional[str] = None
+
+
+class ReleaseDetails(BaseModel):
+    player: str
 
 
 class TradeAsset(BaseModel):
@@ -705,6 +707,9 @@ def _apply_option(details: OptionDetails, info: dict) -> Optional[str]:
         key = _season_start(details.year)
         bio["salaries"] = {yr: amt for yr, amt in bio.get("salaries", {}).items()
                            if _season_start(yr) < key}
+        # Write cap hold salary for the option year if provided
+        if details.cap_hold_amount:
+            bio["salaries"][details.year] = details.cap_hold_amount
         # Remove option entry and any cap_holds at or after the option year
         holds = [(yr, typ) for yr, typ in holds
                  if not (yr == details.year and typ == details.option_type)
