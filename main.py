@@ -35,11 +35,13 @@ OVR_FILE           = DATA_DIR / "ovr-history.json"
 CAP_LEVELS_FILE    = DATA_DIR / "cap-levels.json"
 PICKS_FILE         = DATA_DIR / "draft-picks.csv"
 TRANSACTIONS_FILE  = DATA_DIR / "transactions.json"
+TEAM_STATE_FILE    = DATA_DIR / "team-state.json"
 
 PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PLAYER", "PROTECTED", "SWAP_OWNER", "NOTES"]
-_picks_lock = threading.Lock()
-_txn_lock   = threading.Lock()
-_ovr_lock   = threading.Lock()
+_picks_lock  = threading.Lock()
+_txn_lock    = threading.Lock()
+_ovr_lock    = threading.Lock()
+_state_lock  = threading.Lock()
 
 VALID_TEAMS = {
     "ATL", "BKN", "BOS", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW",
@@ -590,6 +592,9 @@ class CapLevel(BaseModel):
     cap: int
     apron1: int
     apron2: int
+    ntmle_amount: int = 0
+    tmle_amount: int = 0
+    bae_amount: int = 0
 
 @app.get("/api/cap-levels")
 def get_cap_levels():
@@ -602,8 +607,103 @@ def put_cap_level(season: str, body: CapLevel, info: dict = Depends(require_role
     levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
     levels[season] = body.model_dump()
     CAP_LEVELS_FILE.write_text(json.dumps(levels, indent=2))
-    log_write(info, f"PUT cap-levels/{season} — cap={body.cap} apron1={body.apron1} apron2={body.apron2}")
+    log_write(info, f"PUT cap-levels/{season} — cap={body.cap} apron1={body.apron1} apron2={body.apron2} ntmle={body.ntmle_amount} tmle={body.tmle_amount} bae={body.bae_amount}")
     return levels[season]
+
+
+# ── Team state ────────────────────────────────────────────────────────────────
+
+DEFAULT_SEASON_STATE: dict = {
+    "hard_cap": None, "hard_cap_reason": "", "mle_used": 0, "bae_used": False,
+}
+
+CAP_RANK = {None: 0, "first_apron": 1, "second_apron": 2}
+
+
+def load_team_state() -> dict:
+    if not TEAM_STATE_FILE.exists():
+        return {}
+    return json.loads(TEAM_STATE_FILE.read_text())
+
+
+def save_team_state(data: dict):
+    TEAM_STATE_FILE.write_text(json.dumps(data, indent=2))
+
+
+def get_season_state(state: dict, team: str, season: str) -> dict:
+    return state.get(team, {}).get(season, dict(DEFAULT_SEASON_STATE))
+
+
+def _bae_available(state: dict, team: str, cur_season: str) -> bool:
+    seasons = sorted(state.get(team, {}).keys())
+    prior = [s for s in seasons if s < cur_season]
+    if not prior:
+        return True
+    return not state[team][prior[-1]].get("bae_used", False)
+
+
+def _maybe_set_hard_cap(ts: dict, new_cap: str, reason: str):
+    if CAP_RANK.get(new_cap, 0) > CAP_RANK.get(ts.get("hard_cap"), 0):
+        ts["hard_cap"] = new_cap
+        ts["hard_cap_reason"] = reason
+
+
+class TeamSeasonState(BaseModel):
+    hard_cap: Optional[str] = None
+    hard_cap_reason: str = ""
+    mle_used: int = 0
+    bae_used: bool = False
+
+
+@app.get("/api/team-state")
+def get_all_team_state():
+    state = load_team_state()
+    cur = _current_season_str()
+    return {
+        team: {
+            "seasons": state.get(team, {}),
+            "current": get_season_state(state, team, cur),
+            "bae_available": _bae_available(state, team, cur),
+        }
+        for team in sorted(VALID_TEAMS)
+    }
+
+
+@app.get("/api/team-state/{team}")
+def get_team_state(team: str, season: Optional[str] = None):
+    team = team.upper()
+    if team not in VALID_TEAMS:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    state = load_team_state()
+    cur = season or _current_season_str()
+    return {
+        "season": cur,
+        **get_season_state(state, team, cur),
+        "bae_available": _bae_available(state, team, cur),
+    }
+
+
+@app.put("/api/team-state/{team}")
+def put_team_state(
+    team: str,
+    body: TeamSeasonState,
+    season: Optional[str] = None,
+    info: dict = Depends(require_role("rosters")),
+):
+    team = team.upper()
+    if team not in VALID_TEAMS:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    if body.hard_cap not in (None, "first_apron", "second_apron"):
+        raise HTTPException(status_code=422, detail="hard_cap must be null, 'first_apron', or 'second_apron'")
+    cur = season or _current_season_str()
+    with _state_lock:
+        state = load_team_state()
+        if team not in state:
+            state[team] = {}
+        state[team][cur] = body.model_dump()
+        save_team_state(state)
+    log_write(info, f"PUT team-state/{team}/{cur} — hard_cap={body.hard_cap} mle_used={body.mle_used} bae_used={body.bae_used}")
+    return {"season": cur, **state[team][cur], "bae_available": _bae_available(state, team, cur)}
 
 
 # ── Transactions ─────────────────────────────────────────────────────────────
@@ -644,6 +744,8 @@ class SignDetails(BaseModel):
     player: str
     team: str
     contract: ContractIn
+    signing_method: Optional[str] = None   # cap_space | bird_rights | ntmle | tmle | room_exception | bae | sign_and_trade
+    bird_rights_type: Optional[str] = None  # QVFA | EQVFA | Non-QVFA
 
 
 class PickIn(BaseModel):
@@ -905,7 +1007,34 @@ def _apply_sign(details: SignDetails, info: dict):
     bio["type"] = details.contract.type
     save_player_bios(bios)
 
-    log_write(info, f"TXN sign — {details.player} → {team}")
+    if details.signing_method in ("ntmle", "tmle", "room_exception", "bae"):
+        cur = _current_season_str()
+        with _state_lock:
+            state = load_team_state()
+            if team not in state:
+                state[team] = {}
+            ts = state[team].get(cur, dict(DEFAULT_SEASON_STATE))
+
+            if details.signing_method in ("ntmle", "tmle", "room_exception"):
+                yr1 = 0
+                for yr in sorted(details.contract.salaries.keys()):
+                    if yr >= cur:
+                        yr1 = int(str(details.contract.salaries[yr])
+                                  .replace("$", "").replace(",", "").strip() or 0)
+                        break
+                ts["mle_used"] = ts.get("mle_used", 0) + yr1
+                if details.signing_method == "ntmle":
+                    _maybe_set_hard_cap(ts, "first_apron", f"NTMLE signing: {details.player}")
+                elif details.signing_method == "tmle":
+                    _maybe_set_hard_cap(ts, "second_apron", f"TMLE signing: {details.player}")
+            elif details.signing_method == "bae":
+                ts["bae_used"] = True
+                _maybe_set_hard_cap(ts, "first_apron", f"BAE signing: {details.player}")
+
+            state[team][cur] = ts
+            save_team_state(state)
+
+    log_write(info, f"TXN sign — {details.player} → {team} [{details.signing_method or 'cap_space'}]")
 
 
 def _apply_pick(details: PickDetails, info: dict):
