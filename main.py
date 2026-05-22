@@ -33,15 +33,17 @@ TRADING_BLOCK_FILE = DATA_DIR / "trading-block.json"
 PLAYER_BIOS_FILE   = DATA_DIR / "player-bios.json"
 OVR_FILE           = DATA_DIR / "ovr-history.json"
 CAP_LEVELS_FILE    = DATA_DIR / "cap-levels.json"
+ROOKIE_SCALE_FILE  = DATA_DIR / "rookie-scale.json"
 PICKS_FILE         = DATA_DIR / "draft-picks.csv"
 TRANSACTIONS_FILE  = DATA_DIR / "transactions.json"
 TEAM_STATE_FILE    = DATA_DIR / "team-state.json"
 
 PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PLAYER", "PROTECTED", "SWAP_OWNER", "NOTES"]
-_picks_lock  = threading.Lock()
-_txn_lock    = threading.Lock()
-_ovr_lock    = threading.Lock()
-_state_lock  = threading.Lock()
+_picks_lock    = threading.Lock()
+_txn_lock      = threading.Lock()
+_ovr_lock      = threading.Lock()
+_state_lock    = threading.Lock()
+_deadcap_lock  = threading.Lock()
 
 VALID_TEAMS = {
     "ATL", "BKN", "BOS", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW",
@@ -156,6 +158,41 @@ def put_roster(team: str, body: dict, info: dict = Depends(require_role("rosters
     rows = body.get("rows", [])
     write_csv(path, headers, rows)
     log_write(info, f"PUT roster/{team.upper()} — {len(rows)} rows")
+    return {"ok": True}
+
+
+# ── Dead Cap ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/deadcap/{team}")
+def get_deadcap(team: str):
+    team = team.upper()
+    if team not in VALID_TEAMS:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    path = DATA_DIR / f"{team.lower()}-deadcap.csv"
+    if not path.exists():
+        return []
+    _, rows = read_csv(path)
+    return rows
+
+
+@app.put("/api/deadcap/{team}")
+def put_deadcap(
+    team: str,
+    body: list[dict],
+    info: dict = Depends(require_role("rosters")),
+):
+    team = team.upper()
+    if team not in VALID_TEAMS:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    season_keys = sorted({
+        k for row in body for k in row
+        if k != "SLUG" and re.fullmatch(r'\d{2}-\d{2}', k)
+    })
+    headers = ["SLUG"] + season_keys
+    path = DATA_DIR / f"{team.lower()}-deadcap.csv"
+    with _deadcap_lock:
+        write_csv(path, headers, body)
+    log_write(info, f"PUT deadcap/{team} — {len(body)} rows")
     return {"ok": True}
 
 
@@ -611,6 +648,23 @@ def put_cap_level(season: str, body: CapLevel, info: dict = Depends(require_role
     return levels[season]
 
 
+# ── Rookie scale ─────────────────────────────────────────────────────────────
+
+@app.get("/api/rookie-scale")
+def get_rookie_scale():
+    if not ROOKIE_SCALE_FILE.exists():
+        return {}
+    return json.loads(ROOKIE_SCALE_FILE.read_text())
+
+@app.put("/api/rookie-scale/{year}")
+def put_rookie_scale(year: int, body: list[list[int]], info: dict = Depends(require_role("rosters"))):
+    scale = json.loads(ROOKIE_SCALE_FILE.read_text()) if ROOKIE_SCALE_FILE.exists() else {}
+    scale[str(year)] = body
+    ROOKIE_SCALE_FILE.write_text(json.dumps(scale, indent=2))
+    log_write(info, f"PUT rookie-scale/{year} — {len(body)} picks")
+    return scale[str(year)]
+
+
 # ── Team state ────────────────────────────────────────────────────────────────
 
 DEFAULT_SEASON_STATE: dict = {
@@ -910,14 +964,11 @@ def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[
         # Fully or partially guaranteed (including PLAYER_OPT years)
         dead_cap[season] = guaranteed.get(season, salary)
 
-    existing_dead = bio.get("dead_cap") or {}
-    existing_dead.update(dead_cap)
-    bio["dead_cap"] = existing_dead
     bio["salaries"] = {k: v for k, v in bio["salaries"].items() if k < cur_season}
     bio["cap_holds"] = {}
     bio["guaranteed"] = {}
     bio["guarantee_dates"] = {}
-    bio["type"] = "dead"
+    bio["type"] = ""
     save_player_bios(bios)
 
     # Remove from roster CSV
@@ -925,6 +976,22 @@ def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[
     headers, rows = read_csv(path)
     rows = [r for r in rows if r.get("SLUG", "").strip() != details.player]
     write_csv(path, headers, rows)
+
+    # Write dead cap to team's deadcap CSV
+    if dead_cap:
+        dc_path = DATA_DIR / f"{team.lower()}-deadcap.csv"
+        with _deadcap_lock:
+            if dc_path.exists():
+                _, dc_rows = read_csv(dc_path)
+            else:
+                dc_rows = []
+            dc_rows = [r for r in dc_rows if r.get("SLUG", "").strip() != details.player]
+            dc_rows.append({"SLUG": details.player, **dead_cap})
+            season_keys = sorted({
+                k for row in dc_rows for k in row
+                if k != "SLUG" and re.fullmatch(r'\d{2}-\d{2}', k)
+            })
+            write_csv(dc_path, ["SLUG"] + season_keys, dc_rows)
 
     _scrub_trading_block({team: {details.player}}, bios)
     log_write(info, f"TXN release — {details.player} from {team}")
