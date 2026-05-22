@@ -821,6 +821,7 @@ class TransactionIn(BaseModel):
     date: str
     description: str = ""
     details: dict
+    force: bool = False   # override warning-level failures
 
 
 class OptionDetails(BaseModel):
@@ -1297,6 +1298,66 @@ def _apply_trade(details: TradeIn, info: dict) -> list[str]:
     return teams
 
 
+# ── Transaction validation ────────────────────────────────────────────────────
+# Each _validate_* function receives the parsed details object and returns a
+# list of CheckResult. level="error" → hard block. level="warning" → soft,
+# can be overridden with force=True on the request.
+
+def _validate_sign(details: SignDetails) -> list[CheckResult]:
+    checks = []
+    # TODO: roster size, cap space / exception eligibility, contract length limits,
+    #       apron restrictions, Bird Rights eligibility, sign-and-trade rules
+    return checks
+
+
+def _validate_release(details: ReleaseDetails) -> list[CheckResult]:
+    checks = []
+    # TODO: player exists on a roster, release window rules
+    return checks
+
+
+def _validate_trade(details: TradeIn) -> list[CheckResult]:
+    checks = []
+    # TODO: salary matching tiers, Stepien Rule, 7-year advance limit,
+    #       apron restrictions, roster size after trade, aggregation rules
+    return checks
+
+
+def _validate_option(details: OptionDetails) -> list[CheckResult]:
+    checks = []
+    # TODO: option year exists on contract, decision window
+    return checks
+
+
+def _validate_pick(details: PickDetails) -> list[CheckResult]:
+    checks = []
+    # TODO: player not already on a roster, pick exists and is owned by team,
+    #       rookie scale contract limits
+    return checks
+
+
+def _validate_convert_twoway(details: ConvertTwoWayDetails) -> list[CheckResult]:
+    checks = []
+    # TODO: player is on a two-way, roster size after conversion,
+    #       cap space / exception for the new contract
+    return checks
+
+
+_VALIDATORS = {
+    "sign":           _validate_sign,
+    "release":        _validate_release,
+    "trade":          _validate_trade,
+    "option":         _validate_option,
+    "pick":           _validate_pick,
+    "convert_twoway": _validate_convert_twoway,
+}
+
+
+def _run_validation(txn_type: str, details) -> list[CheckResult]:
+    fn = _VALIDATORS.get(txn_type)
+    return fn(details) if fn else []
+
+
 @app.post("/api/transactions")
 def create_transaction(body: TransactionIn, info: dict = Depends(require_role("rosters"))):
     try:
@@ -1307,56 +1368,61 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
     if body.type not in ("sign", "pick", "option", "release", "trade", "convert_twoway"):
         raise HTTPException(status_code=422, detail=f"Unsupported transaction type: {body.type!r}")
 
+    # ── Parse details early so validators get typed objects ───────────────────
+    _detail_models = {
+        "sign":           (SignDetails,           "Invalid sign details"),
+        "pick":           (PickDetails,           "Invalid pick details"),
+        "option":         (OptionDetails,         "Invalid option details"),
+        "release":        (ReleaseDetails,        "Invalid release details"),
+        "trade":          (TradeIn,               "Invalid trade details"),
+        "convert_twoway": (ConvertTwoWayDetails,  "Invalid convert_twoway details"),
+    }
+    model_cls, err_prefix = _detail_models[body.type]
+    try:
+        parsed_details = model_cls(**body.details)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"{err_prefix}: {e}")
+
+    # ── Run rubric checks ─────────────────────────────────────────────────────
+    checks = _run_validation(body.type, parsed_details)
+    errors   = [c for c in checks if not c.passed and c.level == "error"]
+    warnings = [c for c in checks if not c.passed and c.level == "warning"]
+
+    if errors or (warnings and not body.force):
+        raise HTTPException(status_code=422, detail={
+            "validation": True,
+            "checks": [c.model_dump() for c in checks],
+            "can_force": len(errors) == 0,
+        })
+
     with _txn_lock:
+        details = parsed_details  # already parsed above
         if body.type == "sign":
-            try:
-                details = SignDetails(**body.details)
-            except Exception as e:
-                raise HTTPException(status_code=422, detail=f"Invalid sign details: {e}")
             _apply_sign(details, info)
             stored_details = details.model_dump()
         elif body.type == "pick":
-            try:
-                details = PickDetails(**body.details)
-            except Exception as e:
-                raise HTTPException(status_code=422, detail=f"Invalid pick details: {e}")
             _apply_pick(details, info)
             stored_details = details.model_dump()
         elif body.type == "option":
-            try:
-                details = OptionDetails(**body.details)
-            except Exception as e:
-                raise HTTPException(status_code=422, detail=f"Invalid option details: {e}")
             team = _apply_option(details, info)
             stored_details = details.model_dump()
             stored_details["team"] = team
         elif body.type == "release":
-            try:
-                details = ReleaseDetails(**body.details)
-            except Exception as e:
-                raise HTTPException(status_code=422, detail=f"Invalid release details: {e}")
             team, dead_cap = _apply_release(details, body.date, info)
             stored_details = details.model_dump()
             stored_details["team"] = team
             stored_details["dead_cap"] = dead_cap
         elif body.type == "trade":
-            try:
-                details = TradeIn(**body.details)
-            except Exception as e:
-                raise HTTPException(status_code=422, detail=f"Invalid trade details: {e}")
             teams = _apply_trade(details, info)
             stored_details = details.model_dump()
             stored_details["teams"] = teams
         elif body.type == "convert_twoway":
-            try:
-                details = ConvertTwoWayDetails(**body.details)
-            except Exception as e:
-                raise HTTPException(status_code=422, detail=f"Invalid convert_twoway details: {e}")
             team = _apply_convert_twoway(details, info)
             stored_details = details.model_dump()
             stored_details["team"] = team
-        else:
-            raise HTTPException(status_code=422, detail=f"Unsupported transaction type: {body.type!r}")
+
+        if body.force and warnings:
+            stored_details["_forced_warnings"] = [c.check for c in warnings]
 
         txn = {
             "id": secrets.token_hex(8),
@@ -1432,6 +1498,7 @@ class TradeValidateInput(BaseModel):
 class CheckResult(BaseModel):
     check: str
     passed: bool
+    level: str = "error"   # "error" blocks; "warning" allows force-through
     message: str
 
 
