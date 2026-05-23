@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import shutil
+import subprocess
 import sys
 import threading
 import uuid
@@ -35,6 +36,8 @@ def log_write(info: dict, action: str):
 DATA_DIR  = Path("/var/lib/nothing-but-stats")
 RULES_DIR = DATA_DIR / "rules"
 PENDING_BOXSCORES_DIR = DATA_DIR / "pending-boxscores"
+BUILD_STATUS_FILE  = DATA_DIR / "build-status.json"
+BUILD_SCRIPT       = Path("/home/skim/projects/nothing-but-stats/refresh/nbs.sh")
 TOKENS_FILE        = DATA_DIR / "tokens.json"
 TRADING_BLOCK_FILE = DATA_DIR / "trading-block.json"
 PLAYER_BIOS_FILE   = DATA_DIR / "player-bios.json"
@@ -2170,7 +2173,64 @@ def commit_boxscore(body: BoxscoreCommitRequest, info: dict = Depends(require_an
 
     write_csv(path, expected_headers, existing + new_rows)
     logger.info("[%s] POST boxscore/commit — %s vs %s on %s (%d rows)", info.get("name"), home_team, away_team, body.date, len(new_rows))
-    return {"ok": True, "rows_added": len(new_rows)}
+    building = _trigger_build()
+    return {"ok": True, "rows_added": len(new_rows), "building": building}
+
+
+# ── Stats build ───────────────────────────────────────────────────────────────
+
+def _read_build_status() -> dict:
+    if BUILD_STATUS_FILE.exists():
+        try:
+            return json.loads(BUILD_STATUS_FILE.read_text())
+        except Exception:
+            pass
+    return {"status": "idle"}
+
+
+def _trigger_build():
+    status = _read_build_status()
+    if status.get("status") == "running":
+        return False
+
+    now = datetime.now(timezone.utc).isoformat()
+    BUILD_STATUS_FILE.write_text(json.dumps({"status": "running", "started_at": now}))
+
+    def _run():
+        try:
+            result = subprocess.run(
+                ["bash", str(BUILD_SCRIPT), "build"],
+                capture_output=True, text=True,
+            )
+            finished = datetime.now(timezone.utc).isoformat()
+            if result.returncode == 0:
+                BUILD_STATUS_FILE.write_text(json.dumps({
+                    "status": "done",
+                    "started_at": now,
+                    "finished_at": finished,
+                }))
+            else:
+                BUILD_STATUS_FILE.write_text(json.dumps({
+                    "status": "error",
+                    "started_at": now,
+                    "finished_at": finished,
+                    "error": (result.stderr or result.stdout or "unknown error")[-500:],
+                }))
+        except Exception as e:
+            BUILD_STATUS_FILE.write_text(json.dumps({
+                "status": "error",
+                "started_at": now,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "error": str(e),
+            }))
+
+    threading.Thread(target=_run, daemon=True).start()
+    return True
+
+
+@app.get("/api/build/status")
+def get_build_status():
+    return _read_build_status()
 
 
 # ── Boxscore pending queue ────────────────────────────────────────────────────
