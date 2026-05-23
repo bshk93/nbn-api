@@ -6,8 +6,10 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import sys
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -32,6 +34,7 @@ def log_write(info: dict, action: str):
 
 DATA_DIR  = Path("/var/lib/nothing-but-stats")
 RULES_DIR = DATA_DIR / "rules"
+PENDING_BOXSCORES_DIR = DATA_DIR / "pending-boxscores"
 TOKENS_FILE        = DATA_DIR / "tokens.json"
 TRADING_BLOCK_FILE = DATA_DIR / "trading-block.json"
 PLAYER_BIOS_FILE   = DATA_DIR / "player-bios.json"
@@ -2168,6 +2171,80 @@ def commit_boxscore(body: BoxscoreCommitRequest, info: dict = Depends(require_an
     write_csv(path, expected_headers, existing + new_rows)
     logger.info("[%s] POST boxscore/commit — %s vs %s on %s (%d rows)", info.get("name"), home_team, away_team, body.date, len(new_rows))
     return {"ok": True, "rows_added": len(new_rows)}
+
+
+# ── Boxscore pending queue ────────────────────────────────────────────────────
+
+@app.post("/api/boxscore/upload")
+async def upload_boxscore(
+    home_image: UploadFile = File(...),
+    away_image: UploadFile = File(...),
+    date: str = Form(...),
+    home_team: str = Form(...),
+    away_team: str = Form(...),
+    season: str = Form(...),
+    game_type: str = Form(...),
+    game_num: Optional[int] = Form(None),
+    round_num: Optional[int] = Form(None),
+    info: dict = Depends(require_any_role("rosters", "stats")),
+):
+    home_team = home_team.upper()
+    away_team = away_team.upper()
+    if home_team not in VALID_TEAMS or away_team not in VALID_TEAMS:
+        raise HTTPException(status_code=422, detail="Invalid team abbreviation")
+
+    item_id = str(uuid.uuid4())[:8]
+    item_dir = PENDING_BOXSCORES_DIR / item_id
+    item_dir.mkdir(parents=True, exist_ok=True)
+
+    home_bytes = await home_image.read()
+    away_bytes = await away_image.read()
+    home_ext = (home_image.filename or "home.png").rsplit(".", 1)[-1].lower()
+    away_ext = (away_image.filename or "away.png").rsplit(".", 1)[-1].lower()
+    (item_dir / f"home.{home_ext}").write_bytes(home_bytes)
+    (item_dir / f"away.{away_ext}").write_bytes(away_bytes)
+
+    meta = {
+        "id": item_id,
+        "date": date,
+        "home_team": home_team,
+        "away_team": away_team,
+        "season": season,
+        "game_type": game_type,
+        "game_num": game_num,
+        "round_num": round_num,
+        "uploaded_by": info.get("name"),
+        "home_image": f"home.{home_ext}",
+        "away_image": f"away.{away_ext}",
+    }
+    (item_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+
+    logger.info("[%s] POST boxscore/upload — %s vs %s on %s (id=%s)", info.get("name"), home_team, away_team, date, item_id)
+    return {"ok": True, "id": item_id}
+
+
+@app.get("/api/boxscore/pending")
+def list_pending_boxscores(info: dict = Depends(require_any_role("rosters", "stats"))):
+    if not PENDING_BOXSCORES_DIR.exists():
+        return []
+    items = []
+    for item_dir in sorted(PENDING_BOXSCORES_DIR.iterdir()):
+        meta_path = item_dir / "meta.json"
+        if not meta_path.exists():
+            continue
+        meta = json.loads(meta_path.read_text())
+        items.append(meta)
+    return items
+
+
+@app.delete("/api/boxscore/pending/{item_id}")
+def delete_pending_boxscore(item_id: str, info: dict = Depends(require_any_role("rosters", "stats"))):
+    item_dir = PENDING_BOXSCORES_DIR / item_id
+    if not item_dir.exists():
+        raise HTTPException(status_code=404, detail="Pending item not found")
+    shutil.rmtree(item_dir)
+    logger.info("[%s] DELETE boxscore/pending/%s", info.get("name"), item_id)
+    return {"ok": True}
 
 
 # ── Tokens ───────────────────────────────────────────────────────────────────
