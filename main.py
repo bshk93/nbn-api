@@ -2905,6 +2905,7 @@ async def upload_boxscore(
         "game_num": game_num,
         "round_num": round_num,
         "uploaded_by": info.get("name"),
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
         "home_image": f"home.{home_ext}",
         "away_image": f"away.{away_ext}",
     }
@@ -2919,12 +2920,13 @@ def list_pending_boxscores(info: dict = Depends(require_any_role("rosters", "sta
     if not PENDING_BOXSCORES_DIR.exists():
         return []
     items = []
-    for item_dir in sorted(PENDING_BOXSCORES_DIR.iterdir()):
+    for item_dir in PENDING_BOXSCORES_DIR.iterdir():
         meta_path = item_dir / "meta.json"
         if not meta_path.exists():
             continue
         meta = json.loads(meta_path.read_text())
         items.append(meta)
+    items.sort(key=lambda x: x.get("uploaded_at") or x.get("id", ""))
     return items
 
 
