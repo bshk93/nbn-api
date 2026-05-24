@@ -2592,6 +2592,7 @@ class BoxscoreCommitRequest(BaseModel):
     round_num: Optional[int] = None
     home_rows: list[BoxscorePlayerRow]
     away_rows: list[BoxscorePlayerRow]
+    skip_build: bool = False
 
 
 @app.post("/api/boxscore/commit")
@@ -2635,7 +2636,7 @@ def commit_boxscore(body: BoxscoreCommitRequest, info: dict = Depends(require_an
 
     write_csv(path, expected_headers, existing + new_rows)
     logger.info("[%s] POST boxscore/commit — %s vs %s on %s (%d rows)", info.get("name"), home_team, away_team, body.date, len(new_rows))
-    building = _trigger_build()
+    building = False if body.skip_build else _trigger_build()
     return {"ok": True, "rows_added": len(new_rows), "building": building}
 
 
@@ -2862,6 +2863,13 @@ def _trigger_build():
 @app.get("/api/build/status")
 def get_build_status():
     return _read_build_status()
+
+
+@app.post("/api/build/trigger")
+def trigger_build(info: dict = Depends(require_any_role("rosters", "stats"))):
+    building = _trigger_build()
+    logger.info("[%s] POST build/trigger (started=%s)", info.get("name"), building)
+    return {"ok": True, "building": building}
 
 
 # ── Boxscore pending queue ────────────────────────────────────────────────────
