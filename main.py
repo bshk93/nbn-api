@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import csv
 import io
@@ -16,7 +17,8 @@ from pathlib import Path
 from typing import Optional
 
 import anthropic
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+import ptyprocess
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -39,6 +41,7 @@ PENDING_BOXSCORES_DIR = DATA_DIR / "pending-boxscores"
 BUILD_STATUS_FILE  = DATA_DIR / "build-status.json"
 BUILD_SCRIPT       = Path("/home/skim/projects/nothing-but-stats/refresh/nbs.sh")
 TOKENS_FILE        = DATA_DIR / "tokens.json"
+MEMBERS_FILE       = DATA_DIR / "members.json"
 TRADING_BLOCK_FILE = DATA_DIR / "trading-block.json"
 PLAYER_BIOS_FILE   = DATA_DIR / "player-bios.json"
 OVR_FILE           = DATA_DIR / "ovr-history.json"
@@ -81,35 +84,47 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://nbn.today"],
-    allow_methods=["GET", "PUT", "POST", "DELETE"],
+    allow_methods=["GET", "PUT", "POST", "DELETE", "PATCH"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
 
-def load_tokens() -> dict:
-    if not TOKENS_FILE.exists():
+def load_members() -> dict:
+    if not MEMBERS_FILE.exists():
         return {}
-    return json.loads(TOKENS_FILE.read_text())
+    return json.loads(MEMBERS_FILE.read_text())
+
+
+def save_members(members: dict):
+    MEMBERS_FILE.write_text(json.dumps(members, indent=2))
+
+
+def load_tokens() -> dict:
+    """Compatibility shim — reads members.json in the old {hex: {name, roles}} format."""
+    return {
+        m["token"]: {"name": name, "roles": m.get("roles", [])}
+        for name, m in load_members().items()
+        if m.get("token")
+    }
 
 
 def _resolve_token(authorization: Optional[str]) -> Optional[dict]:
     if not authorization or not authorization.startswith("Bearer "):
         return None
-    return load_tokens().get(authorization[7:])
-
-
-def save_tokens(tokens: dict):
-    TOKENS_FILE.write_text(json.dumps(tokens, indent=2))
+    hex_token = authorization[7:]
+    for name, member in load_members().items():
+        if member.get("token") == hex_token:
+            return {"name": name, "roles": member.get("roles", [])}
+    return None
 
 
 def get_token_info(authorization: Optional[str] = Header(None)) -> dict:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing Authorization header")
-    token = authorization[7:]
-    tokens = load_tokens()
-    if token not in tokens:
+    info = _resolve_token(authorization)
+    if info is None:
         raise HTTPException(status_code=403, detail="Invalid token")
-    return tokens[token]
+    return info
 
 
 def has_role(info: dict, role: str) -> bool:
@@ -417,10 +432,18 @@ def delete_pick(year: int, rnd: int, orig: str, info: dict = Depends(require_rol
 
 # ── Trading Block ────────────────────────────────────────────────────────────
 
+def _normalize_team_block(raw) -> dict:
+    """Coerce legacy flat-array format to {players, picks} shape."""
+    if isinstance(raw, list):
+        return {"players": raw, "picks": []}
+    return {"players": raw.get("players", []), "picks": raw.get("picks", [])}
+
+
 def load_trading_block() -> dict:
     if not TRADING_BLOCK_FILE.exists():
-        return {t: [] for t in sorted(VALID_TEAMS)}
-    return json.loads(TRADING_BLOCK_FILE.read_text())
+        return {t: {"players": [], "picks": []} for t in sorted(VALID_TEAMS)}
+    raw = json.loads(TRADING_BLOCK_FILE.read_text())
+    return {team: _normalize_team_block(val) for team, val in raw.items()}
 
 
 def save_trading_block(data: dict):
@@ -432,6 +455,17 @@ class TradingBlockEntry(BaseModel):
     notes: str = ""
 
 
+class PickEntry(BaseModel):
+    year: int
+    round: str   # "1st" or "2nd"
+    notes: str = ""
+
+
+class TeamTradeBlock(BaseModel):
+    players: list[TradingBlockEntry] = []
+    picks: list[PickEntry] = []
+
+
 @app.get("/api/trading-block")
 def get_trading_block():
     return load_trading_block()
@@ -440,7 +474,7 @@ def get_trading_block():
 @app.put("/api/trading-block/{team}")
 def put_trading_block(
     team: str,
-    body: list[TradingBlockEntry],
+    body: TeamTradeBlock,
     info: dict = Depends(get_token_info),
 ):
     team = team.upper()
@@ -449,9 +483,11 @@ def put_trading_block(
     if not has_role(info, team.lower()) and not has_role(info, "admin"):
         raise HTTPException(status_code=403, detail=f"'{team.lower()}' role required")
     data = load_trading_block()
-    data[team] = [e.model_dump() for e in body]
+    data[team] = body.model_dump()
     save_trading_block(data)
-    log_write(info, f"PUT trading-block/{team} — {len(body)} players")
+    n_players = len(body.players)
+    n_picks   = len(body.picks)
+    log_write(info, f"PUT trading-block/{team} — {n_players} players, {n_picks} picks")
     return {"ok": True}
 
 
@@ -490,6 +526,7 @@ class PlayerBio(BaseModel):
     guarantee_dates: dict[str, str] = {}  # season → "YYYY-MM-DD" after which salary is fully guaranteed
     jersey_number: Optional[str] = None
     retired: bool = False
+    notes: str = ""
 
 
 class PlayerCreate(PlayerBio):
@@ -678,10 +715,12 @@ def _scrub_trading_block(removals: dict[str, set[str]], bios: dict) -> None:
         display_names.discard('')
         if not display_names:
             continue
-        original = data.get(team, [])
-        updated = [e for e in original if e.get('player') not in display_names]
+        block    = _normalize_team_block(data.get(team, []))
+        original = block["players"]
+        updated  = [e for e in original if e.get('player') not in display_names]
         if len(updated) != len(original):
-            data[team] = updated
+            block["players"] = updated
+            data[team] = block
             changed = True
     if changed:
         save_trading_block(data)
@@ -699,7 +738,7 @@ def get_team_map():
         _, rows = read_csv(path)
         for row in rows:
             slug = row.get("SLUG", "").strip()
-            if slug and row.get("TYPE", "").strip() != "dead":
+            if slug:
                 result[slug] = team
     return result
 
@@ -713,6 +752,7 @@ class CapLevel(BaseModel):
     ntmle_amount: int = 0
     tmle_amount: int = 0
     bae_amount: int = 0
+    room_amount: int = 0
 
 @app.get("/api/cap-levels")
 def get_cap_levels():
@@ -725,7 +765,7 @@ def put_cap_level(season: str, body: CapLevel, info: dict = Depends(require_role
     levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
     levels[season] = body.model_dump()
     CAP_LEVELS_FILE.write_text(json.dumps(levels, indent=2))
-    log_write(info, f"PUT cap-levels/{season} — cap={body.cap} apron1={body.apron1} apron2={body.apron2} ntmle={body.ntmle_amount} tmle={body.tmle_amount} bae={body.bae_amount}")
+    log_write(info, f"PUT cap-levels/{season} — cap={body.cap} apron1={body.apron1} apron2={body.apron2} ntmle={body.ntmle_amount} tmle={body.tmle_amount} bae={body.bae_amount} room={body.room_amount}")
     return levels[season]
 
 
@@ -865,7 +905,7 @@ def put_rookie_scale(year: int, body: list[list[int]], info: dict = Depends(requ
 # ── Team state ────────────────────────────────────────────────────────────────
 
 DEFAULT_SEASON_STATE: dict = {
-    "hard_cap": None, "hard_cap_reason": "", "mle_used": 0, "bae_used": False,
+    "hard_cap": None, "hard_cap_reason": "", "mle_used": 0, "bae_used": False, "mle_type": None,
 }
 
 CAP_RANK = {None: 0, "first_apron": 1, "second_apron": 2}
@@ -904,6 +944,7 @@ class TeamSeasonState(BaseModel):
     hard_cap_reason: str = ""
     mle_used: int = 0
     bae_used: bool = False
+    mle_type: Optional[str] = None
 
 
 @app.get("/api/team-state")
@@ -946,6 +987,8 @@ def put_team_state(
         raise HTTPException(status_code=404, detail="Unknown team")
     if body.hard_cap not in (None, "first_apron", "second_apron"):
         raise HTTPException(status_code=422, detail="hard_cap must be null, 'first_apron', or 'second_apron'")
+    if body.mle_type not in (None, "room", "ntmle", "tmle"):
+        raise HTTPException(status_code=422, detail="mle_type must be null, 'room', 'ntmle', or 'tmle'")
     cur = season or _current_season_str()
     with _state_lock:
         state = load_team_state()
@@ -953,7 +996,7 @@ def put_team_state(
             state[team] = {}
         state[team][cur] = body.model_dump()
         save_team_state(state)
-    log_write(info, f"PUT team-state/{team}/{cur} — hard_cap={body.hard_cap} mle_used={body.mle_used} bae_used={body.bae_used}")
+    log_write(info, f"PUT team-state/{team}/{cur} — hard_cap={body.hard_cap} mle_used={body.mle_used} bae_used={body.bae_used} mle_type={body.mle_type}")
     return {"season": cur, **state[team][cur], "bae_available": _bae_available(state, team, cur)}
 
 
@@ -980,7 +1023,7 @@ def _build_team_map() -> dict[str, str]:
         _, rows = read_csv(path)
         for row in rows:
             slug = row.get("SLUG", "").strip()
-            if slug and row.get("TYPE", "").strip() != "dead":
+            if slug:
                 result[slug] = team
     return result
 
@@ -1265,10 +1308,6 @@ def _apply_sign(details: SignDetails, info: dict):
     write_csv(path, headers, rows)
 
     bio = bios[details.player]
-    # Migrate old dead players whose dead cap was stored in salaries
-    if bio.get("type") == "dead" and bio.get("salaries") and not bio.get("dead_cap"):
-        bio["dead_cap"] = bio["salaries"]
-        bio["salaries"] = {}
     cur_season = _current_season_str()
     past = {k: v for k, v in bio.get("salaries", {}).items() if k < cur_season}
     past_gtd = {k: v for k, v in bio.get("guaranteed", {}).items() if k < cur_season}
@@ -1280,7 +1319,7 @@ def _apply_sign(details: SignDetails, info: dict):
     bio["type"] = details.contract.type
     save_player_bios(bios)
 
-    if details.signing_method in ("ntmle", "tmle", "room_exception", "bae"):
+    if details.signing_method in ("mle", "ntmle", "tmle", "room_exception", "bae", "cap_space"):
         cur = _current_season_str()
         with _state_lock:
             state = load_team_state()
@@ -1288,7 +1327,12 @@ def _apply_sign(details: SignDetails, info: dict):
                 state[team] = {}
             ts = state[team].get(cur, dict(DEFAULT_SEASON_STATE))
 
-            if details.signing_method in ("ntmle", "tmle", "room_exception"):
+            if details.signing_method == "cap_space":
+                # Using cap space locks the team into the Room Exception for the season
+                if not ts.get("mle_type"):
+                    ts["mle_type"] = "room"
+
+            elif details.signing_method in ("mle", "ntmle", "tmle", "room_exception"):
                 yr1 = 0
                 for yr in sorted(details.contract.salaries.keys()):
                     if yr >= cur:
@@ -1296,10 +1340,17 @@ def _apply_sign(details: SignDetails, info: dict):
                                   .replace("$", "").replace(",", "").strip() or 0)
                         break
                 ts["mle_used"] = ts.get("mle_used", 0) + yr1
-                if details.signing_method == "ntmle":
+
+                # Resolve which MLE type for hard-cap purposes
+                resolved = details.signing_method
+                if resolved == "mle":
+                    resolved = ts.get("mle_type") or "ntmle"
+                if resolved == "ntmle":
                     _maybe_set_hard_cap(ts, "first_apron", f"NTMLE signing: {details.player}")
-                elif details.signing_method == "tmle":
+                elif resolved == "tmle":
                     _maybe_set_hard_cap(ts, "second_apron", f"TMLE signing: {details.player}")
+                # room_exception: no hard cap triggered
+
             elif details.signing_method == "bae":
                 ts["bae_used"] = True
                 _maybe_set_hard_cap(ts, "first_apron", f"BAE signing: {details.player}")
@@ -1342,9 +1393,6 @@ def _apply_pick(details: PickDetails, info: dict):
     write_csv(path, headers, rows)
 
     bio = bios[details.player]
-    if bio.get("type") == "dead" and bio.get("salaries") and not bio.get("dead_cap"):
-        bio["dead_cap"] = bio["salaries"]
-        bio["salaries"] = {}
     if details.contract.salaries:
         cur_season = _current_season_str()
         past = {k: v for k, v in bio.get("salaries", {}).items() if k < cur_season}
@@ -1750,11 +1798,11 @@ def _build_trade_context(trade: TradeValidateInput) -> dict:
 
         non_standard_on_roster = {
             r["SLUG"].strip() for r in rows
-            if r.get("SLUG", "").strip() and r.get("TYPE", "").strip() in ("two-way", "dead")
+            if r.get("SLUG", "").strip() and r.get("TYPE", "").strip() == "two-way"
         }
         count_before = sum(
             1 for r in rows
-            if r.get("SLUG", "").strip() and r.get("TYPE", "").strip() not in ("two-way", "dead")
+            if r.get("SLUG", "").strip() and r.get("TYPE", "").strip() != "two-way"
         )
 
         out_slugs = players_out.get(team, [])
@@ -1763,7 +1811,7 @@ def _build_trade_context(trade: TradeValidateInput) -> dict:
         out_standard = sum(1 for s in out_slugs if s not in non_standard_on_roster)
         in_standard = sum(
             1 for s in in_slugs
-            if bios.get(s, {}).get("type", "") not in ("two-way", "dead")
+            if bios.get(s, {}).get("type", "") != "two-way"
         )
 
         teams[team] = {
@@ -1924,7 +1972,7 @@ def _build_allstats_row(
         "TEAM": team.upper(),
         "DATE": date,
         "OPP": opp.upper(),
-        "OPP_RAW": opp.upper(),
+        "OPP_RAW": opp.lstrip("@").upper(),
         "PLAYER": player_name,
         "M": str(min_),
         "P": str(pts),
@@ -1945,7 +1993,7 @@ def _build_allstats_row(
         "FTA": str(fta),
         "FTPCT": _safe_pct(ftm, fta),
         "PF": str(pf),
-        "OPP_TEAM": opp.upper(),
+        "OPP_TEAM": opp.lstrip("@").upper(),
         "TD": _triple_double(pts, reb, ast, stl, blk),
         "BOX": "0",
         " ": "",
@@ -2162,7 +2210,7 @@ def commit_boxscore(body: BoxscoreCommitRequest, info: dict = Depends(require_an
         ))
     for r in body.away_rows:
         new_rows.append(_build_allstats_row(
-            away_team, home_team, body.date, r.player, r.slug,
+            away_team, f"@{home_team}", body.date, r.player, r.slug,
             r.min, r.pts, r.reb, r.oreb, r.dreb,
             r.ast, r.stl, r.blk, r.tov, r.pf,
             r.fgm, r.fga, r.tpm, r.tpa, r.ftm, r.fta,
@@ -2175,6 +2223,175 @@ def commit_boxscore(body: BoxscoreCommitRequest, info: dict = Depends(require_an
     logger.info("[%s] POST boxscore/commit — %s vs %s on %s (%d rows)", info.get("name"), home_team, away_team, body.date, len(new_rows))
     building = _trigger_build()
     return {"ok": True, "rows_added": len(new_rows), "building": building}
+
+
+@app.get("/api/boxscores/dates")
+def get_boxscore_dates(season: str = Query(default=None)):
+    if season is None:
+        season = _current_season_str()
+    reg_path = allstats_path(season, "REG")
+    po_path = allstats_path(season, "PLAYOFF")
+    dates: set[str] = set()
+    for path in (reg_path, po_path):
+        if not path.exists():
+            continue
+        _, rows = read_csv(path)
+        for r in rows:
+            d = r.get("DATE", "").strip()
+            if d:
+                dates.add(d)
+    return sorted(dates, reverse=True)
+
+
+def _all_allstats_paths() -> list[Path]:
+    paths = []
+    for p in sorted(DATA_DIR.glob("allstats-??-??.csv")):
+        paths.append((p, "REG"))
+    for p in sorted(DATA_DIR.glob("allstats-playoffs-??.csv")):
+        paths.append((p, "PLAYOFF"))
+    return paths
+
+
+@app.get("/api/boxscores/games")
+def get_boxscore_games(season: str = Query(default=None)):
+    """Compact game index: [{date, home_team, away_team, home_score, away_score, gametype, season}].
+    Pass season=YY-YY for one season, or omit for all seasons."""
+    if season:
+        paths = [(allstats_path(season, "REG"), "REG"), (allstats_path(season, "PLAYOFF"), "PLAYOFF")]
+    else:
+        paths = _all_allstats_paths()
+
+    seen: dict[tuple, dict] = {}
+    for path, gtype in paths:
+        if not path.exists():
+            continue
+        _, rows = read_csv(path)
+        for r in rows:
+            date = r.get("DATE", "").strip()
+            team = r.get("TEAM", "").strip()
+            opp_field = r.get("OPP", "").strip()
+            opp_raw = r.get("OPP_RAW", opp_field).strip().lstrip("@")
+            if not date or not team or not opp_raw:
+                continue
+            is_home = not opp_field.startswith("@")
+            key = (date, team, opp_raw) if is_home else (date, opp_raw, team)
+            if key in seen:
+                continue
+            try:
+                team_pts = int(r.get("TEAM_PTS", 0) or 0)
+                opp_pts = int(r.get("OPP_TEAM_PTS", 0) or 0)
+            except ValueError:
+                team_pts, opp_pts = 0, 0
+            seen[key] = {
+                "date": date,
+                "home_team": key[1],
+                "away_team": key[2],
+                "home_score": team_pts if is_home else opp_pts,
+                "away_score": opp_pts if is_home else team_pts,
+                "gametype": r.get("gametype", gtype),
+                "season": r.get("SEASON", "").strip(),
+            }
+    return sorted(seen.values(), key=lambda g: g["date"], reverse=True)
+
+
+@app.get("/api/boxscores")
+def get_boxscores(date: str = Query(...), season: str = Query(default=None)):
+    if season is None:
+        season = _current_season_str()
+    reg_path = allstats_path(season, "REG")
+    po_path = allstats_path(season, "PLAYOFF")
+
+    all_rows: list[dict] = []
+    for path in (reg_path, po_path):
+        if not path.exists():
+            continue
+        _, rows = read_csv(path)
+        all_rows.extend(r for r in rows if r.get("DATE", "").strip() == date)
+
+    # Identify unique games: home-team rows have OPP without leading "@"
+    games: dict[tuple, dict] = {}
+    for r in all_rows:
+        opp_raw = r.get("OPP_RAW", r.get("OPP", "")).strip().lstrip("@")
+        opp_field = r.get("OPP", "").strip()
+        team = r.get("TEAM", "").strip()
+        if not team or not opp_raw:
+            continue
+        is_home = not opp_field.startswith("@")
+        if is_home:
+            key = (team, opp_raw)
+        else:
+            key = (opp_raw, team)
+        if key not in games:
+            games[key] = {
+                "home_team": key[0],
+                "away_team": key[1],
+                "home_score": None,
+                "away_score": None,
+                "gametype": r.get("gametype", "REG"),
+                "home_players": [],
+                "away_players": [],
+            }
+
+    # Populate player rows into the right game/side
+    for r in all_rows:
+        opp_raw = r.get("OPP_RAW", r.get("OPP", "")).strip().lstrip("@")
+        opp_field = r.get("OPP", "").strip()
+        team = r.get("TEAM", "").strip()
+        if not team or not opp_raw:
+            continue
+        is_home = not opp_field.startswith("@")
+        key = (team, opp_raw) if is_home else (opp_raw, team)
+        if key not in games:
+            continue
+        g = games[key]
+        try:
+            team_pts = int(r.get("TEAM_PTS", 0) or 0)
+            opp_pts = int(r.get("OPP_TEAM_PTS", 0) or 0)
+        except ValueError:
+            team_pts, opp_pts = 0, 0
+        if is_home:
+            if g["home_score"] is None:
+                g["home_score"] = team_pts
+                g["away_score"] = opp_pts
+            g["home_players"].append(_boxscore_player_row(r))
+        else:
+            if g["away_score"] is None:
+                g["away_score"] = team_pts
+                g["home_score"] = opp_pts
+            g["away_players"].append(_boxscore_player_row(r))
+
+    return sorted(games.values(), key=lambda g: (g["home_team"], g["away_team"]))
+
+
+def _boxscore_player_row(r: dict) -> dict:
+    def iv(k): return int(r.get(k, 0) or 0)
+    def fv(k):
+        v = r.get(k, "")
+        try: return round(float(v), 3)
+        except (ValueError, TypeError): return None
+    return {
+        "player": r.get("PLAYER", ""),
+        "slug": r.get("SLUG", ""),
+        "min": iv("M"),
+        "pts": iv("P"),
+        "reb": iv("R"),
+        "oreb": iv("OR"),
+        "dreb": iv("DR"),
+        "ast": iv("A"),
+        "stl": iv("S"),
+        "blk": iv("B"),
+        "tov": iv("TO"),
+        "pf": iv("PF"),
+        "fgm": iv("FGM"),
+        "fga": iv("FGA"),
+        "tpm": iv("3PM"),
+        "tpa": iv("3PA"),
+        "ftm": iv("FTM"),
+        "fta": iv("FTA"),
+        "fgpct": fv("FGPCT"),
+        "tppct": fv("3PPCT"),
+        "ftpct": fv("FTPCT"),
+    }
 
 
 # ── Stats build ───────────────────────────────────────────────────────────────
@@ -2307,7 +2524,7 @@ def delete_pending_boxscore(item_id: str, info: dict = Depends(require_any_role(
     return {"ok": True}
 
 
-# ── Tokens ───────────────────────────────────────────────────────────────────
+# ── Tokens (compatibility shims — member management via /api/members) ─────────
 
 class TokenCreate(BaseModel):
     name: str
@@ -2321,14 +2538,17 @@ class TokenUpdate(BaseModel):
 
 @app.get("/api/tokens/public")
 def list_tokens_public():
-    tokens = load_tokens()
-    return [{"name": v.get("name"), "roles": v.get("roles", [])} for v in tokens.values()]
+    members = load_members()
+    return [{"name": name, "roles": m.get("roles", [])} for name, m in members.items()]
 
 
 @app.get("/api/tokens")
 def list_tokens(_: dict = Depends(require_admin)):
-    tokens = load_tokens()
-    return [{"token": k, **v} for k, v in tokens.items()]
+    members = load_members()
+    return [
+        {"token": m.get("token", ""), "name": name, "roles": m.get("roles", [])}
+        for name, m in members.items() if m.get("token")
+    ]
 
 
 @app.post("/api/tokens")
@@ -2336,40 +2556,221 @@ def create_token(body: TokenCreate, info: dict = Depends(require_admin)):
     invalid = [r for r in body.roles if r not in VALID_ROLES]
     if invalid:
         raise HTTPException(status_code=422, detail=f"Invalid roles: {invalid}")
-    token = secrets.token_hex(32)
-    tokens = load_tokens()
-    tokens[token] = {"name": body.name, "roles": body.roles}
-    save_tokens(tokens)
-    log_write(info, f"POST tokens — created token for {body.name!r} roles={body.roles}")
+    members = load_members()
+    if body.name in members:
+        if not members[body.name].get("token"):
+            members[body.name]["token"] = secrets.token_hex(32)
+        members[body.name]["roles"] = body.roles
+        token = members[body.name]["token"]
+    else:
+        token = secrets.token_hex(32)
+        members[body.name] = {"token": token, "roles": body.roles, "tenures": []}
+    save_members(members)
+    log_write(info, f"POST tokens — upserted member {body.name!r} roles={body.roles}")
     return {"token": token, "name": body.name, "roles": body.roles}
 
 
 @app.patch("/api/tokens/{token}")
 def update_token(token: str, body: TokenUpdate, info: dict = Depends(require_admin)):
-    tokens = load_tokens()
-    if token not in tokens:
+    members = load_members()
+    target = next((name for name, m in members.items() if m.get("token") == token), None)
+    if not target:
         raise HTTPException(status_code=404, detail="Token not found")
-    entry = tokens[token]
-    if body.name is not None:
-        entry["name"] = body.name
     if body.roles is not None:
         invalid = [r for r in body.roles if r not in VALID_ROLES]
         if invalid:
             raise HTTPException(status_code=422, detail=f"Invalid roles: {invalid}")
-        entry["roles"] = body.roles
-    tokens[token] = entry
-    save_tokens(tokens)
-    log_write(info, f"PATCH tokens — updated token for {entry['name']!r} roles={entry['roles']}")
-    return {"token": token, **entry}
+        members[target]["roles"] = body.roles
+    save_members(members)
+    log_write(info, f"PATCH tokens — updated {target!r} roles={members[target]['roles']}")
+    return {"token": token, "name": target, "roles": members[target]["roles"]}
 
 
 @app.delete("/api/tokens/{token}")
 def delete_token(token: str, info: dict = Depends(require_admin)):
-    tokens = load_tokens()
-    if token not in tokens:
+    members = load_members()
+    target = next((name for name, m in members.items() if m.get("token") == token), None)
+    if not target:
         raise HTTPException(status_code=404, detail="Token not found")
-    deleted_name = tokens[token].get("name", "?")
-    del tokens[token]
-    save_tokens(tokens)
-    log_write(info, f"DELETE tokens — removed token for {deleted_name!r}")
+    members[target].pop("token", None)
+    save_members(members)
+    log_write(info, f"DELETE tokens — revoked token for {target!r}")
     return {"ok": True}
+
+
+# ── Members ───────────────────────────────────────────────────────────────────
+
+VALID_MEMBER_POSITIONS = {"owner", "gm", "coach", "none"}
+
+
+class TenureEntry(BaseModel):
+    team: str
+    start: str
+    end: Optional[str] = None
+    position: str
+
+
+class MemberCreate(BaseModel):
+    name: str
+    roles: list[str] = []
+    tenures: list[TenureEntry] = []
+
+
+class MemberUpdate(BaseModel):
+    roles: Optional[list[str]] = None
+    tenures: Optional[list[TenureEntry]] = None
+
+
+@app.get("/api/members/public")
+def list_members_public():
+    members = load_members()
+    return [
+        {"name": name, "roles": m.get("roles", []), "tenures": m.get("tenures", [])}
+        for name, m in members.items()
+    ]
+
+
+@app.get("/api/members")
+def list_members_admin(info: dict = Depends(require_admin)):
+    members = load_members()
+    return [
+        {"name": name, "token": m.get("token"), "roles": m.get("roles", []), "tenures": m.get("tenures", [])}
+        for name, m in members.items()
+    ]
+
+
+@app.post("/api/members")
+def create_member(body: MemberCreate, info: dict = Depends(require_admin)):
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Name cannot be empty")
+    members = load_members()
+    if name in members:
+        raise HTTPException(status_code=409, detail=f"Member '{name}' already exists")
+    invalid = [r for r in body.roles if r not in VALID_ROLES]
+    if invalid:
+        raise HTTPException(status_code=422, detail=f"Invalid roles: {invalid}")
+    for t in body.tenures:
+        if t.team.upper() not in VALID_TEAMS:
+            raise HTTPException(status_code=422, detail=f"Invalid team: {t.team}")
+        if t.position not in VALID_MEMBER_POSITIONS:
+            raise HTTPException(status_code=422, detail=f"Invalid position: {t.position}")
+    token = secrets.token_hex(32)
+    members[name] = {"token": token, "roles": body.roles, "tenures": [t.model_dump() for t in body.tenures]}
+    save_members(members)
+    log_write(info, f"POST members — created {name!r} roles={body.roles}")
+    return {"name": name, "token": token, "roles": body.roles, "tenures": members[name]["tenures"]}
+
+
+@app.patch("/api/members/{name}")
+def update_member(name: str, body: MemberUpdate, info: dict = Depends(get_token_info)):
+    is_admin = has_role(info, "admin")
+    is_bod   = has_role(info, "bod")
+    if not is_admin and not is_bod:
+        raise HTTPException(status_code=403, detail="'bod' role required")
+    if body.roles is not None and not is_admin:
+        raise HTTPException(status_code=403, detail="Only admin can update roles")
+    members = load_members()
+    if name not in members:
+        raise HTTPException(status_code=404, detail=f"Member '{name}' not found")
+    member = members[name]
+    if body.roles is not None:
+        invalid = [r for r in body.roles if r not in VALID_ROLES]
+        if invalid:
+            raise HTTPException(status_code=422, detail=f"Invalid roles: {invalid}")
+        member["roles"] = body.roles
+    if body.tenures is not None:
+        for t in body.tenures:
+            if t.team.upper() not in VALID_TEAMS:
+                raise HTTPException(status_code=422, detail=f"Invalid team: {t.team}")
+            if t.position not in VALID_MEMBER_POSITIONS:
+                raise HTTPException(status_code=422, detail=f"Invalid position: {t.position}")
+        member["tenures"] = [t.model_dump() for t in body.tenures]
+    members[name] = member
+    save_members(members)
+    log_write(info, f"PATCH members — updated {name!r}")
+    return {"name": name, "roles": member.get("roles", []), "tenures": member.get("tenures", [])}
+
+
+@app.post("/api/members/{name}/rotate-token")
+def rotate_member_token(name: str, info: dict = Depends(require_admin)):
+    members = load_members()
+    if name not in members:
+        raise HTTPException(status_code=404, detail=f"Member '{name}' not found")
+    new_token = secrets.token_hex(32)
+    members[name]["token"] = new_token
+    save_members(members)
+    log_write(info, f"POST members/{name}/rotate-token")
+    return {"name": name, "token": new_token}
+
+
+@app.delete("/api/members/{name}")
+def delete_member(name: str, info: dict = Depends(require_admin)):
+    members = load_members()
+    if name not in members:
+        raise HTTPException(status_code=404, detail=f"Member '{name}' not found")
+    del members[name]
+    save_members(members)
+    log_write(info, f"DELETE members — removed {name!r}")
+    return {"ok": True}
+
+
+CLAUDE_BIN = Path("/home/skim/.local/bin/claude")
+NBN_TODAY_DIR = Path("/home/skim/projects/nbn-today")
+
+
+@app.websocket("/api/ws/claude")
+async def ws_claude(websocket: WebSocket, token: str = Query(...)):
+    tokens = load_tokens()
+    info = tokens.get(token)
+    if not info or not has_role(info, "admin"):
+        await websocket.close(code=4003)
+        return
+
+    await websocket.accept()
+    log_write(info, "WS claude session started")
+
+    proc = ptyprocess.PtyProcess.spawn(
+        [str(CLAUDE_BIN), "/parse-boxscores"],
+        cwd=str(NBN_TODAY_DIR),
+        env={**os.environ, "TERM": "xterm-256color", "COLUMNS": "220", "LINES": "50"},
+        dimensions=(50, 220),
+    )
+
+    loop = asyncio.get_event_loop()
+
+    async def pty_to_ws():
+        while proc.isalive():
+            try:
+                data = await loop.run_in_executor(None, proc.read, 4096)
+                await websocket.send_bytes(data)
+            except (EOFError, Exception):
+                break
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+    async def ws_to_pty():
+        try:
+            while True:
+                msg = await websocket.receive()
+                if msg["type"] == "websocket.disconnect":
+                    break
+                if "bytes" in msg and msg["bytes"]:
+                    proc.write(msg["bytes"])
+                elif "text" in msg and msg["text"]:
+                    try:
+                        ctrl = json.loads(msg["text"])
+                        if ctrl.get("type") == "resize":
+                            proc.setwinsize(ctrl["rows"], ctrl["cols"])
+                    except json.JSONDecodeError:
+                        proc.write(msg["text"].encode())
+        except (WebSocketDisconnect, Exception):
+            pass
+        finally:
+            if proc.isalive():
+                proc.terminate(force=True)
+            log_write(info, "WS claude session ended")
+
+    await asyncio.gather(pty_to_ws(), ws_to_pty())
