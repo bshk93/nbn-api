@@ -525,6 +525,7 @@ class PlayerBio(BaseModel):
     salaries: dict[str, str] = {}
     guaranteed: dict[str, str] = {}
     guarantee_dates: dict[str, str] = {}  # season → "YYYY-MM-DD" after which salary is fully guaranteed
+    guarantee_schedule: dict[str, list[dict]] = {}  # season → [{amount?, date?}, …] multi-step vesting; overrides guaranteed/guarantee_dates when present
     jersey_number: Optional[str] = None
     retired: bool = False
     notes: str = ""
@@ -1035,6 +1036,7 @@ class ContractIn(BaseModel):
     cap_holds: dict[str, str] = {}
     guaranteed: dict[str, str] = {}
     guarantee_dates: dict[str, str] = {}
+    guarantee_schedule: dict[str, list[dict]] = {}  # multi-step vesting; overrides guaranteed/guarantee_dates when present
 
 
 class SignDetails(BaseModel):
@@ -1171,6 +1173,92 @@ def _apply_option(details: OptionDetails, info: dict) -> Optional[str]:
     return team
 
 
+def _parse_dollar(s) -> int:
+    """Parse a salary string like '$37,000,000' to an integer. Returns 0 on empty/invalid."""
+    if not s:
+        return 0
+    try:
+        return round(float(re.sub(r"[$,\s]", "", str(s)) or 0))
+    except (ValueError, TypeError):
+        return 0
+
+
+def _compute_team_salary(team: str, bios: dict, season: str) -> int:
+    """Sum all active salary + dead cap for a team in a given season."""
+    total = 0
+    # Standard roster
+    path = DATA_DIR / f"{team.lower()}-roster.csv"
+    if path.exists():
+        _, rows = read_csv(path)
+        for row in rows:
+            slug = row.get("SLUG", "").strip()
+            bio = bios.get(slug, {})
+            total += _parse_dollar((bio.get("salaries") or {}).get(season, ""))
+    # Dead cap
+    dc_path = DATA_DIR / f"{team.lower()}-deadcap.csv"
+    if dc_path.exists():
+        _, dc_rows = read_csv(dc_path)
+        for row in dc_rows:
+            total += _parse_dollar(row.get(season, ""))
+    return total
+
+
+def _hard_cap_check(team: str, projected: int, season: str,
+                    team_state: dict, cap_levels: dict) -> Optional["CheckResult"]:
+    """Return an error CheckResult if team's projected salary exceeds their hard cap, else None."""
+    ts  = get_season_state(team_state, team, season)
+    hc  = ts.get("hard_cap")
+    if not hc:
+        return None
+    cl  = cap_levels.get(season, {})
+    limit = cl.get("apron1") if hc == "first_apron" else cl.get("apron2")
+    if limit is None or projected <= limit:
+        return None
+    label = "First Apron" if hc == "first_apron" else "Second Apron"
+    over  = projected - limit
+    return CheckResult(
+        check=f"hard_cap_{team.lower()}",
+        passed=False,
+        level="error",
+        message=(
+            f"{team} would be ${over:,.0f} over their hard cap ({label}: ${limit:,}) "
+            f"— projected salary ${projected:,}."
+        ),
+    )
+
+
+def _dead_cap_from_schedule(schedule: list, salary: str, txn_date: str) -> Optional[str]:
+    """Compute dead cap for a NON_GTD year given a multi-step guarantee schedule.
+
+    Each step: {"amount": "$X", "date": "YYYY-MM-DD"}
+    - `amount` omitted  → this step makes the salary fully guaranteed
+    - `date` omitted    → vests immediately at signing
+    Steps are processed in order; skips any step whose date has not yet passed.
+    """
+    def parse_dollar(s) -> float:
+        if not s:
+            return 0.0
+        return float(re.sub(r"[$,\s]", "", str(s)) or 0)
+
+    cumulative = 0.0
+    fully_gtd = False
+    for step in schedule:
+        step_date = step.get("date") or ""
+        if step_date and txn_date < step_date:
+            continue  # not yet vested; steps assumed ordered, but we keep scanning in case of out-of-order
+        step_amount = step.get("amount")
+        if not step_amount:
+            fully_gtd = True
+            break
+        cumulative += parse_dollar(step_amount)
+
+    if fully_gtd:
+        return salary
+    if cumulative > 0:
+        return f"${round(cumulative):,}"
+    return None
+
+
 def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[str, dict]:
     """Removes player from roster, converts guaranteed salary to dead cap. Returns (team, dead_cap)."""
     bios = load_player_bios()
@@ -1197,13 +1285,20 @@ def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[
         if hold_type in ("TEAM_OPT", "UFA", "RFA"):
             continue
         if hold_type == "NON_GTD":
-            gtd_date = guarantee_dates.get(season)
-            if gtd_date and txn_date >= gtd_date:
-                # Released on or after guarantee date → full salary is now dead cap
-                dead_cap[season] = salary
-            elif guaranteed.get(season):
-                dead_cap[season] = guaranteed[season]
-            # else: $0 dead cap, skip
+            schedule = bio.get("guarantee_schedule", {}).get(season)
+            if schedule:
+                dead = _dead_cap_from_schedule(schedule, salary, txn_date)
+                if dead:
+                    dead_cap[season] = dead
+            else:
+                # Legacy: single guaranteed amount + full guarantee date
+                gtd_date = guarantee_dates.get(season)
+                if gtd_date and txn_date >= gtd_date:
+                    # Released on or after guarantee date → full salary is now dead cap
+                    dead_cap[season] = salary
+                elif guaranteed.get(season):
+                    dead_cap[season] = guaranteed[season]
+                # else: $0 dead cap, skip
             continue
         # Fully or partially guaranteed (including PLAYER_OPT years)
         dead_cap[season] = guaranteed.get(season, salary)
@@ -1212,6 +1307,7 @@ def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[
     bio["cap_holds"] = {}
     bio["guaranteed"] = {}
     bio["guarantee_dates"] = {}
+    bio["guarantee_schedule"] = {}
     bio["type"] = ""
     save_player_bios(bios)
 
@@ -1263,10 +1359,12 @@ def _apply_convert_twoway(details: ConvertTwoWayDetails, info: dict) -> str:
     past = {k: v for k, v in bio.get("salaries", {}).items() if k < cur_season}
     past_gtd = {k: v for k, v in bio.get("guaranteed", {}).items() if k < cur_season}
     past_gtd_dates = {k: v for k, v in bio.get("guarantee_dates", {}).items() if k < cur_season}
+    past_gtd_sched = {k: v for k, v in bio.get("guarantee_schedule", {}).items() if k < cur_season}
     bio["salaries"] = {**past, **details.contract.salaries}
     bio["cap_holds"] = details.contract.cap_holds
     bio["guaranteed"] = {**past_gtd, **details.contract.guaranteed}
     bio["guarantee_dates"] = {**past_gtd_dates, **details.contract.guarantee_dates}
+    bio["guarantee_schedule"] = {**past_gtd_sched, **details.contract.guarantee_schedule}
     save_player_bios(bios)
 
     # Update roster CSV: clear TYPE field (two-way → standard player)
@@ -1313,10 +1411,12 @@ def _apply_sign(details: SignDetails, info: dict):
     past = {k: v for k, v in bio.get("salaries", {}).items() if k < cur_season}
     past_gtd = {k: v for k, v in bio.get("guaranteed", {}).items() if k < cur_season}
     past_gtd_dates = {k: v for k, v in bio.get("guarantee_dates", {}).items() if k < cur_season}
+    past_gtd_sched = {k: v for k, v in bio.get("guarantee_schedule", {}).items() if k < cur_season}
     bio["salaries"] = {**past, **details.contract.salaries}
     bio["cap_holds"] = details.contract.cap_holds
     bio["guaranteed"] = {**past_gtd, **details.contract.guaranteed}
     bio["guarantee_dates"] = {**past_gtd_dates, **details.contract.guarantee_dates}
+    bio["guarantee_schedule"] = {**past_gtd_sched, **details.contract.guarantee_schedule}
     bio["type"] = details.contract.type
     save_player_bios(bios)
 
@@ -1399,10 +1499,12 @@ def _apply_pick(details: PickDetails, info: dict):
         past = {k: v for k, v in bio.get("salaries", {}).items() if k < cur_season}
         past_gtd = {k: v for k, v in bio.get("guaranteed", {}).items() if k < cur_season}
         past_gtd_dates = {k: v for k, v in bio.get("guarantee_dates", {}).items() if k < cur_season}
+        past_gtd_sched = {k: v for k, v in bio.get("guarantee_schedule", {}).items() if k < cur_season}
         bio["salaries"] = {**past, **details.contract.salaries}
         bio["cap_holds"] = details.contract.cap_holds
         bio["guaranteed"] = {**past_gtd, **details.contract.guaranteed}
         bio["guarantee_dates"] = {**past_gtd_dates, **details.contract.guarantee_dates}
+        bio["guarantee_schedule"] = {**past_gtd_sched, **details.contract.guarantee_schedule}
     bio["type"] = details.contract.type
     save_player_bios(bios)
 
@@ -1556,48 +1658,316 @@ def _apply_trade(details: TradeIn, info: dict) -> list[str]:
     return teams
 
 
-# ── Transaction validation ────────────────────────────────────────────────────
-# Each _validate_* function receives the parsed details object and returns a
-# list of CheckResult. level="error" → hard block. level="warning" → soft,
-# can be overridden with force=True on the request.
+# ── Transaction validation helpers ───────────────────────────────────────────
 
-def _validate_sign(details: SignDetails) -> list[CheckResult]:
+def _count_standard_roster(team: str) -> int:
+    """Count non-two-way players currently on a team's standard roster."""
+    path = DATA_DIR / f"{team.lower()}-roster.csv"
+    if not path.exists():
+        return 0
+    _, rows = read_csv(path)
+    return sum(
+        1 for r in rows
+        if r.get("SLUG", "").strip() and r.get("TYPE", "").strip() != "two-way"
+    )
+
+
+# § 3.9 raise/decrease thresholds (salaries are fixed dollar multiples of Year 1 salary)
+SALARY_MATCH_TIER1_CAP = 8_527_000   # § 4.2 tier boundary
+SALARY_MATCH_TIER2_CAP = 29_000_000  # § 4.2 tier boundary
+
+
+def _salary_match_limit(outgoing: int) -> int:
+    """Max incoming salary allowed under standard (below First Apron) tiered matching (§ 4.2)."""
+    if outgoing <= SALARY_MATCH_TIER1_CAP:
+        return 2 * outgoing + 250_000
+    elif outgoing <= SALARY_MATCH_TIER2_CAP:
+        return outgoing + 8_527_000
+    else:
+        return round(1.25 * outgoing) + 250_000
+
+
+def _check_contract_raises(
+    contract: "ContractIn", bird_pct: bool, cur_season: str
+) -> Optional["CheckResult"]:
+    """Validate annual raise/decrease limits (§ 3.9).
+
+    bird_pct=True  → 8% rule (QVFA / EQVFA re-signings and extensions)
+    bird_pct=False → 5% rule (standard FA signings, NTMLE, TMLE, BAE, Room)
+    """
+    if contract.type == "two-way":
+        return None  # two-way salary is always $0 — raise rule doesn't apply
+
+    pct = 0.08 if bird_pct else 0.05
+    pct_label = "8%" if bird_pct else "5%"
+
+    # Only validate current-season-forward years
+    years = sorted(
+        (yr for yr in contract.salaries if yr >= cur_season),
+        key=lambda y: (_season_start(y), y),
+    )
+    if len(years) < 2:
+        return None  # single-year contract — nothing to check
+
+    yr1_sal = _parse_dollar(contract.salaries[years[0]])
+    if yr1_sal == 0:
+        return None  # can't validate raises against a zero Year 1
+
+    max_step = round(pct * yr1_sal)
+    violations = []
+    for i in range(1, len(years)):
+        prev_sal = _parse_dollar(contract.salaries[years[i - 1]])
+        this_sal = _parse_dollar(contract.salaries[years[i]])
+        diff = abs(this_sal - prev_sal)
+        if diff > max_step + 1:  # +1 tolerance for integer rounding
+            violations.append(
+                f"{years[i]}: ${prev_sal:,} → ${this_sal:,} "
+                f"(Δ${diff:,}, max ${max_step:,})"
+            )
+
+    if violations:
+        return CheckResult(
+            check="raise_limit",
+            passed=False,
+            level="error",
+            message=(
+                f"Raise/decrease limit violated ({pct_label} of Year 1 = ${max_step:,}/yr): "
+                + "; ".join(violations)
+            ),
+        )
+    return None
+
+
+def _check_salary_matching(
+    team: str,
+    outgoing: int,
+    incoming: int,
+    team_salary_before: int,
+    cap_levels: dict,
+    season: str,
+) -> Optional["CheckResult"]:
+    """Check trade salary matching for one team (§ 4.2 / § 4.3).
+
+    Returns an error CheckResult if incoming exceeds the allowed maximum, else None.
+    """
+    if incoming <= outgoing:
+        return None  # sending out at least as much as coming in — always legal
+
+    cl = cap_levels.get(season, {})
+    apron1 = cl.get("apron1")
+    if apron1 is None:
+        return None  # cap data unavailable; skip check
+
+    if team_salary_before >= apron1:
+        # § 4.3: First Apron teams — strict outgoing + $250K limit
+        limit = outgoing + 250_000
+        if incoming > limit:
+            over = incoming - limit
+            return CheckResult(
+                check=f"salary_matching_{team.lower()}",
+                passed=False,
+                level="error",
+                message=(
+                    f"{team} is at/above the First Apron (§ 4.3) — incoming salary "
+                    f"${incoming:,} exceeds outgoing + $250K limit of ${limit:,} "
+                    f"by ${over:,}."
+                ),
+            )
+    else:
+        # § 4.2: standard tiered matching
+        limit = _salary_match_limit(outgoing)
+        if incoming > limit:
+            over = incoming - limit
+            return CheckResult(
+                check=f"salary_matching_{team.lower()}",
+                passed=False,
+                level="error",
+                message=(
+                    f"{team} salary matching failed (§ 4.2) — incoming ${incoming:,} "
+                    f"exceeds the tier limit of ${limit:,} "
+                    f"for outgoing salary of ${outgoing:,}. Overage: ${over:,}."
+                ),
+            )
+    return None
+
+
+# ── Transaction validation ────────────────────────────────────────────────────
+# Each _validate_* function receives (details, ctx) and returns a list of
+# CheckResult. level="error" → hard block. level="warning" → soft (force=True
+# on the request overrides warnings).
+#
+# ctx keys: bios, team_state, cap_levels, cur_season
+
+def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
     checks = []
-    # TODO: roster size, cap space / exception eligibility, contract length limits,
-    #       apron restrictions, Bird Rights eligibility, sign-and-trade rules
+    bios = ctx["bios"]; season = ctx["cur_season"]
+    team = details.team.upper()
+
+    # ── Hard cap (§ 1.3) ─────────────────────────────────────────────────────
+    current = _compute_team_salary(team, bios, season)
+    new_sal = _parse_dollar(details.contract.salaries.get(season, ""))
+    r = _hard_cap_check(team, current + new_sal, season,
+                        ctx["team_state"], ctx["cap_levels"])
+    if r:
+        checks.append(r)
+
+    # ── Roster size (§ 2.1) ──────────────────────────────────────────────────
+    if details.contract.type != "two-way":
+        count = _count_standard_roster(team)
+        if count >= ROSTER_MAX:
+            checks.append(CheckResult(
+                check="roster_size",
+                passed=False,
+                level="error",
+                message=(
+                    f"{team} already has {count} standard players (max {ROSTER_MAX}); "
+                    f"release a player before signing."
+                ),
+            ))
+
+    # ── Annual raise / decrease limits (§ 3.9) ───────────────────────────────
+    bird_pct = details.bird_rights_type in ("QVFA", "EQVFA")
+    r = _check_contract_raises(details.contract, bird_pct=bird_pct, cur_season=season)
+    if r:
+        checks.append(r)
+
+    # TODO: cap space / exception eligibility, contract length limits,
+    #       Bird Rights eligibility, sign-and-trade rules
     return checks
 
 
-def _validate_release(details: ReleaseDetails) -> list[CheckResult]:
+def _validate_release(details: ReleaseDetails, ctx: dict) -> list[CheckResult]:
     checks = []
+    # Release always reduces or holds team salary — cannot breach hard cap.
     # TODO: player exists on a roster, release window rules
     return checks
 
 
-def _validate_trade(details: TradeIn) -> list[CheckResult]:
+def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
     checks = []
-    # TODO: salary matching tiers, Stepien Rule, 7-year advance limit,
-    #       apron restrictions, roster size after trade, aggregation rules
+    bios = ctx["bios"]; season = ctx["cur_season"]
+
+    # Compute per-team outgoing and incoming player salary totals
+    outgoing: dict[str, int] = {}
+    incoming: dict[str, int] = {}
+    for xfer in details.transfers:
+        from_t = xfer.from_team.upper()
+        to_t   = xfer.to_team.upper()
+        for asset in xfer.assets:
+            if asset.type != "player" or not asset.slug:
+                continue
+            sal = _parse_dollar((bios.get(asset.slug, {}).get("salaries") or {}).get(season, ""))
+            outgoing[from_t] = outgoing.get(from_t, 0) + sal
+            incoming[to_t]   = incoming.get(to_t, 0)   + sal
+
+    for team in set(outgoing) | set(incoming):
+        out = outgoing.get(team, 0)
+        inc = incoming.get(team, 0)
+        current = _compute_team_salary(team, bios, season)
+
+        # ── Hard cap (§ 1.3) ─────────────────────────────────────────────
+        delta = inc - out
+        if delta > 0:
+            r = _hard_cap_check(team, current + delta, season,
+                                ctx["team_state"], ctx["cap_levels"])
+            if r:
+                checks.append(r)
+
+        # ── Salary matching (§ 4.2 / § 4.3) ─────────────────────────────
+        # NOTE: minimum-contract exception (§ 4.2) not yet implemented —
+        # players on minimum contracts of ≤ 2 years don't count as incoming.
+        if inc > 0:
+            r = _check_salary_matching(team, out, inc, current, ctx["cap_levels"], season)
+            if r:
+                checks.append(r)
+
+    # TODO: Stepien Rule, 7-year advance limit, aggregation rules (§ 4.4),
+    #       Touch Rule (§ 4.6), apron contagion hard-cap trigger
     return checks
 
 
-def _validate_option(details: OptionDetails) -> list[CheckResult]:
+def _validate_option(details: OptionDetails, ctx: dict) -> list[CheckResult]:
     checks = []
+    # Option exercise doesn't change current-season cap hit (salary already on the books).
     # TODO: option year exists on contract, decision window
     return checks
 
 
-def _validate_pick(details: PickDetails) -> list[CheckResult]:
+def _validate_pick(details: PickDetails, ctx: dict) -> list[CheckResult]:
     checks = []
-    # TODO: player not already on a roster, pick exists and is owned by team,
-    #       rookie scale contract limits
+    bios = ctx["bios"]; season = ctx["cur_season"]
+    team = details.team.upper()
+
+    # ── Hard cap (§ 1.3) ─────────────────────────────────────────────────────
+    current = _compute_team_salary(team, bios, season)
+    new_sal = _parse_dollar(details.contract.salaries.get(season, ""))
+    r = _hard_cap_check(team, current + new_sal, season,
+                        ctx["team_state"], ctx["cap_levels"])
+    if r:
+        checks.append(r)
+
+    # ── Roster size (§ 2.1) ──────────────────────────────────────────────────
+    if details.contract.type != "two-way":
+        count = _count_standard_roster(team)
+        if count >= ROSTER_MAX:
+            checks.append(CheckResult(
+                check="roster_size",
+                passed=False,
+                level="error",
+                message=(
+                    f"{team} already has {count} standard players (max {ROSTER_MAX}); "
+                    f"release a player before signing this pick."
+                ),
+            ))
+
+    # NOTE: raise/decrease limits (§ 3.9) are not applied here — first-round
+    # picks must use the mandatory rookie scale (§ 7.1) which has its own
+    # structure; second-round contracts are validated at signing time if
+    # entered as a normal "sign" transaction instead.
+    # TODO: pick exists and is owned by team, rookie scale contract limits
     return checks
 
 
-def _validate_convert_twoway(details: ConvertTwoWayDetails) -> list[CheckResult]:
+def _validate_convert_twoway(details: ConvertTwoWayDetails, ctx: dict) -> list[CheckResult]:
     checks = []
-    # TODO: player is on a two-way, roster size after conversion,
-    #       cap space / exception for the new contract
+    bios = ctx["bios"]; season = ctx["cur_season"]
+
+    team_map = _build_team_map()
+    team = team_map.get(details.player)
+
+    # ── Hard cap (§ 1.3) — two-way salary was $0; new contract adds to cap ──
+    old_sal = _parse_dollar((bios.get(details.player, {}).get("salaries") or {}).get(season, ""))
+    new_sal = _parse_dollar(details.contract.salaries.get(season, ""))
+    delta = new_sal - old_sal
+    if delta > 0 and team:
+        current = _compute_team_salary(team, bios, season)
+        r = _hard_cap_check(team, current + delta, season,
+                            ctx["team_state"], ctx["cap_levels"])
+        if r:
+            checks.append(r)
+
+    # ── Roster size (§ 2.1) ──────────────────────────────────────────────────
+    # Two-way slot is separate from the 15-man roster; conversion moves the
+    # player onto the standard roster, so the count increases by 1.
+    if team:
+        count = _count_standard_roster(team)
+        if count >= ROSTER_MAX:
+            checks.append(CheckResult(
+                check="roster_size",
+                passed=False,
+                level="error",
+                message=(
+                    f"{team} already has {count} standard players (max {ROSTER_MAX}); "
+                    f"release a player before converting this two-way contract."
+                ),
+            ))
+
+    # ── Annual raise / decrease limits (§ 3.9) ───────────────────────────────
+    r = _check_contract_raises(details.contract, bird_pct=False, cur_season=season)
+    if r:
+        checks.append(r)
+
+    # TODO: player is on a two-way, cap space / exception for the new contract
     return checks
 
 
@@ -1611,9 +1981,9 @@ _VALIDATORS = {
 }
 
 
-def _run_validation(txn_type: str, details) -> list[CheckResult]:
+def _run_validation(txn_type: str, details, ctx: dict) -> list[CheckResult]:
     fn = _VALIDATORS.get(txn_type)
-    return fn(details) if fn else []
+    return fn(details, ctx) if fn else []
 
 
 @app.post("/api/transactions")
@@ -1642,7 +2012,13 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
         raise HTTPException(status_code=422, detail=f"{err_prefix}: {e}")
 
     # ── Run rubric checks ─────────────────────────────────────────────────────
-    checks = _run_validation(body.type, parsed_details)
+    _val_ctx = {
+        "bios":        load_player_bios(),
+        "team_state":  load_team_state(),
+        "cap_levels":  json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {},
+        "cur_season":  _current_season_str(),
+    }
+    checks = _run_validation(body.type, parsed_details, _val_ctx)
     errors   = [c for c in checks if not c.passed and c.level == "error"]
     warnings = [c for c in checks if not c.passed and c.level == "warning"]
 
