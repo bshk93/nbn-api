@@ -752,6 +752,7 @@ class CapLevel(BaseModel):
     cap: int
     apron1: int
     apron2: int
+    hard_cap: int = 0
     ntmle_amount: int = 0
     tmle_amount: int = 0
     bae_amount: int = 0
@@ -768,7 +769,7 @@ def put_cap_level(season: str, body: CapLevel, info: dict = Depends(require_role
     levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
     levels[season] = body.model_dump()
     CAP_LEVELS_FILE.write_text(json.dumps(levels, indent=2))
-    log_write(info, f"PUT cap-levels/{season} — cap={body.cap} apron1={body.apron1} apron2={body.apron2} ntmle={body.ntmle_amount} tmle={body.tmle_amount} bae={body.bae_amount} room={body.room_amount}")
+    log_write(info, f"PUT cap-levels/{season} — cap={body.cap} apron1={body.apron1} apron2={body.apron2} hard_cap={body.hard_cap} ntmle={body.ntmle_amount} tmle={body.tmle_amount} bae={body.bae_amount} room={body.room_amount}")
     return levels[season]
 
 
@@ -1223,6 +1224,25 @@ def _hard_cap_check(team: str, projected: int, season: str,
         level="error",
         message=(
             f"{team} would be ${over:,.0f} over their hard cap ({label}: ${limit:,}) "
+            f"— projected salary ${projected:,}."
+        ),
+    )
+
+
+def _universal_hard_cap_check(team: str, projected: int, season: str,
+                               cap_levels: dict) -> Optional["CheckResult"]:
+    """Return an error CheckResult if projected salary would exceed the league-wide hard cap."""
+    cl    = cap_levels.get(season, {})
+    limit = cl.get("hard_cap") or 0
+    if not limit or projected <= limit:
+        return None
+    over = projected - limit
+    return CheckResult(
+        check=f"hard_cap_league_{team.lower()}",
+        passed=False,
+        level="error",
+        message=(
+            f"{team} would be ${over:,.0f} over the league Hard Cap (${limit:,}) "
             f"— projected salary ${projected:,}."
         ),
     )
@@ -1807,8 +1827,12 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
     # ── Hard cap (§ 1.3) ─────────────────────────────────────────────────────
     current = _compute_team_salary(team, bios, season)
     new_sal = _parse_dollar(details.contract.salaries.get(season, ""))
-    r = _hard_cap_check(team, current + new_sal, season,
+    projected = current + new_sal
+    r = _hard_cap_check(team, projected, season,
                         ctx["team_state"], ctx["cap_levels"])
+    if r:
+        checks.append(r)
+    r = _universal_hard_cap_check(team, projected, season, ctx["cap_levels"])
     if r:
         checks.append(r)
 
@@ -1869,8 +1893,12 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
         # ── Hard cap (§ 1.3) ─────────────────────────────────────────────
         delta = inc - out
         if delta > 0:
-            r = _hard_cap_check(team, current + delta, season,
+            projected = current + delta
+            r = _hard_cap_check(team, projected, season,
                                 ctx["team_state"], ctx["cap_levels"])
+            if r:
+                checks.append(r)
+            r = _universal_hard_cap_check(team, projected, season, ctx["cap_levels"])
             if r:
                 checks.append(r)
 
@@ -1902,8 +1930,12 @@ def _validate_pick(details: PickDetails, ctx: dict) -> list[CheckResult]:
     # ── Hard cap (§ 1.3) ─────────────────────────────────────────────────────
     current = _compute_team_salary(team, bios, season)
     new_sal = _parse_dollar(details.contract.salaries.get(season, ""))
-    r = _hard_cap_check(team, current + new_sal, season,
+    projected = current + new_sal
+    r = _hard_cap_check(team, projected, season,
                         ctx["team_state"], ctx["cap_levels"])
+    if r:
+        checks.append(r)
+    r = _universal_hard_cap_check(team, projected, season, ctx["cap_levels"])
     if r:
         checks.append(r)
 
@@ -1942,8 +1974,12 @@ def _validate_convert_twoway(details: ConvertTwoWayDetails, ctx: dict) -> list[C
     delta = new_sal - old_sal
     if delta > 0 and team:
         current = _compute_team_salary(team, bios, season)
-        r = _hard_cap_check(team, current + delta, season,
+        projected = current + delta
+        r = _hard_cap_check(team, projected, season,
                             ctx["team_state"], ctx["cap_levels"])
+        if r:
+            checks.append(r)
+        r = _universal_hard_cap_check(team, projected, season, ctx["cap_levels"])
         if r:
             checks.append(r)
 
