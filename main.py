@@ -457,7 +457,8 @@ class TradingBlockEntry(BaseModel):
 
 class PickEntry(BaseModel):
     year: int
-    round: str   # "1st" or "2nd"
+    round: str    # "1st" or "2nd"
+    team: str = "Own"   # origin from picks CSV (e.g. "Own", "from NYK")
     notes: str = ""
 
 
