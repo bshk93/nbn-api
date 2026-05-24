@@ -50,7 +50,8 @@ ROOKIE_SCALE_FILE  = DATA_DIR / "rookie-scale.json"
 PICKS_FILE         = DATA_DIR / "draft-picks.csv"
 TRANSACTIONS_FILE  = DATA_DIR / "transactions.json"
 TEAM_STATE_FILE    = DATA_DIR / "team-state.json"
-AWARDS_CONFIG_FILE = DATA_DIR / "awards-config.json"
+AWARDS_CONFIG_FILE    = DATA_DIR / "awards-config.json"
+CALENDAR_EVENTS_FILE  = DATA_DIR / "calendar-events.json"
 
 PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PLAYER", "PROTECTED", "SWAP_OWNER", "NOTES"]
 _rules_lock    = threading.Lock()
@@ -3089,6 +3090,68 @@ def delete_member(name: str, info: dict = Depends(require_admin)):
     del members[name]
     save_members(members)
     log_write(info, f"DELETE members — removed {name!r}")
+    return {"ok": True}
+
+
+# ── Auth identity ────────────────────────────────────────────────────────────
+
+@app.get("/api/auth/me")
+def get_me(authorization: Optional[str] = Header(None)):
+    """Returns the current token's member name and roles. Always 200 — empty if no/invalid token."""
+    info = _resolve_token(authorization)
+    if not info:
+        return {"name": None, "roles": []}
+    return {"name": info["name"], "roles": info["roles"]}
+
+
+# ── Calendar events ──────────────────────────────────────────────────────────
+
+class CalendarEventIn(BaseModel):
+    date: str    # "YYYY-MM-DD"
+    label: str
+
+
+def _load_calendar_events() -> list[dict]:
+    if not CALENDAR_EVENTS_FILE.exists():
+        return []
+    return json.loads(CALENDAR_EVENTS_FILE.read_text())
+
+
+def _save_calendar_events(events: list[dict]):
+    CALENDAR_EVENTS_FILE.write_text(json.dumps(events, indent=2))
+
+
+@app.get("/api/calendar/events")
+def get_calendar_events():
+    """Returns all custom calendar events, sorted by date."""
+    events = _load_calendar_events()
+    return sorted(events, key=lambda e: e["date"])
+
+
+@app.post("/api/calendar/events")
+def create_calendar_event(body: CalendarEventIn, info: dict = Depends(require_role("bod"))):
+    import re
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", body.date):
+        raise HTTPException(status_code=422, detail="date must be YYYY-MM-DD")
+    if not body.label.strip():
+        raise HTTPException(status_code=422, detail="label is required")
+    events = _load_calendar_events()
+    event_id = secrets.token_hex(8)
+    event = {"id": event_id, "date": body.date, "label": body.label.strip()}
+    events.append(event)
+    _save_calendar_events(events)
+    log_write(info, f"POST calendar/events — {body.date} {body.label!r}")
+    return event
+
+
+@app.delete("/api/calendar/events/{event_id}")
+def delete_calendar_event(event_id: str, info: dict = Depends(require_role("bod"))):
+    events = _load_calendar_events()
+    remaining = [e for e in events if e["id"] != event_id]
+    if len(remaining) == len(events):
+        raise HTTPException(status_code=404, detail="Event not found")
+    _save_calendar_events(remaining)
+    log_write(info, f"DELETE calendar/events/{event_id}")
     return {"ok": True}
 
 
