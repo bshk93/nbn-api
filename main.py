@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 import anthropic
+import httpx
 import ptyprocess
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -3066,6 +3067,19 @@ class MemberUpdate(BaseModel):
     tenures: Optional[list[TenureEntry]] = None
 
 
+@app.get("/api/members/me")
+def get_my_member_info(info: dict = Depends(get_token_info)):
+    """Return the authenticated member's own name, roles, and current tenure positions."""
+    members = load_members()
+    m = members.get(info["name"], {})
+    tenures = m.get("tenures", [])
+    current_positions = list({
+        t["position"] for t in tenures
+        if not t.get("end") and t.get("position") and t["position"] != "none"
+    })
+    return {"name": info["name"], "roles": info.get("roles", []), "positions": current_positions}
+
+
 @app.get("/api/members/public")
 def list_members_public():
     members = load_members()
@@ -3222,8 +3236,527 @@ def delete_calendar_event(event_id: str, info: dict = Depends(require_role("bod"
     return {"ok": True}
 
 
+# ── Calendar games (scheduled) ────────────────────────────────────────────────
+
+CALENDAR_GAMES_FILE = DATA_DIR / "calendar-games.json"
+
+
+class CalendarGameIn(BaseModel):
+    date: str        # "YYYY-MM-DD"
+    home_team: str   # uppercase team abbr, e.g. "GSW"
+    away_team: str   # uppercase team abbr
+    note: str = ""   # optional context, e.g. "Conf Finals G1"
+
+
+def _load_calendar_games() -> list[dict]:
+    if not CALENDAR_GAMES_FILE.exists():
+        return []
+    return json.loads(CALENDAR_GAMES_FILE.read_text())
+
+
+def _save_calendar_games(games: list[dict]):
+    CALENDAR_GAMES_FILE.write_text(json.dumps(games, indent=2))
+
+
+@app.get("/api/calendar/games")
+def get_calendar_games():
+    """Returns all scheduled (future) games, sorted by date."""
+    return sorted(_load_calendar_games(), key=lambda g: g["date"])
+
+
+@app.post("/api/calendar/games")
+def create_calendar_game(body: CalendarGameIn, info: dict = Depends(require_role("bod"))):
+    import re
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", body.date):
+        raise HTTPException(status_code=422, detail="date must be YYYY-MM-DD")
+    ht = body.home_team.strip().upper()
+    at = body.away_team.strip().upper()
+    if ht not in VALID_TEAMS:
+        raise HTTPException(status_code=422, detail=f"Unknown home team: {ht}")
+    if at not in VALID_TEAMS:
+        raise HTTPException(status_code=422, detail=f"Unknown away team: {at}")
+    if ht == at:
+        raise HTTPException(status_code=422, detail="home_team and away_team must differ")
+    games = _load_calendar_games()
+    game_id = secrets.token_hex(8)
+    game = {"id": game_id, "date": body.date, "home_team": ht, "away_team": at, "note": body.note.strip()}
+    games.append(game)
+    _save_calendar_games(games)
+    log_write(info, f"POST calendar/games — {body.date} {at}@{ht}" + (f" ({body.note})" if body.note else ""))
+    return game
+
+
+@app.delete("/api/calendar/games/{game_id}")
+def delete_calendar_game(game_id: str, info: dict = Depends(require_role("bod"))):
+    games = _load_calendar_games()
+    remaining = [g for g in games if g["id"] != game_id]
+    if len(remaining) == len(games):
+        raise HTTPException(status_code=404, detail="Game not found")
+    _save_calendar_games(remaining)
+    log_write(info, f"DELETE calendar/games/{game_id}")
+    return {"ok": True}
+
+
+# ── Proposals ─────────────────────────────────────────────────────────────────
+
+PROPOSALS_FILE = DATA_DIR / "proposals.json"
+_proposals_lock = threading.Lock()
+TEAM_ROLE_SET = {t.lower() for t in VALID_TEAMS}
+VALID_TENURE_POSITIONS = {"owner", "gm", "coach"}
+
+
+def _member_current_positions(name: str) -> set[str]:
+    """Return the set of active (end=null) tenure positions for a member, excluding 'none'."""
+    members = load_members()
+    tenures = members.get(name, {}).get("tenures", [])
+    return {t["position"] for t in tenures if not t.get("end") and t.get("position") and t["position"] != "none"}
+
+
+def load_proposals() -> list[dict]:
+    if not PROPOSALS_FILE.exists():
+        return []
+    return json.loads(PROPOSALS_FILE.read_text())
+
+
+def save_proposals(proposals: list[dict]):
+    PROPOSALS_FILE.write_text(json.dumps(proposals, indent=2))
+
+
+def _proposal_view(p: dict, viewer_name: Optional[str] = None) -> dict:
+    """Return a safe copy of the proposal with votes masked appropriately."""
+    votes = p.get("votes", {})
+    status = p.get("status", "draft")
+    out = {k: v for k, v in p.items() if k != "votes"}
+    out["comment_count"] = len(p.get("comments", []))
+    if status == "voting":
+        out["vote_count"] = len(votes)
+        out["my_vote"] = votes.get(viewer_name) if viewer_name else None
+    elif status == "closed":
+        tally = {"yes": 0, "no": 0, "abstain": 0}
+        for v in votes.values():
+            if v in tally:
+                tally[v] += 1
+        out["results"] = tally
+        out["vote_count"] = len(votes)
+        out["my_vote"] = votes.get(viewer_name) if viewer_name else None
+    else:
+        out["vote_count"] = 0
+        out["my_vote"] = None
+    return out
+
+
+def _proposal_can_edit(p: dict, info: dict) -> bool:
+    status = p.get("status")
+    is_privileged = has_role(info, "bod") or has_role(info, "admin")
+    if status == "draft":
+        return p.get("author") == info["name"]
+    if status == "submitted":
+        return p.get("author") == info["name"] or is_privileged
+    return False
+
+
+class ProposalCreate(BaseModel):
+    title: str
+    body: str
+    eligible_roles: list[str] = []      # [] with empty positions = all team-role members
+    eligible_positions: list[str] = []  # active tenure positions: owner, gm, coach
+
+
+class ProposalPatch(BaseModel):
+    title: Optional[str] = None
+    body: Optional[str] = None
+    eligible_roles: Optional[list[str]] = None
+    eligible_positions: Optional[list[str]] = None
+
+
+class CommentCreate(BaseModel):
+    body: str
+
+
+class VoteIn(BaseModel):
+    vote: str   # "yes" | "no" | "abstain"
+
+
+@app.get("/api/proposals")
+def list_proposals(authorization: Optional[str] = Header(None)):
+    info = _resolve_token(authorization)
+    viewer = info["name"] if info else None
+    proposals = load_proposals()
+    result: dict = {"proposals": [], "drafts": []}
+    for p in proposals:
+        status = p.get("status", "draft")
+        if status == "draft":
+            if viewer and p.get("author") == viewer:
+                result["drafts"].append(_proposal_view(p, viewer))
+        else:
+            result["proposals"].append(_proposal_view(p, viewer))
+    result["proposals"].sort(key=lambda x: x.get("submitted_at") or x.get("created_at") or "", reverse=True)
+    result["drafts"].sort(key=lambda x: x.get("updated_at") or x.get("created_at") or "", reverse=True)
+    return result
+
+
+@app.post("/api/proposals")
+def create_proposal(body: ProposalCreate, info: dict = Depends(get_token_info)):
+    if not body.title.strip():
+        raise HTTPException(status_code=422, detail="title is required")
+    invalid_roles = [r for r in body.eligible_roles if r not in VALID_ROLES]
+    if invalid_roles:
+        raise HTTPException(status_code=422, detail=f"Invalid roles: {invalid_roles}")
+    invalid_positions = [p for p in body.eligible_positions if p not in VALID_TENURE_POSITIONS]
+    if invalid_positions:
+        raise HTTPException(status_code=422, detail=f"Invalid positions: {invalid_positions}")
+    now = datetime.now(timezone.utc).isoformat()
+    proposal = {
+        "id": str(uuid.uuid4()),
+        "title": body.title.strip(),
+        "body": body.body,
+        "author": info["name"],
+        "status": "draft",
+        "eligible_roles": body.eligible_roles,
+        "eligible_positions": body.eligible_positions,
+        "created_at": now,
+        "updated_at": now,
+        "submitted_at": None,
+        "voting_opened_at": None,
+        "voting_closed_at": None,
+        "comments": [],
+        "votes": {},
+    }
+    with _proposals_lock:
+        proposals = load_proposals()
+        proposals.append(proposal)
+        save_proposals(proposals)
+    log_write(info, f"POST proposals — {proposal['id']!r} {body.title!r}")
+    return _proposal_view(proposal, info["name"])
+
+
+@app.get("/api/proposals/{proposal_id}")
+def get_proposal(proposal_id: str, authorization: Optional[str] = Header(None)):
+    info = _resolve_token(authorization)
+    proposals = load_proposals()
+    p = next((x for x in proposals if x["id"] == proposal_id), None)
+    if not p:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    if p.get("status") == "draft":
+        if not info or p.get("author") != info["name"]:
+            raise HTTPException(status_code=403, detail="Not authorized to view this draft")
+    return _proposal_view(p, info["name"] if info else None)
+
+
+@app.patch("/api/proposals/{proposal_id}")
+def patch_proposal(proposal_id: str, body: ProposalPatch, info: dict = Depends(get_token_info)):
+    with _proposals_lock:
+        proposals = load_proposals()
+        idx = next((i for i, p in enumerate(proposals) if p["id"] == proposal_id), None)
+        if idx is None:
+            raise HTTPException(status_code=404, detail="Proposal not found")
+        p = proposals[idx]
+        if not _proposal_can_edit(p, info):
+            raise HTTPException(status_code=403, detail="Cannot edit this proposal")
+        if body.title is not None:
+            p["title"] = body.title.strip()
+        if body.body is not None:
+            p["body"] = body.body
+        if body.eligible_roles is not None:
+            invalid_roles = [r for r in body.eligible_roles if r not in VALID_ROLES]
+            if invalid_roles:
+                raise HTTPException(status_code=422, detail=f"Invalid roles: {invalid_roles}")
+            p["eligible_roles"] = body.eligible_roles
+        if body.eligible_positions is not None:
+            invalid_positions = [pos for pos in body.eligible_positions if pos not in VALID_TENURE_POSITIONS]
+            if invalid_positions:
+                raise HTTPException(status_code=422, detail=f"Invalid positions: {invalid_positions}")
+            p["eligible_positions"] = body.eligible_positions
+        p["updated_at"] = datetime.now(timezone.utc).isoformat()
+        proposals[idx] = p
+        save_proposals(proposals)
+    log_write(info, f"PATCH proposals/{proposal_id}")
+    return _proposal_view(p, info["name"])
+
+
+@app.post("/api/proposals/{proposal_id}/submit")
+def submit_proposal(proposal_id: str, info: dict = Depends(get_token_info)):
+    with _proposals_lock:
+        proposals = load_proposals()
+        idx = next((i for i, p in enumerate(proposals) if p["id"] == proposal_id), None)
+        if idx is None:
+            raise HTTPException(status_code=404, detail="Proposal not found")
+        p = proposals[idx]
+        if p.get("author") != info["name"] and not has_role(info, "admin"):
+            raise HTTPException(status_code=403, detail="Only the author can submit this proposal")
+        if p.get("status") != "draft":
+            raise HTTPException(status_code=422, detail="Only drafts can be submitted")
+        now = datetime.now(timezone.utc).isoformat()
+        p["status"] = "submitted"
+        p["submitted_at"] = now
+        p["updated_at"] = now
+        proposals[idx] = p
+        save_proposals(proposals)
+    log_write(info, f"POST proposals/{proposal_id}/submit")
+    return _proposal_view(p, info["name"])
+
+
+@app.post("/api/proposals/{proposal_id}/open-voting")
+def open_proposal_voting(proposal_id: str, info: dict = Depends(require_role("bod"))):
+    with _proposals_lock:
+        proposals = load_proposals()
+        idx = next((i for i, p in enumerate(proposals) if p["id"] == proposal_id), None)
+        if idx is None:
+            raise HTTPException(status_code=404, detail="Proposal not found")
+        p = proposals[idx]
+        if p.get("status") != "submitted":
+            raise HTTPException(status_code=422, detail="Only submitted proposals can be opened for voting")
+        now = datetime.now(timezone.utc).isoformat()
+        p["status"] = "voting"
+        p["voting_opened_at"] = now
+        p["updated_at"] = now
+        proposals[idx] = p
+        save_proposals(proposals)
+    log_write(info, f"POST proposals/{proposal_id}/open-voting")
+    return _proposal_view(p, info["name"])
+
+
+@app.post("/api/proposals/{proposal_id}/close-voting")
+def close_proposal_voting(proposal_id: str, info: dict = Depends(require_role("bod"))):
+    with _proposals_lock:
+        proposals = load_proposals()
+        idx = next((i for i, p in enumerate(proposals) if p["id"] == proposal_id), None)
+        if idx is None:
+            raise HTTPException(status_code=404, detail="Proposal not found")
+        p = proposals[idx]
+        if p.get("status") != "voting":
+            raise HTTPException(status_code=422, detail="Proposal is not open for voting")
+        now = datetime.now(timezone.utc).isoformat()
+        p["status"] = "closed"
+        p["voting_closed_at"] = now
+        p["updated_at"] = now
+        proposals[idx] = p
+        save_proposals(proposals)
+    log_write(info, f"POST proposals/{proposal_id}/close-voting")
+    return _proposal_view(p, info["name"])
+
+
+@app.post("/api/proposals/{proposal_id}/vote")
+def cast_vote(proposal_id: str, body: VoteIn, info: dict = Depends(get_token_info)):
+    if body.vote not in ("yes", "no", "abstain"):
+        raise HTTPException(status_code=422, detail="vote must be 'yes', 'no', or 'abstain'")
+    with _proposals_lock:
+        proposals = load_proposals()
+        idx = next((i for i, p in enumerate(proposals) if p["id"] == proposal_id), None)
+        if idx is None:
+            raise HTTPException(status_code=404, detail="Proposal not found")
+        p = proposals[idx]
+        if p.get("status") != "voting":
+            raise HTTPException(status_code=422, detail="Voting is not open for this proposal")
+        eligible_roles = p.get("eligible_roles", [])
+        eligible_positions = p.get("eligible_positions", [])
+        voter_roles = set(info.get("roles", []))
+        if not has_role(info, "admin"):
+            if not eligible_roles and not eligible_positions:
+                # Default: any member with a team role
+                if not voter_roles & TEAM_ROLE_SET:
+                    raise HTTPException(status_code=403, detail="You must have a team role to vote")
+            else:
+                role_match = bool(eligible_roles) and any(r in voter_roles for r in eligible_roles)
+                pos_match = bool(eligible_positions) and bool(
+                    _member_current_positions(info["name"]) & set(eligible_positions)
+                )
+                if not role_match and not pos_match:
+                    raise HTTPException(status_code=403, detail="You are not eligible to vote on this proposal")
+        votes = p.get("votes", {})
+        already_voted = info["name"] in votes
+        votes[info["name"]] = body.vote
+        p["votes"] = votes
+        proposals[idx] = p
+        save_proposals(proposals)
+    log_write(info, f"POST proposals/{proposal_id}/vote — {info['name']} {'changed' if already_voted else 'cast'} {body.vote}")
+    return {"ok": True, "vote": body.vote, "changed": already_voted}
+
+
+@app.post("/api/proposals/{proposal_id}/comments")
+def add_proposal_comment(proposal_id: str, body: CommentCreate, info: dict = Depends(get_token_info)):
+    if not body.body.strip():
+        raise HTTPException(status_code=422, detail="Comment body is required")
+    with _proposals_lock:
+        proposals = load_proposals()
+        idx = next((i for i, p in enumerate(proposals) if p["id"] == proposal_id), None)
+        if idx is None:
+            raise HTTPException(status_code=404, detail="Proposal not found")
+        p = proposals[idx]
+        if p.get("status") == "draft":
+            raise HTTPException(status_code=422, detail="Cannot comment on a draft")
+        comment = {
+            "id": secrets.token_hex(8),
+            "author": info["name"],
+            "body": body.body.strip(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        p.setdefault("comments", []).append(comment)
+        proposals[idx] = p
+        save_proposals(proposals)
+    log_write(info, f"POST proposals/{proposal_id}/comments — {info['name']}")
+    return comment
+
+
+@app.delete("/api/proposals/{proposal_id}/comments/{comment_id}")
+def delete_proposal_comment(proposal_id: str, comment_id: str, info: dict = Depends(get_token_info)):
+    with _proposals_lock:
+        proposals = load_proposals()
+        idx = next((i for i, p in enumerate(proposals) if p["id"] == proposal_id), None)
+        if idx is None:
+            raise HTTPException(status_code=404, detail="Proposal not found")
+        p = proposals[idx]
+        comments = p.get("comments", [])
+        comment = next((c for c in comments if c["id"] == comment_id), None)
+        if not comment:
+            raise HTTPException(status_code=404, detail="Comment not found")
+        if comment["author"] != info["name"] and not has_role(info, "bod") and not has_role(info, "admin"):
+            raise HTTPException(status_code=403, detail="Not authorized to delete this comment")
+        p["comments"] = [c for c in comments if c["id"] != comment_id]
+        proposals[idx] = p
+        save_proposals(proposals)
+    log_write(info, f"DELETE proposals/{proposal_id}/comments/{comment_id}")
+    return {"ok": True}
+
+
+@app.delete("/api/proposals/{proposal_id}")
+def delete_proposal(proposal_id: str, info: dict = Depends(get_token_info)):
+    is_privileged = has_role(info, "bod") or has_role(info, "admin")
+    with _proposals_lock:
+        proposals = load_proposals()
+        idx = next((i for i, p in enumerate(proposals) if p["id"] == proposal_id), None)
+        if idx is None:
+            raise HTTPException(status_code=404, detail="Proposal not found")
+        p = proposals[idx]
+        if p.get("author") != info["name"] and not is_privileged:
+            raise HTTPException(status_code=403, detail="Not authorized to delete this proposal")
+        if p.get("status") != "draft" and not is_privileged:
+            raise HTTPException(status_code=422, detail="Only BOD can delete submitted proposals")
+        proposals.pop(idx)
+        save_proposals(proposals)
+    log_write(info, f"DELETE proposals/{proposal_id}")
+    return {"ok": True}
+
+
 CLAUDE_BIN = Path("/home/skim/.local/bin/claude")
 NBN_TODAY_DIR = Path("/home/skim/projects/nbn-today")
+
+# ── Discord webhooks ──────────────────────────────────────────────────────────
+
+DISCORD_STANDINGS_WEBHOOK = (
+    "https://discord.com/api/webhooks/1508510341288689876/"
+    "2_KbnDbQ5HqVfT9dvXUuR2oceOLuj4gGWrJZZfqYvH3nODExFoASqsrzZ24FtP2YUyCF"
+)
+NBN_STANDINGS_CSV = NBN_TODAY_DIR / "standings" / "standings-history.csv"
+
+
+def _season_label(season: str) -> str:
+    """'25-26' → '2025–26'"""
+    parts = season.split("-")
+    if len(parts) == 2:
+        return f"20{parts[0]}–{parts[1]}"  # em-dash
+    return season
+
+
+def _build_standings_payload(season: str) -> dict:
+    """Read standings CSV for *season* and build a Discord webhook payload."""
+    if not NBN_STANDINGS_CSV.exists():
+        raise FileNotFoundError("standings-history.csv not found")
+
+    with open(NBN_STANDINGS_CSV, newline="") as f:
+        rows = [r for r in csv.DictReader(f) if r.get("SEASON", "").strip() == season]
+
+    if not rows:
+        raise ValueError(f"No standings data found for season {season!r}")
+
+    east = sorted(
+        [r for r in rows if r["SEED"].startswith("East")],
+        key=lambda r: int(r["SEED_NUM"]),
+    )
+    west = sorted(
+        [r for r in rows if r["SEED"].startswith("West")],
+        key=lambda r: int(r["SEED_NUM"]),
+    )
+
+    # Only show Result column when at least one team has a non-Missed result
+    has_results = any(
+        r.get("PLAYOFF_RESULT", "").strip() not in ("", "Missed")
+        for r in rows
+    )
+
+    RESULT_CODE = {
+        "Champion":    "CHAMP",
+        "Runner-Up":   "FINAL",
+        "Conf Finals": "CF   ",
+        "First Round": "R1   ",
+        "Missed":      "",
+        "":            "",
+    }
+
+    def fmt_conf(teams: list[dict]) -> str:
+        hdr = f" #  Team    W    L    PCT"
+        if has_results:
+            hdr += "   Result"
+        lines = [hdr, "─" * len(hdr)]
+        for t in teams:
+            seed = int(t["SEED_NUM"])
+            w    = int(t["W"])
+            l    = int(t["L"])
+            pct  = float(t["PCT"])
+            res  = t.get("PLAYOFF_RESULT", "").strip()
+            pct_str = f"{pct:.3f}"[1:]  # ".695" not "0.695"
+            row  = f"{seed:2}  {t['TEAM']:<4}  {w:3}  {l:3}  {pct_str}"
+            if has_results:
+                row += f"  {RESULT_CODE.get(res, ''):5}"
+            lines.append(row)
+            # visual separator after the 8th seed (playoff cutline)
+            if seed == 8 and seed < len(teams):
+                lines.append("·" * 26)
+        return "```\n" + "\n".join(lines) + "\n```"
+
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        "username": "NBN League Office",
+        "avatar_url": "https://nbn.today/logo.png",
+        "embeds": [{
+            "title": f"\U0001f4ca NBN Standings — {_season_label(season)}",
+            "color": 0x3b82f6,
+            "fields": [
+                {"name": "\U0001f535 Eastern Conference", "value": fmt_conf(east)},
+                {"name": "\U0001f534 Western Conference", "value": fmt_conf(west)},
+            ],
+            "footer": {"text": "Nothing But Net · nbn.today/standings"},
+            "timestamp": now,
+        }],
+    }
+
+
+@app.post("/api/admin/discord/post-standings")
+def post_standings_to_discord(
+    season: str = Query(..., description="Season code, e.g. 25-26"),
+    info: dict = Depends(require_role("admin")),
+):
+    """Post a formatted standings embed to the NBN Discord announcements webhook."""
+    if not re.match(r"^\d{2}-\d{2}$", season):
+        raise HTTPException(status_code=422, detail="season must be YY-YY format, e.g. 25-26")
+    try:
+        payload = _build_standings_payload(season)
+    except (FileNotFoundError, ValueError) as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    try:
+        resp = httpx.post(DISCORD_STANDINGS_WEBHOOK, json=payload, timeout=10)
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Discord request failed: {e}")
+
+    if not resp.is_success:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Discord returned {resp.status_code}: {resp.text[:300]}",
+        )
+
+    log_write(info, f"POST discord/standings — season={season}")
+    return {"ok": True, "season": season}
 
 
 @app.websocket("/api/ws/claude")
