@@ -355,7 +355,12 @@ def get_team_picks(team: str):
         raise HTTPException(status_code=404, detail="Unknown team")
     all_picks = [pick_to_response(p) for p in load_picks()]
     enrich_swap_conveys(all_picks)
-    return [p for p in all_picks if p["owner"] == team or (p["owner"] == "?" and p["orig"] == team)]
+    def matches(p):
+        owner = p["owner"]
+        if owner == "?":
+            return p["orig"] == team          # fallback: serve to orig team
+        return team in owner.split("|")       # single team or pipe-separated candidates
+    return [p for p in all_picks if matches(p)]
 
 
 class PickUpsert(BaseModel):
@@ -378,9 +383,15 @@ def upsert_pick(
         raise HTTPException(status_code=404, detail="Unknown team")
     if rnd not in (1, 2):
         raise HTTPException(status_code=422, detail="Round must be 1 or 2")
-    owner = body.owner.upper()
-    if owner != "?" and owner not in VALID_TEAMS:
-        raise HTTPException(status_code=422, detail=f"Unknown owner team: {owner}")
+    owner_raw = body.owner.strip().upper()
+    if owner_raw == "?":
+        owner = "?"
+    else:
+        parts = [p.strip() for p in owner_raw.split("|") if p.strip()]
+        bad = [p for p in parts if p not in VALID_TEAMS]
+        if bad:
+            raise HTTPException(status_code=422, detail=f"Unknown owner team(s): {', '.join(bad)}")
+        owner = "|".join(parts)   # normalized, no spaces around |
 
     swap_owner = body.swap_owner.upper() if body.swap_owner else ""
     if swap_owner and swap_owner not in VALID_TEAMS:
