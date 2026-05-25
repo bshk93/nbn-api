@@ -68,7 +68,7 @@ VALID_TEAMS = {
     "OKC", "ORL", "PHI", "PHX", "POR", "SAC", "SAS", "TOR", "UTA", "WAS",
 }
 
-VALID_ROLES = {"admin", "rosters", "bod", "curator", "stats"} | {t.lower() for t in VALID_TEAMS}
+VALID_ROLES = {"admin", "rosters", "bod", "curator", "stats", "bets"} | {t.lower() for t in VALID_TEAMS}
 
 # Roles that are implicitly granted by holding another role
 ROLE_IMPLIES: dict[str, set[str]] = {
@@ -3295,6 +3295,232 @@ def delete_calendar_game(game_id: str, info: dict = Depends(require_role("bod"))
     _save_calendar_games(remaining)
     log_write(info, f"DELETE calendar/games/{game_id}")
     return {"ok": True}
+
+
+# ── NBYen Bets ────────────────────────────────────────────────────────────────
+
+BETS_FILE     = DATA_DIR / "bets.json"
+BALANCES_FILE = DATA_DIR / "member-balances.json"
+NBY_START     = 1000.0
+_bets_lock     = threading.Lock()
+_balances_lock = threading.Lock()
+
+
+class BetOptionSpec(BaseModel):
+    label: str
+
+
+class BetCreate(BaseModel):
+    title: str
+    description: str = ""
+    options: list[BetOptionSpec]  # must have ≥ 2 non-empty entries
+
+
+class WagerIn(BaseModel):
+    option_id: str
+    amount: float  # NB¥, must be > 0
+
+
+class CloseBetIn(BaseModel):
+    winning_option_id: str
+
+
+def _load_bets() -> list[dict]:
+    if not BETS_FILE.exists():
+        return []
+    return json.loads(BETS_FILE.read_text())
+
+
+def _save_bets(bets: list[dict]):
+    BETS_FILE.write_text(json.dumps(bets, indent=2))
+
+
+def _load_balances() -> dict:
+    if not BALANCES_FILE.exists():
+        return {}
+    return json.loads(BALANCES_FILE.read_text())
+
+
+def _save_balances(bal: dict):
+    BALANCES_FILE.write_text(json.dumps(bal, indent=2))
+
+
+def _init_bal(bal: dict, name: str) -> float:
+    if name not in bal:
+        bal[name] = NBY_START
+    return bal[name]
+
+
+def _bet_summary(bet: dict) -> dict:
+    """Return a copy of *bet* enriched with option_totals and total_pool."""
+    wagers = bet.get("wagers", {})
+    option_totals: dict[str, float] = {opt["id"]: 0.0 for opt in bet["options"]}
+    for w in wagers.values():
+        oid = w["option_id"]
+        if oid in option_totals:
+            option_totals[oid] = round(option_totals[oid] + w["amount"], 2)
+    total_pool = round(sum(option_totals.values()), 2)
+    return {**bet, "option_totals": option_totals, "total_pool": total_pool}
+
+
+@app.get("/api/bets")
+def list_bets():
+    """Public — all bets with per-option totals and individual wager details."""
+    return [_bet_summary(b) for b in _load_bets()]
+
+
+@app.post("/api/bets")
+def create_bet(body: BetCreate, info: dict = Depends(require_role("bets"))):
+    opts = [{"id": secrets.token_hex(4), "label": o.label.strip()} for o in body.options if o.label.strip()]
+    if len(opts) < 2:
+        raise HTTPException(status_code=422, detail="At least 2 non-empty options required")
+    if not body.title.strip():
+        raise HTTPException(status_code=422, detail="title is required")
+    with _bets_lock:
+        bets = _load_bets()
+        bet: dict = {
+            "id": secrets.token_hex(8),
+            "title": body.title.strip(),
+            "description": body.description.strip(),
+            "options": opts,
+            "status": "open",
+            "created_by": info["name"],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "closed_at": None,
+            "winning_option_id": None,
+            "wagers": {},   # { member_name: {option_id, amount, placed_at} }
+            "resolution": None,
+        }
+        bets.append(bet)
+        _save_bets(bets)
+    log_write(info, f"POST bets — {body.title!r} ({len(opts)} options)")
+    return _bet_summary(bet)
+
+
+@app.post("/api/bets/{bet_id}/wager")
+def place_wager(bet_id: str, body: WagerIn, info: dict = Depends(get_token_info)):
+    if body.amount <= 0:
+        raise HTTPException(status_code=422, detail="amount must be positive")
+    with _bets_lock, _balances_lock:
+        bets     = _load_bets()
+        bet      = next((b for b in bets if b["id"] == bet_id), None)
+        if bet is None:
+            raise HTTPException(status_code=404, detail="Bet not found")
+        if bet["status"] != "open":
+            raise HTTPException(status_code=409, detail="Bet is not open for wagering")
+        opt_ids = {o["id"] for o in bet["options"]}
+        if body.option_id not in opt_ids:
+            raise HTTPException(status_code=422, detail="Invalid option_id")
+        existing = bet["wagers"].get(info["name"])
+        if existing and existing["option_id"] != body.option_id:
+            raise HTTPException(status_code=409, detail="You have already backed a different option in this bet")
+        balances = _load_balances()
+        _init_bal(balances, info["name"])
+        if balances[info["name"]] < body.amount:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Insufficient balance — NB¥{balances[info['name']]:.2f} available",
+            )
+        balances[info["name"]] = round(balances[info["name"]] - body.amount, 2)
+        _save_balances(balances)
+        if existing:
+            bet["wagers"][info["name"]]["amount"] = round(existing["amount"] + body.amount, 2)
+        else:
+            bet["wagers"][info["name"]] = {
+                "option_id": body.option_id,
+                "amount": body.amount,
+                "placed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        _save_bets(bets)
+    log_write(info, f"POST bets/{bet_id}/wager — NB¥{body.amount} on {body.option_id}")
+    return _bet_summary(bet)
+
+
+@app.post("/api/bets/{bet_id}/close")
+def close_bet(bet_id: str, body: CloseBetIn, info: dict = Depends(require_role("bets"))):
+    with _bets_lock, _balances_lock:
+        bets = _load_bets()
+        bet  = next((b for b in bets if b["id"] == bet_id), None)
+        if bet is None:
+            raise HTTPException(status_code=404, detail="Bet not found")
+        if bet["status"] != "open":
+            raise HTTPException(status_code=409, detail="Bet is already closed")
+        if body.winning_option_id not in {o["id"] for o in bet["options"]}:
+            raise HTTPException(status_code=422, detail="Invalid winning_option_id")
+
+        wagers       = bet["wagers"]
+        total_pool   = round(sum(w["amount"] for w in wagers.values()), 2)
+        winners_pool = round(
+            sum(w["amount"] for w in wagers.values() if w["option_id"] == body.winning_option_id),
+            2,
+        )
+        balances = _load_balances()
+        payouts: dict[str, float] = {}
+        voided = winners_pool == 0
+
+        if voided:
+            for member, w in wagers.items():
+                _init_bal(balances, member)
+                balances[member] = round(balances[member] + w["amount"], 2)
+                payouts[member]  = w["amount"]
+        else:
+            for member, w in wagers.items():
+                if w["option_id"] == body.winning_option_id:
+                    payout = round((w["amount"] / winners_pool) * total_pool, 2)
+                    _init_bal(balances, member)
+                    balances[member] = round(balances[member] + payout, 2)
+                    payouts[member]  = payout
+
+        _save_balances(balances)
+        bet.update(
+            status="closed",
+            closed_at=datetime.now(timezone.utc).isoformat(),
+            winning_option_id=body.winning_option_id,
+            resolution={
+                "total_pool":   total_pool,
+                "winners_pool": winners_pool,
+                "voided":       voided,
+                "payouts":      payouts,
+            },
+        )
+        _save_bets(bets)
+
+    log_write(info, f"POST bets/{bet_id}/close — winner={body.winning_option_id}, pool=NB¥{total_pool}")
+    return _bet_summary(bet)
+
+
+@app.delete("/api/bets/{bet_id}")
+def delete_bet(bet_id: str, info: dict = Depends(require_role("bets"))):
+    with _bets_lock, _balances_lock:
+        bets = _load_bets()
+        bet  = next((b for b in bets if b["id"] == bet_id), None)
+        if bet is None:
+            raise HTTPException(status_code=404, detail="Bet not found")
+        if bet["status"] != "open":
+            raise HTTPException(status_code=409, detail="Cannot delete a closed bet")
+        if bet["wagers"] and not has_role(info, "admin"):
+            raise HTTPException(status_code=409, detail="Cannot delete a bet that has wagers — close it instead")
+        if bet["wagers"]:
+            # Admin-only: refund everyone
+            balances = _load_balances()
+            for member, w in bet["wagers"].items():
+                _init_bal(balances, member)
+                balances[member] = round(balances[member] + w["amount"], 2)
+            _save_balances(balances)
+        _save_bets([b for b in bets if b["id"] != bet_id])
+    log_write(info, f"DELETE bets/{bet_id}")
+    return {"ok": True}
+
+
+@app.get("/api/bets/balances")
+def get_bets_balances():
+    """Public — NB¥ balances for all known members, sorted by balance desc."""
+    all_members = load_members()
+    balances    = _load_balances()
+    for name in all_members:
+        _init_bal(balances, name)
+    result = [{"name": n, "balance": round(b, 2)} for n, b in balances.items()]
+    return sorted(result, key=lambda x: (-x["balance"], x["name"]))
 
 
 # ── Proposals ─────────────────────────────────────────────────────────────────
