@@ -3523,6 +3523,37 @@ def get_bets_balances():
     return sorted(result, key=lambda x: (-x["balance"], x["name"]))
 
 
+class BalanceAdjustIn(BaseModel):
+    member: str
+    delta: float    # positive = give, negative = take
+    reason: str = ""
+
+
+@app.post("/api/bets/admin/adjust")
+def admin_adjust_balance(body: BalanceAdjustIn, info: dict = Depends(require_admin)):
+    """Admin-only — give or take NB¥ from any member."""
+    if body.delta == 0:
+        raise HTTPException(status_code=422, detail="delta cannot be zero")
+    all_members = load_members()
+    if body.member not in all_members:
+        raise HTTPException(status_code=404, detail=f"Member '{body.member}' not found")
+    with _balances_lock:
+        balances = _load_balances()
+        _init_bal(balances, body.member)
+        old_bal = balances[body.member]
+        new_bal = round(old_bal + body.delta, 2)
+        if new_bal < 0:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Would result in negative balance (NB¥{new_bal:.2f}); current balance is NB¥{old_bal:.2f}",
+            )
+        balances[body.member] = new_bal
+        _save_balances(balances)
+    verb = "gave" if body.delta > 0 else "took"
+    log_write(info, f"POST bets/admin/adjust — {verb} NB¥{abs(body.delta)} {'to' if body.delta > 0 else 'from'} {body.member}" + (f" ({body.reason})" if body.reason else ""))
+    return {"member": body.member, "old_balance": old_bal, "new_balance": new_bal, "delta": body.delta, "reason": body.reason}
+
+
 # ── Proposals ─────────────────────────────────────────────────────────────────
 
 PROPOSALS_FILE = DATA_DIR / "proposals.json"
