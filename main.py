@@ -355,7 +355,7 @@ def get_team_picks(team: str):
         raise HTTPException(status_code=404, detail="Unknown team")
     all_picks = [pick_to_response(p) for p in load_picks()]
     enrich_swap_conveys(all_picks)
-    return [p for p in all_picks if p["owner"] == team]
+    return [p for p in all_picks if p["owner"] == team or (p["owner"] == "?" and p["orig"] == team)]
 
 
 class PickUpsert(BaseModel):
@@ -379,7 +379,7 @@ def upsert_pick(
     if rnd not in (1, 2):
         raise HTTPException(status_code=422, detail="Round must be 1 or 2")
     owner = body.owner.upper()
-    if owner not in VALID_TEAMS:
+    if owner != "?" and owner not in VALID_TEAMS:
         raise HTTPException(status_code=422, detail=f"Unknown owner team: {owner}")
 
     swap_owner = body.swap_owner.upper() if body.swap_owner else ""
@@ -1682,14 +1682,20 @@ def _apply_trade(details: TradeIn, info: dict) -> list[str]:
 # ── Transaction validation helpers ───────────────────────────────────────────
 
 def _count_standard_roster(team: str) -> int:
-    """Count non-two-way players currently on a team's standard roster."""
+    """Count standard (non-two-way) players currently on a team's roster.
+
+    Derives player type from player-bios.json so the roster CSV doesn't need
+    a TYPE column.
+    """
     path = DATA_DIR / f"{team.lower()}-roster.csv"
     if not path.exists():
         return 0
     _, rows = read_csv(path)
+    bios = load_player_bios()
     return sum(
         1 for r in rows
-        if r.get("SLUG", "").strip() and r.get("TYPE", "").strip() != "two-way"
+        if r.get("SLUG", "").strip()
+        and bios.get(r["SLUG"], {}).get("type", "") != "two-way"
     )
 
 
@@ -1722,9 +1728,14 @@ def _check_contract_raises(
     pct = 0.08 if bird_pct else 0.05
     pct_label = "8%" if bird_pct else "5%"
 
-    # Only validate current-season-forward years
+    # Cap-hold placeholder years (UFA/RFA/PLAYER_OPT/TEAM_OPT) are not real
+    # salary years — the raise rule only applies to actual contract years.
+    _HOLD_TYPES = {"UFA", "RFA", "PLAYER_OPT", "TEAM_OPT"}
+    hold_years = {yr for yr, ht in (contract.cap_holds or {}).items() if ht in _HOLD_TYPES}
+
+    # Only validate current-season-forward years, excluding cap-hold placeholders
     years = sorted(
-        (yr for yr in contract.salaries if yr >= cur_season),
+        (yr for yr in contract.salaries if yr >= cur_season and yr not in hold_years),
         key=lambda y: (_season_start(y), y),
     )
     if len(years) < 2:
@@ -2056,14 +2067,13 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
         "cur_season":  _current_season_str(),
     }
     checks = _run_validation(body.type, parsed_details, _val_ctx)
-    errors   = [c for c in checks if not c.passed and c.level == "error"]
-    warnings = [c for c in checks if not c.passed and c.level == "warning"]
+    failed = [c for c in checks if not c.passed]
 
-    if errors or (warnings and not body.force):
+    if failed and not body.force:
         raise HTTPException(status_code=422, detail={
             "validation": True,
             "checks": [c.model_dump() for c in checks],
-            "can_force": len(errors) == 0,
+            "can_force": True,
         })
 
     with _txn_lock:
@@ -2092,8 +2102,8 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             stored_details = details.model_dump()
             stored_details["team"] = team
 
-        if body.force and warnings:
-            stored_details["_forced_warnings"] = [c.check for c in warnings]
+        if body.force and failed:
+            stored_details["_forced_checks"] = [c.check for c in failed]
 
         txn = {
             "id": secrets.token_hex(8),
