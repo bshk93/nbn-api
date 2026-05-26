@@ -2657,9 +2657,10 @@ def commit_boxscore(body: BoxscoreCommitRequest, info: dict = Depends(require_an
         ))
 
     write_csv(path, expected_headers, existing + new_rows)
-    logger.info("[%s] POST boxscore/commit — %s vs %s on %s (%d rows)", info.get("name"), home_team, away_team, body.date, len(new_rows))
+    reward, new_bal = _award_submission_reward(info["name"])
+    logger.info("[%s] POST boxscore/commit — %s vs %s on %s (%d rows, +NB¥%.2f)", info.get("name"), home_team, away_team, body.date, len(new_rows), reward)
     building = False if body.skip_build else _trigger_build()
-    return {"ok": True, "rows_added": len(new_rows), "building": building}
+    return {"ok": True, "rows_added": len(new_rows), "building": building, "nbyen_reward": reward, "nbyen_balance": new_bal}
 
 
 @app.get("/api/boxscores/dates")
@@ -2941,8 +2942,9 @@ async def upload_boxscore(
     }
     (item_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 
-    logger.info("[%s] POST boxscore/upload — %s vs %s on %s (id=%s)", info.get("name"), home_team, away_team, date, item_id)
-    return {"ok": True, "id": item_id}
+    reward, new_bal = _award_submission_reward(info["name"])
+    logger.info("[%s] POST boxscore/upload — %s vs %s on %s (id=%s, +NB¥%.2f)", info.get("name"), home_team, away_team, date, item_id, reward)
+    return {"ok": True, "id": item_id, "nbyen_reward": reward, "nbyen_balance": new_bal}
 
 
 @app.get("/api/boxscore/pending")
@@ -3301,19 +3303,22 @@ def delete_calendar_game(game_id: str, info: dict = Depends(require_role("bod"))
 
 BETS_FILE     = DATA_DIR / "bets.json"
 BALANCES_FILE = DATA_DIR / "member-balances.json"
-NBY_START     = 1000.0
+NBY_START            = 1000.0
+NBY_BOXSCORE_REWARD  = 10.0   # NB¥ awarded per box score submission (upload or manual commit)
 _bets_lock     = threading.Lock()
 _balances_lock = threading.Lock()
 
 
 class BetOptionSpec(BaseModel):
     label: str
+    probability: float | None = None  # required for fixed_odds (0 < p < 1)
 
 
 class BetCreate(BaseModel):
     title: str
     description: str = ""
     options: list[BetOptionSpec]  # must have ≥ 2 non-empty entries
+    bet_type: str = "pool"        # "pool" or "fixed_odds"
 
 
 class WagerIn(BaseModel):
@@ -3351,8 +3356,20 @@ def _init_bal(bal: dict, name: str) -> float:
     return bal[name]
 
 
+def _award_submission_reward(name: str) -> tuple[float, float]:
+    """Award NBY_BOXSCORE_REWARD to *name* for submitting a box score.
+    Returns (reward, new_balance)."""
+    with _balances_lock:
+        balances = _load_balances()
+        _init_bal(balances, name)
+        balances[name] = round(balances[name] + NBY_BOXSCORE_REWARD, 2)
+        _save_balances(balances)
+        return NBY_BOXSCORE_REWARD, balances[name]
+
+
 def _bet_summary(bet: dict) -> dict:
-    """Return a copy of *bet* enriched with option_totals and total_pool."""
+    """Return a copy of *bet* enriched with option_totals, total_pool, and
+    (for fixed_odds) option_exposure — total potential payout per option."""
     wagers = bet.get("wagers", {})
     option_totals: dict[str, float] = {opt["id"]: 0.0 for opt in bet["options"]}
     for w in wagers.values():
@@ -3360,7 +3377,17 @@ def _bet_summary(bet: dict) -> dict:
         if oid in option_totals:
             option_totals[oid] = round(option_totals[oid] + w["amount"], 2)
     total_pool = round(sum(option_totals.values()), 2)
-    return {**bet, "option_totals": option_totals, "total_pool": total_pool}
+    result = {**bet, "option_totals": option_totals, "total_pool": total_pool}
+    if bet.get("bet_type") == "fixed_odds":
+        option_exposure: dict[str, float] = {opt["id"]: 0.0 for opt in bet["options"]}
+        for w in wagers.values():
+            oid = w["option_id"]
+            if oid in option_exposure:
+                option_exposure[oid] = round(
+                    option_exposure[oid] + w.get("potential_payout", w["amount"]), 2
+                )
+        result["option_exposure"] = option_exposure
+    return result
 
 
 @app.get("/api/bets")
@@ -3371,29 +3398,54 @@ def list_bets():
 
 @app.post("/api/bets")
 def create_bet(body: BetCreate, info: dict = Depends(require_role("bets"))):
-    opts = [{"id": secrets.token_hex(4), "label": o.label.strip()} for o in body.options if o.label.strip()]
-    if len(opts) < 2:
-        raise HTTPException(status_code=422, detail="At least 2 non-empty options required")
+    if body.bet_type not in ("pool", "fixed_odds"):
+        raise HTTPException(status_code=422, detail="bet_type must be 'pool' or 'fixed_odds'")
     if not body.title.strip():
         raise HTTPException(status_code=422, detail="title is required")
+
+    opts = []
+    for o in body.options:
+        if not o.label.strip():
+            continue
+        opt: dict = {"id": secrets.token_hex(4), "label": o.label.strip()}
+        if body.bet_type == "fixed_odds":
+            if o.probability is None:
+                raise HTTPException(status_code=422, detail=f"probability required for all options in a fixed_odds bet")
+            if not (0.01 <= o.probability <= 0.99):
+                raise HTTPException(status_code=422, detail="each probability must be between 0.01 and 0.99")
+            opt["probability"] = round(o.probability, 6)
+        opts.append(opt)
+
+    if len(opts) < 2:
+        raise HTTPException(status_code=422, detail="At least 2 non-empty options required")
+
+    if body.bet_type == "fixed_odds":
+        total_prob = round(sum(o["probability"] for o in opts), 4)
+        if abs(total_prob - 1.0) > 0.01:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Probabilities must sum to 1.0 (got {total_prob:.4f})",
+            )
+
     with _bets_lock:
         bets = _load_bets()
         bet: dict = {
             "id": secrets.token_hex(8),
             "title": body.title.strip(),
             "description": body.description.strip(),
+            "bet_type": body.bet_type,
             "options": opts,
             "status": "open",
             "created_by": info["name"],
             "created_at": datetime.now(timezone.utc).isoformat(),
             "closed_at": None,
             "winning_option_id": None,
-            "wagers": {},   # { member_name: {option_id, amount, placed_at} }
+            "wagers": {},   # { member_name: {option_id, amount, [potential_payout], placed_at} }
             "resolution": None,
         }
         bets.append(bet)
         _save_bets(bets)
-    log_write(info, f"POST bets — {body.title!r} ({len(opts)} options)")
+    log_write(info, f"POST bets ({body.bet_type}) — {body.title!r} ({len(opts)} options)")
     return _bet_summary(bet)
 
 
@@ -3423,16 +3475,50 @@ def place_wager(bet_id: str, body: WagerIn, info: dict = Depends(get_token_info)
             )
         balances[info["name"]] = round(balances[info["name"]] - body.amount, 2)
         _save_balances(balances)
-        if existing:
-            bet["wagers"][info["name"]]["amount"] = round(existing["amount"] + body.amount, 2)
+        if bet.get("bet_type") == "fixed_odds":
+            opt    = next(o for o in bet["options"] if o["id"] == body.option_id)
+            prob   = opt["probability"]
+            new_pp = round(body.amount / prob, 2)
+            if existing:
+                bet["wagers"][info["name"]]["amount"]           = round(existing["amount"] + body.amount, 2)
+                bet["wagers"][info["name"]]["potential_payout"] = round(
+                    existing.get("potential_payout", 0.0) + new_pp, 2
+                )
+            else:
+                bet["wagers"][info["name"]] = {
+                    "option_id":        body.option_id,
+                    "amount":           body.amount,
+                    "potential_payout": new_pp,
+                    "placed_at":        datetime.now(timezone.utc).isoformat(),
+                }
         else:
-            bet["wagers"][info["name"]] = {
-                "option_id": body.option_id,
-                "amount": body.amount,
-                "placed_at": datetime.now(timezone.utc).isoformat(),
-            }
+            if existing:
+                bet["wagers"][info["name"]]["amount"] = round(existing["amount"] + body.amount, 2)
+            else:
+                bet["wagers"][info["name"]] = {
+                    "option_id": body.option_id,
+                    "amount": body.amount,
+                    "placed_at": datetime.now(timezone.utc).isoformat(),
+                }
         _save_bets(bets)
     log_write(info, f"POST bets/{bet_id}/wager — NB¥{body.amount} on {body.option_id}")
+    return _bet_summary(bet)
+
+
+@app.post("/api/bets/{bet_id}/lock")
+def lock_bet(bet_id: str, info: dict = Depends(require_role("bets"))):
+    """Close betting on a bet without setting an outcome yet (open → locked)."""
+    with _bets_lock:
+        bets = _load_bets()
+        bet  = next((b for b in bets if b["id"] == bet_id), None)
+        if bet is None:
+            raise HTTPException(status_code=404, detail="Bet not found")
+        if bet["status"] != "open":
+            raise HTTPException(status_code=409, detail="Bet is not open")
+        bet["status"]    = "locked"
+        bet["locked_at"] = datetime.now(timezone.utc).isoformat()
+        _save_bets(bets)
+    log_write(info, f"POST bets/{bet_id}/lock")
     return _bet_summary(bet)
 
 
@@ -3443,19 +3529,65 @@ def close_bet(bet_id: str, body: CloseBetIn, info: dict = Depends(require_role("
         bet  = next((b for b in bets if b["id"] == bet_id), None)
         if bet is None:
             raise HTTPException(status_code=404, detail="Bet not found")
-        if bet["status"] != "open":
+        if bet["status"] not in ("open", "locked"):
             raise HTTPException(status_code=409, detail="Bet is already closed")
         if body.winning_option_id not in {o["id"] for o in bet["options"]}:
             raise HTTPException(status_code=422, detail="Invalid winning_option_id")
 
-        wagers       = bet["wagers"]
+        wagers   = bet["wagers"]
+        balances = _load_balances()
+        payouts: dict[str, float] = {}
+
+        if bet.get("bet_type") == "fixed_odds":
+            # ── Fixed-odds: each winner receives their locked-in potential_payout ──
+            total_stakes   = round(sum(w["amount"] for w in wagers.values()), 2)
+            winners_stakes = round(
+                sum(w["amount"] for w in wagers.values() if w["option_id"] == body.winning_option_id),
+                2,
+            )
+            voided         = winners_stakes == 0
+            total_paid_out = 0.0
+
+            if voided:
+                for member, w in wagers.items():
+                    _init_bal(balances, member)
+                    balances[member] = round(balances[member] + w["amount"], 2)
+                    payouts[member]  = w["amount"]
+            else:
+                for member, w in wagers.items():
+                    if w["option_id"] == body.winning_option_id:
+                        payout = w.get("potential_payout", w["amount"])
+                        _init_bal(balances, member)
+                        balances[member] = round(balances[member] + payout, 2)
+                        payouts[member]  = payout
+                        total_paid_out   = round(total_paid_out + payout, 2)
+
+            # positive shortfall = admin top-up needed; negative = house surplus
+            net_shortfall = round(total_paid_out - total_stakes, 2) if not voided else 0.0
+            _save_balances(balances)
+            bet.update(
+                status="closed",
+                closed_at=datetime.now(timezone.utc).isoformat(),
+                winning_option_id=body.winning_option_id,
+                resolution={
+                    "total_pool":     total_stakes,
+                    "winners_pool":   winners_stakes,
+                    "total_paid_out": total_paid_out if not voided else total_stakes,
+                    "net_shortfall":  net_shortfall,
+                    "voided":         voided,
+                    "payouts":        payouts,
+                },
+            )
+            _save_bets(bets)
+            log_write(info, f"POST bets/{bet_id}/close (fixed_odds) — winner={body.winning_option_id}, stakes=NB¥{total_stakes}, paid=NB¥{total_paid_out:.2f}, shortfall=NB¥{net_shortfall:.2f}")
+            return _bet_summary(bet)
+
+        # ── Pool bet ──────────────────────────────────────────────────────────────
         total_pool   = round(sum(w["amount"] for w in wagers.values()), 2)
         winners_pool = round(
             sum(w["amount"] for w in wagers.values() if w["option_id"] == body.winning_option_id),
             2,
         )
-        balances = _load_balances()
-        payouts: dict[str, float] = {}
         voided = winners_pool == 0
 
         if voided:
@@ -3496,7 +3628,7 @@ def delete_bet(bet_id: str, info: dict = Depends(require_role("bets"))):
         bet  = next((b for b in bets if b["id"] == bet_id), None)
         if bet is None:
             raise HTTPException(status_code=404, detail="Bet not found")
-        if bet["status"] != "open":
+        if bet["status"] not in ("open", "locked"):
             raise HTTPException(status_code=409, detail="Cannot delete a closed bet")
         if bet["wagers"] and not has_role(info, "admin"):
             raise HTTPException(status_code=409, detail="Cannot delete a bet that has wagers — close it instead")
