@@ -3419,14 +3419,6 @@ def create_bet(body: BetCreate, info: dict = Depends(require_role("bookie"))):
     if len(opts) < 2:
         raise HTTPException(status_code=422, detail="At least 2 non-empty options required")
 
-    if body.bet_type == "fixed_odds":
-        total_prob = round(sum(o["probability"] for o in opts), 4)
-        if abs(total_prob - 1.0) > 0.01:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Probabilities must sum to 1.0 (got {total_prob:.4f})",
-            )
-
     with _bets_lock:
         bets = _load_bets()
         bet: dict = {
