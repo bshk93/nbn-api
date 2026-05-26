@@ -68,12 +68,11 @@ VALID_TEAMS = {
     "OKC", "ORL", "PHI", "PHX", "POR", "SAC", "SAS", "TOR", "UTA", "WAS",
 }
 
-VALID_ROLES = {"admin", "rosters", "bod", "curator", "stats", "bets", "bookie"} | {t.lower() for t in VALID_TEAMS}
+VALID_ROLES = {"admin", "rosters", "bod", "curator", "stats", "bookie"} | {t.lower() for t in VALID_TEAMS}
 
 # Roles that are implicitly granted by holding another role
 ROLE_IMPLIES: dict[str, set[str]] = {
-    "bod":    {"rosters"},
-    "bookie": {"bets"},
+    "bod": {"rosters"},
 }
 
 CURATOR_FIELDS = {
@@ -3398,7 +3397,7 @@ def list_bets():
 
 
 @app.post("/api/bets")
-def create_bet(body: BetCreate, info: dict = Depends(require_role("bets"))):
+def create_bet(body: BetCreate, info: dict = Depends(require_role("bookie"))):
     if body.bet_type not in ("pool", "fixed_odds"):
         raise HTTPException(status_code=422, detail="bet_type must be 'pool' or 'fixed_odds'")
     if not body.title.strip():
@@ -3507,7 +3506,7 @@ def place_wager(bet_id: str, body: WagerIn, info: dict = Depends(get_token_info)
 
 
 @app.post("/api/bets/{bet_id}/lock")
-def lock_bet(bet_id: str, info: dict = Depends(require_role("bets"))):
+def lock_bet(bet_id: str, info: dict = Depends(require_role("bookie"))):
     """Close betting on a bet without setting an outcome yet (open → locked)."""
     with _bets_lock:
         bets = _load_bets()
@@ -3524,7 +3523,7 @@ def lock_bet(bet_id: str, info: dict = Depends(require_role("bets"))):
 
 
 @app.post("/api/bets/{bet_id}/close")
-def close_bet(bet_id: str, body: CloseBetIn, info: dict = Depends(require_role("bets"))):
+def close_bet(bet_id: str, body: CloseBetIn, info: dict = Depends(require_role("bookie"))):
     with _bets_lock, _balances_lock:
         bets = _load_bets()
         bet  = next((b for b in bets if b["id"] == bet_id), None)
@@ -3623,7 +3622,7 @@ def close_bet(bet_id: str, body: CloseBetIn, info: dict = Depends(require_role("
 
 
 @app.delete("/api/bets/{bet_id}")
-def delete_bet(bet_id: str, info: dict = Depends(require_role("bets"))):
+def delete_bet(bet_id: str, info: dict = Depends(require_role("bookie"))):
     with _bets_lock, _balances_lock:
         bets = _load_bets()
         bet  = next((b for b in bets if b["id"] == bet_id), None)
