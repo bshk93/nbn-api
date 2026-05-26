@@ -68,11 +68,12 @@ VALID_TEAMS = {
     "OKC", "ORL", "PHI", "PHX", "POR", "SAC", "SAS", "TOR", "UTA", "WAS",
 }
 
-VALID_ROLES = {"admin", "rosters", "bod", "curator", "stats", "bets"} | {t.lower() for t in VALID_TEAMS}
+VALID_ROLES = {"admin", "rosters", "bod", "curator", "stats", "bets", "bookie"} | {t.lower() for t in VALID_TEAMS}
 
 # Roles that are implicitly granted by holding another role
 ROLE_IMPLIES: dict[str, set[str]] = {
-    "bod": {"rosters"},
+    "bod":    {"rosters"},
+    "bookie": {"bets"},
 }
 
 CURATOR_FIELDS = {
