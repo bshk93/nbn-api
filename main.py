@@ -38,7 +38,8 @@ def log_write(info: dict, action: str):
 
 DATA_DIR  = Path("/var/lib/nothing-but-stats")
 RULES_DIR = DATA_DIR / "rules"
-PENDING_BOXSCORES_DIR = DATA_DIR / "pending-boxscores"
+PENDING_BOXSCORES_DIR  = DATA_DIR / "pending-boxscores"
+MANUAL_QUEUE_FILE      = DATA_DIR / "pending-manual-queue.json"
 BUILD_STATUS_FILE  = DATA_DIR / "build-status.json"
 BUILD_SCRIPT       = Path("/home/skim/projects/nothing-but-stats/refresh/nbs.sh")
 TOKENS_FILE        = DATA_DIR / "tokens.json"
@@ -55,9 +56,10 @@ AWARDS_CONFIG_FILE    = DATA_DIR / "awards-config.json"
 CALENDAR_EVENTS_FILE  = DATA_DIR / "calendar-events.json"
 
 PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PLAYER", "PROTECTED", "SWAP_OWNER", "NOTES"]
-_rules_lock    = threading.Lock()
-_picks_lock    = threading.Lock()
-_txn_lock      = threading.Lock()
+_rules_lock         = threading.Lock()
+_picks_lock         = threading.Lock()
+_txn_lock           = threading.Lock()
+_manual_queue_lock  = threading.Lock()
 _ovr_lock      = threading.Lock()
 _state_lock    = threading.Lock()
 _deadcap_lock  = threading.Lock()
@@ -2347,6 +2349,33 @@ def post_trivia_score(body: TriviaScoreSubmit, info: dict = Depends(get_token_in
     return {"ok": True}
 
 
+class TriviaAnswerSubmit(BaseModel):
+    streak: int  # 1-based streak number for this correct answer
+
+
+@app.post("/api/trivia/answer")
+def post_trivia_answer(body: TriviaAnswerSubmit, info: dict = Depends(get_token_info)):
+    """Award NB¥ for a correct trivia answer. Reward = 2^(streak-1), capped at 512."""
+    if not info.get("name"):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if body.streak < 1:
+        raise HTTPException(status_code=422, detail="streak must be >= 1")
+    reward = float(min(2 ** (body.streak - 1), 512))
+    with _balances_lock:
+        balances = _load_balances()
+        _init_bal(balances, info["name"])
+        balances[info["name"]] = round(balances[info["name"]] + reward, 2)
+        _save_balances(balances)
+    ts = datetime.now(timezone.utc).isoformat()
+    _append_ledger([{
+        "ts": ts, "member": info["name"], "delta": reward,
+        "balance": balances[info["name"]],
+        "reason": f"Trivia streak {body.streak} reward",
+    }])
+    log_write(info, f"POST trivia/answer — streak={body.streak} reward={reward}")
+    return {"ok": True, "reward": reward, "balance": balances[info["name"]]}
+
+
 # ── Auth ─────────────────────────────────────────────────────────────────────
 
 @app.get("/api/me")
@@ -2615,6 +2644,7 @@ class BoxscoreCommitRequest(BaseModel):
     home_rows: list[BoxscorePlayerRow]
     away_rows: list[BoxscorePlayerRow]
     skip_build: bool = False
+    skip_reward: bool = False  # True when NBYen was already awarded at queue time
 
 
 @app.post("/api/boxscore/commit")
@@ -2623,6 +2653,9 @@ def commit_boxscore(body: BoxscoreCommitRequest, info: dict = Depends(require_an
     away_team = body.away_team.upper()
     if home_team not in VALID_TEAMS or away_team not in VALID_TEAMS:
         raise HTTPException(status_code=422, detail="Invalid team abbreviation")
+
+    if _game_in_data(body.date, home_team, away_team, body.season, body.game_type):
+        raise HTTPException(status_code=409, detail=f"{home_team} vs {away_team} on {body.date} is already committed.")
 
     path = allstats_path(body.season, body.game_type)
     if not path.exists():
@@ -2657,7 +2690,13 @@ def commit_boxscore(body: BoxscoreCommitRequest, info: dict = Depends(require_an
         ))
 
     write_csv(path, expected_headers, existing + new_rows)
-    reward, new_bal = _award_submission_reward(info["name"])
+    _remove_from_manual_queue(body.date, home_team, away_team)
+
+    if body.skip_reward:
+        reward, new_bal = 0.0, 0.0
+    else:
+        reward, new_bal = _award_submission_reward(info["name"])
+
     logger.info("[%s] POST boxscore/commit — %s vs %s on %s (%d rows, +NB¥%.2f)", info.get("name"), home_team, away_team, body.date, len(new_rows), reward)
     building = False if body.skip_build else _trigger_build()
     return {"ok": True, "rows_added": len(new_rows), "building": building, "nbyen_reward": reward, "nbyen_balance": new_bal}
@@ -2895,6 +2934,76 @@ def trigger_build(info: dict = Depends(require_any_role("rosters", "stats"))):
     return {"ok": True, "building": building}
 
 
+# ── Boxscore duplicate detection ─────────────────────────────────────────────
+
+def _game_teams(home: str, away: str) -> frozenset:
+    """Canonical team-pair key (order-independent)."""
+    return frozenset({home.upper(), away.upper()})
+
+def _game_in_data(date: str, home_team: str, away_team: str, season: str, game_type: str) -> bool:
+    """True if this game is already present in the committed allstats CSV."""
+    path = allstats_path(season, game_type)
+    if not path.exists():
+        return False
+    _, rows = read_csv(path)
+    teams = _game_teams(home_team, away_team)
+    for r in rows:
+        if r.get("DATE", "").strip() != date:
+            continue
+        t = r.get("TEAM", "").strip()
+        o = r.get("OPP", "").strip().lstrip("@")
+        if _game_teams(t, o) == teams:
+            return True
+    return False
+
+def _game_in_pending_screenshots(date: str, home_team: str, away_team: str) -> bool:
+    """True if a screenshot for this game is already in the pending queue."""
+    if not PENDING_BOXSCORES_DIR.exists():
+        return False
+    teams = _game_teams(home_team, away_team)
+    for item_dir in PENDING_BOXSCORES_DIR.iterdir():
+        meta_path = item_dir / "meta.json"
+        if not meta_path.exists():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text())
+        except Exception:
+            continue
+        if meta.get("date") == date and _game_teams(meta.get("home_team", ""), meta.get("away_team", "")) == teams:
+            return True
+    return False
+
+def _game_in_manual_queue(date: str, home_team: str, away_team: str) -> bool:
+    """True if this game is already registered in the pending manual queue."""
+    with _manual_queue_lock:
+        if not MANUAL_QUEUE_FILE.exists():
+            return False
+        try:
+            queue = json.loads(MANUAL_QUEUE_FILE.read_text())
+        except Exception:
+            return False
+    teams = _game_teams(home_team, away_team)
+    return any(
+        q.get("date") == date and _game_teams(q.get("home_team", ""), q.get("away_team", "")) == teams
+        for q in queue
+    )
+
+def _remove_from_manual_queue(date: str, home_team: str, away_team: str):
+    """Remove a game from the manual queue once it has been committed."""
+    with _manual_queue_lock:
+        if not MANUAL_QUEUE_FILE.exists():
+            return
+        try:
+            queue = json.loads(MANUAL_QUEUE_FILE.read_text())
+        except Exception:
+            return
+        teams = _game_teams(home_team, away_team)
+        queue = [q for q in queue if not (
+            q.get("date") == date and
+            _game_teams(q.get("home_team", ""), q.get("away_team", "")) == teams
+        )]
+        MANUAL_QUEUE_FILE.write_text(json.dumps(queue))
+
 # ── Boxscore pending queue ────────────────────────────────────────────────────
 
 @app.post("/api/boxscore/upload")
@@ -2914,6 +3023,13 @@ async def upload_boxscore(
     away_team = away_team.upper()
     if home_team not in VALID_TEAMS or away_team not in VALID_TEAMS:
         raise HTTPException(status_code=422, detail="Invalid team abbreviation")
+
+    if _game_in_data(date, home_team, away_team, season, game_type):
+        raise HTTPException(status_code=409, detail=f"{home_team} vs {away_team} on {date} is already committed.")
+    if _game_in_pending_screenshots(date, home_team, away_team):
+        raise HTTPException(status_code=409, detail=f"A screenshot is already pending for {home_team} vs {away_team} on {date}.")
+    if _game_in_manual_queue(date, home_team, away_team):
+        raise HTTPException(status_code=409, detail=f"A manual entry is already queued for {home_team} vs {away_team} on {date}.")
 
     item_id = str(uuid.uuid4())[:8]
     item_dir = PENDING_BOXSCORES_DIR / item_id
@@ -2944,6 +3060,49 @@ async def upload_boxscore(
 
     reward, new_bal = _award_submission_reward(info["name"])
     logger.info("[%s] POST boxscore/upload — %s vs %s on %s (id=%s, +NB¥%.2f)", info.get("name"), home_team, away_team, date, item_id, reward)
+    return {"ok": True, "id": item_id, "nbyen_reward": reward, "nbyen_balance": new_bal}
+
+
+class BoxscoreQueueRequest(BaseModel):
+    date: str
+    home_team: str
+    away_team: str
+    season: str
+    game_type: str
+
+@app.post("/api/boxscore/queue")
+def register_boxscore_queue(body: BoxscoreQueueRequest, info: dict = Depends(require_any_role("rosters", "stats"))):
+    """Register intent to manually submit a game. Awards NBYen immediately and
+    records the claim so the same game can't be double-queued or double-rewarded."""
+    home_team = body.home_team.upper()
+    away_team = body.away_team.upper()
+    if home_team not in VALID_TEAMS or away_team not in VALID_TEAMS:
+        raise HTTPException(status_code=422, detail="Invalid team abbreviation")
+
+    if _game_in_data(body.date, home_team, away_team, body.season, body.game_type):
+        raise HTTPException(status_code=409, detail=f"{home_team} vs {away_team} on {body.date} is already committed.")
+    if _game_in_pending_screenshots(body.date, home_team, away_team):
+        raise HTTPException(status_code=409, detail=f"A screenshot is already pending for {home_team} vs {away_team} on {body.date}.")
+    if _game_in_manual_queue(body.date, home_team, away_team):
+        raise HTTPException(status_code=409, detail=f"{home_team} vs {away_team} on {body.date} is already in the queue.")
+
+    item_id = str(uuid.uuid4())[:8]
+    with _manual_queue_lock:
+        queue = json.loads(MANUAL_QUEUE_FILE.read_text()) if MANUAL_QUEUE_FILE.exists() else []
+        queue.append({
+            "id": item_id,
+            "date": body.date,
+            "home_team": home_team,
+            "away_team": away_team,
+            "season": body.season,
+            "game_type": body.game_type,
+            "queued_by": info.get("name"),
+            "queued_at": datetime.now(timezone.utc).isoformat(),
+        })
+        MANUAL_QUEUE_FILE.write_text(json.dumps(queue))
+
+    reward, new_bal = _award_submission_reward(info["name"])
+    logger.info("[%s] POST boxscore/queue — %s vs %s on %s (id=%s, +NB¥%.2f)", info.get("name"), home_team, away_team, body.date, item_id, reward)
     return {"ok": True, "id": item_id, "nbyen_reward": reward, "nbyen_balance": new_bal}
 
 
@@ -3303,10 +3462,142 @@ def delete_calendar_game(game_id: str, info: dict = Depends(require_role("bod"))
 
 BETS_FILE     = DATA_DIR / "bets.json"
 BALANCES_FILE = DATA_DIR / "member-balances.json"
+LEDGER_FILE   = DATA_DIR / "bets-ledger.json"
 NBY_START            = 1000.0
 NBY_BOXSCORE_REWARD  = 10.0   # NB¥ awarded per box score submission (upload or manual commit)
+NBY_MAX_WAGER        = 300.0  # maximum total stake per member per bet
 _bets_lock     = threading.Lock()
 _balances_lock = threading.Lock()
+
+DISCORD_BETS_WEBHOOK = "https://discord.com/api/webhooks/1509022602671427695/76fqELDrhV9Pj7TAd7fvq56VQTIUMi8ZwokSwaWSN-rWq0zMlUDr4zfhFJd35_Ioocyr"
+
+def _discord_post_bet(embed: dict) -> None:
+    """Fire-and-forget Discord webhook post. Swallows errors so a Discord outage never breaks the API."""
+    try:
+        httpx.post(DISCORD_BETS_WEBHOOK, json={"embeds": [embed]}, timeout=5)
+    except Exception as exc:
+        logger.warning("Discord webhook failed: %s", exc)
+
+
+def _fmt_nby(amount: float) -> str:
+    return f"NB¥{amount:,.2f}"
+
+
+def _discord_bet_created(bet: dict) -> None:
+    bet_type = bet.get("bet_type", "pool")
+    if bet_type == "fixed_odds":
+        options_lines = "\n".join(
+            f"• {o['label']}  ({round(1 / o['probability'], 2)}× payout)"
+            for o in bet["options"]
+        )
+        type_label = "Fixed Odds"
+    else:
+        options_lines = "\n".join(f"• {o['label']}" for o in bet["options"])
+        type_label = "Pool Bet"
+
+    description = bet.get("description", "").strip()
+    body = f"**{bet['title']}**"
+    if description:
+        body += f"\n{description}"
+    body += f"\n\n**Type:** {type_label}\n**Options:**\n{options_lines}"
+    body += "\n\nPlace your wagers at **[nbn.today/bet](https://nbn.today/bet)**"
+
+    _discord_post_bet({
+        "title": "🎲  New Bet Opened",
+        "description": body,
+        "color": 0x2ecc71,  # green
+    })
+
+
+def _discord_bet_locked(bet: dict) -> None:
+    wagers = bet.get("wagers", {})
+    option_totals: dict[str, float] = {o["id"]: 0.0 for o in bet["options"]}
+    bettor_counts: dict[str, int]   = {o["id"]: 0   for o in bet["options"]}
+    for w in wagers.values():
+        oid = w["option_id"]
+        if oid in option_totals:
+            option_totals[oid] = round(option_totals[oid] + w["amount"], 2)
+            bettor_counts[oid] += 1
+    total_pool = round(sum(option_totals.values()), 2)
+
+    opt_lines = []
+    for o in bet["options"]:
+        oid   = o["id"]
+        amt   = option_totals[oid]
+        cnt   = bettor_counts[oid]
+        pct   = round(amt / total_pool * 100, 1) if total_pool else 0.0
+        bettors_str = f"{cnt} bettor{'s' if cnt != 1 else ''}"
+        opt_lines.append(f"• **{o['label']}** — {_fmt_nby(amt)}  ({bettors_str}, {pct}%)")
+
+    total_bettors = len(wagers)
+    description = (
+        f"**{bet['title']}**\n\n"
+        f"**Total Pool:** {_fmt_nby(total_pool)}\n"
+        + "\n".join(opt_lines)
+    )
+
+    _discord_post_bet({
+        "title": "🔒  Betting Closed — Awaiting Outcome",
+        "description": description,
+        "color": 0xe67e22,  # orange
+    })
+
+
+def _discord_bet_settled(bet: dict) -> None:
+    resolution = bet.get("resolution", {})
+    voided     = resolution.get("voided", False)
+    wagers     = bet.get("wagers", {})
+    payouts    = resolution.get("payouts", {})
+
+    winning_id    = bet.get("winning_option_id")
+    winning_label = next((o["label"] for o in bet["options"] if o["id"] == winning_id), "?")
+
+    if voided:
+        total_refunded = resolution.get("total_pool", 0.0)
+        description = (
+            f"**{bet['title']}**\n\n"
+            f"No bettors picked the winning option. All wagers have been refunded.\n"
+            f"**Total Refunded:** {_fmt_nby(total_refunded)}"
+        )
+        _discord_post_bet({
+            "title": "⚠️  Bet Voided — Full Refunds Issued",
+            "description": description,
+            "color": 0xe74c3c,  # red
+        })
+        return
+
+    # Build winner lines: name | received | net
+    winner_lines = []
+    for member, payout in sorted(payouts.items(), key=lambda x: -x[1]):
+        wagered = wagers.get(member, {}).get("amount", 0.0)
+        net     = round(payout - wagered, 2)
+        net_str = f"+{_fmt_nby(net)}" if net >= 0 else f"-{_fmt_nby(abs(net))}"
+        winner_lines.append(f"• **{member}** — received {_fmt_nby(payout)}  ({net_str})")
+
+    if len(winner_lines) > 8:
+        winner_lines = winner_lines[:8] + [f"• *(+{len(winner_lines) - 8} more)*"]
+
+    bet_type = bet.get("bet_type", "pool")
+    if bet_type == "fixed_odds":
+        total_label = "Total Stakes"
+        total_amt   = resolution.get("total_pool", 0.0)
+    else:
+        total_label = "Total Pool"
+        total_amt   = resolution.get("total_pool", 0.0)
+
+    description = (
+        f"**{bet['title']}**\n\n"
+        f"**Result:** ✅ {winning_label}\n"
+        f"**{total_label}:** {_fmt_nby(total_amt)}\n\n"
+        "**Winners:**\n" + "\n".join(winner_lines)
+    )
+
+    _discord_post_bet({
+        "title": "🏆  Bet Settled",
+        "description": description,
+        "color": 0xf1c40f,  # gold
+    })
+_ledger_lock   = threading.Lock()
 
 
 class BetOptionSpec(BaseModel):
@@ -3356,6 +3647,14 @@ def _init_bal(bal: dict, name: str) -> float:
     return bal[name]
 
 
+def _append_ledger(entries: list[dict]):
+    """Append one or more ledger entries. Each entry: {ts, member, delta, balance, reason}."""
+    with _ledger_lock:
+        ledger = json.loads(LEDGER_FILE.read_text()) if LEDGER_FILE.exists() else []
+        ledger.extend(entries)
+        LEDGER_FILE.write_text(json.dumps(ledger))
+
+
 def _award_submission_reward(name: str) -> tuple[float, float]:
     """Award NBY_BOXSCORE_REWARD to *name* for submitting a box score.
     Returns (reward, new_balance)."""
@@ -3364,7 +3663,10 @@ def _award_submission_reward(name: str) -> tuple[float, float]:
         _init_bal(balances, name)
         balances[name] = round(balances[name] + NBY_BOXSCORE_REWARD, 2)
         _save_balances(balances)
-        return NBY_BOXSCORE_REWARD, balances[name]
+    ts = datetime.now(timezone.utc).isoformat()
+    _append_ledger([{"ts": ts, "member": name, "delta": NBY_BOXSCORE_REWARD,
+                     "balance": balances[name], "reason": "Box score submission reward"}])
+    return NBY_BOXSCORE_REWARD, balances[name]
 
 
 def _bet_summary(bet: dict) -> dict:
@@ -3438,6 +3740,7 @@ def create_bet(body: BetCreate, info: dict = Depends(require_role("bookie"))):
         bets.append(bet)
         _save_bets(bets)
     log_write(info, f"POST bets ({body.bet_type}) — {body.title!r} ({len(opts)} options)")
+    _discord_bet_created(bet)
     return _bet_summary(bet)
 
 
@@ -3458,6 +3761,13 @@ def place_wager(bet_id: str, body: WagerIn, info: dict = Depends(get_token_info)
         existing = bet["wagers"].get(info["name"])
         if existing and existing["option_id"] != body.option_id:
             raise HTTPException(status_code=409, detail="You have already backed a different option in this bet")
+        already_staked = existing["amount"] if existing else 0.0
+        if round(already_staked + body.amount, 2) > NBY_MAX_WAGER:
+            remaining = round(NBY_MAX_WAGER - already_staked, 2)
+            raise HTTPException(
+                status_code=422,
+                detail=f"Maximum stake per bet is NB¥{NBY_MAX_WAGER:.0f} — you have NB¥{already_staked:.2f} on this bet, so you can add at most NB¥{remaining:.2f} more",
+            )
         balances = _load_balances()
         _init_bal(balances, info["name"])
         if balances[info["name"]] < body.amount:
@@ -3467,6 +3777,10 @@ def place_wager(bet_id: str, body: WagerIn, info: dict = Depends(get_token_info)
             )
         balances[info["name"]] = round(balances[info["name"]] - body.amount, 2)
         _save_balances(balances)
+        ts = datetime.now(timezone.utc).isoformat()
+        _append_ledger([{"ts": ts, "member": info["name"], "delta": -body.amount,
+                         "balance": balances[info["name"]],
+                         "reason": f"Wager on \"{bet['title']}\""}])
         if bet.get("bet_type") == "fixed_odds":
             opt    = next(o for o in bet["options"] if o["id"] == body.option_id)
             prob   = opt["probability"]
@@ -3511,6 +3825,7 @@ def lock_bet(bet_id: str, info: dict = Depends(require_role("bookie"))):
         bet["locked_at"] = datetime.now(timezone.utc).isoformat()
         _save_bets(bets)
     log_write(info, f"POST bets/{bet_id}/lock")
+    _discord_bet_locked(bet)
     return _bet_summary(bet)
 
 
@@ -3540,11 +3855,16 @@ def close_bet(bet_id: str, body: CloseBetIn, info: dict = Depends(require_role("
             voided         = winners_stakes == 0
             total_paid_out = 0.0
 
+            ledger_entries = []
+            ts = datetime.now(timezone.utc).isoformat()
             if voided:
                 for member, w in wagers.items():
                     _init_bal(balances, member)
                     balances[member] = round(balances[member] + w["amount"], 2)
                     payouts[member]  = w["amount"]
+                    ledger_entries.append({"ts": ts, "member": member, "delta": w["amount"],
+                                           "balance": balances[member],
+                                           "reason": f"Refund (voided): \"{bet['title']}\"" })
             else:
                 for member, w in wagers.items():
                     if w["option_id"] == body.winning_option_id:
@@ -3553,10 +3873,15 @@ def close_bet(bet_id: str, body: CloseBetIn, info: dict = Depends(require_role("
                         balances[member] = round(balances[member] + payout, 2)
                         payouts[member]  = payout
                         total_paid_out   = round(total_paid_out + payout, 2)
+                        ledger_entries.append({"ts": ts, "member": member, "delta": payout,
+                                               "balance": balances[member],
+                                               "reason": f"Payout (fixed odds): \"{bet['title']}\"" })
 
             # positive shortfall = admin top-up needed; negative = house surplus
             net_shortfall = round(total_paid_out - total_stakes, 2) if not voided else 0.0
             _save_balances(balances)
+            if ledger_entries:
+                _append_ledger(ledger_entries)
             bet.update(
                 status="closed",
                 closed_at=datetime.now(timezone.utc).isoformat(),
@@ -3572,6 +3897,7 @@ def close_bet(bet_id: str, body: CloseBetIn, info: dict = Depends(require_role("
             )
             _save_bets(bets)
             log_write(info, f"POST bets/{bet_id}/close (fixed_odds) — winner={body.winning_option_id}, stakes=NB¥{total_stakes}, paid=NB¥{total_paid_out:.2f}, shortfall=NB¥{net_shortfall:.2f}")
+            _discord_bet_settled(bet)
             return _bet_summary(bet)
 
         # ── Pool bet ──────────────────────────────────────────────────────────────
@@ -3582,11 +3908,16 @@ def close_bet(bet_id: str, body: CloseBetIn, info: dict = Depends(require_role("
         )
         voided = winners_pool == 0
 
+        ledger_entries = []
+        ts = datetime.now(timezone.utc).isoformat()
         if voided:
             for member, w in wagers.items():
                 _init_bal(balances, member)
                 balances[member] = round(balances[member] + w["amount"], 2)
                 payouts[member]  = w["amount"]
+                ledger_entries.append({"ts": ts, "member": member, "delta": w["amount"],
+                                       "balance": balances[member],
+                                       "reason": f"Refund (voided): \"{bet['title']}\"" })
         else:
             for member, w in wagers.items():
                 if w["option_id"] == body.winning_option_id:
@@ -3594,8 +3925,13 @@ def close_bet(bet_id: str, body: CloseBetIn, info: dict = Depends(require_role("
                     _init_bal(balances, member)
                     balances[member] = round(balances[member] + payout, 2)
                     payouts[member]  = payout
+                    ledger_entries.append({"ts": ts, "member": member, "delta": payout,
+                                           "balance": balances[member],
+                                           "reason": f"Payout (pool): \"{bet['title']}\"" })
 
         _save_balances(balances)
+        if ledger_entries:
+            _append_ledger(ledger_entries)
         bet.update(
             status="closed",
             closed_at=datetime.now(timezone.utc).isoformat(),
@@ -3610,6 +3946,7 @@ def close_bet(bet_id: str, body: CloseBetIn, info: dict = Depends(require_role("
         _save_bets(bets)
 
     log_write(info, f"POST bets/{bet_id}/close — winner={body.winning_option_id}, pool=NB¥{total_pool}")
+    _discord_bet_settled(bet)
     return _bet_summary(bet)
 
 
@@ -3627,10 +3964,16 @@ def delete_bet(bet_id: str, info: dict = Depends(require_role("bookie"))):
         if bet["wagers"]:
             # Admin-only: refund everyone
             balances = _load_balances()
+            ledger_entries = []
+            ts = datetime.now(timezone.utc).isoformat()
             for member, w in bet["wagers"].items():
                 _init_bal(balances, member)
                 balances[member] = round(balances[member] + w["amount"], 2)
+                ledger_entries.append({"ts": ts, "member": member, "delta": w["amount"],
+                                       "balance": balances[member],
+                                       "reason": f"Refund (deleted): \"{bet['title']}\"" })
             _save_balances(balances)
+            _append_ledger(ledger_entries)
         _save_bets([b for b in bets if b["id"] != bet_id])
     log_write(info, f"DELETE bets/{bet_id}")
     return {"ok": True}
@@ -3638,13 +3981,74 @@ def delete_bet(bet_id: str, info: dict = Depends(require_role("bookie"))):
 
 @app.get("/api/bets/balances")
 def get_bets_balances():
-    """Public — NB¥ balances for all known members, sorted by balance desc."""
+    """Public — NB¥ balances for all known members, sorted by balance desc.
+    Includes per-member breakdown: bet_won, bet_lost, bet_placed, stats_earned, trivia_earned."""
     all_members = load_members()
     balances    = _load_balances()
     for name in all_members:
         _init_bal(balances, name)
-    result = [{"name": n, "balance": round(b, 2)} for n, b in balances.items()]
+
+    # Build per-member breakdown
+    breakdown: dict[str, dict] = {}
+    def _bd(name: str) -> dict:
+        if name not in breakdown:
+            breakdown[name] = {"bet_won": 0.0, "bet_lost": 0.0, "bet_placed": 0.0,
+                               "stats_earned": 0.0, "trivia_earned": 0.0}
+        return breakdown[name]
+
+    # bet_won, stats_earned, trivia_earned — from ledger
+    if LEDGER_FILE.exists():
+        ledger = json.loads(LEDGER_FILE.read_text())
+        for entry in ledger:
+            name   = entry.get("member", "")
+            delta  = entry.get("delta", 0.0)
+            reason = entry.get("reason", "")
+            bd = _bd(name)
+            if reason.startswith("Payout"):
+                bd["bet_won"] += delta
+            elif "Box score" in reason:
+                bd["stats_earned"] += delta
+            elif reason.startswith("Trivia"):
+                bd["trivia_earned"] += delta
+
+    # bet_lost and bet_placed — computed directly from bets data so open/locked
+    # wagers are correctly classified as "placed" rather than "lost"
+    for bet in _load_bets():
+        wagers = bet.get("wagers", {})
+        if bet["status"] in ("open", "locked"):
+            for member, w in wagers.items():
+                _bd(member)["bet_placed"] = round(_bd(member)["bet_placed"] + w["amount"], 2)
+        elif bet["status"] == "closed":
+            resolution = bet.get("resolution", {})
+            if not resolution.get("voided", False):
+                payouts = resolution.get("payouts", {})
+                for member, w in wagers.items():
+                    if member not in payouts:
+                        _bd(member)["bet_lost"] = round(_bd(member)["bet_lost"] + w["amount"], 2)
+            # voided bets: all stakes refunded, nothing counted as lost
+
+    result = []
+    for n, b in balances.items():
+        bd = _bd(n)
+        result.append({
+            "name":          n,
+            "balance":       round(b, 2),
+            "bet_won":       round(bd["bet_won"], 2),
+            "bet_lost":      round(bd["bet_lost"], 2),
+            "bet_placed":    round(bd["bet_placed"], 2),
+            "stats_earned":  round(bd["stats_earned"], 2),
+            "trivia_earned": round(bd["trivia_earned"], 2),
+        })
     return sorted(result, key=lambda x: (-x["balance"], x["name"]))
+
+
+@app.get("/api/bets/ledger")
+def get_bets_ledger(info: dict = Depends(require_admin)):
+    """Admin-only — full NB¥ transaction ledger, newest first."""
+    if not LEDGER_FILE.exists():
+        return []
+    ledger = json.loads(LEDGER_FILE.read_text())
+    return list(reversed(ledger))
 
 
 class BalanceAdjustIn(BaseModel):
@@ -3673,6 +4077,10 @@ def admin_adjust_balance(body: BalanceAdjustIn, info: dict = Depends(require_adm
             )
         balances[body.member] = new_bal
         _save_balances(balances)
+    ts = datetime.now(timezone.utc).isoformat()
+    reason_str = f"Admin adjustment: {body.reason}" if body.reason else "Admin adjustment"
+    _append_ledger([{"ts": ts, "member": body.member, "delta": body.delta,
+                     "balance": new_bal, "reason": reason_str}])
     verb = "gave" if body.delta > 0 else "took"
     log_write(info, f"POST bets/admin/adjust — {verb} NB¥{abs(body.delta)} {'to' if body.delta > 0 else 'from'} {body.member}" + (f" ({body.reason})" if body.reason else ""))
     return {"member": body.member, "old_balance": old_bal, "new_balance": new_bal, "delta": body.delta, "reason": body.reason}
