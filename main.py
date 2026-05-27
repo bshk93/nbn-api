@@ -4427,6 +4427,64 @@ def delete_proposal(proposal_id: str, info: dict = Depends(get_token_info)):
     return {"ok": True}
 
 
+# ── Constitution amendments ───────────────────────────────────────────────────
+
+CONSTITUTION_AMENDMENTS_FILE = DATA_DIR / "constitution-amendments.json"
+_amendments_lock = threading.Lock()
+
+
+def load_amendments() -> list[dict]:
+    if not CONSTITUTION_AMENDMENTS_FILE.exists():
+        return []
+    return json.loads(CONSTITUTION_AMENDMENTS_FILE.read_text())
+
+
+def save_amendments(data: list[dict]):
+    CONSTITUTION_AMENDMENTS_FILE.write_text(json.dumps(data, indent=2))
+
+
+class AmendmentIn(BaseModel):
+    date: str       # YYYY-MM-DD
+    summary: str
+
+
+@app.get("/api/constitution/amendments")
+def get_constitution_amendments():
+    return load_amendments()
+
+
+@app.post("/api/constitution/amendments")
+def add_constitution_amendment(body: AmendmentIn, info: dict = Depends(require_role("bod"))):
+    if not body.date or not body.summary.strip():
+        raise HTTPException(status_code=422, detail="date and summary are required")
+    entry = {
+        "id": secrets.token_hex(8),
+        "date": body.date,
+        "summary": body.summary.strip(),
+        "author": info["name"],
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    with _amendments_lock:
+        data = load_amendments()
+        data.append(entry)
+        save_amendments(data)
+    log_write(info, f"POST constitution/amendments: {body.summary[:60]}")
+    return entry
+
+
+@app.delete("/api/constitution/amendments/{amendment_id}")
+def delete_constitution_amendment(amendment_id: str, info: dict = Depends(require_role("bod"))):
+    with _amendments_lock:
+        data = load_amendments()
+        idx = next((i for i, a in enumerate(data) if a["id"] == amendment_id), None)
+        if idx is None:
+            raise HTTPException(status_code=404, detail="Amendment not found")
+        data.pop(idx)
+        save_amendments(data)
+    log_write(info, f"DELETE constitution/amendments/{amendment_id}")
+    return {"ok": True}
+
+
 CLAUDE_BIN = Path("/home/skim/.local/bin/claude")
 NBN_TODAY_DIR = Path("/home/skim/projects/nbn-today")
 
