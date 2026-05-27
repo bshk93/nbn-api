@@ -4427,62 +4427,53 @@ def delete_proposal(proposal_id: str, info: dict = Depends(get_token_info)):
     return {"ok": True}
 
 
-# ── Constitution amendments ───────────────────────────────────────────────────
+# ── Constitution ──────────────────────────────────────────────────────────────
 
-CONSTITUTION_AMENDMENTS_FILE = DATA_DIR / "constitution-amendments.json"
-_amendments_lock = threading.Lock()
-
-
-def load_amendments() -> list[dict]:
-    if not CONSTITUTION_AMENDMENTS_FILE.exists():
-        return []
-    return json.loads(CONSTITUTION_AMENDMENTS_FILE.read_text())
+CONSTITUTION_FILE = DATA_DIR / "constitution.json"
+_constitution_lock = threading.Lock()
 
 
-def save_amendments(data: list[dict]):
-    CONSTITUTION_AMENDMENTS_FILE.write_text(json.dumps(data, indent=2))
+def load_constitution() -> dict:
+    if not CONSTITUTION_FILE.exists():
+        return {"version": 0, "date": None, "updated_by": None, "content": "", "history": []}
+    return json.loads(CONSTITUTION_FILE.read_text())
 
 
-class AmendmentIn(BaseModel):
-    date: str       # YYYY-MM-DD
+def save_constitution(data: dict):
+    CONSTITUTION_FILE.write_text(json.dumps(data, indent=2))
+
+
+class ConstitutionUpdate(BaseModel):
+    content: str
     summary: str
 
 
-@app.get("/api/constitution/amendments")
-def get_constitution_amendments():
-    return load_amendments()
+@app.get("/api/constitution")
+def get_constitution():
+    return load_constitution()
 
 
-@app.post("/api/constitution/amendments")
-def add_constitution_amendment(body: AmendmentIn, info: dict = Depends(require_role("bod"))):
-    if not body.date or not body.summary.strip():
-        raise HTTPException(status_code=422, detail="date and summary are required")
-    entry = {
-        "id": secrets.token_hex(8),
-        "date": body.date,
-        "summary": body.summary.strip(),
-        "author": info["name"],
-        "created_at": datetime.utcnow().isoformat(),
-    }
-    with _amendments_lock:
-        data = load_amendments()
-        data.append(entry)
-        save_amendments(data)
-    log_write(info, f"POST constitution/amendments: {body.summary[:60]}")
-    return entry
-
-
-@app.delete("/api/constitution/amendments/{amendment_id}")
-def delete_constitution_amendment(amendment_id: str, info: dict = Depends(require_role("bod"))):
-    with _amendments_lock:
-        data = load_amendments()
-        idx = next((i for i, a in enumerate(data) if a["id"] == amendment_id), None)
-        if idx is None:
-            raise HTTPException(status_code=404, detail="Amendment not found")
-        data.pop(idx)
-        save_amendments(data)
-    log_write(info, f"DELETE constitution/amendments/{amendment_id}")
-    return {"ok": True}
+@app.put("/api/constitution")
+def put_constitution(body: ConstitutionUpdate, info: dict = Depends(require_role("bod"))):
+    if not body.content.strip() or not body.summary.strip():
+        raise HTTPException(status_code=422, detail="content and summary are required")
+    with _constitution_lock:
+        data = load_constitution()
+        new_version = data.get("version", 0) + 1
+        entry = {
+            "version": new_version,
+            "date": datetime.utcnow().strftime("%Y-%m-%d"),
+            "author": info["name"],
+            "summary": body.summary.strip(),
+        }
+        data["version"] = new_version
+        data["date"] = entry["date"]
+        data["updated_by"] = info["name"]
+        data["content"] = body.content
+        data.setdefault("history", []).append(entry)
+        save_constitution(data)
+    log_write(info, f"PUT constitution v{new_version}: {body.summary[:60]}")
+    return {"ok": True, "version": new_version}
 
 
 CLAUDE_BIN = Path("/home/skim/.local/bin/claude")
