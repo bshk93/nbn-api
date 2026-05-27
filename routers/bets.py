@@ -596,7 +596,7 @@ def get_bets_balances():
             "stats_earned":  round(bd["stats_earned"], 2),
             "trivia_earned": round(bd["trivia_earned"], 2),
         })
-    return sorted(result, key=lambda x: (-x["balance"], x["name"]))
+    return sorted(result, key=lambda x: (-(x["balance"] + x["bet_placed"]), x["name"]))
 
 
 @router.get("/api/bets/ledger")
