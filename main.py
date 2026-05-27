@@ -3483,11 +3483,21 @@ def _fmt_nby(amount: float) -> str:
     return f"NB¥{amount:,.2f}"
 
 
+def _prob_to_american(p: float) -> str:
+    """Convert an implied probability (0 < p < 1) to American odds string, e.g. '-700' or '+150'."""
+    if p >= 0.5:
+        odds = round(-(p / (1 - p)) * 100)
+        return str(odds)  # already negative
+    else:
+        odds = round(((1 - p) / p) * 100)
+        return f"+{odds}"
+
+
 def _discord_bet_created(bet: dict) -> None:
     bet_type = bet.get("bet_type", "pool")
     if bet_type == "fixed_odds":
         options_lines = "\n".join(
-            f"• {o['label']}  ({round(1 / o['probability'], 2)}× payout)"
+            f"• {o['label']}  ({_prob_to_american(o['probability'])} / {round(1 / o['probability'], 2)}× payout)"
             for o in bet["options"]
         )
         type_label = "Fixed Odds"
