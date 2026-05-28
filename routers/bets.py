@@ -19,7 +19,7 @@ router = APIRouter()
 
 NBY_START            = 1000.0
 NBY_BOXSCORE_REWARD  = 10.0
-NBY_BIO_REWARD       = 100.0
+NBY_BIO_REWARD       = 10.0
 NBY_MAX_WAGER        = 300.0
 
 DISCORD_BETS_WEBHOOK = "https://discord.com/api/webhooks/1509022602671427695/76fqELDrhV9Pj7TAd7fvq56VQTIUMi8ZwokSwaWSN-rWq0zMlUDr4zfhFJd35_Ioocyr"
