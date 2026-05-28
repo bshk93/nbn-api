@@ -33,6 +33,7 @@ CALENDAR_GAMES_FILE   = DATA_DIR / "calendar-games.json"
 BETS_FILE     = DATA_DIR / "bets.json"
 BALANCES_FILE = DATA_DIR / "member-balances.json"
 LEDGER_FILE   = DATA_DIR / "bets-ledger.json"
+BIO_REWARDS_FILE = DATA_DIR / "bio-rewards.json"
 PROPOSALS_FILE = DATA_DIR / "proposals.json"
 CONSTITUTION_FILE = DATA_DIR / "constitution.json"
 TRIVIA_SCORES_PATH = DATA_DIR / "trivia-scores.json"
@@ -41,6 +42,7 @@ PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PLAYER", "PROTECTED"
 
 _rules_lock         = threading.Lock()
 _picks_lock         = threading.Lock()
+_bio_rewards_lock   = threading.Lock()
 _txn_lock           = threading.Lock()
 _manual_queue_lock  = threading.Lock()
 _ovr_lock      = threading.Lock()
@@ -65,6 +67,14 @@ CURATOR_FIELDS = {
     "draft_year", "draft_round", "draft_pick",
     "photo_url", "height", "weight", "wingspan", "jersey_number", "retired",
 }
+
+# Fields eligible for the bio-fill NB¥ reward (excludes name/pos set at creation,
+# jersey_number set by team owners, and retired which is a status flag)
+BIO_REWARD_FIELDS = frozenset({
+    "dob", "college", "country",
+    "draft_year", "draft_round", "draft_pick",
+    "photo_url", "height", "weight", "wingspan",
+})
 
 ROSTER_MAX = 15
 

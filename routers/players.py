@@ -6,10 +6,11 @@ from pydantic import BaseModel
 
 from .constants import (
     DATA_DIR, PLAYER_BIOS_FILE, OVR_FILE, VALID_TEAMS,
-    _ovr_lock, CURATOR_FIELDS,
+    _ovr_lock, CURATOR_FIELDS, BIO_REWARD_FIELDS, BIO_REWARDS_FILE, _bio_rewards_lock,
 )
 from .storage import _load_json, _save_json, read_csv, log_write
 from .auth import get_token_info, has_role, require_any_role, require_admin
+from .bets import _award_bio_reward, NBY_BIO_REWARD
 
 router = APIRouter()
 
@@ -127,6 +128,35 @@ class OvrBatchEntry(BaseModel):
     ovr: int
 
 
+# ── Bio reward helpers ────────────────────────────────────────────────────────
+
+def _is_bio_empty(val) -> bool:
+    if val is None:
+        return True
+    if isinstance(val, str):
+        return val == ""
+    return False
+
+
+def _maybe_award_bio_reward(member: str, slug: str, old_bio: dict, new_bio: dict):
+    """Award NB¥100 per BIO_REWARD_FIELD that goes from empty to non-empty for the first time."""
+    newly_filled = [
+        f for f in BIO_REWARD_FIELDS
+        if _is_bio_empty(old_bio.get(f)) and not _is_bio_empty(new_bio.get(f))
+    ]
+    if not newly_filled:
+        return
+    with _bio_rewards_lock:
+        rewarded = _load_json(BIO_REWARDS_FILE, {})
+        new_fields = [f for f in newly_filled if f"{slug}:{f}" not in rewarded]
+        if not new_fields:
+            return
+        for f in new_fields:
+            rewarded[f"{slug}:{f}"] = True
+        _save_json(BIO_REWARDS_FILE, rewarded)
+    _award_bio_reward(member, NBY_BIO_REWARD * len(new_fields))
+
+
 # ── Player routes ─────────────────────────────────────────────────────────────
 
 @router.get("/api/players")
@@ -159,16 +189,22 @@ def update_player(slug: str, body: PlayerBio, info: dict = Depends(require_any_r
     if invalid_pos:
         raise HTTPException(status_code=422, detail=f"Invalid positions: {invalid_pos}")
     bios = load_player_bios()
+    existed = slug in bios
+    old_bio = dict(bios.get(slug, {}))
     if has_role(info, "curator") and not has_role(info, "rosters") and not has_role(info, "admin"):
         existing = bios.get(slug, {})
         update_data = body.model_dump()
         for field in CURATOR_FIELDS:
             existing[field] = update_data[field]
         bios[slug] = existing
+        new_bio = existing
     else:
         bios[slug] = body.model_dump()
+        new_bio = bios[slug]
     save_player_bios(bios)
     log_write(info, f"PUT players/{slug} ({body.name})")
+    if existed:
+        _maybe_award_bio_reward(info["name"], slug, old_bio, new_bio)
     return {"ok": True}
 
 

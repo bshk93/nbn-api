@@ -19,6 +19,7 @@ router = APIRouter()
 
 NBY_START            = 1000.0
 NBY_BOXSCORE_REWARD  = 10.0
+NBY_BIO_REWARD       = 100.0
 NBY_MAX_WAGER        = 300.0
 
 DISCORD_BETS_WEBHOOK = "https://discord.com/api/webhooks/1509022602671427695/76fqELDrhV9Pj7TAd7fvq56VQTIUMi8ZwokSwaWSN-rWq0zMlUDr4zfhFJd35_Ioocyr"
@@ -115,8 +116,9 @@ def _discord_bet_settled(bet: dict) -> None:
     wagers     = bet.get("wagers", {})
     payouts    = resolution.get("payouts", {})
 
-    winning_id    = bet.get("winning_option_id")
-    winning_label = next((o["label"] for o in bet["options"] if o["id"] == winning_id), "?")
+    win_ids = bet.get("winning_option_ids") or ([bet["winning_option_id"]] if bet.get("winning_option_id") else [])
+    win_id_set = set(win_ids)
+    winning_label = ", ".join(o["label"] for o in bet["options"] if o["id"] in win_id_set) or "?"
 
     if voided:
         total_refunded = resolution.get("total_pool", 0.0)
@@ -209,6 +211,20 @@ def _award_submission_reward(name: str) -> tuple[float, float]:
     return NBY_BOXSCORE_REWARD, balances[name]
 
 
+def _award_bio_reward(name: str, amount: float) -> tuple[float, float]:
+    """Award *amount* to *name* for filling in player bio fields.
+    Returns (amount, new_balance)."""
+    with _balances_lock:
+        balances = _load_balances()
+        _init_bal(balances, name)
+        balances[name] = round(balances[name] + amount, 2)
+        _save_balances(balances)
+    ts = datetime.now(timezone.utc).isoformat()
+    _append_ledger([{"ts": ts, "member": name, "delta": amount,
+                     "balance": balances[name], "reason": f"Bio field reward"}])
+    return amount, balances[name]
+
+
 def _bet_summary(bet: dict) -> dict:
     wagers = bet.get("wagers", {})
     option_totals: dict[str, float] = {opt["id"]: 0.0 for opt in bet["options"]}
@@ -250,7 +266,8 @@ class WagerIn(BaseModel):
 
 
 class CloseBetIn(BaseModel):
-    winning_option_id: str
+    winning_option_id: str | None = None
+    winning_option_ids: list[str] | None = None
 
 
 class BalanceAdjustIn(BaseModel):
@@ -405,8 +422,19 @@ def close_bet(bet_id: str, body: CloseBetIn, info: dict = Depends(require_role("
             raise HTTPException(status_code=404, detail="Bet not found")
         if bet["status"] not in ("open", "locked"):
             raise HTTPException(status_code=409, detail="Bet is already closed")
-        if body.winning_option_id not in {o["id"] for o in bet["options"]}:
-            raise HTTPException(status_code=422, detail="Invalid winning_option_id")
+
+        # Normalize to a list of winning IDs
+        if body.winning_option_ids:
+            win_ids = list(dict.fromkeys(body.winning_option_ids))
+        elif body.winning_option_id:
+            win_ids = [body.winning_option_id]
+        else:
+            raise HTTPException(status_code=422, detail="winning_option_id or winning_option_ids is required")
+        opt_id_set = {o["id"] for o in bet["options"]}
+        for wid in win_ids:
+            if wid not in opt_id_set:
+                raise HTTPException(status_code=422, detail=f"Invalid winning option id: {wid}")
+        win_ids_set = set(win_ids)
 
         wagers   = bet["wagers"]
         balances = _load_balances()
@@ -415,7 +443,7 @@ def close_bet(bet_id: str, body: CloseBetIn, info: dict = Depends(require_role("
         if bet.get("bet_type") == "fixed_odds":
             total_stakes   = round(sum(w["amount"] for w in wagers.values()), 2)
             winners_stakes = round(
-                sum(w["amount"] for w in wagers.values() if w["option_id"] == body.winning_option_id),
+                sum(w["amount"] for w in wagers.values() if w["option_id"] in win_ids_set),
                 2,
             )
             voided         = winners_stakes == 0
@@ -433,7 +461,7 @@ def close_bet(bet_id: str, body: CloseBetIn, info: dict = Depends(require_role("
                                            "reason": f"Refund (voided): \"{bet['title']}\"" })
             else:
                 for member, w in wagers.items():
-                    if w["option_id"] == body.winning_option_id:
+                    if w["option_id"] in win_ids_set:
                         payout = w.get("potential_payout", w["amount"])
                         _init_bal(balances, member)
                         balances[member] = round(balances[member] + payout, 2)
@@ -450,7 +478,8 @@ def close_bet(bet_id: str, body: CloseBetIn, info: dict = Depends(require_role("
             bet.update(
                 status="closed",
                 closed_at=datetime.now(timezone.utc).isoformat(),
-                winning_option_id=body.winning_option_id,
+                winning_option_id=win_ids[0],
+                winning_option_ids=win_ids,
                 resolution={
                     "total_pool":     total_stakes,
                     "winners_pool":   winners_stakes,
@@ -461,14 +490,14 @@ def close_bet(bet_id: str, body: CloseBetIn, info: dict = Depends(require_role("
                 },
             )
             _save_bets(bets)
-            log_write(info, f"POST bets/{bet_id}/close (fixed_odds) — winner={body.winning_option_id}, stakes=NB¥{total_stakes}, paid=NB¥{total_paid_out:.2f}, shortfall=NB¥{net_shortfall:.2f}")
+            log_write(info, f"POST bets/{bet_id}/close (fixed_odds) — winners={win_ids}, stakes=NB¥{total_stakes}, paid=NB¥{total_paid_out:.2f}, shortfall=NB¥{net_shortfall:.2f}")
             _discord_bet_settled(bet)
             return _bet_summary(bet)
 
         # Pool bet
         total_pool   = round(sum(w["amount"] for w in wagers.values()), 2)
         winners_pool = round(
-            sum(w["amount"] for w in wagers.values() if w["option_id"] == body.winning_option_id),
+            sum(w["amount"] for w in wagers.values() if w["option_id"] in win_ids_set),
             2,
         )
         voided = winners_pool == 0
@@ -485,7 +514,7 @@ def close_bet(bet_id: str, body: CloseBetIn, info: dict = Depends(require_role("
                                        "reason": f"Refund (voided): \"{bet['title']}\"" })
         else:
             for member, w in wagers.items():
-                if w["option_id"] == body.winning_option_id:
+                if w["option_id"] in win_ids_set:
                     payout = round((w["amount"] / winners_pool) * total_pool, 2)
                     _init_bal(balances, member)
                     balances[member] = round(balances[member] + payout, 2)
@@ -500,7 +529,8 @@ def close_bet(bet_id: str, body: CloseBetIn, info: dict = Depends(require_role("
         bet.update(
             status="closed",
             closed_at=datetime.now(timezone.utc).isoformat(),
-            winning_option_id=body.winning_option_id,
+            winning_option_id=win_ids[0],
+            winning_option_ids=win_ids,
             resolution={
                 "total_pool":   total_pool,
                 "winners_pool": winners_pool,
@@ -510,7 +540,7 @@ def close_bet(bet_id: str, body: CloseBetIn, info: dict = Depends(require_role("
         )
         _save_bets(bets)
 
-    log_write(info, f"POST bets/{bet_id}/close — winner={body.winning_option_id}, pool=NB¥{total_pool}")
+    log_write(info, f"POST bets/{bet_id}/close — winners={win_ids}, pool=NB¥{total_pool}")
     _discord_bet_settled(bet)
     return _bet_summary(bet)
 
@@ -554,7 +584,7 @@ def get_bets_balances():
     def _bd(name: str) -> dict:
         if name not in breakdown:
             breakdown[name] = {"bet_won": 0.0, "bet_lost": 0.0, "bet_placed": 0.0,
-                               "stats_earned": 0.0, "trivia_earned": 0.0}
+                               "stats_earned": 0.0, "trivia_earned": 0.0, "bio_earned": 0.0}
         return breakdown[name]
 
     if LEDGER_FILE.exists():
@@ -570,6 +600,8 @@ def get_bets_balances():
                 bd["stats_earned"] += delta
             elif reason.startswith("Trivia"):
                 bd["trivia_earned"] += delta
+            elif "Bio field" in reason:
+                bd["bio_earned"] += delta
 
     for bet in _load_bets():
         wagers = bet.get("wagers", {})
@@ -595,6 +627,7 @@ def get_bets_balances():
             "bet_placed":    round(bd["bet_placed"], 2),
             "stats_earned":  round(bd["stats_earned"], 2),
             "trivia_earned": round(bd["trivia_earned"], 2),
+            "bio_earned":    round(bd["bio_earned"], 2),
         })
     return sorted(result, key=lambda x: (-(x["balance"] + x["bet_placed"]), x["name"]))
 
