@@ -180,6 +180,8 @@ def _get_or_create_state() -> dict:
     today = _today_et()
     state = _load_perry()
     if state.get("date") != today:
+        if state.get("date"):
+            _archive_state(state)
         state = _generate_puzzle(today)
         _save_perry(state)
     return state
@@ -351,9 +353,6 @@ def post_perry_submit(body: PerrySubmit, info: dict = Depends(get_token_info)):
         used_teams = [pick["team"] for pick in lineup_raw.values()]
         if set(used_teams) != today_teams or len(used_teams) != 6:
             raise HTTPException(status_code=422, detail="Each of today's 6 teams must be used exactly once")
-
-        if len({pick["slug"] for pick in lineup_raw.values()}) != 6:
-            raise HTTPException(status_code=422, detail="Each player can only be used once")
 
         team_players = state["team_players"]
         for slot, pick in lineup_raw.items():
