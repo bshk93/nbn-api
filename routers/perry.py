@@ -132,7 +132,6 @@ def _compute_solution(teams: list[str], team_players: dict) -> tuple[dict | None
         score = 0.0
         valid = True
         assignment: dict = {}
-        used_slugs: set = set()
 
         for slot_idx, team_idx in enumerate(perm):
             slot = SLOTS[slot_idx]
@@ -140,9 +139,9 @@ def _compute_solution(teams: list[str], team_players: dict) -> tuple[dict | None
             players = team_players[team]
 
             if slot == "6MAN":
-                eligible = [p for p in players if p["slug"] not in used_slugs]
+                eligible = players
             else:
-                eligible = [p for p in players if slot in p["pos"] and p["slug"] not in used_slugs]
+                eligible = [p for p in players if slot in p["pos"]]
 
             if not eligible:
                 valid = False
@@ -151,7 +150,6 @@ def _compute_solution(teams: list[str], team_players: dict) -> tuple[dict | None
             best_p = max(eligible, key=lambda p: p["gmsc"])
             score += best_p["gmsc"]
             assignment[slot] = {**best_p, "team": team}
-            used_slugs.add(best_p["slug"])
 
         if valid and score > best_score:
             best_score = score
