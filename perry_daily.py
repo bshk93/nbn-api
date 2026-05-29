@@ -5,16 +5,15 @@ sys.path.insert(0, "/home/skim/projects/nbn-api")
 
 from routers.perry import (
     _load_perry, _save_perry, _generate_puzzle, _award_prizes,
-    _discord_daily_results, _today_et,
+    _archive_state, _discord_daily_results, _today_et,
 )
 
 def main():
     old = _load_perry()
-    if old and old.get("entries"):
-        _award_prizes(old)
-        _discord_daily_results(old)
-    elif old and old.get("date"):
-        # No entries — still post results (shows no entries + solution)
+    if old and old.get("date"):
+        _archive_state(old)
+        if old.get("entries"):
+            _award_prizes(old)
         _discord_daily_results(old)
 
     today = _today_et()

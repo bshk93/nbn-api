@@ -21,7 +21,8 @@ from .bets import (
 
 router = APIRouter()
 
-PERRY_STATE_FILE = DATA_DIR / "perry-state.json"
+PERRY_STATE_FILE   = DATA_DIR / "perry-state.json"
+PERRY_ARCHIVE_FILE = DATA_DIR / "perry-archive.json"
 NBN_TODAY_DIR    = Path("/home/skim/projects/nbn-today")
 PLAYER_SEASONS_CSV = NBN_TODAY_DIR / "players" / "player_seasons.csv"
 
@@ -269,6 +270,22 @@ def _award_prizes(state: dict) -> None:
     _append_ledger(ledger_entries)
 
 
+# ── Archive ───────────────────────────────────────────────────────────────────
+
+def _archive_state(state: dict) -> None:
+    """Save completed day's state to archive, stripping team_players to save space."""
+    archive = _load_json(PERRY_ARCHIVE_FILE, {})
+    archive[state["date"]] = {
+        "date": state["date"],
+        "teams": state["teams"],
+        "team_names": state["team_names"],
+        "solution": state["solution"],
+        "solution_score": state["solution_score"],
+        "entries": state["entries"],
+    }
+    _save_json(PERRY_ARCHIVE_FILE, archive)
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/api/perry/today")
@@ -373,13 +390,41 @@ def post_perry_submit(body: PerrySubmit, info: dict = Depends(get_token_info)):
     }
 
 
+@router.get("/api/perry/history")
+def get_perry_history():
+    archive = _load_json(PERRY_ARCHIVE_FILE, {})
+    result = []
+    for date_str, day in sorted(archive.items(), reverse=True):
+        lb = _leaderboard(day["entries"])
+        result.append({
+            "date": date_str,
+            "teams": day["teams"],
+            "solution_score": day["solution_score"],
+            "entries": len(day["entries"]),
+            "winner": lb[0]["member"] if lb else None,
+            "winner_score": lb[0]["score"] if lb else None,
+        })
+    return result
+
+
+@router.get("/api/perry/history/{date}")
+def get_perry_history_date(date: str):
+    archive = _load_json(PERRY_ARCHIVE_FILE, {})
+    day = archive.get(date)
+    if not day:
+        raise HTTPException(status_code=404, detail=f"No results for {date}")
+    return {**day, "leaderboard": _leaderboard(day["entries"])}
+
+
 @router.post("/api/perry/admin/reset")
 def perry_admin_reset(info: dict = Depends(require_admin)):
     with _perry_lock:
         old = _load_perry()
-        if old and old.get("entries"):
-            _award_prizes(old)
-            _discord_daily_results(old)
+        if old and old.get("date"):
+            _archive_state(old)
+            if old.get("entries"):
+                _award_prizes(old)
+                _discord_daily_results(old)
         today = _today_et()
         new_state = _generate_puzzle(today)
         _save_perry(new_state)
