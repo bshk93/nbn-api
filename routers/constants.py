@@ -35,8 +35,10 @@ BALANCES_FILE = DATA_DIR / "member-balances.json"
 LEDGER_FILE   = DATA_DIR / "bets-ledger.json"
 BIO_REWARDS_FILE = DATA_DIR / "bio-rewards.json"
 PROPOSALS_FILE = DATA_DIR / "proposals.json"
+TIPS_FILE      = DATA_DIR / "tips.json"
 CONSTITUTION_FILE = DATA_DIR / "constitution.json"
 TRIVIA_SCORES_PATH = DATA_DIR / "trivia-scores.json"
+STRIKES_FILE       = DATA_DIR / "strikes.json"
 
 PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PLAYER", "PROTECTED", "SWAP_OWNER", "NOTES"]
 
