@@ -148,7 +148,7 @@ class DraftLivePatch(BaseModel):
 
 
 @router.patch("/api/draft/live")
-def patch_draft_live(body: DraftLivePatch, info: dict = Depends(require_admin)):
+def patch_draft_live(body: DraftLivePatch, info: dict = Depends(require_any_role("bod"))):
     with _draft_lock:
         state = load_draft_live()
         if body.year is not None:
@@ -171,7 +171,7 @@ def set_queue(team: str, body: QueueBody, info: dict = Depends(get_token_info)):
     team = team.upper()
     if team not in VALID_TEAMS:
         raise HTTPException(status_code=404, detail="Unknown team")
-    if not has_role(info, team.lower()) and not has_role(info, "admin"):
+    if not has_role(info, team.lower()) and not has_role(info, "admin") and not has_role(info, "bod"):
         raise HTTPException(status_code=403, detail=f"'{team.lower()}' role required")
 
     with _draft_lock:
@@ -217,7 +217,7 @@ def submit_pick(body: DraftPickBody, info: dict = Depends(get_token_info)):
     orig = body.orig.upper()
     if orig not in VALID_TEAMS:
         raise HTTPException(status_code=404, detail="Unknown team")
-    is_admin = has_role(info, "admin")
+    is_privileged = has_role(info, "admin") or has_role(info, "bod")
 
     with _draft_lock:
         state = load_draft_live()
@@ -241,7 +241,7 @@ def submit_pick(body: DraftPickBody, info: dict = Depends(get_token_info)):
 
         owners = _pick_owners(match)
 
-        if not is_admin:
+        if not is_privileged:
             start, end = get_window(state, body.round, pick_num)
             now = datetime.now(tz=EASTERN)
             if start is None or not (start <= now < end):
