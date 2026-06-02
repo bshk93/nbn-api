@@ -40,6 +40,7 @@ TIPS_FILE      = DATA_DIR / "tips.json"
 CONSTITUTION_FILE = DATA_DIR / "constitution.json"
 TRIVIA_SCORES_PATH = DATA_DIR / "trivia-scores.json"
 STRIKES_FILE       = DATA_DIR / "strikes.json"
+DRAFT_LIVE_FILE    = DATA_DIR / "draft-live.json"
 
 PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PLAYER", "PROTECTED", "SWAP_OWNER", "NOTES"]
 
