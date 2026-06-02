@@ -21,7 +21,6 @@ _draft_lock = threading.Lock()
 
 def _default_state() -> dict:
     return {
-        "live": False,
         "year": 2026,
         "round1_date": None,
         "youtube_embed_url": "",
@@ -80,7 +79,7 @@ def auto_submit_loop_sync():
     """Check for expired pick windows and auto-submit queued players. Called every 30s."""
     with _draft_lock:
         state = load_draft_live()
-        if not state.get("live") or not state.get("round1_date"):
+        if not state.get("round1_date"):
             return
 
         year = state.get("year", 2026)
@@ -130,7 +129,6 @@ def get_draft_live():
 
 
 class DraftLivePatch(BaseModel):
-    live: Optional[bool] = None
     year: Optional[int] = None
     round1_date: Optional[str] = None
     youtube_embed_url: Optional[str] = None
@@ -140,8 +138,6 @@ class DraftLivePatch(BaseModel):
 def patch_draft_live(body: DraftLivePatch, info: dict = Depends(require_admin)):
     with _draft_lock:
         state = load_draft_live()
-        if body.live is not None:
-            state["live"] = body.live
         if body.year is not None:
             state["year"] = body.year
         if body.round1_date is not None:
@@ -206,9 +202,6 @@ def submit_pick(body: DraftPickBody, info: dict = Depends(get_token_info)):
 
     with _draft_lock:
         state = load_draft_live()
-
-        if not is_admin and not state.get("live"):
-            raise HTTPException(status_code=422, detail="Draft is not live")
 
         picks = _load_picks()
         match = next(
