@@ -101,19 +101,32 @@ def auto_submit_loop_sync():
             if end is None or now < end:
                 break
             owners = _pick_owners(p)
-            queued = next(
-                (state["queue"][o] for o in owners if o in state["queue"]),
-                None,
-            )
-            if queued and queued not in drafted:
-                p["PLAYER"] = queued
-                drafted.add(queued)
-                for o in owners:
-                    state["queue"].pop(o, None)
+            # Find first available player from any owner's queue
+            chosen: Optional[str] = None
+            chosen_owner: Optional[str] = None
+            for o in owners:
+                raw = state["queue"].get(o)
+                q_list = raw if isinstance(raw, list) else ([raw] if raw else [])
+                for slug in q_list:
+                    if slug not in drafted:
+                        chosen, chosen_owner = slug, o
+                        break
+                if chosen:
+                    break
+            if chosen:
+                p["PLAYER"] = chosen
+                drafted.add(chosen)
+                # Remove submitted player from that owner's queue; keep the rest
+                raw = state["queue"].get(chosen_owner, [])
+                remaining = [s for s in (raw if isinstance(raw, list) else [raw]) if s != chosen]
+                if remaining:
+                    state["queue"][chosen_owner] = remaining
+                else:
+                    state["queue"].pop(chosen_owner, None)
                 changed = True
                 logger.info(
                     "[auto-submit] %d R%d P%d %s → %s",
-                    year, int(p["ROUND"]), int(p["PICK"]), p.get("OWNER"), queued,
+                    year, int(p["ROUND"]), int(p["PICK"]), p.get("OWNER"), chosen,
                 )
 
         if changed:
@@ -150,7 +163,7 @@ def patch_draft_live(body: DraftLivePatch, info: dict = Depends(require_admin)):
 
 
 class QueueBody(BaseModel):
-    player: Optional[str] = None
+    players: list[str] = []  # ordered preference list; empty = clear queue
 
 
 @router.put("/api/draft/queue/{team}")
@@ -165,25 +178,31 @@ def set_queue(team: str, body: QueueBody, info: dict = Depends(get_token_info)):
         state = load_draft_live()
         year = state.get("year", 2026)
 
-        if body.player:
+        if body.players:
             bios = _load_json(PLAYER_BIOS_FILE, {})
-            bio = bios.get(body.player)
-            if not bio or bio.get("draft_year") != year:
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"Player '{body.player}' not in {year} draft class",
-                )
             picks = _load_picks()
-            if any(p.get("PLAYER") == body.player for p in picks if p.get("PLAYER")):
-                raise HTTPException(status_code=422, detail="Player already drafted")
-            state["queue"][team] = body.player
+            drafted = {p["PLAYER"] for p in picks if p.get("PLAYER")}
+            seen: set[str] = set()
+            for slug in body.players:
+                if slug in seen:
+                    raise HTTPException(status_code=422, detail=f"Duplicate player: {slug!r}")
+                seen.add(slug)
+                bio = bios.get(slug)
+                if not bio or bio.get("draft_year") != year:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Player '{slug}' not in {year} draft class",
+                    )
+                if slug in drafted:
+                    raise HTTPException(status_code=422, detail=f"Player '{slug}' already drafted")
+            state["queue"][team] = body.players
         else:
             state["queue"].pop(team, None)
 
         save_draft_live(state)
 
-    log_write(info, f"PUT draft/queue/{team} — player={body.player!r}")
-    return {"team": team, "player": body.player}
+    log_write(info, f"PUT draft/queue/{team} — {len(body.players)} players")
+    return {"team": team, "players": body.players}
 
 
 class DraftPickBody(BaseModel):
@@ -243,8 +262,17 @@ def submit_pick(body: DraftPickBody, info: dict = Depends(get_token_info)):
         match["PLAYER"] = body.player
         _save_picks(picks)
 
+        # Remove submitted player from each owner's queue; keep remaining entries
         for o in owners:
-            state["queue"].pop(o, None)
+            raw = state["queue"].get(o)
+            if raw is None:
+                continue
+            q_list = raw if isinstance(raw, list) else [raw]
+            remaining = [s for s in q_list if s != body.player]
+            if remaining:
+                state["queue"][o] = remaining
+            else:
+                state["queue"].pop(o, None)
         save_draft_live(state)
 
     log_write(info, f"POST draft/pick — {body.year} R{body.round} {orig} → {body.player}")
