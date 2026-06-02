@@ -573,6 +573,16 @@ def delete_bet(bet_id: str, info: dict = Depends(require_role("bookie"))):
     return {"ok": True}
 
 
+@router.get("/api/bets/balance/{member}")
+def get_member_balance(member: str):
+    all_members = load_members()
+    if member not in all_members:
+        raise HTTPException(status_code=404, detail=f"Member '{member}' not found")
+    balances = _load_balances()
+    _init_bal(balances, member)
+    return {"name": member, "balance": balances[member]}
+
+
 @router.get("/api/bets/balances")
 def get_bets_balances():
     all_members = load_members()

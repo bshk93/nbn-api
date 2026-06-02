@@ -636,6 +636,79 @@ def get_boxscores(date: str = Query(...), season: str = Query(default=None)):
     return sorted(games.values(), key=lambda g: (g["home_team"], g["away_team"]))
 
 
+def _gamelog_row(r: dict, season: str) -> dict:
+    def iv(k): return int(r.get(k, 0) or 0)
+    def fv(k):
+        v = r.get(k, "")
+        try: return round(float(v), 3)
+        except (ValueError, TypeError): return None
+    opp = r.get("OPP", "").strip()
+    return {
+        "date": r.get("DATE", ""),
+        "season": season,
+        "team": r.get("TEAM", "").strip(),
+        "opp": opp,
+        "opp_raw": r.get("OPP_RAW", opp.lstrip("@")).strip(),
+        "home": not opp.startswith("@"),
+        "wl": r.get("WL", "").strip(),
+        "team_pts": iv("TEAM_PTS"),
+        "opp_pts": iv("OPP_TEAM_PTS"),
+        "min": iv("M"),
+        "pts": iv("P"),
+        "reb": iv("R"),
+        "oreb": iv("OR"),
+        "dreb": iv("DR"),
+        "ast": iv("A"),
+        "stl": iv("S"),
+        "blk": iv("B"),
+        "tov": iv("TO"),
+        "pf": iv("PF"),
+        "fgm": iv("FGM"),
+        "fga": iv("FGA"),
+        "tpm": iv("3PM"),
+        "tpa": iv("3PA"),
+        "ftm": iv("FTM"),
+        "fta": iv("FTA"),
+        "fgpct": fv("FGPCT"),
+        "tppct": fv("3PPCT"),
+        "ftpct": fv("FTPCT"),
+        "td": r.get("TD", "0") == "1",
+        "gametype": r.get("gametype", "REG"),
+    }
+
+
+@router.get("/api/players/{slug}/gamelog")
+def get_player_gamelog(slug: str):
+    bios = load_player_bios()
+    bio = bios.get(slug)
+    if not bio:
+        raise HTTPException(status_code=404, detail="Player not found")
+    player_name = (bio.get("name") or "").strip().upper()
+    if not player_name:
+        raise HTTPException(status_code=404, detail="Player has no name")
+
+    results = []
+
+    for path in sorted(DATA_DIR.glob("allstats-??-??.csv")):
+        season = path.stem[len("allstats-"):]
+        _, rows = read_csv(path)
+        for r in rows:
+            if r.get("PLAYER", "").strip().upper() == player_name:
+                results.append(_gamelog_row(r, season))
+
+    for path in sorted(DATA_DIR.glob("allstats-playoffs-??.csv")):
+        end_yr = path.stem[len("allstats-playoffs-"):]
+        start_yr = str(int(end_yr) - 1).zfill(2)[-2:]
+        season = f"{start_yr}-{end_yr}"
+        _, rows = read_csv(path)
+        for r in rows:
+            if r.get("PLAYER", "").strip().upper() == player_name:
+                results.append(_gamelog_row(r, season))
+
+    results.sort(key=lambda r: r["date"], reverse=True)
+    return results
+
+
 @router.get("/api/build/status")
 def get_build_status():
     return _read_build_status()

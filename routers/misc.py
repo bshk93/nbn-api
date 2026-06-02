@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from .constants import (
     DATA_DIR, CAP_LEVELS_FILE, ROOKIE_SCALE_FILE, AWARDS_CONFIG_FILE,
+    AWARDS_HISTORY_FILE, PLAYER_BIOS_FILE,
     CALENDAR_EVENTS_FILE, CALENDAR_GAMES_FILE, TRIVIA_SCORES_PATH,
     VALID_TEAMS, logger,
 )
@@ -68,6 +69,61 @@ def put_cap_level(season: str, body: CapLevel, info: dict = Depends(require_role
 
 # ── Awards config ─────────────────────────────────────────────────────────────
 
+_INDIVIDUAL_AWARDS = ["MVP", "DPOY", "ROTY", "6MOY", "MIP"]
+# (ballot_key, tier_size, num_tiers, scoring_per_tier)
+_TEAM_AWARDS = [
+    ("All-NBN",     5, 3, [5, 3, 1]),
+    ("All-Defense", 5, 2, [5, 3]),
+    ("All-Rookie",  5, 2, [5, 3]),
+]
+
+def _compute_season_awards(ballots: dict, bios: dict) -> dict:
+    missing = []
+
+    def to_name(slug):
+        bio = bios.get(slug)
+        if not bio:
+            missing.append(slug)
+            return f"UNKNOWN({slug})"
+        return bio["name"]
+
+    result = {}
+
+    for key in _INDIVIDUAL_AWARDS:
+        scores: dict[str, int] = {}
+        for team_ballot in ballots.values():
+            for i, slug in enumerate(team_ballot.get(key, [])[:3]):
+                if slug:
+                    scores[slug] = scores.get(slug, 0) + [5, 3, 1][i]
+        if scores:
+            winner = max(scores, key=lambda s: scores[s])
+            result[key] = [to_name(winner)]
+        else:
+            result[key] = []
+
+    for ballot_key, tier_size, num_tiers, scoring in _TEAM_AWARDS:
+        scores = {}
+        for team_ballot in ballots.values():
+            for idx, slug in enumerate(team_ballot.get(ballot_key, [])):
+                if not slug:
+                    continue
+                tier = idx // tier_size
+                if tier < len(scoring):
+                    scores[slug] = scores.get(slug, 0) + scoring[tier]
+        ranked = sorted(scores, key=lambda s: scores[s], reverse=True)
+        if ballot_key == "All-NBN":
+            for t in range(num_tiers):
+                tier_slugs = ranked[t * tier_size:(t + 1) * tier_size]
+                result[f"All-NBN-{t + 1}"] = [to_name(s) for s in tier_slugs]
+        else:
+            result[ballot_key] = [to_name(s) for s in ranked[:tier_size * num_tiers]]
+
+    if missing:
+        raise ValueError(f"Unknown player slugs in ballots: {', '.join(sorted(set(missing)))}")
+
+    return result
+
+
 class AwardsSeasonConfig(BaseModel):
     revealed: bool = False
 
@@ -81,6 +137,20 @@ def get_awards_config():
 
 @router.put("/api/awards-config/{season}")
 def put_awards_config(season: str, body: AwardsSeasonConfig, info: dict = Depends(require_admin)):
+    if body.revealed:
+        ballots_path = _awards_ballots_path(season)
+        if not ballots_path.exists():
+            raise HTTPException(status_code=422, detail=f"No ballot data for season {season} — cannot reveal")
+        ballots = json.loads(ballots_path.read_text())
+        bios = json.loads(PLAYER_BIOS_FILE.read_text()) if PLAYER_BIOS_FILE.exists() else {}
+        try:
+            season_awards = _compute_season_awards(ballots, bios)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        history = json.loads(AWARDS_HISTORY_FILE.read_text()) if AWARDS_HISTORY_FILE.exists() else {}
+        history[season] = season_awards
+        AWARDS_HISTORY_FILE.write_text(json.dumps(history, indent=2))
+
     config = json.loads(AWARDS_CONFIG_FILE.read_text()) if AWARDS_CONFIG_FILE.exists() else {}
     config[season] = body.model_dump()
     AWARDS_CONFIG_FILE.write_text(json.dumps(config, indent=2))
