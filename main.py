@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import auth, players, roster_picks, transactions, boxscores, bets, proposals, misc, tips, perry, strikes, draft
+from routers import auth, players, roster_picks, transactions, boxscores, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest
 
 logging.basicConfig(
     stream=sys.stdout,
@@ -57,5 +57,7 @@ app.include_router(proposals.router)
 app.include_router(misc.router)
 app.include_router(tips.router)
 app.include_router(perry.router)
+app.include_router(poeltl.router)
 app.include_router(strikes.router)
 app.include_router(draft.router)
+app.include_router(invest.router)
