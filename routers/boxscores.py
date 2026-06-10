@@ -812,6 +812,28 @@ def register_boxscore_queue(body: BoxscoreQueueRequest, info: dict = Depends(req
     return {"ok": True, "id": item_id, "nbyen_reward": reward, "nbyen_balance": new_bal}
 
 
+@router.get("/api/boxscore/queue")
+def list_manual_queue(info: dict = Depends(require_any_role("rosters", "stats"))):
+    with _manual_queue_lock:
+        if not MANUAL_QUEUE_FILE.exists():
+            return []
+        return json.loads(MANUAL_QUEUE_FILE.read_text())
+
+
+@router.delete("/api/boxscore/queue/{item_id}")
+def delete_manual_queue_entry(item_id: str, info: dict = Depends(require_any_role("rosters", "stats"))):
+    with _manual_queue_lock:
+        if not MANUAL_QUEUE_FILE.exists():
+            raise HTTPException(status_code=404, detail="Queue entry not found")
+        queue = json.loads(MANUAL_QUEUE_FILE.read_text())
+        new_queue = [q for q in queue if q["id"] != item_id]
+        if len(new_queue) == len(queue):
+            raise HTTPException(status_code=404, detail="Queue entry not found")
+        MANUAL_QUEUE_FILE.write_text(json.dumps(new_queue))
+    logger.info("[%s] DELETE boxscore/queue/%s", info.get("name"), item_id)
+    return {"ok": True}
+
+
 @router.get("/api/boxscore/pending")
 def list_pending_boxscores(info: dict = Depends(require_any_role("rosters", "stats"))):
     if not PENDING_BOXSCORES_DIR.exists():
