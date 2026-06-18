@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from .constants import (
-    DATA_DIR, BETS_FILE, BALANCES_FILE, LEDGER_FILE,
+    DATA_DIR, BETS_FILE, BALANCES_FILE, LEDGER_FILE, TIPS_FILE,
     logger,
 )
 from .storage import _load_json, _save_json, log_write
@@ -18,7 +18,7 @@ from .auth import get_token_info, has_role, require_role, require_admin, load_me
 router = APIRouter()
 
 NBY_START            = 1000.0
-NBY_BOXSCORE_REWARD  = 10.0
+NBY_BOXSCORE_REWARD  = 200.0
 NBY_BIO_REWARD       = 10.0
 NBY_MAX_WAGER        = 300.0
 
@@ -446,32 +446,22 @@ def close_bet(bet_id: str, body: CloseBetIn, info: dict = Depends(require_role("
                 sum(w["amount"] for w in wagers.values() if w["option_id"] in win_ids_set),
                 2,
             )
-            voided         = winners_stakes == 0
             total_paid_out = 0.0
 
             ledger_entries = []
             ts = datetime.now(timezone.utc).isoformat()
-            if voided:
-                for member, w in wagers.items():
+            for member, w in wagers.items():
+                if w["option_id"] in win_ids_set:
+                    payout = w.get("potential_payout", w["amount"])
                     _init_bal(balances, member)
-                    balances[member] = round(balances[member] + w["amount"], 2)
-                    payouts[member]  = w["amount"]
-                    ledger_entries.append({"ts": ts, "member": member, "delta": w["amount"],
+                    balances[member] = round(balances[member] + payout, 2)
+                    payouts[member]  = payout
+                    total_paid_out   = round(total_paid_out + payout, 2)
+                    ledger_entries.append({"ts": ts, "member": member, "delta": payout,
                                            "balance": balances[member],
-                                           "reason": f"Refund (voided): \"{bet['title']}\"" })
-            else:
-                for member, w in wagers.items():
-                    if w["option_id"] in win_ids_set:
-                        payout = w.get("potential_payout", w["amount"])
-                        _init_bal(balances, member)
-                        balances[member] = round(balances[member] + payout, 2)
-                        payouts[member]  = payout
-                        total_paid_out   = round(total_paid_out + payout, 2)
-                        ledger_entries.append({"ts": ts, "member": member, "delta": payout,
-                                               "balance": balances[member],
-                                               "reason": f"Payout (fixed odds): \"{bet['title']}\"" })
+                                           "reason": f"Payout (fixed odds): \"{bet['title']}\"" })
 
-            net_shortfall = round(total_paid_out - total_stakes, 2) if not voided else 0.0
+            net_shortfall = round(total_paid_out - total_stakes, 2)
             _save_balances(balances)
             if ledger_entries:
                 _append_ledger(ledger_entries)
@@ -483,9 +473,9 @@ def close_bet(bet_id: str, body: CloseBetIn, info: dict = Depends(require_role("
                 resolution={
                     "total_pool":     total_stakes,
                     "winners_pool":   winners_stakes,
-                    "total_paid_out": total_paid_out if not voided else total_stakes,
+                    "total_paid_out": total_paid_out,
                     "net_shortfall":  net_shortfall,
-                    "voided":         voided,
+                    "voided":         False,
                     "payouts":        payouts,
                 },
             )
@@ -583,6 +573,70 @@ def get_member_balance(member: str):
     return {"name": member, "balance": balances[member]}
 
 
+@router.get("/api/bets/stats/{member}")
+def get_member_bet_stats(member: str):
+    all_members = load_members()
+    if member not in all_members:
+        raise HTTPException(status_code=404, detail=f"Member '{member}' not found")
+
+    bets = _load_bets()
+    tips = _load_json(TIPS_FILE, [])
+
+    wager_count = 0
+    win_count = 0
+    net_pnl = 0.0
+    max_odds_win = 0.0
+    bet_results: list[dict] = []  # {ts, won} for streak calc
+
+    for bet in bets:
+        if bet["status"] != "closed":
+            continue
+        wager = bet.get("wagers", {}).get(member)
+        if not wager:
+            continue
+        resolution = bet.get("resolution", {})
+        if resolution.get("voided", False):
+            continue
+
+        win_ids = set(bet.get("winning_option_ids") or
+                      ([bet["winning_option_id"]] if bet.get("winning_option_id") else []))
+        won = wager["option_id"] in win_ids
+        payout = resolution.get("payouts", {}).get(member, 0.0)
+
+        wager_count += 1
+        net_pnl = round(net_pnl + payout - wager["amount"], 2)
+        bet_results.append({"ts": bet.get("closed_at", ""), "won": won})
+
+        if won:
+            win_count += 1
+            if bet.get("bet_type") == "fixed_odds" and wager["amount"] > 0:
+                pp = wager.get("potential_payout", 0.0)
+                max_odds_win = max(max_odds_win, round(pp / wager["amount"], 2))
+            elif bet.get("bet_type") != "fixed_odds" and wager["amount"] > 0:
+                max_odds_win = max(max_odds_win, round(payout / wager["amount"], 2))
+
+    bet_results.sort(key=lambda x: x["ts"])
+    best_streak = 0
+    cur_streak = 0
+    for r in bet_results:
+        if r["won"]:
+            cur_streak += 1
+            best_streak = max(best_streak, cur_streak)
+        else:
+            cur_streak = 0
+
+    tips_sent = round(sum(t["amount"] for t in tips if t.get("from") == member), 2)
+
+    return {
+        "wager_count": wager_count,
+        "win_count": win_count,
+        "net_pnl": net_pnl,
+        "best_streak": best_streak,
+        "max_odds_win": round(max_odds_win, 2),
+        "tips_sent": tips_sent,
+    }
+
+
 @router.get("/api/bets/balances")
 def get_bets_balances():
     all_members = load_members()
@@ -594,7 +648,8 @@ def get_bets_balances():
     def _bd(name: str) -> dict:
         if name not in breakdown:
             breakdown[name] = {"bet_won": 0.0, "bet_lost": 0.0, "bet_placed": 0.0,
-                               "stats_earned": 0.0, "trivia_earned": 0.0, "bio_earned": 0.0}
+                               "stats_earned": 0.0, "trivia_earned": 0.0, "bio_earned": 0.0,
+                               "bet_pnl": 0.0}
         return breakdown[name]
 
     if LEDGER_FILE.exists():
@@ -623,8 +678,13 @@ def get_bets_balances():
             if not resolution.get("voided", False):
                 payouts = resolution.get("payouts", {})
                 for member, w in wagers.items():
+                    stake = w["amount"]
                     if member not in payouts:
-                        _bd(member)["bet_lost"] = round(_bd(member)["bet_lost"] + w["amount"], 2)
+                        _bd(member)["bet_lost"] = round(_bd(member)["bet_lost"] + stake, 2)
+                        _bd(member)["bet_pnl"]  = round(_bd(member)["bet_pnl"]  - stake, 2)
+                    else:
+                        payout = payouts[member]
+                        _bd(member)["bet_pnl"] = round(_bd(member)["bet_pnl"] + payout - stake, 2)
 
     result = []
     for n, b in balances.items():
@@ -638,6 +698,7 @@ def get_bets_balances():
             "stats_earned":  round(bd["stats_earned"], 2),
             "trivia_earned": round(bd["trivia_earned"], 2),
             "bio_earned":    round(bd["bio_earned"], 2),
+            "bet_pnl":       round(bd["bet_pnl"], 2),
         })
     return sorted(result, key=lambda x: (-(x["balance"] + x["bet_placed"]), x["name"]))
 

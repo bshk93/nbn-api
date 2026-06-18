@@ -99,6 +99,10 @@ class ReleaseDetails(BaseModel):
     player: str
 
 
+class RenounceDetails(BaseModel):
+    player: str
+
+
 class ConvertTwoWayDetails(BaseModel):
     player: str
     contract: ContractIn
@@ -210,6 +214,22 @@ def _dead_cap_from_schedule(schedule: list, salary: str, txn_date: str) -> Optio
     return None
 
 
+def _retained_history(bio: dict, cur_season: str):
+    """Entries to keep when a new contract is applied to a player: every season
+    already played (<= cur_season) plus any future season still guaranteed from a
+    prior deal. Earnings history is never silently dropped — only unplayed,
+    non-guaranteed future years are released. Returns
+    (salaries, guaranteed, guarantee_dates, guarantee_schedule)."""
+    prior_gtd = bio.get("guaranteed", {})
+    keep = lambda s: s <= cur_season or s in prior_gtd
+    return (
+        {k: v for k, v in bio.get("salaries", {}).items() if keep(k)},
+        {k: v for k, v in bio.get("guaranteed", {}).items() if keep(k)},
+        {k: v for k, v in bio.get("guarantee_dates", {}).items() if keep(k)},
+        {k: v for k, v in bio.get("guarantee_schedule", {}).items() if keep(k)},
+    )
+
+
 def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[str, dict]:
     """Removes player from roster, converts guaranteed salary to dead cap. Returns (team, dead_cap)."""
     bios = load_player_bios()
@@ -250,11 +270,20 @@ def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[
             continue
         dead_cap[season] = guaranteed.get(season, salary)
 
-    bio["salaries"] = {k: v for k, v in bio["salaries"].items() if k < cur_season}
+    # Preserve earnings history: keep every season already played (<= cur_season)
+    # plus any future season that's guaranteed (the player still collects it, as
+    # the dead-cap amount). Drop only unplayed, non-guaranteed future years.
+    def _kept(season: str) -> bool:
+        return season <= cur_season or season in dead_cap
+    bio["salaries"] = {
+        season: (dead_cap[season] if season in dead_cap and season > cur_season else salary)
+        for season, salary in bio.get("salaries", {}).items()
+        if _kept(season)
+    }
     bio["cap_holds"] = {}
-    bio["guaranteed"] = {}
-    bio["guarantee_dates"] = {}
-    bio["guarantee_schedule"] = {}
+    bio["guaranteed"] = {k: v for k, v in guaranteed.items() if _kept(k)}
+    bio["guarantee_dates"] = {k: v for k, v in guarantee_dates.items() if _kept(k)}
+    bio["guarantee_schedule"] = {k: v for k, v in bio.get("guarantee_schedule", {}).items() if _kept(k)}
     bio["type"] = ""
     save_player_bios(bios)
 
@@ -285,6 +314,64 @@ def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[
     return team, dead_cap
 
 
+def _season_after(season: str) -> str:
+    """'25-26' -> '26-27'."""
+    a, b = season.split("-")
+    return f"{(int(a) + 1) % 100:02d}-{(int(b) + 1) % 100:02d}"
+
+
+def _apply_renounce(details: RenounceDetails, info: dict) -> str:
+    """Renounce a free-agent hold: remove the player from the roster and clear the
+    cap hold, turning them into an unsigned free agent. Unlike a release, no dead cap
+    is created — a renounced free agent is owed nothing. Earnings history is preserved.
+    Returns the player's former team."""
+    bios = load_player_bios()
+    if details.player not in bios:
+        raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
+
+    team_map = _build_team_map()
+    team = team_map.get(details.player)
+    if not team:
+        raise HTTPException(status_code=422, detail=f"Player {details.player!r} is not on any roster")
+
+    cur_season = _current_season_str()
+    next_season = _season_after(cur_season)
+    bio = bios[details.player]
+    holds = bio.get("cap_holds") or {}
+
+    # Must be a clean free-agent hold for the current FA period: the player's
+    # earliest cap hold is a UFA/RFA for the upcoming season (their contract has
+    # lapsed). Players under contract, or with an unresolved option, are excluded.
+    fa_years = sorted(y for y, t in holds.items() if t in ("UFA", "RFA"))
+    earliest_hold = min(holds) if holds else None
+    if not fa_years or earliest_hold not in fa_years or fa_years[0] > next_season:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"Player {details.player!r} is not a free-agent hold for {next_season}. "
+                    "Renounce only applies to UFA/RFA holds — decline any option, or "
+                    "use Release to waive a player under contract."),
+        )
+
+    # Preserve earnings; drop the hold salary and the renounced cap hold(s).
+    past, past_gtd, past_gtd_dates, past_gtd_sched = _retained_history(bio, cur_season)
+    bio["salaries"] = past
+    bio["guaranteed"] = past_gtd
+    bio["guarantee_dates"] = past_gtd_dates
+    bio["guarantee_schedule"] = past_gtd_sched
+    bio["cap_holds"] = {y: t for y, t in holds.items() if y > next_season}
+    save_player_bios(bios)
+
+    # Remove from roster CSV
+    path = DATA_DIR / f"{team.lower()}-roster.csv"
+    headers, rows = read_csv(path)
+    rows = [r for r in rows if r.get("SLUG", "").strip() != details.player]
+    write_csv(path, headers, rows)
+
+    _scrub_trading_block({team: {details.player}}, bios)
+    log_write(info, f"TXN renounce — {details.player} from {team}")
+    return team
+
+
 def _apply_convert_twoway(details: ConvertTwoWayDetails, info: dict) -> str:
     """Converts a two-way contract to a standard player contract. Returns the player's team."""
     bios = load_player_bios()
@@ -302,10 +389,7 @@ def _apply_convert_twoway(details: ConvertTwoWayDetails, info: dict) -> str:
 
     bio["type"] = "player"
     cur_season = _current_season_str()
-    past = {k: v for k, v in bio.get("salaries", {}).items() if k < cur_season}
-    past_gtd = {k: v for k, v in bio.get("guaranteed", {}).items() if k < cur_season}
-    past_gtd_dates = {k: v for k, v in bio.get("guarantee_dates", {}).items() if k < cur_season}
-    past_gtd_sched = {k: v for k, v in bio.get("guarantee_schedule", {}).items() if k < cur_season}
+    past, past_gtd, past_gtd_dates, past_gtd_sched = _retained_history(bio, cur_season)
     bio["salaries"] = {**past, **details.contract.salaries}
     bio["cap_holds"] = details.contract.cap_holds
     bio["guaranteed"] = {**past_gtd, **details.contract.guaranteed}
@@ -353,10 +437,7 @@ def _apply_sign(details: SignDetails, info: dict):
 
     bio = bios[details.player]
     cur_season = _current_season_str()
-    past = {k: v for k, v in bio.get("salaries", {}).items() if k < cur_season}
-    past_gtd = {k: v for k, v in bio.get("guaranteed", {}).items() if k < cur_season}
-    past_gtd_dates = {k: v for k, v in bio.get("guarantee_dates", {}).items() if k < cur_season}
-    past_gtd_sched = {k: v for k, v in bio.get("guarantee_schedule", {}).items() if k < cur_season}
+    past, past_gtd, past_gtd_dates, past_gtd_sched = _retained_history(bio, cur_season)
     bio["salaries"] = {**past, **details.contract.salaries}
     bio["cap_holds"] = details.contract.cap_holds
     bio["guaranteed"] = {**past_gtd, **details.contract.guaranteed}
@@ -438,10 +519,7 @@ def _apply_pick(details: PickDetails, info: dict):
     bio = bios[details.player]
     if details.contract.salaries:
         cur_season = _current_season_str()
-        past = {k: v for k, v in bio.get("salaries", {}).items() if k < cur_season}
-        past_gtd = {k: v for k, v in bio.get("guaranteed", {}).items() if k < cur_season}
-        past_gtd_dates = {k: v for k, v in bio.get("guarantee_dates", {}).items() if k < cur_season}
-        past_gtd_sched = {k: v for k, v in bio.get("guarantee_schedule", {}).items() if k < cur_season}
+        past, past_gtd, past_gtd_dates, past_gtd_sched = _retained_history(bio, cur_season)
         bio["salaries"] = {**past, **details.contract.salaries}
         bio["cap_holds"] = details.contract.cap_holds
         bio["guaranteed"] = {**past_gtd, **details.contract.guaranteed}
@@ -814,6 +892,10 @@ def _validate_release(details: ReleaseDetails, ctx: dict) -> list[CheckResult]:
     return []
 
 
+def _validate_renounce(details: RenounceDetails, ctx: dict) -> list[CheckResult]:
+    return []
+
+
 def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
     checks = []
     bios = ctx["bios"]; season = ctx["cur_season"]
@@ -935,6 +1017,7 @@ def _validate_convert_twoway(details: ConvertTwoWayDetails, ctx: dict) -> list[C
 _VALIDATORS = {
     "sign":           _validate_sign,
     "release":        _validate_release,
+    "renounce":       _validate_renounce,
     "trade":          _validate_trade,
     "option":         _validate_option,
     "pick":           _validate_pick,
@@ -956,7 +1039,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid date; use YYYY-MM-DD")
 
-    if body.type not in ("sign", "pick", "option", "release", "trade", "convert_twoway"):
+    if body.type not in ("sign", "pick", "option", "release", "renounce", "trade", "convert_twoway"):
         raise HTTPException(status_code=422, detail=f"Unsupported transaction type: {body.type!r}")
 
     _detail_models = {
@@ -964,6 +1047,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
         "pick":           (PickDetails,           "Invalid pick details"),
         "option":         (OptionDetails,         "Invalid option details"),
         "release":        (ReleaseDetails,        "Invalid release details"),
+        "renounce":       (RenounceDetails,       "Invalid renounce details"),
         "trade":          (TradeIn,               "Invalid trade details"),
         "convert_twoway": (ConvertTwoWayDetails,  "Invalid convert_twoway details"),
     }
@@ -1006,6 +1090,10 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             stored_details = details.model_dump()
             stored_details["team"] = team
             stored_details["dead_cap"] = dead_cap
+        elif body.type == "renounce":
+            team = _apply_renounce(details, info)
+            stored_details = details.model_dump()
+            stored_details["team"] = team
         elif body.type == "trade":
             teams = _apply_trade(details, info)
             stored_details = details.model_dump()

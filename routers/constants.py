@@ -35,6 +35,9 @@ BETS_FILE     = DATA_DIR / "bets.json"
 BALANCES_FILE = DATA_DIR / "member-balances.json"
 LEDGER_FILE   = DATA_DIR / "bets-ledger.json"
 BIO_REWARDS_FILE = DATA_DIR / "bio-rewards.json"
+INVEST_HOLDINGS_FILE = DATA_DIR / "invest-holdings.json"
+INVEST_TRADES_FILE   = DATA_DIR / "invest-trades.json"
+INVEST_MARKET_FILE   = DATA_DIR / "invest-market.json"
 PROPOSALS_FILE = DATA_DIR / "proposals.json"
 TIPS_FILE      = DATA_DIR / "tips.json"
 CONSTITUTION_FILE = DATA_DIR / "constitution.json"
@@ -56,6 +59,8 @@ _manual_queue_lock  = threading.Lock()
 _ovr_lock      = threading.Lock()
 _state_lock    = threading.Lock()
 _deadcap_lock  = threading.Lock()
+_invest_lock   = threading.Lock()
+_market_lock   = threading.Lock()
 
 VALID_TEAMS = {
     "ATL", "BKN", "BOS", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW",
