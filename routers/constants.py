@@ -41,6 +41,10 @@ CONSTITUTION_FILE = DATA_DIR / "constitution.json"
 TRIVIA_SCORES_PATH = DATA_DIR / "trivia-scores.json"
 STRIKES_FILE       = DATA_DIR / "strikes.json"
 DRAFT_LIVE_FILE    = DATA_DIR / "draft-live.json"
+DRAFT_SNAPSHOT_FILE = DATA_DIR / "draft-snapshot.json"
+# Isolated picks file the live-draft show writes to (reassigns + selections), so the
+# broadcast never mutates the permanent draft-picks.csv the transactions pipeline owns.
+DRAFT_LIVE_PICKS_FILE = DATA_DIR / "draft-live-picks.csv"
 
 PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PLAYER", "PROTECTED", "SWAP_OWNER", "NOTES"]
 
