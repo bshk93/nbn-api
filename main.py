@@ -1,7 +1,5 @@
-import asyncio
 import logging
 import sys
-from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,27 +16,7 @@ logging.basicConfig(
 logger = logging.getLogger("nbn-api")
 
 
-async def _draft_scheduler():
-    while True:
-        await asyncio.sleep(30)
-        try:
-            draft.auto_submit_loop_sync()
-        except Exception as e:
-            logger.error("Draft scheduler error: %s", e)
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    task = asyncio.create_task(_draft_scheduler())
-    yield
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-
-
-app = FastAPI(lifespan=lifespan)
+app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,

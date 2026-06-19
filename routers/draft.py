@@ -1,4 +1,5 @@
 import threading
+import uuid
 from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -27,6 +28,7 @@ def _default_state() -> dict:
         "youtube_embed_url": "",
         "queue": {},
         "revealed": [],
+        "trades": [],
     }
 
 
@@ -79,76 +81,6 @@ def _pick_owners(p: dict) -> list[str]:
     if not owner or owner == "?":
         return [p.get("ORIG", "").strip().upper()]
     return [o.strip().upper() for o in owner.split("|") if o.strip()]
-
-
-def auto_submit_loop_sync():
-    """Check for expired pick windows and auto-submit queued players. Called every 30s."""
-    with _draft_lock:
-        state = load_draft_live()
-        if not state.get("round1_date"):
-            return
-
-        year = state.get("year", 2026)
-        picks = _load_picks()
-        year_picks = [
-            p for p in picks
-            if p.get("YEAR") and int(p["YEAR"]) == year and p.get("PICK")
-        ]
-        year_picks.sort(key=lambda p: (int(p["ROUND"]), int(p["PICK"])))
-
-        now = datetime.now(tz=EASTERN)
-        drafted = {p["PLAYER"] for p in year_picks if p.get("PLAYER")}
-        changed = False
-
-        for p in year_picks:
-            if p.get("PLAYER"):
-                continue
-            _, end = get_window(state, int(p["ROUND"]), int(p["PICK"]))
-            if end is None or now < end:
-                break
-            owners = _pick_owners(p)
-            # Find first available player from any owner's queue
-            chosen: Optional[str] = None
-            chosen_owner: Optional[str] = None
-            for o in owners:
-                raw = state["queue"].get(o)
-                q_list = raw if isinstance(raw, list) else ([raw] if raw else [])
-                for slug in q_list:
-                    if slug not in drafted:
-                        chosen, chosen_owner = slug, o
-                        break
-                if chosen:
-                    break
-            if chosen:
-                p["PLAYER"] = chosen
-                drafted.add(chosen)
-                # Remove submitted player from that owner's queue; keep the rest
-                raw = state["queue"].get(chosen_owner, [])
-                remaining = [s for s in (raw if isinstance(raw, list) else [raw]) if s != chosen]
-                if remaining:
-                    state["queue"][chosen_owner] = remaining
-                else:
-                    state["queue"].pop(chosen_owner, None)
-                state.setdefault("events", []).append({
-                    "type": "pick",
-                    "ts": datetime.now(tz=EASTERN).isoformat(),
-                    "year": year,
-                    "round": int(p["ROUND"]),
-                    "pick": int(p["PICK"]),
-                    "orig": p.get("ORIG", "").upper(),
-                    "owner": p.get("OWNER", ""),
-                    "player": chosen,
-                    "auto": True,
-                })
-                changed = True
-                logger.info(
-                    "[auto-submit] %d R%d P%d %s → %s",
-                    year, int(p["ROUND"]), int(p["PICK"]), p.get("OWNER"), chosen,
-                )
-
-        if changed:
-            _save_picks(picks)
-            save_draft_live(state)
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -394,6 +326,142 @@ def reassign_pick(body: ReassignPickBody, info: dict = Depends(require_any_role(
     return {"ok": True, **event}
 
 
+# ── Draft-day trades ────────────────────────────────────────────────────────────
+
+def _find_pick(picks: list[dict], year: int, round_num: int, orig: str):
+    return next(
+        (p for p in picks
+         if p.get("YEAR") and int(p["YEAR"]) == year
+         and p.get("ROUND") and int(p["ROUND"]) == round_num
+         and p.get("ORIG", "").upper() == orig.upper()),
+        None,
+    )
+
+
+class TradeReassignment(BaseModel):
+    round: int
+    orig: str       # original pick origin team
+    new_owner: str  # team receiving the pick
+
+
+class TradeBody(BaseModel):
+    year: int
+    text: str = ""
+    reassignments: list[TradeReassignment]
+
+
+@router.post("/api/draft/trade")
+def create_trade(body: TradeBody, info: dict = Depends(require_any_role("bod"))):
+    """Stage a multi-pick draft-day trade.
+
+    Ownership flips in the picks file immediately (mechanical-on-entry) so the
+    on-the-clock / queue logic stays correct, but the trade is created
+    un-announced — the live board masks the change until the presenter announces.
+    """
+    if not body.reassignments:
+        raise HTTPException(status_code=422, detail="Trade needs at least one reassignment")
+
+    norm = []
+    for r in body.reassignments:
+        orig = r.orig.upper()
+        new_owner = r.new_owner.upper()
+        if orig not in VALID_TEAMS or new_owner not in VALID_TEAMS:
+            raise HTTPException(status_code=404, detail=f"Unknown team ({r.orig} → {r.new_owner})")
+        norm.append((r.round, orig, new_owner))
+
+    with _draft_lock:
+        picks = _load_picks()
+        # Validate every reassignment before mutating anything (atomic)
+        matches = []
+        for round_num, orig, new_owner in norm:
+            match = _find_pick(picks, body.year, round_num, orig)
+            if not match:
+                raise HTTPException(status_code=404, detail=f"Pick not found: R{round_num} {orig}")
+            if match.get("PLAYER"):
+                raise HTTPException(status_code=422, detail=f"Pick already submitted — cannot trade R{round_num} {orig}")
+            matches.append((match, round_num, orig, new_owner))
+
+        reassignments = []
+        for match, round_num, orig, new_owner in matches:
+            from_owner = match.get("OWNER") or orig
+            match["OWNER"] = new_owner
+            reassignments.append({
+                "round": round_num,
+                "orig": orig,
+                "from_owner": from_owner,
+                "to_owner": new_owner,
+                "pick": int(match["PICK"]) if match.get("PICK") else None,
+            })
+        _save_picks(picks)
+
+        trade = {
+            "id": uuid.uuid4().hex[:8],
+            "ts": datetime.now(tz=EASTERN).isoformat(),
+            "year": body.year,
+            "text": body.text or "",
+            "reassignments": reassignments,
+            "announced": False,
+        }
+        state = load_draft_live()
+        state.setdefault("trades", []).append(trade)
+        save_draft_live(state)
+
+    log_write(info, f"POST draft/trade — {body.year} {len(reassignments)} pick(s) staged ({trade['id']})")
+    return {"ok": True, "trade": trade}
+
+
+@router.post("/api/draft/trade/{trade_id}/announce")
+def announce_trade(trade_id: str, info: dict = Depends(require_any_role("bod"))):
+    """Reveal a staged trade: mark it announced and log a single Trade event."""
+    with _draft_lock:
+        state = load_draft_live()
+        trade = next((t for t in state.get("trades", []) if t.get("id") == trade_id), None)
+        if not trade:
+            raise HTTPException(status_code=404, detail="Trade not found")
+        if not trade.get("announced"):
+            trade["announced"] = True
+            state.setdefault("events", []).append({
+                "type": "trade",
+                "ts": datetime.now(tz=EASTERN).isoformat(),
+                "year": trade.get("year"),
+                "text": trade.get("text", ""),
+                "reassignments": trade.get("reassignments", []),
+                "trade_id": trade_id,
+            })
+            save_draft_live(state)
+
+    log_write(info, f"POST draft/trade/{trade_id}/announce")
+    return {"ok": True, "trade": trade}
+
+
+@router.delete("/api/draft/trade/{trade_id}")
+def cancel_trade(trade_id: str, info: dict = Depends(require_any_role("bod"))):
+    """Undo a not-yet-announced trade: revert ownership and drop the trade."""
+    with _draft_lock:
+        state = load_draft_live()
+        trades = state.get("trades", [])
+        trade = next((t for t in trades if t.get("id") == trade_id), None)
+        if not trade:
+            raise HTTPException(status_code=404, detail="Trade not found")
+        if trade.get("announced"):
+            raise HTTPException(status_code=422, detail="Cannot cancel an announced trade")
+
+        picks = _load_picks()
+        for r in trade.get("reassignments", []):
+            match = _find_pick(picks, trade.get("year"), r["round"], r["orig"])
+            # Only revert if the pick still carries the traded-to owner and is unsubmitted
+            if (match and not match.get("PLAYER")
+                    and (match.get("OWNER") or "").upper() == r["to_owner"].upper()):
+                match["OWNER"] = r["from_owner"]
+        _save_picks(picks)
+
+        state["trades"] = [t for t in trades if t.get("id") != trade_id]
+        save_draft_live(state)
+
+    log_write(info, f"DELETE draft/trade/{trade_id} — cancelled")
+    return {"ok": True}
+
+
 # ── Snapshot / restore ─────────────────────────────────────────────────────────
 
 @router.post("/api/draft/snapshot")
@@ -446,6 +514,7 @@ def reset_live_draft(info: dict = Depends(require_any_role("bod"))):
         state["events"] = []
         state["revealed"] = []
         state["queue"] = {}
+        state["trades"] = []
         save_draft_live(state)
     log_write(info, "POST draft/reset — live draft reset to clean slate")
     return {"ok": True}
