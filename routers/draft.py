@@ -208,10 +208,29 @@ def submit_pick(body: DraftPickBody, info: dict = Depends(get_token_info)):
         if not is_privileged:
             if not any(has_role(info, o.lower()) for o in owners):
                 raise HTTPException(status_code=403, detail="Not your pick")
-            start, _ = get_window(state, body.round, pick_num)
+            # Floor: the draft must have opened (round 1, pick 1 = noon ET).
+            draft_open, _ = get_window(state, 1, 1)
             now = datetime.now(tz=EASTERN)
-            if start is None or now < start:
-                raise HTTPException(status_code=422, detail="Pick window has not opened yet")
+            if draft_open is None or now < draft_open:
+                raise HTTPException(status_code=422, detail="Draft has not started yet")
+            # An owner may submit once they're genuinely up — either every pick
+            # ahead of them in draft order is in (run ahead of schedule), or
+            # their own scheduled window has arrived (so a stuck earlier pick
+            # never blocks them forever).
+            start, _ = get_window(state, body.round, pick_num)
+            window_open = start is not None and now >= start
+            earlier_in = all(
+                p.get("PLAYER")
+                for p in picks
+                if p.get("YEAR") and int(p["YEAR"]) == body.year
+                and p.get("ROUND") and p.get("PICK")
+                and (int(p["ROUND"]), int(p["PICK"])) < (body.round, pick_num)
+            )
+            if not (window_open or earlier_in):
+                raise HTTPException(
+                    status_code=422,
+                    detail="Not your turn yet — the picks ahead of you aren't in and your window hasn't opened",
+                )
 
         bios = _load_json(PLAYER_BIOS_FILE, {})
         bio = bios.get(body.player)
@@ -254,6 +273,82 @@ def submit_pick(body: DraftPickBody, info: dict = Depends(get_token_info)):
 
     log_write(info, f"POST draft/pick — {body.year} R{body.round} {orig} → {body.player}")
     return {"ok": True, "year": body.year, "round": body.round, "orig": orig, "player": body.player}
+
+
+class UnstagePickBody(BaseModel):
+    year: int
+    round: int
+    orig: str
+
+
+@router.post("/api/draft/pick/unstage")
+def unstage_pick(body: UnstagePickBody, info: dict = Depends(get_token_info)):
+    """Reverse an early lock-in. An owner may unstage their own pick only while
+    their window has not started yet (i.e. it was submitted ahead of schedule);
+    once on the clock the pick is final. Restores the player to the front of the
+    owner's queue and removes the pick event so it's as if it never happened."""
+    orig = body.orig.upper()
+    if orig not in VALID_TEAMS:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    is_privileged = has_role(info, "admin") or has_role(info, "bod")
+
+    with _draft_lock:
+        state = load_draft_live()
+
+        picks = _load_picks()
+        match = next(
+            (p for p in picks
+             if p.get("YEAR") and int(p["YEAR"]) == body.year
+             and p.get("ROUND") and int(p["ROUND"]) == body.round
+             and p.get("ORIG", "").upper() == orig),
+            None,
+        )
+        if not match:
+            raise HTTPException(status_code=404, detail="Pick not found")
+        player = match.get("PLAYER")
+        if not player:
+            raise HTTPException(status_code=422, detail="Pick is not staged")
+
+        pick_num = int(match["PICK"]) if match.get("PICK") else None
+        if pick_num is None:
+            raise HTTPException(status_code=422, detail="Pick number not assigned")
+
+        if f"{body.round}-{pick_num}" in state.get("revealed", []):
+            raise HTTPException(status_code=422, detail="Pick already revealed — cannot unstage")
+
+        owners = _pick_owners(match)
+
+        if not is_privileged:
+            if not any(has_role(info, o.lower()) for o in owners):
+                raise HTTPException(status_code=403, detail="Not your pick")
+            start, _ = get_window(state, body.round, pick_num)
+            now = datetime.now(tz=EASTERN)
+            if start is not None and now >= start:
+                raise HTTPException(status_code=422, detail="Your pick window has started — pick is locked")
+
+        match["PLAYER"] = ""
+        _save_picks(picks)
+
+        # Restore the player to the front of each owner's queue
+        for o in owners:
+            raw = state["queue"].get(o)
+            q_list = [] if raw is None else (raw if isinstance(raw, list) else [raw])
+            if player not in q_list:
+                state["queue"][o] = [player] + q_list
+
+        # Drop the matching (unrevealed) pick event so the log stays clean
+        events = state.get("events", [])
+        for i in range(len(events) - 1, -1, -1):
+            ev = events[i]
+            if (ev.get("type") == "pick" and ev.get("year") == body.year
+                    and ev.get("round") == body.round and ev.get("pick") == pick_num
+                    and ev.get("orig") == orig):
+                events.pop(i)
+                break
+        save_draft_live(state)
+
+    log_write(info, f"POST draft/pick/unstage — {body.year} R{body.round} {orig} (was {player})")
+    return {"ok": True, "year": body.year, "round": body.round, "orig": orig, "player": player}
 
 
 class RevealBody(BaseModel):
