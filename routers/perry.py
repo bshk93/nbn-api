@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from .constants import DATA_DIR, PLAYER_BIOS_FILE, logger
@@ -23,10 +23,12 @@ router = APIRouter()
 
 PERRY_STATE_FILE   = DATA_DIR / "perry-state.json"
 PERRY_ARCHIVE_FILE = DATA_DIR / "perry-archive.json"
+PERRY_ACTIVITY_FILE = DATA_DIR / "perry-activity.json"
 NBN_TODAY_DIR    = Path("/home/skim/projects/nbn-today")
 PLAYER_SEASONS_CSV = NBN_TODAY_DIR / "players" / "player_seasons.csv"
 
 _perry_lock = threading.Lock()
+_perry_activity_lock = threading.Lock()
 
 SLOTS = ["PG", "SG", "SF", "PF", "C", "6MAN"]
 PRIZES = [100.0, 50.0, 25.0]
@@ -174,6 +176,65 @@ def _generate_puzzle(date_str: str) -> dict:
     }
 
 
+def _client_ip(request: Request) -> str:
+    return request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
+
+
+def _record_perry_activity(date_str: str, member: Optional[str], event: str, request: Request) -> None:
+    """Record one perry/today or perry/submit hit (member, ip, timestamp), for spotting
+    multi-IP concurrent sessions and excessive reloads (possible cheating)."""
+    who = member or "anon"
+    ip = _client_ip(request)
+    ts = datetime.now(timezone.utc).isoformat()
+    with _perry_activity_lock:
+        activity = _load_json(PERRY_ACTIVITY_FILE, {})
+        day = activity.setdefault(date_str, [])
+        day.append({"member": who, "ip": ip, "ts": ts, "event": event})
+        _save_json(PERRY_ACTIVITY_FILE, activity)
+    logger.info("[perry/%s] member=%s ip=%s date=%s", event, who, ip, date_str)
+
+
+def _detect_suspicious(events: list[dict], concurrent_window_minutes: float = 15.0, reload_threshold: int = 4) -> dict:
+    """Flag (a) members hit from 2+ distinct IPs within a short window same day, and
+    (b) members reloading /perry/today many times before submitting (possible relitigating)."""
+    by_member: dict[str, list[dict]] = {}
+    for e in events:
+        if e["member"] == "anon":
+            continue
+        by_member.setdefault(e["member"], []).append(e)
+
+    concurrent_ip: list[dict] = []
+    excessive_reloads: list[dict] = []
+
+    for member, evs in by_member.items():
+        evs = sorted(evs, key=lambda e: e["ts"])
+
+        for i, e1 in enumerate(evs):
+            t1 = datetime.fromisoformat(e1["ts"])
+            for e2 in evs[i + 1:]:
+                if e2["ip"] == e1["ip"]:
+                    continue
+                t2 = datetime.fromisoformat(e2["ts"])
+                gap = abs((t2 - t1).total_seconds()) / 60
+                if gap <= concurrent_window_minutes:
+                    concurrent_ip.append({
+                        "member": member, "gap_minutes": round(gap, 1),
+                        "ip_a": e1["ip"], "ts_a": e1["ts"], "ip_b": e2["ip"], "ts_b": e2["ts"],
+                    })
+                break  # only need the nearest differing-IP neighbor per e1
+
+        today_loads = [e for e in evs if e["event"] == "today"]
+        submitted = any(e["event"] == "submit" for e in evs)
+        reload_count = len(today_loads) if submitted else max(0, len(today_loads) - 1)
+        if reload_count >= reload_threshold:
+            excessive_reloads.append({
+                "member": member, "today_loads": len(today_loads),
+                "submitted": submitted, "reload_count": reload_count,
+            })
+
+    return {"concurrent_ip": concurrent_ip, "excessive_reloads": excessive_reloads}
+
+
 def _get_or_create_state() -> dict:
     today = _today_et()
     state = _load_perry()
@@ -289,7 +350,7 @@ def _archive_state(state: dict) -> None:
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/api/perry/today")
-def get_perry_today(authorization: Optional[str] = Header(None)):
+def get_perry_today(request: Request, authorization: Optional[str] = Header(None)):
     with _perry_lock:
         state = _get_or_create_state()
 
@@ -305,6 +366,8 @@ def get_perry_today(authorization: Optional[str] = Header(None)):
     my_entry = None
     if member:
         my_entry = next((e for e in state["entries"] if e["member"] == member), None)
+
+    _record_perry_activity(state["date"], member, "today", request)
 
     resp = {
         "date": state["date"],
@@ -331,7 +394,7 @@ class PerrySubmit(BaseModel):
 
 
 @router.post("/api/perry/submit")
-def post_perry_submit(body: PerrySubmit, info: dict = Depends(get_token_info)):
+def post_perry_submit(body: PerrySubmit, request: Request, info: dict = Depends(get_token_info)):
     if not info.get("name"):
         raise HTTPException(status_code=401, detail="Authentication required")
     member = info["name"]
@@ -376,6 +439,7 @@ def post_perry_submit(body: PerrySubmit, info: dict = Depends(get_token_info)):
     pct = round(total_score / state["solution_score"] * 100, 1) if state["solution_score"] > 0 else 0.0
     _discord_submission(member, total_score, state["solution_score"])
     log_write(info, f"POST perry/submit — score={total_score}")
+    _record_perry_activity(state["date"], member, "submit", request)
 
     return {
         "score": total_score,
@@ -411,6 +475,23 @@ def get_perry_history_date(date: str):
     if not day:
         raise HTTPException(status_code=404, detail=f"No results for {date}")
     return {**day, "leaderboard": _leaderboard(day["entries"])}
+
+
+@router.get("/api/perry/admin/activity")
+def perry_admin_activity(date: Optional[str] = None, info: dict = Depends(require_admin)):
+    """Raw perry/today + perry/submit hits (member, ip, ts) for a given day (default today)."""
+    activity = _load_json(PERRY_ACTIVITY_FILE, {})
+    day_str = date or _today_et()
+    return {"date": day_str, "events": activity.get(day_str, [])}
+
+
+@router.get("/api/perry/admin/suspicious")
+def perry_admin_suspicious(date: Optional[str] = None, info: dict = Depends(require_admin)):
+    """Flag members hit from 2+ IPs within a short window (concurrent sessions / account sharing)
+    and members reloading perry/today many times before submitting (relitigating their lineup)."""
+    activity = _load_json(PERRY_ACTIVITY_FILE, {})
+    day_str = date or _today_et()
+    return {"date": day_str, **_detect_suspicious(activity.get(day_str, []))}
 
 
 @router.post("/api/perry/admin/reset")
