@@ -1,9 +1,11 @@
 import threading
+import time
 import uuid
 from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -12,6 +14,7 @@ from .constants import (
     DRAFT_LIVE_FILE, DRAFT_LIVE_PICKS_FILE, DRAFT_SNAPSHOT_FILE,
     PICKS_FILE, PICKS_HEADERS, PLAYER_BIOS_FILE, VALID_TEAMS, logger,
 )
+from .players import _display_name
 from .roster_picks import enrich_swap_conveys, pick_to_response
 from .storage import _load_json, _save_json, log_write, read_csv, write_csv
 
@@ -19,6 +22,28 @@ router = APIRouter()
 
 EASTERN = ZoneInfo("America/New_York")
 _draft_lock = threading.Lock()
+
+# Discord webhook for live draft-pick announcements. Posted to on reveal only.
+# Kept best-effort: a failure here must never disrupt the live show (see
+# _post_draft_webhook / reveal_pick).
+DRAFT_WEBHOOK = "https://discord.com/api/webhooks/1517890636810817569/7MW228lLGQkhh7Ykx4ijABkm9xIrqfDhrLCICyE8vOtMeW_4tLdLHT3-88vAYp8k5yCj"
+
+# Delay (seconds) before firing the reveal webhook, so the Discord post trails the
+# broadcast stream delay instead of beating it.
+DRAFT_WEBHOOK_DELAY_SECONDS = 30
+
+DRAFT_TEAM_NAMES = {
+    "ATL": "Atlanta Hawks",    "BKN": "Brooklyn Nets",       "BOS": "Boston Celtics",
+    "CHA": "Charlotte Hornets", "CHI": "Chicago Bulls",      "CLE": "Cleveland Cavaliers",
+    "DAL": "Dallas Mavericks", "DEN": "Denver Nuggets",       "DET": "Detroit Pistons",
+    "GSW": "Golden State Warriors", "HOU": "Houston Rockets", "IND": "Indiana Pacers",
+    "LAC": "Los Angeles Clippers", "LAL": "Los Angeles Lakers", "MEM": "Memphis Grizzlies",
+    "MIA": "Miami Heat",       "MIL": "Milwaukee Bucks",      "MIN": "Minnesota Timberwolves",
+    "NOP": "New Orleans Pelicans", "NYK": "New York Knicks",  "OKC": "Oklahoma City Thunder",
+    "ORL": "Orlando Magic",    "PHI": "Philadelphia 76ers",   "PHX": "Phoenix Suns",
+    "POR": "Portland Trail Blazers", "SAC": "Sacramento Kings", "SAS": "San Antonio Spurs",
+    "TOR": "Toronto Raptors",  "UTA": "Utah Jazz",            "WAS": "Washington Wizards",
+}
 
 
 def _default_state() -> dict:
@@ -81,6 +106,18 @@ def _pick_owners(p: dict) -> list[str]:
     if not owner or owner == "?":
         return [p.get("ORIG", "").strip().upper()]
     return [o.strip().upper() for o in owner.split("|") if o.strip()]
+
+
+def _owners_swap_aware(picks: list[dict], round_num: int, pick_num: int) -> list[str]:
+    """True current owner(s) of a pick with pick-swap conveyance applied, matching
+    the live board / frontend `pickOwners`. Used for draft authorization: the raw
+    OWNER column does not reflect a conveyed swap, so a swap holder (e.g. WAS on a
+    BOS pick that conveys) would otherwise be wrongly rejected. Unlike
+    `_broadcast_pick_owners` it does not mask un-announced trades — authorization
+    is against true current ownership, so the real owner can always draft."""
+    enriched = [pick_to_response(p) for p in picks]
+    enrich_swap_conveys(enriched)
+    return _broadcast_pick_owners({"trades": []}, enriched, round_num, pick_num)
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -203,7 +240,7 @@ def submit_pick(body: DraftPickBody, info: dict = Depends(get_token_info)):
         if pick_num is None:
             raise HTTPException(status_code=422, detail="Pick number not assigned")
 
-        owners = _pick_owners(match)
+        owners = _owners_swap_aware(picks, body.round, pick_num)
 
         if not is_privileged:
             if not any(has_role(info, o.lower()) for o in owners):
@@ -257,18 +294,9 @@ def submit_pick(body: DraftPickBody, info: dict = Depends(get_token_info)):
             else:
                 state["queue"].pop(o, None)
 
-        # Append to event log
-        event = {
-            "type": "pick",
-            "ts": datetime.now(tz=EASTERN).isoformat(),
-            "year": body.year,
-            "round": body.round,
-            "pick": pick_num,
-            "orig": orig,
-            "owner": "|".join(owners),
-            "player": body.player,
-        }
-        state.setdefault("events", []).append(event)
+        # Note: the pick is NOT logged to the event log here. Like trades (which
+        # log only on announce), a pick is added to the event log when the
+        # presenter reveals it — see reveal_pick.
         save_draft_live(state)
 
     log_write(info, f"POST draft/pick — {body.year} R{body.round} {orig} → {body.player}")
@@ -316,7 +344,7 @@ def unstage_pick(body: UnstagePickBody, info: dict = Depends(get_token_info)):
         if f"{body.round}-{pick_num}" in state.get("revealed", []):
             raise HTTPException(status_code=422, detail="Pick already revealed — cannot unstage")
 
-        owners = _pick_owners(match)
+        owners = _owners_swap_aware(picks, body.round, pick_num)
 
         if not is_privileged:
             if not any(has_role(info, o.lower()) for o in owners):
@@ -356,14 +384,138 @@ class RevealBody(BaseModel):
     pick: int
 
 
+def _ordinal(n: int) -> str:
+    """1 -> '1st', 11 -> '11th', 22 -> '22nd', etc."""
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def _broadcast_pick_owners(state: dict, picks: list[dict], round_num: int, pick_num: int) -> list[str]:
+    """Resolve the on-air owner(s) of a pick exactly as the live board does
+    (draft/live/index.html `displayOwners`): swap-conveyance, the swap-takes-from
+    map, and masking of un-announced trades back to the pre-trade owner. `picks`
+    is the enriched list (pick_to_response + enrich_swap_conveys). Returns a list
+    of team abbreviations."""
+    target = next((p for p in picks if p["round"] == round_num and p["pick"] == pick_num), None)
+    if not target:
+        return []
+    orig = (target["orig"] or "").upper()
+
+    # Un-announced trades flip OWNER in the file immediately but the board keeps
+    # showing the old owner until the presenter announces — mask back to it.
+    for t in state.get("trades", []):
+        if t.get("announced"):
+            continue
+        for r in t.get("reassignments", []):
+            if r.get("round") == round_num and (r.get("orig") or "").upper() == orig:
+                masked = r.get("from_owner") or ""
+                return [x.strip().upper() for x in masked.split("|") if x.strip()] or [orig]
+
+    # swap-takes-from: a conveyed swap hands the swap_owner's own pick to `owner`
+    year_picks = [p for p in picks if p["year"] == target["year"]]
+    swap_takes_from = {}
+    for p in year_picks:
+        if p["swap_conveys"] is True and p["swap_owner"]:
+            swap_takes_from[(p["round"], p["swap_owner"].upper())] = p["owner"]
+
+    if target["swap_conveys"] is True:
+        raw = target["swap_owner"]
+    else:
+        raw = swap_takes_from.get((round_num, orig), target["owner"])
+    if not raw or raw == "?":
+        return [orig]
+    return [x.strip().upper() for x in str(raw).split("|") if x.strip()] or [orig]
+
+
+def _build_pick_announcement(state: dict, round_num: int, pick_num: int):
+    """Compose the Discord line for a just-revealed pick, or None if anything
+    needed is missing. Read-only and fully guarded so a reveal can never fail on
+    our account."""
+    try:
+        picks = [pick_to_response(p) for p in _load_picks()]
+        enrich_swap_conveys(picks)
+        target = next((p for p in picks if p["round"] == round_num and p["pick"] == pick_num), None)
+        if not target or not target["player"]:
+            return None
+        owners = _broadcast_pick_owners(state, picks, round_num, pick_num)
+        owner = owners[0] if owners else (target["orig"] or "")
+        team_name = DRAFT_TEAM_NAMES.get(owner, owner)
+        bio = _load_json(PLAYER_BIOS_FILE, {}).get(target["player"], {})
+        prospect = _display_name(bio.get("name", "")) or target["player"]
+        origin = (bio.get("college") or bio.get("country") or "").strip()
+        msg = (f"With the {_ordinal(pick_num)} pick in the {target['year']} NBN Draft, "
+               f"the {team_name} select {prospect}")
+        if origin:
+            msg += f", from {origin}"
+        return msg + "."
+    except Exception as exc:
+        logger.warning("Draft announcement build failed for %s-%s: %s", round_num, pick_num, exc)
+        return None
+
+
+def _post_draft_webhook(message: str) -> None:
+    """Fire-and-forget Discord post on a daemon thread so the live reveal never
+    blocks on (or is broken by) network latency or a Discord outage."""
+    def _send():
+        try:
+            time.sleep(DRAFT_WEBHOOK_DELAY_SECONDS)
+            httpx.post(DRAFT_WEBHOOK, json={"content": message}, timeout=5)
+        except Exception as exc:
+            logger.warning("Draft Discord webhook failed: %s", exc)
+    try:
+        threading.Thread(target=_send, daemon=True).start()
+    except Exception as exc:
+        logger.warning("Draft Discord webhook thread failed to start: %s", exc)
+
+
 @router.post("/api/draft/reveal")
 def reveal_pick(body: RevealBody, info: dict = Depends(require_any_role("bod"))):
     key = f"{body.round}-{body.pick}"
+    newly_revealed = False
+    state = None
     with _draft_lock:
         state = load_draft_live()
         if key not in state["revealed"]:
             state["revealed"].append(key)
+            # Log the pick to the event log on reveal (not on submit), mirroring
+            # how trades are logged only when announced.
+            picks = [pick_to_response(p) for p in _load_picks()]
+            enrich_swap_conveys(picks)
+            target = next(
+                (p for p in picks if p["round"] == body.round and p["pick"] == body.pick),
+                None,
+            )
+            if target and target["player"]:
+                owners = _broadcast_pick_owners(state, picks, body.round, body.pick)
+                # Idempotent: drop any prior pick event for this slot (e.g. a
+                # straggler logged at submit time by older code) before appending.
+                state["events"] = [
+                    e for e in state.get("events", [])
+                    if not (e.get("type") == "pick"
+                            and e.get("round") == body.round
+                            and e.get("pick") == body.pick)
+                ]
+                state["events"].append({
+                    "type": "pick",
+                    "ts": datetime.now(tz=EASTERN).isoformat(),
+                    "year": target["year"],
+                    "round": body.round,
+                    "pick": body.pick,
+                    "orig": (target["orig"] or "").upper(),
+                    "owner": "|".join(owners),
+                    "player": target["player"],
+                })
             save_draft_live(state)
+            newly_revealed = True
+    # Announce exactly once, after the lock is released. Best-effort: any failure
+    # is swallowed inside the helpers so the reveal response is unaffected.
+    if newly_revealed:
+        msg = _build_pick_announcement(state, body.round, body.pick)
+        if msg:
+            _post_draft_webhook(msg)
     log_write(info, f"POST draft/reveal — {key}")
     return {"revealed": key}
 
