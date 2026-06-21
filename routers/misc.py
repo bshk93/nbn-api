@@ -15,11 +15,11 @@ from pydantic import BaseModel
 
 from .constants import (
     DATA_DIR, CAP_LEVELS_FILE, ROOKIE_SCALE_FILE, AWARDS_CONFIG_FILE,
-    AWARDS_HISTORY_FILE, PLAYER_BIOS_FILE,
+    AWARDS_HISTORY_FILE, PLAYER_BIOS_FILE, LEAGUE_STATE_FILE,
     CALENDAR_EVENTS_FILE, CALENDAR_GAMES_FILE, TRIVIA_SCORES_PATH,
     VALID_TEAMS, logger,
 )
-from .storage import _load_json, _save_json, log_write, _current_season_str
+from .storage import _load_json, _save_json, log_write, _current_season_str, _current_league_year
 from .auth import (
     get_token_info, has_role, require_role, require_admin,
     load_tokens, _resolve_token,
@@ -65,6 +65,46 @@ def put_cap_level(season: str, body: CapLevel, info: dict = Depends(require_role
     CAP_LEVELS_FILE.write_text(json.dumps(levels, indent=2))
     log_write(info, f"PUT cap-levels/{season} — cap={body.cap} apron1={body.apron1} apron2={body.apron2} hard_cap={body.hard_cap} ntmle={body.ntmle_amount} tmle={body.tmle_amount} bae={body.bae_amount} room={body.room_amount}")
     return levels[season]
+
+
+# ── League year (cap/contract clock) ───────────────────────────────────────────
+# The league year is derived from today's date plus any rollover overrides stored
+# in league-state.json. BOD sets a season's effective start date to roll the league
+# year over on a date other than the default July 1 (e.g. start it early). The stats
+# clock (box scores / R build) is unaffected — that stays on _current_season_str.
+
+class LeagueRollover(BaseModel):
+    effective: str  # YYYY-MM-DD
+
+
+@router.get("/api/league-year")
+def get_league_year():
+    rollovers = _load_json(LEAGUE_STATE_FILE, {}).get("rollovers", {})
+    return {"current_season": _current_league_year(), "rollovers": rollovers}
+
+
+@router.put("/api/league-year/{season}")
+def put_league_rollover(season: str, body: LeagueRollover, info: dict = Depends(require_role("bod"))):
+    if not re.fullmatch(r"\d{2}-\d{2}", season):
+        raise HTTPException(status_code=422, detail="season must be YY-YY format")
+    try:
+        datetime.strptime(body.effective, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=422, detail="effective must be YYYY-MM-DD")
+    state = _load_json(LEAGUE_STATE_FILE, {})
+    state.setdefault("rollovers", {})[season] = body.effective
+    _save_json(LEAGUE_STATE_FILE, state)
+    log_write(info, f"PUT league-year/{season} — effective={body.effective}")
+    return {"current_season": _current_league_year(), "rollovers": state["rollovers"]}
+
+
+@router.delete("/api/league-year/{season}")
+def delete_league_rollover(season: str, info: dict = Depends(require_role("bod"))):
+    state = _load_json(LEAGUE_STATE_FILE, {})
+    if state.get("rollovers", {}).pop(season, None) is not None:
+        _save_json(LEAGUE_STATE_FILE, state)
+        log_write(info, f"DELETE league-year/{season} — reset to default")
+    return {"current_season": _current_league_year(), "rollovers": state.get("rollovers", {})}
 
 
 # ── Awards config ─────────────────────────────────────────────────────────────

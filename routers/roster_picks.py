@@ -9,7 +9,7 @@ from .constants import (
     DATA_DIR, RULES_DIR, VALID_TEAMS, PICKS_HEADERS, PICKS_FILE, TRADING_BLOCK_FILE,
     TEAM_STATE_FILE, _rules_lock, _picks_lock, _state_lock, _deadcap_lock,
 )
-from .storage import read_csv, write_csv, _load_json, _save_json, log_write, _current_season_str
+from .storage import read_csv, write_csv, _load_json, _save_json, log_write, _current_season_str, _current_league_year
 from .auth import get_token_info, has_role, require_role
 
 router = APIRouter()
@@ -393,7 +393,7 @@ class TeamSeasonState(BaseModel):
 @router.get("/api/team-state")
 def get_all_team_state():
     state = load_team_state()
-    cur = _current_season_str()
+    cur = _current_league_year()
     return {
         team: {
             "seasons": state.get(team, {}),
@@ -410,11 +410,12 @@ def get_team_state(team: str, season: Optional[str] = None):
     if team not in VALID_TEAMS:
         raise HTTPException(status_code=404, detail="Unknown team")
     state = load_team_state()
-    cur = season or _current_season_str()
+    cur = season or _current_league_year()
     return {
         "season": cur,
         **get_season_state(state, team, cur),
         "bae_available": _bae_available(state, team, cur),
+        "seasons": state.get(team, {}),
     }
 
 
@@ -432,7 +433,7 @@ def put_team_state(
         raise HTTPException(status_code=422, detail="hard_cap must be null, 'first_apron', or 'second_apron'")
     if body.mle_type not in (None, "room", "ntmle", "tmle"):
         raise HTTPException(status_code=422, detail="mle_type must be null, 'room', 'ntmle', or 'tmle'")
-    cur = season or _current_season_str()
+    cur = season or _current_league_year()
     with _state_lock:
         state = load_team_state()
         if team not in state:

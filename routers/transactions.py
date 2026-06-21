@@ -12,7 +12,7 @@ from .constants import (
     _txn_lock, _deadcap_lock, _state_lock, _picks_lock,
     ROSTER_MAX, SALARY_MATCH_TIER1_CAP, SALARY_MATCH_TIER2_CAP,
 )
-from .storage import read_csv, write_csv, _load_json, log_write, _parse_dollar, _season_start, _current_season_str
+from .storage import read_csv, write_csv, _load_json, log_write, _parse_dollar, _season_start, _season_for_date
 from .auth import require_role
 from .players import load_player_bios, save_player_bios, _build_team_map, _scrub_trading_block
 from .roster_picks import (
@@ -241,7 +241,7 @@ def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[
     if not team:
         raise HTTPException(status_code=422, detail=f"Player {details.player!r} is not on any roster")
 
-    cur_season = _current_season_str()
+    cur_season = _season_for_date(txn_date)
 
     bio = bios[details.player]
     holds_map = bio.get("cap_holds") or {}
@@ -320,7 +320,7 @@ def _season_after(season: str) -> str:
     return f"{(int(a) + 1) % 100:02d}-{(int(b) + 1) % 100:02d}"
 
 
-def _apply_renounce(details: RenounceDetails, info: dict) -> str:
+def _apply_renounce(details: RenounceDetails, txn_date: str, info: dict) -> str:
     """Renounce a free-agent hold: remove the player from the roster and clear the
     cap hold, turning them into an unsigned free agent. Unlike a release, no dead cap
     is created — a renounced free agent is owed nothing. Earnings history is preserved.
@@ -334,7 +334,7 @@ def _apply_renounce(details: RenounceDetails, info: dict) -> str:
     if not team:
         raise HTTPException(status_code=422, detail=f"Player {details.player!r} is not on any roster")
 
-    cur_season = _current_season_str()
+    cur_season = _season_for_date(txn_date)
     next_season = _season_after(cur_season)
     bio = bios[details.player]
     holds = bio.get("cap_holds") or {}
@@ -372,7 +372,7 @@ def _apply_renounce(details: RenounceDetails, info: dict) -> str:
     return team
 
 
-def _apply_convert_twoway(details: ConvertTwoWayDetails, info: dict) -> str:
+def _apply_convert_twoway(details: ConvertTwoWayDetails, txn_date: str, info: dict) -> str:
     """Converts a two-way contract to a standard player contract. Returns the player's team."""
     bios = load_player_bios()
     if details.player not in bios:
@@ -388,7 +388,7 @@ def _apply_convert_twoway(details: ConvertTwoWayDetails, info: dict) -> str:
         raise HTTPException(status_code=422, detail=f"Player {details.player!r} is not on any roster")
 
     bio["type"] = "player"
-    cur_season = _current_season_str()
+    cur_season = _season_for_date(txn_date)
     past, past_gtd, past_gtd_dates, past_gtd_sched = _retained_history(bio, cur_season)
     bio["salaries"] = {**past, **details.contract.salaries}
     bio["cap_holds"] = details.contract.cap_holds
@@ -410,7 +410,7 @@ def _apply_convert_twoway(details: ConvertTwoWayDetails, info: dict) -> str:
     return team
 
 
-def _apply_sign(details: SignDetails, info: dict):
+def _apply_sign(details: SignDetails, txn_date: str, info: dict):
     bios = load_player_bios()
     if details.player not in bios:
         raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
@@ -436,7 +436,7 @@ def _apply_sign(details: SignDetails, info: dict):
     write_csv(path, headers, rows)
 
     bio = bios[details.player]
-    cur_season = _current_season_str()
+    cur_season = _season_for_date(txn_date)
     past, past_gtd, past_gtd_dates, past_gtd_sched = _retained_history(bio, cur_season)
     bio["salaries"] = {**past, **details.contract.salaries}
     bio["cap_holds"] = details.contract.cap_holds
@@ -447,7 +447,7 @@ def _apply_sign(details: SignDetails, info: dict):
     save_player_bios(bios)
 
     if details.signing_method in ("mle", "ntmle", "tmle", "room_exception", "bae", "cap_space"):
-        cur = _current_season_str()
+        cur = cur_season
         with _state_lock:
             state = load_team_state()
             if team not in state:
@@ -485,7 +485,7 @@ def _apply_sign(details: SignDetails, info: dict):
     log_write(info, f"TXN sign — {details.player} → {team} [{details.signing_method or 'cap_space'}]")
 
 
-def _apply_pick(details: PickDetails, info: dict):
+def _apply_pick(details: PickDetails, txn_date: str, info: dict):
     bios = load_player_bios()
     if details.player not in bios:
         raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
@@ -518,7 +518,7 @@ def _apply_pick(details: PickDetails, info: dict):
 
     bio = bios[details.player]
     if details.contract.salaries:
-        cur_season = _current_season_str()
+        cur_season = _season_for_date(txn_date)
         past, past_gtd, past_gtd_dates, past_gtd_sched = _retained_history(bio, cur_season)
         bio["salaries"] = {**past, **details.contract.salaries}
         bio["cap_holds"] = details.contract.cap_holds
@@ -553,8 +553,8 @@ def _apply_pick(details: PickDetails, info: dict):
 
 
 def _apply_trade(details: TradeIn, info: dict) -> list[str]:
-    if len(details.transfers) < 2:
-        raise HTTPException(status_code=422, detail="A trade requires at least 2 transfers")
+    if len(details.transfers) < 1:
+        raise HTTPException(status_code=422, detail="A trade requires at least 1 transfer")
 
     for xfer in details.transfers:
         xfer.from_team = xfer.from_team.upper()
@@ -900,6 +900,15 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
     checks = []
     bios = ctx["bios"]; season = ctx["cur_season"]
 
+    if len(details.transfers) < 2:
+        checks.append(CheckResult(
+            check="trade_min_legs",
+            passed=False,
+            level="warning",
+            message=(f"Trade has only {len(details.transfers)} leg(s); a normal trade has 2 or more. "
+                     "Submit anyway to record a single-sided leg (e.g. remaining leg after a draft-show split)."),
+        ))
+
     outgoing: dict[str, int] = {}
     incoming: dict[str, int] = {}
     for xfer in details.transfers:
@@ -1061,7 +1070,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
         "bios":        load_player_bios(),
         "team_state":  load_team_state(),
         "cap_levels":  json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {},
-        "cur_season":  _current_season_str(),
+        "cur_season":  _season_for_date(body.date),
     }
     checks = _run_validation(body.type, parsed_details, _val_ctx)
     failed = [c for c in checks if not c.passed]
@@ -1076,10 +1085,10 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
     with _txn_lock:
         details = parsed_details
         if body.type == "sign":
-            _apply_sign(details, info)
+            _apply_sign(details, body.date, info)
             stored_details = details.model_dump()
         elif body.type == "pick":
-            _apply_pick(details, info)
+            _apply_pick(details, body.date, info)
             stored_details = details.model_dump()
         elif body.type == "option":
             team = _apply_option(details, info)
@@ -1091,7 +1100,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             stored_details["team"] = team
             stored_details["dead_cap"] = dead_cap
         elif body.type == "renounce":
-            team = _apply_renounce(details, info)
+            team = _apply_renounce(details, body.date, info)
             stored_details = details.model_dump()
             stored_details["team"] = team
         elif body.type == "trade":
@@ -1099,7 +1108,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             stored_details = details.model_dump()
             stored_details["teams"] = teams
         elif body.type == "convert_twoway":
-            team = _apply_convert_twoway(details, info)
+            team = _apply_convert_twoway(details, body.date, info)
             stored_details = details.model_dump()
             stored_details["team"] = team
 
