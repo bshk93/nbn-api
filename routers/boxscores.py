@@ -497,14 +497,13 @@ def _all_allstats_paths() -> list:
     return paths
 
 
-@router.get("/api/boxscores/games")
-def get_boxscore_games(season: str = Query(default=None)):
-    """Compact game index."""
-    if season:
-        paths = [(allstats_path(season, "REG"), "REG"), (allstats_path(season, "PLAYOFF"), "PLAYOFF")]
-    else:
-        paths = _all_allstats_paths()
+# Cache for the compact game index. Keyed by the set of (path, mtime) tuples
+# for the allstats files in play, so it auto-invalidates whenever a box score
+# is committed (which rewrites the underlying CSV and bumps its mtime).
+_GAME_INDEX_CACHE: dict[tuple, list[dict]] = {}
 
+
+def _build_game_index(paths: list) -> list[dict]:
     seen: dict[tuple, dict] = {}
     for path, gtype in paths:
         if not path.exists():
@@ -536,6 +535,29 @@ def get_boxscore_games(season: str = Query(default=None)):
                 "season": r.get("SEASON", "").strip(),
             }
     return sorted(seen.values(), key=lambda g: g["date"], reverse=True)
+
+
+@router.get("/api/boxscores/games")
+def get_boxscore_games(season: str = Query(default=None), team: str = Query(default=None)):
+    """Compact game index. Cached by file mtime; optionally filtered by team."""
+    if season:
+        paths = [(allstats_path(season, "REG"), "REG"), (allstats_path(season, "PLAYOFF"), "PLAYOFF")]
+    else:
+        paths = _all_allstats_paths()
+
+    cache_key = tuple(
+        (str(p), p.stat().st_mtime_ns if p.exists() else None) for p, _ in paths
+    )
+    games = _GAME_INDEX_CACHE.get(cache_key)
+    if games is None:
+        games = _build_game_index(paths)
+        _GAME_INDEX_CACHE.clear()  # only keep the most recent index set
+        _GAME_INDEX_CACHE[cache_key] = games
+
+    if team:
+        team = team.upper()
+        games = [g for g in games if g["home_team"] == team or g["away_team"] == team]
+    return games
 
 
 def _boxscore_player_row(r: dict) -> dict:
