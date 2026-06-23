@@ -573,15 +573,7 @@ def get_member_balance(member: str):
     return {"name": member, "balance": balances[member]}
 
 
-@router.get("/api/bets/stats/{member}")
-def get_member_bet_stats(member: str):
-    all_members = load_members()
-    if member not in all_members:
-        raise HTTPException(status_code=404, detail=f"Member '{member}' not found")
-
-    bets = _load_bets()
-    tips = _load_json(TIPS_FILE, [])
-
+def _compute_bet_stats(member: str, bets: list, tips: list) -> dict:
     wager_count = 0
     win_count = 0
     net_pnl = 0.0
@@ -635,6 +627,25 @@ def get_member_bet_stats(member: str):
         "max_odds_win": round(max_odds_win, 2),
         "tips_sent": tips_sent,
     }
+
+
+@router.get("/api/bets/stats")
+def get_all_bet_stats():
+    """Bet stats for every member in one pass (used by the members list)."""
+    all_members = load_members()
+    bets = _load_bets()
+    tips = _load_json(TIPS_FILE, [])
+    return {m: _compute_bet_stats(m, bets, tips) for m in all_members}
+
+
+@router.get("/api/bets/stats/{member}")
+def get_member_bet_stats(member: str):
+    all_members = load_members()
+    if member not in all_members:
+        raise HTTPException(status_code=404, detail=f"Member '{member}' not found")
+    bets = _load_bets()
+    tips = _load_json(TIPS_FILE, [])
+    return _compute_bet_stats(member, bets, tips)
 
 
 @router.get("/api/bets/balances")

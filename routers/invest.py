@@ -720,14 +720,7 @@ def get_all_holdings():
     return rows
 
 
-@router.get("/api/invest/stats/{member}")
-def get_member_invest_stats(member: str):
-    from .auth import load_members
-    all_members = load_members()
-    if member not in all_members:
-        raise HTTPException(status_code=404, detail=f"Member '{member}' not found")
-
-    all_trades = _load_trades()
+def _compute_invest_stats(member: str, all_trades: list) -> dict:
     member_trades = sorted(
         [t for t in all_trades if t["member"] == member],
         key=lambda t: t["ts"],
@@ -795,6 +788,24 @@ def get_member_invest_stats(member: str):
         "best_single_trade": round(best_single_profit, 2),
         "ever_shorted_profitably": ever_shorted_profitably,
     }
+
+
+@router.get("/api/invest/stats")
+def get_all_invest_stats():
+    """Investment stats for every member in one pass (used by the members list)."""
+    from .auth import load_members
+    all_members = load_members()
+    all_trades = _load_trades()
+    return {m: _compute_invest_stats(m, all_trades) for m in all_members}
+
+
+@router.get("/api/invest/stats/{member}")
+def get_member_invest_stats(member: str):
+    from .auth import load_members
+    all_members = load_members()
+    if member not in all_members:
+        raise HTTPException(status_code=404, detail=f"Member '{member}' not found")
+    return _compute_invest_stats(member, _load_trades())
 
 
 @router.get("/api/invest/portfolio")

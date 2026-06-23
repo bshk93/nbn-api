@@ -70,6 +70,17 @@ def send_tip(body: TipIn, info: dict = Depends(get_token_info)):
     return {"ok": True, "new_balance": sender_bal}
 
 
+@router.get("/api/tips/totals")
+def get_tip_totals():
+    """Total NB¥ received per member (used by the members list). Declared before
+    the /{member} route so 'totals' isn't captured as a member name."""
+    tips = _load_json(TIPS_FILE, [])
+    totals: dict[str, float] = {}
+    for t in tips:
+        totals[t["to"]] = round(totals.get(t["to"], 0.0) + t["amount"], 2)
+    return totals
+
+
 @router.get("/api/tips/{member}")
 def get_member_tips(member: str):
     all_members = load_members()
