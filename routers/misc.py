@@ -49,6 +49,7 @@ class CapLevel(BaseModel):
     tmle_amount: int = 0
     bae_amount: int = 0
     room_amount: int = 0
+    eaps: int = 0          # Estimated Average Player Salary — cap-hold threshold (§ 3.10)
 
 
 @router.get("/api/cap-levels")
@@ -63,7 +64,7 @@ def put_cap_level(season: str, body: CapLevel, info: dict = Depends(require_role
     levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
     levels[season] = body.model_dump()
     CAP_LEVELS_FILE.write_text(json.dumps(levels, indent=2))
-    log_write(info, f"PUT cap-levels/{season} — cap={body.cap} apron1={body.apron1} apron2={body.apron2} hard_cap={body.hard_cap} ntmle={body.ntmle_amount} tmle={body.tmle_amount} bae={body.bae_amount} room={body.room_amount}")
+    log_write(info, f"PUT cap-levels/{season} — cap={body.cap} apron1={body.apron1} apron2={body.apron2} hard_cap={body.hard_cap} ntmle={body.ntmle_amount} tmle={body.tmle_amount} bae={body.bae_amount} room={body.room_amount} eaps={body.eaps}")
     return levels[season]
 
 
