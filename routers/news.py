@@ -1,13 +1,15 @@
+import re
 import secrets
 import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
-from .constants import NEWS_FILE
+from .constants import NEWS_FILE, logger
 from .storage import _load_json, _save_json, log_write
 from .auth import get_token_info, has_role, require_role, _resolve_token
 
@@ -17,6 +19,52 @@ _news_lock = threading.Lock()
 
 MAX_TAGS = 6
 MAX_TAG_LEN = 24
+
+NEWS_WEBHOOK = (
+    "https://discord.com/api/webhooks/1518995213979488406/"
+    "Uc1p3aAUOWhIkO7ToP26P02B0NJenZXQ06uDQwAKyXlPImV6J5ZbU6664wHc2UaE3srC"
+)
+
+
+def _md_excerpt(body: str, limit: int = 280) -> str:
+    """Strip the heaviest markdown markup and collapse to a short plain-text teaser."""
+    text = body or ""
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)          # images
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)       # links → label
+    text = re.sub(r"[`*_#>~]", "", text)                       # inline/heading marks
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > limit:
+        text = text[:limit].rsplit(" ", 1)[0].rstrip() + "…"
+    return text
+
+
+def _announce_published(article: dict) -> None:
+    """Fire-and-forget Discord webhook announcing a freshly published article."""
+    url = f"https://nbn.today/news/view/?id={article['id']}"
+    desc = _md_excerpt(article.get("body", ""))
+    fields = []
+    tags = article.get("tags") or []
+    if tags:
+        fields.append({"name": "Tags", "value": ", ".join(tags), "inline": False})
+    embed = {
+        "title": article.get("title") or "Untitled",
+        "url": url,
+        "color": 0x3b82f6,
+        "description": desc or "Read the full story on NBN.",
+        "author": {"name": f"By {article.get('author', 'NBN')}"},
+        "fields": fields,
+        "footer": {"text": "Nothing But Net · nbn.today/news"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    payload = {
+        "username": "NBN Newsroom",
+        "avatar_url": "https://nbn.today/logo.png",
+        "embeds": [embed],
+    }
+    try:
+        httpx.post(NEWS_WEBHOOK, json=payload, timeout=10)
+    except Exception as exc:
+        logger.warning("News Discord webhook failed: %s", exc)
 
 
 def load_articles() -> list[dict]:
@@ -257,6 +305,7 @@ def publish_article(article_id: str, body: PublishIn, info: dict = Depends(requi
         articles[idx] = a
         save_articles(articles)
     log_write(info, f"POST news/{article_id}/publish — by {info['name']}")
+    threading.Thread(target=_announce_published, args=(dict(a),), daemon=True).start()
     return _article_detail(a)
 
 
