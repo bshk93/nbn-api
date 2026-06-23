@@ -10,9 +10,9 @@ from pydantic import BaseModel
 from .constants import (
     DATA_DIR, CAP_LEVELS_FILE, TRANSACTIONS_FILE, VALID_TEAMS,
     _txn_lock, _deadcap_lock, _state_lock, _picks_lock,
-    ROSTER_MAX, SALARY_MATCH_TIER1_CAP, SALARY_MATCH_TIER2_CAP,
+    ROSTER_MAX, ROSTER_OFFSEASON_MAX, SALARY_MATCH_TIER1_CAP, SALARY_MATCH_TIER2_CAP,
 )
-from .storage import read_csv, write_csv, _load_json, log_write, _parse_dollar, _season_start, _season_for_date
+from .storage import read_csv, write_csv, _load_json, log_write, _parse_dollar, _season_start, _season_for_date, _current_league_year
 from .auth import require_role
 from .players import load_player_bios, save_player_bios, _build_team_map, _scrub_trading_block
 from .roster_picks import (
@@ -75,7 +75,10 @@ class PickDetails(BaseModel):
     player: str
     team: str
     pick: PickIn
-    contract: ContractIn
+    # A draft pick conveys only the player's draft rights — no contract. The
+    # contract is attached later via a separate `sign` step once the cap is
+    # finalized. Kept optional for backward compatibility with old payloads.
+    contract: Optional[ContractIn] = None
 
 
 class TransactionIn(BaseModel):
@@ -95,6 +98,11 @@ class OptionDetails(BaseModel):
     cap_hold_amount: Optional[str] = None
 
 
+class GuaranteeDetails(BaseModel):
+    player: str
+    year: str           # e.g. "26-27"
+
+
 class ReleaseDetails(BaseModel):
     player: str
 
@@ -104,6 +112,12 @@ class RenounceDetails(BaseModel):
 
 
 class ConvertTwoWayDetails(BaseModel):
+    player: str
+    contract: ContractIn
+
+
+class SignPickDetails(BaseModel):
+    # Signs a player whose draft rights a team holds to their first contract.
     player: str
     contract: ContractIn
 
@@ -185,6 +199,45 @@ def _apply_option(details: OptionDetails, info: dict) -> Optional[str]:
 
     save_player_bios(bios)
     log_write(info, f"TXN option — {details.player} {details.decision} {details.option_type} {details.year}")
+    return team
+
+
+def _apply_guarantee(details: GuaranteeDetails, info: dict) -> Optional[str]:
+    """Fully guarantees a single NON_GTD contract year. Sets the full salary as the
+    guaranteed amount, clears the NON_GTD cap hold for that year, and drops any
+    guarantee date / step schedule so the year reads as fully guaranteed thereafter.
+    Returns the player's current team for storage."""
+    bios = load_player_bios()
+    if details.player not in bios:
+        raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
+
+    team_map = _build_team_map()
+    team = team_map.get(details.player)
+    if not team:
+        raise HTTPException(status_code=422, detail=f"Player {details.player!r} is not on any roster")
+
+    bio = bios[details.player]
+    holds = bio.get("cap_holds") or {}
+    if holds.get(details.year) != "NON_GTD":
+        raise HTTPException(
+            status_code=422,
+            detail=f"Player {details.player!r} has no NON_GTD year {details.year!r} to guarantee",
+        )
+    salary = (bio.get("salaries") or {}).get(details.year)
+    if not salary:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Player {details.player!r} has no salary recorded for {details.year!r}",
+        )
+
+    bio["cap_holds"] = {yr: typ for yr, typ in holds.items() if yr != details.year}
+    bio["guaranteed"] = {**bio.get("guaranteed", {}), details.year: salary}
+    bio["guarantee_dates"] = {k: v for k, v in bio.get("guarantee_dates", {}).items()
+                              if k != details.year}
+    bio["guarantee_schedule"] = {k: v for k, v in bio.get("guarantee_schedule", {}).items()
+                                 if k != details.year}
+    save_player_bios(bios)
+    log_write(info, f"TXN guarantee — {details.player} {details.year} ({team})")
     return team
 
 
@@ -407,6 +460,48 @@ def _apply_convert_twoway(details: ConvertTwoWayDetails, txn_date: str, info: di
         write_csv(roster_path, headers, rows)
 
     log_write(info, f"TXN convert_twoway — {details.player} ({team})")
+
+
+def _apply_sign_pick(details: SignPickDetails, txn_date: str, info: dict) -> str:
+    """Signs a held draft pick to their first contract: draft-rights → player/two-way. Returns the team."""
+    bios = load_player_bios()
+    if details.player not in bios:
+        raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
+
+    bio = bios[details.player]
+    if bio.get("type") != "draft-rights":
+        raise HTTPException(
+            status_code=422,
+            detail=f"Player {details.player!r} does not hold draft rights — only drafted players can be signed this way",
+        )
+
+    team_map = _build_team_map()
+    team = team_map.get(details.player)
+    if not team:
+        raise HTTPException(status_code=422, detail=f"Player {details.player!r} is not on any roster")
+
+    new_type = "two-way" if details.contract.type == "two-way" else "player"
+    bio["type"] = new_type
+    cur_season = _season_for_date(txn_date)
+    past, past_gtd, past_gtd_dates, past_gtd_sched = _retained_history(bio, cur_season)
+    bio["salaries"] = {**past, **details.contract.salaries}
+    bio["cap_holds"] = details.contract.cap_holds
+    bio["guaranteed"] = {**past_gtd, **details.contract.guaranteed}
+    bio["guarantee_dates"] = {**past_gtd_dates, **details.contract.guarantee_dates}
+    bio["guarantee_schedule"] = {**past_gtd_sched, **details.contract.guarantee_schedule}
+    save_player_bios(bios)
+
+    roster_path = DATA_DIR / f"{team.lower()}-roster.csv"
+    if roster_path.exists():
+        headers, rows = read_csv(roster_path)
+        for row in rows:
+            if row.get("SLUG") == details.player:
+                row["TYPE"] = "two-way" if new_type == "two-way" else ""
+                break
+        write_csv(roster_path, headers, rows)
+
+    log_write(info, f"TXN sign_pick — {details.player} ({team}) → {new_type}")
+    return team
     return team
 
 
@@ -512,20 +607,23 @@ def _apply_pick(details: PickDetails, txn_date: str, info: dict):
     if "SLUG" not in headers:
         raise HTTPException(status_code=422, detail=f"Roster for {team} uses legacy format; migrate before using transactions")
 
-    row_type = "two-way" if details.contract.type == "two-way" else ""
-    rows.append({"SLUG": details.player, "TYPE": row_type})
+    # A pick conveys draft rights only — the player lands on the roster with no
+    # contract. The salary comes later via a separate `sign` step. (Roster CSVs
+    # store SLUG,OVR only; the TYPE here is dropped on write — bio.type is the
+    # source of truth, read back via the `row.TYPE || bio.type` fallback.)
+    rows.append({"SLUG": details.player, "TYPE": "draft-rights"})
     write_csv(path, headers, rows)
 
     bio = bios[details.player]
-    if details.contract.salaries:
-        cur_season = _season_for_date(txn_date)
-        past, past_gtd, past_gtd_dates, past_gtd_sched = _retained_history(bio, cur_season)
-        bio["salaries"] = {**past, **details.contract.salaries}
-        bio["cap_holds"] = details.contract.cap_holds
-        bio["guaranteed"] = {**past_gtd, **details.contract.guaranteed}
-        bio["guarantee_dates"] = {**past_gtd_dates, **details.contract.guarantee_dates}
-        bio["guarantee_schedule"] = {**past_gtd_sched, **details.contract.guarantee_schedule}
-    bio["type"] = details.contract.type
+    bio["type"] = "draft-rights"
+    # Stamp the canonical draft record on the bio. draft_team is the source of
+    # truth for "who drafted this player" across the whole site (team Draft
+    # History, /draft); the slot fields are the authoritative draft position.
+    bio["draft_team"] = team
+    bio["draft_year"] = details.pick.year
+    bio["draft_round"] = details.pick.round
+    if details.pick.pick_number is not None:
+        bio["draft_pick"] = details.pick.pick_number
     save_player_bios(bios)
 
     pick = details.pick
@@ -896,21 +994,22 @@ def _validate_renounce(details: RenounceDetails, ctx: dict) -> list[CheckResult]
     return []
 
 
-def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
-    checks = []
-    bios = ctx["bios"]; season = ctx["cur_season"]
+def _validate_guarantee(details: GuaranteeDetails, ctx: dict) -> list[CheckResult]:
+    return []
 
-    if len(details.transfers) < 2:
-        checks.append(CheckResult(
-            check="trade_min_legs",
-            passed=False,
-            level="warning",
-            message=(f"Trade has only {len(details.transfers)} leg(s); a normal trade has 2 or more. "
-                     "Submit anyway to record a single-sided leg (e.g. remaining leg after a draft-show split)."),
-        ))
 
+def _trade_flows(details, bios: dict, season: str) -> tuple[dict, dict, dict, dict]:
+    """Per-team salary and player-slug flows for a trade.
+
+    Returns (outgoing_salary, incoming_salary, out_players, in_players), each
+    keyed by team abbreviation. Pick assets carry no salary or roster slot, so
+    only player assets are accumulated. Shared by the validator and fact sheet
+    so the two never diverge on what "this trade moves" means.
+    """
     outgoing: dict[str, int] = {}
     incoming: dict[str, int] = {}
+    out_players: dict[str, list[str]] = {}
+    in_players: dict[str, list[str]] = {}
     for xfer in details.transfers:
         from_t = xfer.from_team.upper()
         to_t   = xfer.to_team.upper()
@@ -920,27 +1019,134 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
             sal = _parse_dollar((bios.get(asset.slug, {}).get("salaries") or {}).get(season, ""))
             outgoing[from_t] = outgoing.get(from_t, 0) + sal
             incoming[to_t]   = incoming.get(to_t, 0)   + sal
+            out_players.setdefault(from_t, []).append(asset.slug)
+            in_players.setdefault(to_t, []).append(asset.slug)
+    return outgoing, incoming, out_players, in_players
 
-    for team in set(outgoing) | set(incoming):
+
+def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
+    """Canonical trade validation, shared verbatim by the submit endpoint
+    (``POST /api/transactions``) and the simulator (``POST /api/validate/trade``).
+
+    Every rule appends an explicit pass *or* fail CheckResult so the result reads
+    as a complete rubric — both the simulator and the transaction trade flow render
+    the whole scorecard live, and the submit UI only blocks on ``passed == False``
+    errors (warnings are force-through-able). The rules, in order:
+
+      • Leg count          — § 4.1 (warning only; single legs are allowed for splits)
+      • Salary matching    — § 4.2 (tiered, below apron) / § 4.3 (apron + $250K)
+      • 2nd-apron aggreg.  — § 4.4 (warning only; apron-2 teams may not combine salaries)
+      • Hard cap           — team apron hard cap (team-state) + league-wide hard cap
+      • Roster size        — Article II: 15 in-season, 20 offseason ceiling
+    """
+    checks = []
+    bios = ctx["bios"]; season = ctx["cur_season"]
+
+    # ── Leg count (§ 4.1) ──────────────────────────────────────────────────────
+    legs = len(details.transfers)
+    if legs < 2:
+        checks.append(CheckResult(
+            check="trade_min_legs",
+            passed=False,
+            level="warning",
+            message=(f"Trade has only {legs} leg(s); a normal trade has 2 or more. "
+                     "Submit anyway to record a single-sided leg (e.g. remaining leg after a draft-show split)."),
+        ))
+    else:
+        checks.append(CheckResult(
+            check="trade_min_legs", passed=True,
+            message=f"{legs} legs exchanged — valid two-or-more-team structure (§ 4.1).",
+        ))
+
+    outgoing, incoming, out_players, in_players = _trade_flows(details, bios, season)
+    teams = sorted(set(outgoing) | set(incoming) | set(out_players) | set(in_players))
+
+    # ── Salary matching (§ 4.2 / § 4.3) + hard cap ─────────────────────────────
+    for team in teams:
         out = outgoing.get(team, 0)
         inc = incoming.get(team, 0)
         current = _compute_team_salary(team, bios, season)
-
         delta = inc - out
+
         if delta > 0:
             projected = current + delta
-            r = _hard_cap_check(team, projected, season,
-                                ctx["team_state"], ctx["cap_levels"])
-            if r:
-                checks.append(r)
-            r = _universal_hard_cap_check(team, projected, season, ctx["cap_levels"])
-            if r:
-                checks.append(r)
+            hc = _hard_cap_check(team, projected, season,
+                                 ctx["team_state"], ctx["cap_levels"])
+            checks.append(hc or CheckResult(
+                check=f"hard_cap_{team.lower()}", passed=True,
+                message=f"{team}: projected salary ${projected:,} within hard-cap limits.",
+            ))
+            lhc = _universal_hard_cap_check(team, projected, season, ctx["cap_levels"])
+            if lhc:
+                checks.append(lhc)
 
         if inc > 0:
-            r = _check_salary_matching(team, out, inc, current, ctx["cap_levels"], season)
-            if r:
-                checks.append(r)
+            sm = _check_salary_matching(team, out, inc, current, ctx["cap_levels"], season)
+            checks.append(sm or CheckResult(
+                check=f"salary_matching_{team.lower()}", passed=True,
+                message=f"{team}: incoming ${inc:,} matches outgoing ${out:,} (§ 4.2/4.3).",
+            ))
+
+        # ── 2nd-apron aggregation (§ 4.4) ──────────────────────────────────────
+        # A team whose pre-trade salary is at/above the second apron may not
+        # aggregate (combine) two or more outgoing salaries to match incoming
+        # salary. Surfaced as a warning for the office to verify — not auto-blocked.
+        apron2 = ctx["cap_levels"].get(season, {}).get("apron2")
+        out_count = len(out_players.get(team, []))
+        if apron2 and current >= apron2 and inc > 0:
+            if out_count >= 2:
+                checks.append(CheckResult(
+                    check=f"apron2_aggregation_{team.lower()}", passed=False, level="warning",
+                    message=(f"{team} is at/above the 2nd apron (${current:,} ≥ ${apron2:,}) and is "
+                             f"aggregating {out_count} outgoing salaries (§ 4.4) — apron-2 teams may not "
+                             "combine salaries to match incoming. Verify this leg manually."),
+                ))
+            else:
+                checks.append(CheckResult(
+                    check=f"apron2_aggregation_{team.lower()}", passed=True,
+                    message=(f"{team} is at/above the 2nd apron but matches with a single outgoing "
+                             "salary — no aggregation (§ 4.4)."),
+                ))
+
+    # ── Roster size (Article II) ───────────────────────────────────────────────
+    # In-season the standard-roster limit is ROSTER_MAX (15). In the offseason it
+    # rises to ROSTER_OFFSEASON_MAX (20); teams must trim back to 15 before the
+    # season. So: ≤15 passes, 16–20 is a warning (a net gain into that band is
+    # flagged; a balanced swap that leaves an already-over roster unchanged is a
+    # quiet note), and anything above 20 is a hard block.
+    for team in sorted(set(out_players) | set(in_players)):
+        before = _count_standard_roster(team)
+        out_std = sum(1 for s in out_players.get(team, [])
+                      if bios.get(s, {}).get("type", "") != "two-way")
+        in_std  = sum(1 for s in in_players.get(team, [])
+                      if bios.get(s, {}).get("type", "") != "two-way")
+        after = before - out_std + in_std
+        key = f"roster_size_{team.lower()}"
+        if after > ROSTER_OFFSEASON_MAX:
+            checks.append(CheckResult(
+                check=key, passed=False, level="error",
+                message=(f"{team} would carry {after} standard players, over the "
+                         f"{ROSTER_OFFSEASON_MAX}-player offseason maximum — release a player first."),
+            ))
+        elif after > ROSTER_MAX and after > before:
+            checks.append(CheckResult(
+                check=key, passed=False, level="warning",
+                message=(f"{team} would go from {before} to {after} standard players — over the "
+                         f"{ROSTER_MAX}-man regular-season limit (offseason ceiling {ROSTER_OFFSEASON_MAX}); "
+                         f"trim to {ROSTER_MAX} before the season."),
+            ))
+        elif after > ROSTER_MAX:
+            checks.append(CheckResult(
+                check=key, passed=True,
+                message=(f"{team}: {after} standard players after trade — over the {ROSTER_MAX}-man "
+                         f"regular-season limit but within the offseason ceiling of {ROSTER_OFFSEASON_MAX} "
+                         "(unchanged by this trade); trim before the season."),
+            ))
+        else:
+            checks.append(CheckResult(
+                check=key, passed=True,
+                message=f"{team}: {after} standard players after trade (max {ROSTER_MAX}).",
+            ))
 
     return checks
 
@@ -950,35 +1156,11 @@ def _validate_option(details: OptionDetails, ctx: dict) -> list[CheckResult]:
 
 
 def _validate_pick(details: PickDetails, ctx: dict) -> list[CheckResult]:
-    checks = []
-    bios = ctx["bios"]; season = ctx["cur_season"]
-    team = details.team.upper()
-
-    current = _compute_team_salary(team, bios, season)
-    new_sal = _parse_dollar(details.contract.salaries.get(season, ""))
-    projected = current + new_sal
-    r = _hard_cap_check(team, projected, season,
-                        ctx["team_state"], ctx["cap_levels"])
-    if r:
-        checks.append(r)
-    r = _universal_hard_cap_check(team, projected, season, ctx["cap_levels"])
-    if r:
-        checks.append(r)
-
-    if details.contract.type != "two-way":
-        count = _count_standard_roster(team)
-        if count >= ROSTER_MAX:
-            checks.append(CheckResult(
-                check="roster_size",
-                passed=False,
-                level="error",
-                message=(
-                    f"{team} already has {count} standard players (max {ROSTER_MAX}); "
-                    f"release a player before signing this pick."
-                ),
-            ))
-
-    return checks
+    # A draft pick conveys draft rights only — no contract, no salary ($0 cap
+    # impact), and the player lands as "draft-rights" rather than a standard
+    # roster player. Cap and roster-size checks belong to the later `sign_pick`
+    # step, not here. `details.contract` is None for picks (see PickDetails).
+    return []
 
 
 def _validate_convert_twoway(details: ConvertTwoWayDetails, ctx: dict) -> list[CheckResult]:
@@ -1029,6 +1211,7 @@ _VALIDATORS = {
     "renounce":       _validate_renounce,
     "trade":          _validate_trade,
     "option":         _validate_option,
+    "guarantee":      _validate_guarantee,
     "pick":           _validate_pick,
     "convert_twoway": _validate_convert_twoway,
 }
@@ -1048,17 +1231,19 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid date; use YYYY-MM-DD")
 
-    if body.type not in ("sign", "pick", "option", "release", "renounce", "trade", "convert_twoway"):
+    if body.type not in ("sign", "pick", "option", "guarantee", "release", "renounce", "trade", "convert_twoway", "sign_pick"):
         raise HTTPException(status_code=422, detail=f"Unsupported transaction type: {body.type!r}")
 
     _detail_models = {
         "sign":           (SignDetails,           "Invalid sign details"),
         "pick":           (PickDetails,           "Invalid pick details"),
         "option":         (OptionDetails,         "Invalid option details"),
+        "guarantee":      (GuaranteeDetails,      "Invalid guarantee details"),
         "release":        (ReleaseDetails,        "Invalid release details"),
         "renounce":       (RenounceDetails,       "Invalid renounce details"),
         "trade":          (TradeIn,               "Invalid trade details"),
         "convert_twoway": (ConvertTwoWayDetails,  "Invalid convert_twoway details"),
+        "sign_pick":      (SignPickDetails,       "Invalid sign_pick details"),
     }
     model_cls, err_prefix = _detail_models[body.type]
     try:
@@ -1094,6 +1279,10 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             team = _apply_option(details, info)
             stored_details = details.model_dump()
             stored_details["team"] = team
+        elif body.type == "guarantee":
+            team = _apply_guarantee(details, info)
+            stored_details = details.model_dump()
+            stored_details["team"] = team
         elif body.type == "release":
             team, dead_cap = _apply_release(details, body.date, info)
             stored_details = details.model_dump()
@@ -1109,6 +1298,10 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             stored_details["teams"] = teams
         elif body.type == "convert_twoway":
             team = _apply_convert_twoway(details, body.date, info)
+            stored_details = details.model_dump()
+            stored_details["team"] = team
+        elif body.type == "sign_pick":
+            team = _apply_sign_pick(details, body.date, info)
             stored_details = details.model_dump()
             stored_details["team"] = team
 
@@ -1190,87 +1383,56 @@ def delete_transaction(txn_id: str, info: dict = Depends(require_role("rosters")
 
 # ── Trade validation endpoint ─────────────────────────────────────────────────
 
-def _build_trade_context(trade: TradeValidateInput) -> dict:
-    bios = load_player_bios()
-
-    players_out: dict[str, list[str]] = {}
-    players_in: dict[str, list[str]] = {}
-    for xfer in trade.transfers:
-        from_team = xfer.from_team.upper()
-        to_team = xfer.to_team.upper()
-        for asset in xfer.assets:
-            if asset.type == "player" and asset.slug:
-                players_out.setdefault(from_team, []).append(asset.slug)
-                players_in.setdefault(to_team, []).append(asset.slug)
+def _trade_fact_sheet(details, ctx: dict) -> dict:
+    """Per-team financial snapshot the simulator renders alongside the checks.
+    Reuses _trade_flows so the numbers shown are the exact ones the validator
+    judged — no parallel cap math on the client."""
+    bios = ctx["bios"]; season = ctx["cur_season"]
+    outgoing, incoming, out_players, in_players = _trade_flows(details, bios, season)
 
     teams: dict[str, dict] = {}
-    for team in set(players_out) | set(players_in):
-        path = DATA_DIR / f"{team.lower()}-roster.csv"
-        rows = read_csv(path)[1] if path.exists() else []
-
-        non_standard_on_roster = {
-            r["SLUG"].strip() for r in rows
-            if r.get("SLUG", "").strip() and r.get("TYPE", "").strip() == "two-way"
-        }
-        count_before = sum(
-            1 for r in rows
-            if r.get("SLUG", "").strip() and r.get("TYPE", "").strip() != "two-way"
-        )
-
-        out_slugs = players_out.get(team, [])
-        in_slugs = players_in.get(team, [])
-
-        out_standard = sum(1 for s in out_slugs if s not in non_standard_on_roster)
-        in_standard = sum(
-            1 for s in in_slugs
-            if bios.get(s, {}).get("type", "") != "two-way"
-        )
-
+    for team in sorted(set(outgoing) | set(incoming) | set(out_players) | set(in_players)):
+        out = outgoing.get(team, 0)
+        inc = incoming.get(team, 0)
+        before = _count_standard_roster(team)
+        out_std = sum(1 for s in out_players.get(team, [])
+                      if bios.get(s, {}).get("type", "") != "two-way")
+        in_std  = sum(1 for s in in_players.get(team, [])
+                      if bios.get(s, {}).get("type", "") != "two-way")
+        current = _compute_team_salary(team, bios, season)
         teams[team] = {
             "team": team,
-            "standard_count_before": count_before,
-            "standard_count_after": count_before - out_standard + in_standard,
-            "players_out": out_slugs,
-            "players_in": in_slugs,
+            "current_salary": current,
+            "outgoing_salary": out,
+            "incoming_salary": inc,
+            "projected_salary": current - out + inc,
+            "players_out": out_players.get(team, []),
+            "players_in": in_players.get(team, []),
+            "standard_count_before": before,
+            "standard_count_after": before - out_std + in_std,
         }
 
     return {
+        "season": season,
+        "cap_levels": ctx["cap_levels"].get(season, {}),
         "teams": teams,
-        "is_sign_and_trade": trade.is_sign_and_trade,
-        "exceptions": trade.exceptions,
     }
-
-
-def _check_roster_size(ctx: dict) -> CheckResult:
-    violations = [
-        f"{tc['team']}: would have {tc['standard_count_after']} players (max {ROSTER_MAX})"
-        for tc in ctx["teams"].values()
-        if tc["standard_count_after"] > ROSTER_MAX
-    ]
-    if violations:
-        return CheckResult(
-            check="roster_size",
-            passed=False,
-            message="Roster limit exceeded — release a player first: " + "; ".join(violations),
-        )
-    return CheckResult(
-        check="roster_size",
-        passed=True,
-        message=f"All rosters within the {ROSTER_MAX}-player limit",
-    )
-
-
-_TRADE_CHECKS = [
-    _check_roster_size,
-]
 
 
 @router.post("/api/validate/trade")
 def validate_trade(body: TradeValidateInput):
-    ctx = _build_trade_context(body)
-    results = [fn(ctx) for fn in _TRADE_CHECKS]
+    ctx = {
+        "bios":       load_player_bios(),
+        "team_state": load_team_state(),
+        "cap_levels": json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {},
+        "cur_season": _current_league_year(),
+    }
+    checks = _validate_trade(body, ctx)
+    # Warnings (e.g. a single-leg trade) don't make a deal illegal — only errors do,
+    # matching the submit path where warnings are force-through-able.
+    legal = not any(not c.passed and c.level == "error" for c in checks)
     return TradeValidationResult(
-        legal=all(r.passed for r in results),
-        checks=results,
-        fact_sheet=ctx,
+        legal=legal,
+        checks=checks,
+        fact_sheet=_trade_fact_sheet(body, ctx),
     )

@@ -359,12 +359,15 @@ def post_trivia_score(body: TriviaScoreSubmit, info: dict = Depends(get_token_in
 
 @router.post("/api/trivia/answer")
 def post_trivia_answer(body: TriviaAnswerSubmit, info: dict = Depends(get_token_info)):
-    """Award NB¥ for a correct trivia answer. Reward = 2^(streak-1), capped at 512."""
+    """Award NB¥ for a correct trivia answer. Reward = 2^(streak-1), capped at 512;
+    no reward past the 10th in a row (streak keeps going for the leaderboard only)."""
     if not info.get("name"):
         raise HTTPException(status_code=401, detail="Authentication required")
     if body.streak < 1:
         raise HTTPException(status_code=422, detail="streak must be >= 1")
-    reward = float(min(2 ** (body.streak - 1), 512))
+    reward = 0.0 if body.streak > 10 else float(min(2 ** (body.streak - 1), 512))
+    if reward == 0.0:
+        return {"ok": True, "reward": 0.0, "balance": _load_balances().get(info["name"], 0.0)}
     with _balances_lock:
         balances = _load_balances()
         _init_bal(balances, info["name"])

@@ -40,6 +40,7 @@ INVEST_HOLDINGS_FILE = DATA_DIR / "invest-holdings.json"
 INVEST_TRADES_FILE   = DATA_DIR / "invest-trades.json"
 INVEST_MARKET_FILE   = DATA_DIR / "invest-market.json"
 PROPOSALS_FILE = DATA_DIR / "proposals.json"
+NEWS_FILE      = DATA_DIR / "news.json"
 TIPS_FILE      = DATA_DIR / "tips.json"
 CONSTITUTION_FILE = DATA_DIR / "constitution.json"
 TRIVIA_SCORES_PATH = DATA_DIR / "trivia-scores.json"
@@ -49,6 +50,8 @@ DRAFT_SNAPSHOT_FILE = DATA_DIR / "draft-snapshot.json"
 # Isolated picks file the live-draft show writes to (reassigns + selections), so the
 # broadcast never mutates the permanent draft-picks.csv the transactions pipeline owns.
 DRAFT_LIVE_PICKS_FILE = DATA_DIR / "draft-live-picks.csv"
+# Member draft-pick grades: { "<year>": { "<slug>": { "<member>": "A" } } }
+DRAFT_GRADES_FILE = DATA_DIR / "draft-grades.json"
 
 PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PLAYER", "PROTECTED", "SWAP_OWNER", "NOTES"]
 
@@ -73,7 +76,7 @@ VALID_ROLES = {"admin", "rosters", "bod", "curator", "stats", "bookie"} | {t.low
 
 # Roles that are implicitly granted by holding another role
 ROLE_IMPLIES: dict[str, set[str]] = {
-    "bod": {"rosters"},
+    "bod": {"rosters", "curator"},
 }
 
 CURATOR_FIELDS = {
@@ -90,7 +93,8 @@ BIO_REWARD_FIELDS = frozenset({
     "photo_url", "height", "weight", "wingspan",
 })
 
-ROSTER_MAX = 15
+ROSTER_MAX = 15            # regular-season standard-roster limit (Article II)
+ROSTER_OFFSEASON_MAX = 20  # offseason ceiling; teams must trim to ROSTER_MAX before the season
 
 # § 4.2 tier boundary constants
 SALARY_MATCH_TIER1_CAP = 8_527_000

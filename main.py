@@ -4,7 +4,7 @@ import sys
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import auth, players, roster_picks, transactions, boxscores, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest
+from routers import auth, players, roster_picks, transactions, boxscores, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news
 
 logging.basicConfig(
     stream=sys.stdout,
@@ -20,7 +20,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://nbn.today"],
+    allow_origins=["https://nbn.today", "https://news.nbn.today"],
     allow_methods=["GET", "PUT", "POST", "DELETE", "PATCH"],
     allow_headers=["Authorization", "Content-Type"],
 )
@@ -39,3 +39,4 @@ app.include_router(poeltl.router)
 app.include_router(strikes.router)
 app.include_router(draft.router)
 app.include_router(invest.router)
+app.include_router(news.router)

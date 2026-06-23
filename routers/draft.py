@@ -6,12 +6,12 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
-from .auth import get_token_info, has_role, require_admin, require_any_role
+from .auth import get_token_info, has_role, require_admin, require_any_role, _resolve_token
 from .constants import (
-    DRAFT_LIVE_FILE, DRAFT_LIVE_PICKS_FILE, DRAFT_SNAPSHOT_FILE,
+    DRAFT_GRADES_FILE, DRAFT_LIVE_FILE, DRAFT_LIVE_PICKS_FILE, DRAFT_SNAPSHOT_FILE,
     PICKS_FILE, PICKS_HEADERS, PLAYER_BIOS_FILE, VALID_TEAMS, logger,
 )
 from .players import _display_name
@@ -28,9 +28,15 @@ _draft_lock = threading.Lock()
 # _post_draft_webhook / reveal_pick).
 DRAFT_WEBHOOK = "https://discord.com/api/webhooks/1517890636810817569/7MW228lLGQkhh7Ykx4ijABkm9xIrqfDhrLCICyE8vOtMeW_4tLdLHT3-88vAYp8k5yCj"
 
-# Delay (seconds) before firing the reveal webhook, so the Discord post trails the
-# broadcast stream delay instead of beating it.
-DRAFT_WEBHOOK_DELAY_SECONDS = 30
+# Delay (seconds) between the presenter triggering a reveal and the pick becoming
+# public, so every reveal surface — the board, Best Available pool, event log, and
+# Discord announcement — trails the broadcast stream delay together instead of
+# beating it. Applied once in reveal_pick; the webhook no longer self-delays.
+DRAFT_REVEAL_DELAY_SECONDS = 30
+
+# Reveals triggered but not yet applied (still inside the stream-delay window).
+# Tracked so a double-press during the delay can't double-log or double-announce.
+_pending_reveals: set[str] = set()
 
 DRAFT_TEAM_NAMES = {
     "ATL": "Atlanta Hawks",    "BKN": "Brooklyn Nets",       "BOS": "Boston Celtics",
@@ -457,67 +463,96 @@ def _build_pick_announcement(state: dict, round_num: int, pick_num: int):
 
 
 def _post_draft_webhook(message: str) -> None:
-    """Fire-and-forget Discord post on a daemon thread so the live reveal never
-    blocks on (or is broken by) network latency or a Discord outage."""
-    def _send():
-        try:
-            time.sleep(DRAFT_WEBHOOK_DELAY_SECONDS)
-            httpx.post(DRAFT_WEBHOOK, json={"content": message}, timeout=5)
-        except Exception as exc:
-            logger.warning("Draft Discord webhook failed: %s", exc)
+    """Best-effort synchronous Discord post. Called from the delayed reveal worker,
+    so the stream-delay wait already happened upstream; a failure or network stall
+    here is swallowed and never affects the reveal."""
     try:
-        threading.Thread(target=_send, daemon=True).start()
+        httpx.post(DRAFT_WEBHOOK, json={"content": message}, timeout=5)
     except Exception as exc:
-        logger.warning("Draft Discord webhook thread failed to start: %s", exc)
+        logger.warning("Draft Discord webhook failed: %s", exc)
+
+
+def _apply_reveal(round_num: int, pick_num: int) -> None:
+    """Make a revealed pick public: flip it into state["revealed"] (which drives the
+    board and Best Available pool), append the event-log entry, and fire the Discord
+    announcement. Runs on a daemon thread DRAFT_REVEAL_DELAY_SECONDS after the
+    presenter triggers the reveal, so every public surface trails the stream delay
+    together. Best-effort throughout — a failure can never break the live show."""
+    key = f"{round_num}-{pick_num}"
+    state = None
+    newly_revealed = False
+    try:
+        with _draft_lock:
+            state = load_draft_live()
+            if key not in state["revealed"]:
+                # Log the pick to the event log on reveal (not on submit), mirroring
+                # how trades are logged only when announced.
+                picks = [pick_to_response(p) for p in _load_picks()]
+                enrich_swap_conveys(picks)
+                target = next(
+                    (p for p in picks if p["round"] == round_num and p["pick"] == pick_num),
+                    None,
+                )
+                # If the pick was unstaged during the delay window there's nothing to
+                # reveal — skip the flip entirely so the board/pool stay consistent.
+                if target and target["player"]:
+                    state["revealed"].append(key)
+                    owners = _broadcast_pick_owners(state, picks, round_num, pick_num)
+                    # Idempotent: drop any prior pick event for this slot (e.g. a
+                    # straggler logged at submit time by older code) before appending.
+                    state["events"] = [
+                        e for e in state.get("events", [])
+                        if not (e.get("type") == "pick"
+                                and e.get("round") == round_num
+                                and e.get("pick") == pick_num)
+                    ]
+                    state["events"].append({
+                        "type": "pick",
+                        "ts": datetime.now(tz=EASTERN).isoformat(),
+                        "year": target["year"],
+                        "round": round_num,
+                        "pick": pick_num,
+                        "orig": (target["orig"] or "").upper(),
+                        "owner": "|".join(owners),
+                        "player": target["player"],
+                    })
+                    save_draft_live(state)
+                    newly_revealed = True
+    except Exception as exc:
+        logger.warning("Draft reveal apply failed for %s: %s", key, exc)
+    finally:
+        with _draft_lock:
+            _pending_reveals.discard(key)
+    # Announce exactly once, after the lock is released.
+    if newly_revealed and state is not None:
+        msg = _build_pick_announcement(state, round_num, pick_num)
+        if msg:
+            _post_draft_webhook(msg)
 
 
 @router.post("/api/draft/reveal")
 def reveal_pick(body: RevealBody, info: dict = Depends(require_any_role("bod"))):
     key = f"{body.round}-{body.pick}"
-    newly_revealed = False
-    state = None
+    round_num, pick_num = body.round, body.pick
     with _draft_lock:
-        state = load_draft_live()
-        if key not in state["revealed"]:
-            state["revealed"].append(key)
-            # Log the pick to the event log on reveal (not on submit), mirroring
-            # how trades are logged only when announced.
-            picks = [pick_to_response(p) for p in _load_picks()]
-            enrich_swap_conveys(picks)
-            target = next(
-                (p for p in picks if p["round"] == body.round and p["pick"] == body.pick),
-                None,
-            )
-            if target and target["player"]:
-                owners = _broadcast_pick_owners(state, picks, body.round, body.pick)
-                # Idempotent: drop any prior pick event for this slot (e.g. a
-                # straggler logged at submit time by older code) before appending.
-                state["events"] = [
-                    e for e in state.get("events", [])
-                    if not (e.get("type") == "pick"
-                            and e.get("round") == body.round
-                            and e.get("pick") == body.pick)
-                ]
-                state["events"].append({
-                    "type": "pick",
-                    "ts": datetime.now(tz=EASTERN).isoformat(),
-                    "year": target["year"],
-                    "round": body.round,
-                    "pick": body.pick,
-                    "orig": (target["orig"] or "").upper(),
-                    "owner": "|".join(owners),
-                    "player": target["player"],
-                })
-            save_draft_live(state)
-            newly_revealed = True
-    # Announce exactly once, after the lock is released. Best-effort: any failure
-    # is swallowed inside the helpers so the reveal response is unaffected.
-    if newly_revealed:
-        msg = _build_pick_announcement(state, body.round, body.pick)
-        if msg:
-            _post_draft_webhook(msg)
+        already = key in load_draft_live()["revealed"] or key in _pending_reveals
+        if not already:
+            _pending_reveals.add(key)
+    # Schedule the public flip + announcement for after the stream-delay window.
+    # The presenter's own console shows the reveal modal immediately (it's driven
+    # by local state, not state["revealed"]), so only the public surfaces wait.
+    if not already:
+        def _delayed():
+            time.sleep(DRAFT_REVEAL_DELAY_SECONDS)
+            _apply_reveal(round_num, pick_num)
+        try:
+            threading.Thread(target=_delayed, daemon=True).start()
+        except Exception as exc:
+            # If the thread can't start, apply immediately so a reveal is never lost.
+            logger.warning("Draft reveal thread failed to start for %s: %s", key, exc)
+            _apply_reveal(round_num, pick_num)
     log_write(info, f"POST draft/reveal — {key}")
-    return {"revealed": key}
+    return {"revealed": key, "delaySeconds": DRAFT_REVEAL_DELAY_SECONDS}
 
 
 # ── Reassign pick ──────────────────────────────────────────────────────────────
@@ -765,3 +800,74 @@ def reset_live_draft(info: dict = Depends(require_any_role("bod"))):
         save_draft_live(state)
     log_write(info, "POST draft/reset — live draft reset to clean slate")
     return {"ok": True}
+
+
+# ── Draft-pick grades ───────────────────────────────────────────────────────────
+# Members grade individual picks of a completed draft (A–F). Results for a pick
+# are revealed to a member only once they've graded that pick themselves.
+
+GRADE_POINTS = {"A": 4, "B": 3, "C": 2, "D": 1, "F": 0}
+
+
+def _load_grades() -> dict:
+    return _load_json(DRAFT_GRADES_FILE, {})
+
+
+def _save_grades(data: dict):
+    _save_json(DRAFT_GRADES_FILE, data)
+
+
+def _aggregate_grades(votes: dict) -> dict:
+    """Distribution, vote count, and 0–4 average for one pick's votes."""
+    dist = {g: 0 for g in GRADE_POINTS}
+    for g in votes.values():
+        if g in dist:
+            dist[g] += 1
+    count = sum(dist.values())
+    avg = sum(GRADE_POINTS[g] * n for g, n in dist.items()) / count if count else None
+    return {"count": count, "avg": round(avg, 2) if avg is not None else None, "dist": dist}
+
+
+class DraftGradeBody(BaseModel):
+    year: int
+    slug: str
+    grade: str
+
+
+@router.get("/api/draft/grades")
+def get_draft_grades(year: int, authorization: Optional[str] = Header(None)):
+    """Grade results for one draft year, gated per pick.
+
+    Only returns aggregates for picks the requesting member has already graded —
+    so a member can't see results until they've cast their own vote on that pick.
+    Without a valid token nothing is revealed.
+    """
+    info = _resolve_token(authorization)
+    name = info["name"] if info else None
+    year_grades = _load_grades().get(str(year), {})
+    picks = {}
+    if name:
+        for slug, votes in year_grades.items():
+            my = votes.get(name)
+            if my is None:
+                continue
+            picks[slug] = {"my": my, **_aggregate_grades(votes)}
+    return {"year": year, "picks": picks}
+
+
+@router.put("/api/draft/grades")
+def put_draft_grade(body: DraftGradeBody, info: dict = Depends(get_token_info)):
+    """Cast or update the requesting member's grade for one pick."""
+    grade = body.grade.strip().upper()
+    if grade not in GRADE_POINTS:
+        raise HTTPException(status_code=400, detail="Grade must be one of A, B, C, D, F")
+    if not body.slug:
+        raise HTTPException(status_code=400, detail="Missing slug")
+    with _draft_lock:
+        grades = _load_grades()
+        votes = grades.setdefault(str(body.year), {}).setdefault(body.slug, {})
+        votes[info["name"]] = grade
+        _save_grades(grades)
+        result = {"my": grade, **_aggregate_grades(votes)}
+    log_write(info, f"PUT draft/grades — {body.year} {body.slug} = {grade}")
+    return result
