@@ -15,6 +15,10 @@ def _atomic_write(path: Path, text: str):
     file — they see either the old contents or the new, never a half-written mix."""
     tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{id(text)}")
     tmp.write_text(text)
+    # These files are served statically by nginx (e.g. {abbr}-roster.csv), so they
+    # must stay world-readable regardless of the writing process's umask. Without
+    # this, a writer running under umask 077 produces 0600 files and nginx 403s.
+    os.chmod(tmp, 0o644)
     os.replace(tmp, path)
 
 
