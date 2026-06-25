@@ -595,9 +595,9 @@ def post_standings_to_discord(
 
 class JoinSubmission(BaseModel):
     discord: str
-    reddit: Optional[str] = None
-    social_platform: Optional[str] = None
-    social_handle: Optional[str] = None
+    reddit: str
+    social_platform: str
+    social_handle: str
     location: str
     how_found: str
     teams_interest: str
@@ -622,9 +622,9 @@ def post_join(body: JoinSubmission, request: Request):
     if len(discord) > 100:
         raise HTTPException(status_code=422, detail="discord name too long")
 
-    social_platform = (body.social_platform or "").strip() or None
-    social_handle   = (body.social_handle   or "").strip() or None
-    if social_platform and social_platform not in _SOCIAL_PLATFORMS:
+    social_platform = require(body.social_platform, "social_platform")
+    social_handle   = require(body.social_handle,   "social_handle")
+    if social_platform not in _SOCIAL_PLATFORMS:
         raise HTTPException(status_code=422, detail="unrecognized social platform")
 
     forwarded_for = request.headers.get("x-forwarded-for", "")
@@ -638,7 +638,7 @@ def post_join(body: JoinSubmission, request: Request):
         "user_agent":      request.headers.get("user-agent"),
         "referrer":        request.headers.get("referer"),
         "discord":         discord,
-        "reddit":          (body.reddit or "").strip() or None,
+        "reddit":          require(body.reddit, "reddit"),
         "social_platform": social_platform,
         "social_handle":   social_handle,
         "location":        location,
