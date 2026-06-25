@@ -1,14 +1,16 @@
+import io
 import re
 import secrets
 import threading
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from .constants import (
     MEMBERS_FILE, VALID_ROLES, VALID_TEAMS, ROLE_IMPLIES,
-    MEMBER_SEEN_FILE,
+    MEMBER_SEEN_FILE, AVATARS_DIR,
 )
 from .storage import _load_json, _save_json, log_write
 
@@ -148,6 +150,12 @@ class CosmeticsUpdate(BaseModel):
     status_text: Optional[str] = None  # max 40 chars or "" to clear
 
 
+_AVATAR_COST = 5000.0
+_AVATAR_MAX_BYTES = 512 * 1024  # 512 KB
+_AVATAR_MAX_PX = 512
+_AVATAR_ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp"}
+
+
 # ── Auth identity ────────────────────────────────────────────────────────────
 
 @router.get("/api/me")
@@ -260,14 +268,15 @@ def get_my_member_info(info: dict = Depends(get_token_info)):
         t["position"] for t in tenures
         if not t.get("end") and t.get("position") and t["position"] != "none"
     })
-    return {"name": info["name"], "roles": info.get("roles", []), "positions": current_positions, "dob": m.get("dob"), "cosmetics": m.get("cosmetics", {})}
+    avatar_url = f"/api/members/{info['name']}/avatar" if m.get("has_avatar") else None
+    return {"name": info["name"], "roles": info.get("roles", []), "positions": current_positions, "dob": m.get("dob"), "cosmetics": m.get("cosmetics", {}), "avatar_url": avatar_url}
 
 
 @router.get("/api/members/public")
 def list_members_public():
     members = load_members()
     return [
-        {"name": name, "roles": m.get("roles", []), "tenures": m.get("tenures", []), "dob": m.get("dob"), "cosmetics": m.get("cosmetics", {})}
+        {"name": name, "roles": m.get("roles", []), "tenures": m.get("tenures", []), "dob": m.get("dob"), "cosmetics": m.get("cosmetics", {}), "avatar_url": f"/api/members/{name}/avatar" if m.get("has_avatar") else None}
         for name, m in members.items()
     ]
 
@@ -338,11 +347,67 @@ def update_my_cosmetics(body: CosmeticsUpdate, info: dict = Depends(get_token_in
     return {"cosmetics": cosmetics, "new_balance": new_balance}
 
 
+@router.post("/api/members/me/avatar")
+async def upload_my_avatar(info: dict = Depends(get_token_info), file: UploadFile = File(...)):
+    from .bets import _load_balances, _save_balances, _init_bal, _append_ledger, _balances_lock
+    from PIL import Image
+
+    name = info["name"]
+    if file.content_type not in _AVATAR_ALLOWED_TYPES:
+        raise HTTPException(status_code=415, detail="Image must be JPEG, PNG, or WebP")
+
+    contents = await file.read()
+    if len(contents) > _AVATAR_MAX_BYTES:
+        raise HTTPException(status_code=413, detail=f"Image must be {_AVATAR_MAX_BYTES // 1024} KB or smaller")
+
+    try:
+        img = Image.open(io.BytesIO(contents)).convert("RGB")
+        img.thumbnail((_AVATAR_MAX_PX, _AVATAR_MAX_PX), Image.LANCZOS)
+    except Exception:
+        raise HTTPException(status_code=422, detail="Could not process image")
+
+    from datetime import datetime, timezone as tz
+    ts = datetime.now(tz.utc).isoformat()
+
+    with _balances_lock:
+        balances = _load_balances()
+        _init_bal(balances, name)
+        if balances[name] < _AVATAR_COST:
+            raise HTTPException(status_code=402, detail=f"Insufficient NB¥ balance (need {_AVATAR_COST:.0f})")
+        balances[name] = round(balances[name] - _AVATAR_COST, 2)
+        new_balance = balances[name]
+        _save_balances(balances)
+
+    _append_ledger([{"ts": ts, "member": name, "delta": -_AVATAR_COST,
+                     "new_balance": new_balance, "reason": "Avatar upload"}])
+
+    AVATARS_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = AVATARS_DIR / f"{name}.jpg"
+    img.save(out_path, "JPEG", quality=88, optimize=True)
+
+    members = load_members()
+    if name not in members:
+        raise HTTPException(status_code=404, detail="Member not found")
+    members[name]["has_avatar"] = True
+    save_members(members)
+    log_write(info, f"POST members/me/avatar — {name!r} uploaded avatar")
+    return {"avatar_url": f"/api/members/{name}/avatar", "new_balance": new_balance}
+
+
+@router.get("/api/members/{name}/avatar")
+def get_member_avatar(name: str):
+    path = AVATARS_DIR / f"{name}.jpg"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="No avatar set")
+    return FileResponse(str(path), media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=3600"})
+
+
 @router.get("/api/members")
 def list_members_admin(info: dict = Depends(require_admin)):
     members = load_members()
     return [
-        {"name": name, "token": m.get("token"), "roles": m.get("roles", []), "tenures": m.get("tenures", []), "cosmetics": m.get("cosmetics", {})}
+        {"name": name, "token": m.get("token"), "roles": m.get("roles", []), "tenures": m.get("tenures", []), "cosmetics": m.get("cosmetics", {}), "avatar_url": f"/api/members/{name}/avatar" if m.get("has_avatar") else None}
         for name, m in members.items()
     ]
 

@@ -13,6 +13,7 @@ logger = logging.getLogger("nbn-api")
 
 DATA_DIR  = Path("/var/lib/nothing-but-stats")
 RULES_DIR = DATA_DIR / "rules"
+AVATARS_DIR = DATA_DIR / "avatars"
 PENDING_BOXSCORES_DIR  = DATA_DIR / "pending-boxscores"
 MANUAL_QUEUE_FILE      = DATA_DIR / "pending-manual-queue.json"
 BUILD_STATUS_FILE  = DATA_DIR / "build-status.json"
