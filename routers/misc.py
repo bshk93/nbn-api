@@ -593,6 +593,8 @@ def post_standings_to_discord(
 
 # ── Join interest form ────────────────────────────────────────────────────────
 
+_BACKGROUND_OPTIONS = {"gm-league", "2k", "scouting", "stathead", "fan"}
+
 class JoinSubmission(BaseModel):
     discord: str
     reddit: str
@@ -602,6 +604,9 @@ class JoinSubmission(BaseModel):
     how_found: str
     teams_interest: str
     team_plan: str
+    background: list[str]
+    background_notes: str
+    activity_level: str
 
 _SOCIAL_PLATFORMS = {"Instagram", "Twitter/X", "Facebook", "TikTok", "YouTube", "Twitch", "Other"}
 
@@ -622,10 +627,17 @@ def post_join(body: JoinSubmission, request: Request):
     if len(discord) > 100:
         raise HTTPException(status_code=422, detail="discord name too long")
 
-    social_platform = require(body.social_platform, "social_platform")
-    social_handle   = require(body.social_handle,   "social_handle")
+    social_platform  = require(body.social_platform,  "social_platform")
+    social_handle    = require(body.social_handle,    "social_handle")
+    background_notes = require(body.background_notes, "background_notes")
+    activity_level   = require(body.activity_level,   "activity_level")
     if social_platform not in _SOCIAL_PLATFORMS:
         raise HTTPException(status_code=422, detail="unrecognized social platform")
+    if not body.background:
+        raise HTTPException(status_code=422, detail="background must have at least one selection")
+    invalid = set(body.background) - _BACKGROUND_OPTIONS
+    if invalid:
+        raise HTTPException(status_code=422, detail=f"unrecognized background option(s): {', '.join(invalid)}")
 
     forwarded_for = request.headers.get("x-forwarded-for", "")
     ip = forwarded_for.split(",")[0].strip() if forwarded_for else (request.client.host if request.client else None)
@@ -637,14 +649,17 @@ def post_join(body: JoinSubmission, request: Request):
         "ip":              ip,
         "user_agent":      request.headers.get("user-agent"),
         "referrer":        request.headers.get("referer"),
-        "discord":         discord,
-        "reddit":          require(body.reddit, "reddit"),
-        "social_platform": social_platform,
-        "social_handle":   social_handle,
-        "location":        location,
-        "how_found":       how_found,
-        "teams_interest":  teams_interest,
-        "team_plan":       team_plan,
+        "discord":          discord,
+        "reddit":           require(body.reddit, "reddit"),
+        "social_platform":  social_platform,
+        "social_handle":    social_handle,
+        "location":         location,
+        "how_found":        how_found,
+        "teams_interest":   teams_interest,
+        "team_plan":        team_plan,
+        "background":       body.background,
+        "background_notes": background_notes,
+        "activity_level":   activity_level,
     })
     _save_json(JOIN_SUBMISSIONS_FILE, submissions)
     return {"ok": True}
