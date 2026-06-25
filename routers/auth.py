@@ -139,6 +139,15 @@ class MemberSelfUpdate(BaseModel):
     dob: Optional[str] = None
 
 
+_COSMETIC_COST = 500.0
+_VALID_COLORS = {"#f59e0b", "#ef4444", "#a855f7", "#60a5fa", "#34d399", "#f472b6", "#fb923c", "#2dd4bf"}
+
+
+class CosmeticsUpdate(BaseModel):
+    name_color: Optional[str] = None   # hex from _VALID_COLORS or "" to clear
+    status_text: Optional[str] = None  # max 40 chars or "" to clear
+
+
 # ── Auth identity ────────────────────────────────────────────────────────────
 
 @router.get("/api/me")
@@ -251,14 +260,14 @@ def get_my_member_info(info: dict = Depends(get_token_info)):
         t["position"] for t in tenures
         if not t.get("end") and t.get("position") and t["position"] != "none"
     })
-    return {"name": info["name"], "roles": info.get("roles", []), "positions": current_positions, "dob": m.get("dob")}
+    return {"name": info["name"], "roles": info.get("roles", []), "positions": current_positions, "dob": m.get("dob"), "cosmetics": m.get("cosmetics", {})}
 
 
 @router.get("/api/members/public")
 def list_members_public():
     members = load_members()
     return [
-        {"name": name, "roles": m.get("roles", []), "tenures": m.get("tenures", []), "dob": m.get("dob")}
+        {"name": name, "roles": m.get("roles", []), "tenures": m.get("tenures", []), "dob": m.get("dob"), "cosmetics": m.get("cosmetics", {})}
         for name, m in members.items()
     ]
 
@@ -282,11 +291,58 @@ def update_my_profile(body: MemberSelfUpdate, info: dict = Depends(get_token_inf
     return {"dob": members[name].get("dob")}
 
 
+@router.patch("/api/members/me/cosmetics")
+def update_my_cosmetics(body: CosmeticsUpdate, info: dict = Depends(get_token_info)):
+    from .bets import _load_balances, _save_balances, _init_bal, _append_ledger, _balances_lock
+
+    name = info["name"]
+    if body.name_color is not None and body.name_color != "" and body.name_color not in _VALID_COLORS:
+        raise HTTPException(status_code=422, detail=f"Invalid color. Must be one of: {sorted(_VALID_COLORS)}")
+    if body.status_text is not None:
+        body.status_text = body.status_text.strip()
+        if len(body.status_text) > 40:
+            raise HTTPException(status_code=422, detail="status_text must be 40 characters or fewer")
+
+    from datetime import datetime, timezone as tz
+    ts = datetime.now(tz.utc).isoformat()
+
+    with _balances_lock:
+        balances = _load_balances()
+        _init_bal(balances, name)
+        if balances[name] < _COSMETIC_COST:
+            raise HTTPException(status_code=402, detail=f"Insufficient NB¥ balance (need {_COSMETIC_COST:.0f})")
+        balances[name] = round(balances[name] - _COSMETIC_COST, 2)
+        new_balance = balances[name]
+        _save_balances(balances)
+
+    _append_ledger([{"ts": ts, "member": name, "delta": -_COSMETIC_COST,
+                     "new_balance": new_balance, "reason": "Cosmetics update"}])
+
+    members = load_members()
+    if name not in members:
+        raise HTTPException(status_code=404, detail="Member not found")
+    cosmetics = members[name].get("cosmetics", {})
+    if body.name_color is not None:
+        if body.name_color == "":
+            cosmetics.pop("name_color", None)
+        else:
+            cosmetics["name_color"] = body.name_color
+    if body.status_text is not None:
+        if body.status_text == "":
+            cosmetics.pop("status_text", None)
+        else:
+            cosmetics["status_text"] = body.status_text
+    members[name]["cosmetics"] = cosmetics
+    save_members(members)
+    log_write(info, f"PATCH members/me/cosmetics — {name!r} updated cosmetics")
+    return {"cosmetics": cosmetics, "new_balance": new_balance}
+
+
 @router.get("/api/members")
 def list_members_admin(info: dict = Depends(require_admin)):
     members = load_members()
     return [
-        {"name": name, "token": m.get("token"), "roles": m.get("roles", []), "tenures": m.get("tenures", [])}
+        {"name": name, "token": m.get("token"), "roles": m.get("roles", []), "tenures": m.get("tenures", []), "cosmetics": m.get("cosmetics", {})}
         for name, m in members.items()
     ]
 
