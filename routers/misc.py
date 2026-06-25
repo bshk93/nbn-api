@@ -10,14 +10,14 @@ from typing import Optional
 
 import httpx
 import ptyprocess
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from .constants import (
     DATA_DIR, CAP_LEVELS_FILE, ROOKIE_SCALE_FILE, AWARDS_CONFIG_FILE,
     AWARDS_HISTORY_FILE, PLAYER_BIOS_FILE, LEAGUE_STATE_FILE,
     CALENDAR_EVENTS_FILE, CALENDAR_GAMES_FILE, TRIVIA_SCORES_PATH,
-    VALID_TEAMS, logger,
+    JOIN_SUBMISSIONS_FILE, VALID_TEAMS, logger,
 )
 from .storage import _load_json, _save_json, log_write, _current_season_str, _current_league_year
 from .auth import (
@@ -589,6 +589,39 @@ def post_standings_to_discord(
 
     log_write(info, f"POST discord/standings — season={season}")
     return {"ok": True, "season": season}
+
+
+# ── Join interest form ────────────────────────────────────────────────────────
+
+class JoinSubmission(BaseModel):
+    discord: str
+
+
+@router.post("/api/join")
+def post_join(body: JoinSubmission, request: Request):
+    discord = body.discord.strip()
+    if not discord:
+        raise HTTPException(status_code=422, detail="discord is required")
+    if len(discord) > 100:
+        raise HTTPException(status_code=422, detail="discord name too long")
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    ip = forwarded_for.split(",")[0].strip() if forwarded_for else (request.client.host if request.client else None)
+    submissions = _load_json(JOIN_SUBMISSIONS_FILE, [])
+    submissions.append({
+        "id": secrets.token_hex(8),
+        "discord": discord,
+        "submitted_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "ip": ip,
+        "user_agent": request.headers.get("user-agent"),
+        "referrer": request.headers.get("referer"),
+    })
+    _save_json(JOIN_SUBMISSIONS_FILE, submissions)
+    return {"ok": True}
+
+
+@router.get("/api/join")
+def get_join_submissions(info: dict = Depends(require_admin)):
+    return _load_json(JOIN_SUBMISSIONS_FILE, [])
 
 
 # ── WebSocket: claude session ─────────────────────────────────────────────────
