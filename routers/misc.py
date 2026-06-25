@@ -17,7 +17,8 @@ from .constants import (
     DATA_DIR, CAP_LEVELS_FILE, ROOKIE_SCALE_FILE, AWARDS_CONFIG_FILE,
     AWARDS_HISTORY_FILE, PLAYER_BIOS_FILE, LEAGUE_STATE_FILE,
     CALENDAR_EVENTS_FILE, CALENDAR_GAMES_FILE, TRIVIA_SCORES_PATH,
-    JOIN_SUBMISSIONS_FILE, VALID_TEAMS, logger,
+    JOIN_SUBMISSIONS_FILE, JOIN_BLACKLIST_FILE, MEMBER_SEEN_FILE,
+    VALID_TEAMS, logger,
 )
 from .storage import _load_json, _save_json, log_write, _current_season_str, _current_league_year
 from .auth import (
@@ -594,6 +595,19 @@ def post_standings_to_discord(
 # ── Join interest form ────────────────────────────────────────────────────────
 
 _BACKGROUND_OPTIONS = {"gm-league", "2k", "scouting", "stathead", "fan"}
+_SOCIAL_PLATFORMS   = {"Instagram", "Twitter/X", "Facebook", "TikTok", "YouTube", "Twitch", "Other"}
+_JOIN_RATE_LIMIT    = 3   # max submissions per IP per 24h
+_FAST_SUBMIT_MS     = 5_000  # flag if form submitted in under 5 seconds
+
+def _join_ip(request: Request) -> Optional[str]:
+    fwd = request.headers.get("x-forwarded-for", "")
+    return fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else None)
+
+def _fingerprint_key(timezone: Optional[str], screen: Optional[str], language: Optional[str]) -> Optional[str]:
+    if timezone and screen and language:
+        return f"{timezone}|{screen}|{language}"
+    return None
+
 
 class JoinSubmission(BaseModel):
     discord: str
@@ -607,8 +621,15 @@ class JoinSubmission(BaseModel):
     background: list[str]
     background_notes: str
     activity_level: str
+    # security fields (client-supplied, never shown as errors to user)
+    _honeypot:         Optional[str] = None
+    time_to_submit_ms: Optional[int] = None
+    tz:                Optional[str] = None
+    screen:            Optional[str] = None
+    lang:              Optional[str] = None
 
-_SOCIAL_PLATFORMS = {"Instagram", "Twitter/X", "Facebook", "TikTok", "YouTube", "Twitch", "Other"}
+    model_config = {"populate_by_name": True, "extra": "allow"}
+
 
 @router.post("/api/join")
 def post_join(body: JoinSubmission, request: Request):
@@ -618,48 +639,91 @@ def post_join(body: JoinSubmission, request: Request):
             raise HTTPException(status_code=422, detail=f"{field} is required")
         return v
 
-    discord        = require(body.discord, "discord")
-    location       = require(body.location, "location")
-    how_found      = require(body.how_found, "how_found")
-    teams_interest = require(body.teams_interest, "teams_interest")
-    team_plan      = require(body.team_plan, "team_plan")
+    discord        = require(body.discord,        "discord")
+    reddit         = require(body.reddit,         "reddit")
+    social_platform  = require(body.social_platform, "social_platform")
+    social_handle    = require(body.social_handle,   "social_handle")
+    location         = require(body.location,        "location")
+    how_found        = require(body.how_found,       "how_found")
+    teams_interest   = require(body.teams_interest,  "teams_interest")
+    team_plan        = require(body.team_plan,        "team_plan")
+    background_notes = require(body.background_notes,"background_notes")
+    activity_level   = require(body.activity_level,  "activity_level")
 
     if len(discord) > 100:
         raise HTTPException(status_code=422, detail="discord name too long")
-
-    social_platform  = require(body.social_platform,  "social_platform")
-    social_handle    = require(body.social_handle,    "social_handle")
-    background_notes = require(body.background_notes, "background_notes")
-    activity_level   = require(body.activity_level,   "activity_level")
     if social_platform not in _SOCIAL_PLATFORMS:
         raise HTTPException(status_code=422, detail="unrecognized social platform")
     if not body.background:
         raise HTTPException(status_code=422, detail="background must have at least one selection")
     invalid = set(body.background) - _BACKGROUND_OPTIONS
     if invalid:
-        raise HTTPException(status_code=422, detail=f"unrecognized background option(s): {', '.join(invalid)}")
+        raise HTTPException(status_code=422, detail=f"unrecognized background option(s): {', '.join(sorted(invalid))}")
 
-    forwarded_for = request.headers.get("x-forwarded-for", "")
-    ip = forwarded_for.split(",")[0].strip() if forwarded_for else (request.client.host if request.client else None)
+    ip         = _join_ip(request)
+    user_agent = request.headers.get("user-agent")
+    referrer   = request.headers.get("referer")
+    honeypot   = getattr(body, "_honeypot", None) or (body.model_extra or {}).get("_honeypot")
+    fp_key     = _fingerprint_key(body.tz, body.screen, body.lang)
 
+    # ── Rate limit ────────────────────────────────────────────────────────────
+    if ip:
+        cutoff = datetime.now(timezone.utc).timestamp() - 86400
+        existing = _load_json(JOIN_SUBMISSIONS_FILE, [])
+        recent_from_ip = sum(
+            1 for s in existing
+            if s.get("ip") == ip
+            and datetime.fromisoformat(s["submitted_at"].replace("Z", "+00:00")).timestamp() > cutoff
+        )
+        if recent_from_ip >= _JOIN_RATE_LIMIT:
+            raise HTTPException(status_code=429, detail="Too many submissions from this IP")
+
+    # ── Security flags ────────────────────────────────────────────────────────
+    flags: list[str] = []
+
+    if honeypot:
+        flags.append("honeypot_triggered")
+
+    if body.time_to_submit_ms is not None and body.time_to_submit_ms < _FAST_SUBMIT_MS:
+        flags.append(f"fast_submit:{body.time_to_submit_ms}ms")
+
+    blacklist = _load_json(JOIN_BLACKLIST_FILE, {"ips": [], "fingerprints": []})
+    if ip and ip in blacklist.get("ips", []):
+        flags.append("blacklisted_ip")
+    if fp_key and fp_key in blacklist.get("fingerprints", []):
+        flags.append("blacklisted_fingerprint")
+
+    member_seen = _load_json(MEMBER_SEEN_FILE, {})
+    for member, seen in member_seen.items():
+        if ip and ip in seen.get("ips", []):
+            flags.append(f"ip_match:{member}")
+        if (fp_key and body.tz in seen.get("timezones", [])
+                and body.screen in seen.get("screens", [])
+                and body.lang in seen.get("languages", [])):
+            flags.append(f"fingerprint_match:{member}")
+
+    # ── Store ─────────────────────────────────────────────────────────────────
     submissions = _load_json(JOIN_SUBMISSIONS_FILE, [])
     submissions.append({
         "id":              secrets.token_hex(8),
         "submitted_at":    datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "flags":           flags,
         "ip":              ip,
-        "user_agent":      request.headers.get("user-agent"),
-        "referrer":        request.headers.get("referer"),
-        "discord":          discord,
-        "reddit":           require(body.reddit, "reddit"),
-        "social_platform":  social_platform,
-        "social_handle":    social_handle,
-        "location":         location,
-        "how_found":        how_found,
-        "teams_interest":   teams_interest,
-        "team_plan":        team_plan,
-        "background":       body.background,
+        "user_agent":      user_agent,
+        "referrer":        referrer,
+        "fingerprint":     fp_key,
+        "time_to_submit_ms": body.time_to_submit_ms,
+        "discord":         discord,
+        "reddit":          reddit,
+        "social_platform": social_platform,
+        "social_handle":   social_handle,
+        "location":        location,
+        "how_found":       how_found,
+        "teams_interest":  teams_interest,
+        "team_plan":       team_plan,
+        "background":      body.background,
         "background_notes": background_notes,
-        "activity_level":   activity_level,
+        "activity_level":  activity_level,
     })
     _save_json(JOIN_SUBMISSIONS_FILE, submissions)
     return {"ok": True}
@@ -668,6 +732,61 @@ def post_join(body: JoinSubmission, request: Request):
 @router.get("/api/join")
 def get_join_submissions(info: dict = Depends(require_admin)):
     return _load_json(JOIN_SUBMISSIONS_FILE, [])
+
+
+# ── Join blacklist ─────────────────────────────────────────────────────────────
+
+def _load_blacklist() -> dict:
+    return _load_json(JOIN_BLACKLIST_FILE, {"ips": [], "fingerprints": []})
+
+def _save_blacklist(bl: dict):
+    _save_json(JOIN_BLACKLIST_FILE, bl)
+
+
+class BlacklistIP(BaseModel):
+    ip: str
+
+class BlacklistFingerprint(BaseModel):
+    fingerprint: str  # "timezone|screen|language"
+
+
+@router.get("/api/join/blacklist")
+def get_blacklist(info: dict = Depends(require_admin)):
+    return _load_blacklist()
+
+@router.post("/api/join/blacklist/ip")
+def add_blacklist_ip(body: BlacklistIP, info: dict = Depends(require_admin)):
+    bl = _load_blacklist()
+    if body.ip not in bl["ips"]:
+        bl["ips"].append(body.ip)
+        _save_blacklist(bl)
+    log_write(info, f"join/blacklist/ip ADD {body.ip}")
+    return bl
+
+@router.delete("/api/join/blacklist/ip/{ip}")
+def remove_blacklist_ip(ip: str, info: dict = Depends(require_admin)):
+    bl = _load_blacklist()
+    bl["ips"] = [x for x in bl["ips"] if x != ip]
+    _save_blacklist(bl)
+    log_write(info, f"join/blacklist/ip REMOVE {ip}")
+    return bl
+
+@router.post("/api/join/blacklist/fingerprint")
+def add_blacklist_fingerprint(body: BlacklistFingerprint, info: dict = Depends(require_admin)):
+    bl = _load_blacklist()
+    if body.fingerprint not in bl["fingerprints"]:
+        bl["fingerprints"].append(body.fingerprint)
+        _save_blacklist(bl)
+    log_write(info, f"join/blacklist/fingerprint ADD {body.fingerprint}")
+    return bl
+
+@router.delete("/api/join/blacklist/fingerprint/{fp:path}")
+def remove_blacklist_fingerprint(fp: str, info: dict = Depends(require_admin)):
+    bl = _load_blacklist()
+    bl["fingerprints"] = [x for x in bl["fingerprints"] if x != fp]
+    _save_blacklist(bl)
+    log_write(info, f"join/blacklist/fingerprint REMOVE {fp}")
+    return bl
 
 
 # ── WebSocket: claude session ─────────────────────────────────────────────────

@@ -1,13 +1,38 @@
 import secrets
+import threading
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from .constants import (
     MEMBERS_FILE, VALID_ROLES, VALID_TEAMS, ROLE_IMPLIES,
+    MEMBER_SEEN_FILE,
 )
 from .storage import _load_json, _save_json, log_write
+
+_seen_lock = threading.Lock()
+_SEEN_MAX = 20  # max unique values stored per member per field
+
+
+def _record_member_seen(name: str, ip: Optional[str], user_agent: Optional[str],
+                         timezone: Optional[str] = None, screen: Optional[str] = None,
+                         language: Optional[str] = None):
+    with _seen_lock:
+        seen = _load_json(MEMBER_SEEN_FILE, {})
+        entry = seen.setdefault(name, {})
+        for field, value in [
+            ("ips", ip), ("user_agents", user_agent),
+            ("timezones", timezone), ("screens", screen), ("languages", language),
+        ]:
+            if not value:
+                continue
+            lst = entry.setdefault(field, [])
+            if value not in lst:
+                lst.append(value)
+                if len(lst) > _SEEN_MAX:
+                    lst.pop(0)
+        _save_json(MEMBER_SEEN_FILE, seen)
 
 router = APIRouter()
 
@@ -112,8 +137,28 @@ class TokenUpdate(BaseModel):
 # ── Auth identity ────────────────────────────────────────────────────────────
 
 @router.get("/api/me")
-def me(info: dict = Depends(get_token_info)):
-    return {"name": info.get("name", ""), "roles": info.get("roles", [])}
+def me(request: Request, info: dict = Depends(get_token_info)):
+    name = info.get("name", "")
+    if name:
+        fwd = request.headers.get("x-forwarded-for", "")
+        ip  = fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else None)
+        _record_member_seen(name, ip, request.headers.get("user-agent"))
+    return {"name": name, "roles": info.get("roles", [])}
+
+
+class MemberSignal(BaseModel):
+    timezone: Optional[str] = None
+    screen:   Optional[str] = None
+    language: Optional[str] = None
+
+
+@router.post("/api/me/signal")
+def post_member_signal(body: MemberSignal, info: dict = Depends(get_token_info)):
+    name = info.get("name", "")
+    if name:
+        _record_member_seen(name, None, None,
+                            timezone=body.timezone, screen=body.screen, language=body.language)
+    return {"ok": True}
 
 
 @router.get("/api/auth/me")
