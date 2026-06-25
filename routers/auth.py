@@ -1,3 +1,4 @@
+import re
 import secrets
 import threading
 from typing import Optional
@@ -134,6 +135,10 @@ class TokenUpdate(BaseModel):
     roles: Optional[list[str]] = None
 
 
+class MemberSelfUpdate(BaseModel):
+    dob: Optional[str] = None
+
+
 # ── Auth identity ────────────────────────────────────────────────────────────
 
 @router.get("/api/me")
@@ -238,7 +243,7 @@ def delete_token(token: str, info: dict = Depends(require_admin)):
 
 @router.get("/api/members/me")
 def get_my_member_info(info: dict = Depends(get_token_info)):
-    """Return the authenticated member's own name, roles, and current tenure positions."""
+    """Return the authenticated member's own name, roles, current tenure positions, and profile."""
     members = load_members()
     m = members.get(info["name"], {})
     tenures = m.get("tenures", [])
@@ -246,16 +251,35 @@ def get_my_member_info(info: dict = Depends(get_token_info)):
         t["position"] for t in tenures
         if not t.get("end") and t.get("position") and t["position"] != "none"
     })
-    return {"name": info["name"], "roles": info.get("roles", []), "positions": current_positions}
+    return {"name": info["name"], "roles": info.get("roles", []), "positions": current_positions, "dob": m.get("dob")}
 
 
 @router.get("/api/members/public")
 def list_members_public():
     members = load_members()
     return [
-        {"name": name, "roles": m.get("roles", []), "tenures": m.get("tenures", [])}
+        {"name": name, "roles": m.get("roles", []), "tenures": m.get("tenures", []), "dob": m.get("dob")}
         for name, m in members.items()
     ]
+
+
+@router.patch("/api/members/me/profile")
+def update_my_profile(body: MemberSelfUpdate, info: dict = Depends(get_token_info)):
+    if body.dob is not None and body.dob != "":
+        if not re.match(r'^\d{4}-\d{2}-\d{2}$', body.dob):
+            raise HTTPException(status_code=422, detail="dob must be YYYY-MM-DD or empty string to clear")
+    members = load_members()
+    name = info["name"]
+    if name not in members:
+        raise HTTPException(status_code=404, detail="Member not found")
+    if body.dob is not None:
+        if body.dob == "":
+            members[name].pop("dob", None)
+        else:
+            members[name]["dob"] = body.dob
+    save_members(members)
+    log_write(info, f"PATCH members/me/profile — {name!r} updated profile")
+    return {"dob": members[name].get("dob")}
 
 
 @router.get("/api/members")
