@@ -595,25 +595,56 @@ def post_standings_to_discord(
 
 class JoinSubmission(BaseModel):
     discord: str
+    reddit: Optional[str] = None
+    social_platform: Optional[str] = None
+    social_handle: Optional[str] = None
+    location: str
+    how_found: str
+    teams_interest: str
+    team_plan: str
 
+_SOCIAL_PLATFORMS = {"Instagram", "Twitter/X", "Facebook", "TikTok", "YouTube", "Twitch", "Other"}
 
 @router.post("/api/join")
 def post_join(body: JoinSubmission, request: Request):
-    discord = body.discord.strip()
-    if not discord:
-        raise HTTPException(status_code=422, detail="discord is required")
+    def require(val: Optional[str], field: str) -> str:
+        v = (val or "").strip()
+        if not v:
+            raise HTTPException(status_code=422, detail=f"{field} is required")
+        return v
+
+    discord        = require(body.discord, "discord")
+    location       = require(body.location, "location")
+    how_found      = require(body.how_found, "how_found")
+    teams_interest = require(body.teams_interest, "teams_interest")
+    team_plan      = require(body.team_plan, "team_plan")
+
     if len(discord) > 100:
         raise HTTPException(status_code=422, detail="discord name too long")
+
+    social_platform = (body.social_platform or "").strip() or None
+    social_handle   = (body.social_handle   or "").strip() or None
+    if social_platform and social_platform not in _SOCIAL_PLATFORMS:
+        raise HTTPException(status_code=422, detail="unrecognized social platform")
+
     forwarded_for = request.headers.get("x-forwarded-for", "")
     ip = forwarded_for.split(",")[0].strip() if forwarded_for else (request.client.host if request.client else None)
+
     submissions = _load_json(JOIN_SUBMISSIONS_FILE, [])
     submissions.append({
-        "id": secrets.token_hex(8),
-        "discord": discord,
-        "submitted_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "ip": ip,
-        "user_agent": request.headers.get("user-agent"),
-        "referrer": request.headers.get("referer"),
+        "id":              secrets.token_hex(8),
+        "submitted_at":    datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "ip":              ip,
+        "user_agent":      request.headers.get("user-agent"),
+        "referrer":        request.headers.get("referer"),
+        "discord":         discord,
+        "reddit":          (body.reddit or "").strip() or None,
+        "social_platform": social_platform,
+        "social_handle":   social_handle,
+        "location":        location,
+        "how_found":       how_found,
+        "teams_interest":  teams_interest,
+        "team_plan":       team_plan,
     })
     _save_json(JOIN_SUBMISSIONS_FILE, submissions)
     return {"ok": True}
