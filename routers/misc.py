@@ -597,6 +597,33 @@ def post_standings_to_discord(
 _BACKGROUND_OPTIONS = {"gm-league", "2k", "scouting", "stathead", "fan"}
 _SOCIAL_PLATFORMS   = {"Instagram", "Twitter/X", "Facebook", "TikTok", "YouTube", "Twitch", "Other"}
 _JOIN_RATE_LIMIT    = 3   # max submissions per IP per 24h
+
+_DISCORD_BOT_TOKEN   = os.environ.get("DISCORD_BOT_TOKEN", "")
+_DISCORD_JOIN_CHANNEL = "720017805847691458"
+
+def _notify_join_discord(sub: dict):
+    if not _DISCORD_BOT_TOKEN:
+        return
+    flags_str = f"\n⚠️ flags: `{', '.join(sub['flags'])}`" if sub["flags"] else ""
+    content = (
+        f"**New join application**{flags_str}\n"
+        f"Discord: `{sub['discord']}` · Reddit: `{sub['reddit']}`\n"
+        f"Location: {sub['location']} · Activity: `{sub['activity_level']}`\n"
+        f"Background: {', '.join(sub['background'])}\n"
+        f"Notes: {sub['background_notes']}\n\n"
+        f"**Teams interest:** {sub['teams_interest']}\n"
+        f"**Team plan:** {sub['team_plan']}\n\n"
+        f"**How they found us:**\n{sub['how_found']}"
+    )
+    try:
+        httpx.post(
+            f"https://discord.com/api/v10/channels/{_DISCORD_JOIN_CHANNEL}/messages",
+            headers={"Authorization": f"Bot {_DISCORD_BOT_TOKEN}"},
+            json={"content": content},
+            timeout=5,
+        )
+    except Exception:
+        pass
 _FAST_SUBMIT_MS     = 5_000  # flag if form submitted in under 5 seconds
 
 def _join_ip(request: Request) -> Optional[str]:
@@ -694,13 +721,17 @@ def post_join(body: JoinSubmission, request: Request):
         flags.append("blacklisted_fingerprint")
 
     member_seen = _load_json(MEMBER_SEEN_FILE, {})
+    ip_matches: list[str] = []
     for member, seen in member_seen.items():
         if ip and ip in seen.get("ips", []):
-            flags.append(f"ip_match:{member}")
+            ip_matches.append(member)
         if (fp_key and body.tz in seen.get("timezones", [])
                 and body.screen in seen.get("screens", [])
                 and body.lang in seen.get("languages", [])):
             flags.append(f"fingerprint_match:{member}")
+    # Single IP match = likely same household/person; multiple = shared NAT/VPN, ignore
+    if len(ip_matches) == 1:
+        flags.append(f"ip_match:{ip_matches[0]}")
 
     # ── Store ─────────────────────────────────────────────────────────────────
     submissions = _load_json(JOIN_SUBMISSIONS_FILE, [])
@@ -726,6 +757,7 @@ def post_join(body: JoinSubmission, request: Request):
         "activity_level":  activity_level,
     })
     _save_json(JOIN_SUBMISSIONS_FILE, submissions)
+    _notify_join_discord(submissions[-1])
     return {"ok": True}
 
 

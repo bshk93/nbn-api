@@ -29,6 +29,7 @@ PLAYER_SEASONS_CSV  = NBN_TODAY_DIR / "players" / "player_seasons.csv"
 
 POELTL_SEASON      = "25-26"   # update each season
 POELTL_MIN_GAMES   = 40        # minimum games to be eligible
+POELTL_NO_REPEAT_WINDOW = 50   # don't reuse an answer from the last N archived puzzles
 POELTL_MAX_GUESSES = 7
 POELTL_TIME_LIMIT  = 300       # seconds (5-min anti-cheat window)
 NBY_POELTL_REWARD  = 50.0
@@ -247,10 +248,25 @@ def _save_poeltl(state: dict):
     _save_json(POELTL_STATE_FILE, state)
 
 
+def _recent_answer_slugs(window: int = POELTL_NO_REPEAT_WINDOW) -> set[str]:
+    """Answer slugs from the most recent `window` archived puzzle dates."""
+    archive = _load_json(POELTL_ARCHIVE_FILE, {})
+    recent_dates = sorted(archive.keys(), reverse=True)[:window]
+    slugs = set()
+    for d in recent_dates:
+        slug = (archive.get(d) or {}).get("answer_slug", "")
+        if slug:
+            slugs.add(slug)
+    return slugs
+
+
 def _generate_puzzle(date_str: str) -> dict:
     rng = random.Random(date_str)
     pool = _build_player_pool()
-    answer = rng.choice(pool)
+    recent = _recent_answer_slugs()
+    eligible = [p for p in pool if p["slug"] not in recent]
+    # Fall back to the full pool if exclusions somehow leave nothing.
+    answer = rng.choice(eligible or pool)
     return {
         "date":             date_str,
         "answer_slug":      answer["slug"],

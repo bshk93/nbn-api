@@ -22,52 +22,68 @@ class TipIn(BaseModel):
     message: str = ""
 
 
-@router.post("/api/tips")
-def send_tip(body: TipIn, info: dict = Depends(get_token_info)):
-    if body.amount <= 0:
-        raise HTTPException(status_code=422, detail="amount must be positive")
-    if info["name"] == body.to:
-        raise HTTPException(status_code=422, detail="Cannot tip yourself")
+class TipError(ValueError):
+    """Raised by perform_tip on a rejected tip (bad amount, self, unknown
+    member, insufficient funds). Callers map this to their own error shape."""
+
+
+def perform_tip(sender: str, to: str, amount: float, message: str = "") -> dict:
+    """Move NB¥ from `sender` to `to`, record the tip + ledger entries, and
+    return balances. The single source of truth for tipping — used by both the
+    HTTP endpoint and the Discord /tip command. Raises TipError on rejection."""
+    if amount <= 0:
+        raise TipError("amount must be positive")
+    if sender == to:
+        raise TipError("Cannot tip yourself")
     all_members = load_members()
-    if body.to not in all_members:
-        raise HTTPException(status_code=404, detail=f"Member '{body.to}' not found")
+    if sender not in all_members:
+        raise TipError(f"Member '{sender}' not found")
+    if to not in all_members:
+        raise TipError(f"Member '{to}' not found")
 
     with _tips_lock, _balances_lock:
         balances = _load_balances()
-        _init_bal(balances, info["name"])
-        _init_bal(balances, body.to)
-        if balances[info["name"]] < body.amount:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Insufficient balance — NB¥{balances[info['name']]:.2f} available",
-            )
-        balances[info["name"]] = round(balances[info["name"]] - body.amount, 2)
-        balances[body.to]      = round(balances[body.to]      + body.amount, 2)
-        sender_bal    = balances[info["name"]]
-        recipient_bal = balances[body.to]
+        _init_bal(balances, sender)
+        _init_bal(balances, to)
+        if balances[sender] < amount:
+            raise TipError(f"Insufficient balance — NB¥{balances[sender]:.2f} available")
+        balances[sender] = round(balances[sender] - amount, 2)
+        balances[to]     = round(balances[to]     + amount, 2)
+        sender_bal    = balances[sender]
+        recipient_bal = balances[to]
         _save_balances(balances)
 
         tips = _load_json(TIPS_FILE, [])
-        message = body.message.strip() if body.amount >= TIP_MESSAGE_THRESHOLD else ""
+        msg = message.strip() if amount >= TIP_MESSAGE_THRESHOLD else ""
         tip = {
             "id":      secrets.token_hex(6),
-            "from":    info["name"],
-            "to":      body.to,
-            "amount":  body.amount,
-            "message": message,
+            "from":    sender,
+            "to":      to,
+            "amount":  amount,
+            "message": msg,
             "ts":      datetime.now(timezone.utc).isoformat(),
         }
         tips.append(tip)
         _save_json(TIPS_FILE, tips)
 
     _append_ledger([
-        {"ts": tip["ts"], "member": info["name"], "delta": -body.amount,
-         "balance": sender_bal,    "reason": f"Tip to {body.to}"},
-        {"ts": tip["ts"], "member": body.to,       "delta":  body.amount,
-         "balance": recipient_bal, "reason": f"Tip from {info['name']}"},
+        {"ts": tip["ts"], "member": sender, "delta": -amount,
+         "balance": sender_bal,    "reason": f"Tip to {to}"},
+        {"ts": tip["ts"], "member": to,     "delta":  amount,
+         "balance": recipient_bal, "reason": f"Tip from {sender}"},
     ])
+    return {"sender_bal": sender_bal, "recipient_bal": recipient_bal, "tip": tip}
+
+
+@router.post("/api/tips")
+def send_tip(body: TipIn, info: dict = Depends(get_token_info)):
+    try:
+        result = perform_tip(info["name"], body.to, body.amount, body.message)
+    except TipError as e:
+        code = 404 if "not found" in str(e) else 422
+        raise HTTPException(status_code=code, detail=str(e))
     log_write(info, f"POST tips — NB¥{body.amount} to {body.to}")
-    return {"ok": True, "new_balance": sender_bal}
+    return {"ok": True, "new_balance": result["sender_bal"]}
 
 
 @router.get("/api/tips/totals")

@@ -96,6 +96,7 @@ class OptionDetails(BaseModel):
     year: str           # e.g. "26-27"
     cap_hold_type: str = "UFA"
     cap_hold_amount: Optional[str] = None
+    bird_tier: Optional[str] = None  # QVFA, EQVFA, Non-QVFA — only used on decline
 
 
 class GuaranteeDetails(BaseModel):
@@ -196,6 +197,8 @@ def _apply_option(details: OptionDetails, info: dict) -> Optional[str]:
         bio["cap_holds"] = {yr: typ for yr, typ in holds.items()
                             if yr != details.year and _season_start(yr) < key}
         bio["cap_holds"][details.year] = details.cap_hold_type
+        if details.bird_tier:
+            bio["bird_tiers"] = {**bio.get("bird_tiers", {}), details.year: details.bird_tier}
 
     save_player_bios(bios)
     log_write(info, f"TXN option — {details.player} {details.decision} {details.option_type} {details.year}")
@@ -425,7 +428,7 @@ def _apply_renounce(details: RenounceDetails, txn_date: str, info: dict) -> str:
     return team
 
 
-def _apply_convert_twoway(details: ConvertTwoWayDetails, txn_date: str, info: dict) -> str:
+def _apply_convert_twoway(details: ConvertTwoWayDetails, txn_date: str, info: dict, txn_id: Optional[str] = None) -> str:
     """Converts a two-way contract to a standard player contract. Returns the player's team."""
     bios = load_player_bios()
     if details.player not in bios:
@@ -448,6 +451,20 @@ def _apply_convert_twoway(details: ConvertTwoWayDetails, txn_date: str, info: di
     bio["guaranteed"] = {**past_gtd, **details.contract.guaranteed}
     bio["guarantee_dates"] = {**past_gtd_dates, **details.contract.guarantee_dates}
     bio["guarantee_schedule"] = {**past_gtd_sched, **details.contract.guarantee_schedule}
+
+    bio["contracts"] = (bio.get("contracts") or []) + [{
+        "team": team,
+        "date": txn_date,
+        "signing_method": "convert_twoway",
+        "bird_rights_type": None,
+        "salaries": details.contract.salaries,
+        "guaranteed": details.contract.guaranteed,
+        "guarantee_dates": details.contract.guarantee_dates,
+        "guarantee_schedule": details.contract.guarantee_schedule,
+        "cap_holds": details.contract.cap_holds,
+        "txn_id": txn_id,
+    }]
+
     save_player_bios(bios)
 
     roster_path = DATA_DIR / f"{team.lower()}-roster.csv"
@@ -462,7 +479,7 @@ def _apply_convert_twoway(details: ConvertTwoWayDetails, txn_date: str, info: di
     log_write(info, f"TXN convert_twoway — {details.player} ({team})")
 
 
-def _apply_sign_pick(details: SignPickDetails, txn_date: str, info: dict) -> str:
+def _apply_sign_pick(details: SignPickDetails, txn_date: str, info: dict, txn_id: Optional[str] = None) -> str:
     """Signs a held draft pick to their first contract: draft-rights → player/two-way. Returns the team."""
     bios = load_player_bios()
     if details.player not in bios:
@@ -489,6 +506,20 @@ def _apply_sign_pick(details: SignPickDetails, txn_date: str, info: dict) -> str
     bio["guaranteed"] = {**past_gtd, **details.contract.guaranteed}
     bio["guarantee_dates"] = {**past_gtd_dates, **details.contract.guarantee_dates}
     bio["guarantee_schedule"] = {**past_gtd_sched, **details.contract.guarantee_schedule}
+
+    bio["contracts"] = (bio.get("contracts") or []) + [{
+        "team": team,
+        "date": txn_date,
+        "signing_method": "draft_pick",
+        "bird_rights_type": None,
+        "salaries": details.contract.salaries,
+        "guaranteed": details.contract.guaranteed,
+        "guarantee_dates": details.contract.guarantee_dates,
+        "guarantee_schedule": details.contract.guarantee_schedule,
+        "cap_holds": details.contract.cap_holds,
+        "txn_id": txn_id,
+    }]
+
     save_player_bios(bios)
 
     roster_path = DATA_DIR / f"{team.lower()}-roster.csv"
@@ -502,10 +533,9 @@ def _apply_sign_pick(details: SignPickDetails, txn_date: str, info: dict) -> str
 
     log_write(info, f"TXN sign_pick — {details.player} ({team}) → {new_type}")
     return team
-    return team
 
 
-def _apply_sign(details: SignDetails, txn_date: str, info: dict):
+def _apply_sign(details: SignDetails, txn_date: str, info: dict, txn_id: Optional[str] = None):
     bios = load_player_bios()
     if details.player not in bios:
         raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
@@ -517,7 +547,8 @@ def _apply_sign(details: SignDetails, txn_date: str, info: dict):
     team_map = _build_team_map()
     if details.player in team_map:
         existing = team_map[details.player]
-        raise HTTPException(status_code=409, detail=f"Player {details.player!r} is already on {existing}")
+        if existing != team:
+            raise HTTPException(status_code=409, detail=f"Player {details.player!r} is already on {existing}")
 
     path = DATA_DIR / f"{team.lower()}-roster.csv"
     if not path.exists():
@@ -526,6 +557,7 @@ def _apply_sign(details: SignDetails, txn_date: str, info: dict):
     if "SLUG" not in headers:
         raise HTTPException(status_code=422, detail=f"Roster for {team} uses legacy format; migrate before using transactions")
 
+    rows = [r for r in rows if r.get("SLUG", "").strip() != details.player]
     row_type = "two-way" if details.contract.type == "two-way" else ""
     rows.append({"SLUG": details.player, "TYPE": row_type})
     write_csv(path, headers, rows)
@@ -539,6 +571,28 @@ def _apply_sign(details: SignDetails, txn_date: str, info: dict):
     bio["guarantee_dates"] = {**past_gtd_dates, **details.contract.guarantee_dates}
     bio["guarantee_schedule"] = {**past_gtd_sched, **details.contract.guarantee_schedule}
     bio["type"] = details.contract.type
+
+    past_bird = {k: v for k, v in bio.get("bird_tiers", {}).items() if k <= cur_season}
+    new_bird = {}
+    if details.bird_rights_type:
+        for season, hold_type in (details.contract.cap_holds or {}).items():
+            if hold_type in ("UFA", "RFA"):
+                new_bird[season] = details.bird_rights_type
+    bio["bird_tiers"] = {**past_bird, **new_bird}
+
+    bio["contracts"] = (bio.get("contracts") or []) + [{
+        "team": team,
+        "date": txn_date,
+        "signing_method": details.signing_method,
+        "bird_rights_type": details.bird_rights_type,
+        "salaries": details.contract.salaries,
+        "guaranteed": details.contract.guaranteed,
+        "guarantee_dates": details.contract.guarantee_dates,
+        "guarantee_schedule": details.contract.guarantee_schedule,
+        "cap_holds": details.contract.cap_holds,
+        "txn_id": txn_id,
+    }]
+
     save_player_bios(bios)
 
     if details.signing_method in ("mle", "ntmle", "tmle", "room_exception", "bae", "cap_space"):
@@ -714,6 +768,12 @@ def _apply_trade(details: TradeIn, info: dict) -> list[str]:
                         status_code=422,
                         detail=f"Pick {asset.year} R{asset.round} {asset.orig} is owned by {pick_row['OWNER']}, not {xfer.from_team}",
                     )
+                if pick_row.get("FROZEN", "").strip().upper() == "TRUE":
+                    reason = pick_row.get("FROZEN_REASON", "").strip()
+                    detail = f"Pick {asset.year} R{asset.round} {asset.orig} is frozen and cannot be traded"
+                    if reason:
+                        detail += f": {reason}"
+                    raise HTTPException(status_code=422, detail=detail)
 
     roster_moves: list[tuple[str, str, dict]] = []
     for xfer in details.transfers:
@@ -955,8 +1015,20 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
     team = details.team.upper()
 
     current = _compute_team_salary(team, bios, season)
+    # If the signee already sits on this team's own roster as a cap hold (e.g.
+    # a Bird-rights re-signing), that hold's figure is still counted in
+    # `current` — the roster row only drops off once the contract is applied,
+    # after validation runs — so back it out here to avoid double-counting
+    # hold + new contract (rulebook § 3.10: the hold is replaced, not stacked,
+    # by the signed contract's Year 1 figure).
+    existing_hold = 0
+    roster_path = DATA_DIR / f"{team.lower()}-roster.csv"
+    if roster_path.exists():
+        _, roster_rows = read_csv(roster_path)
+        if any(r.get("SLUG", "").strip() == details.player for r in roster_rows):
+            existing_hold = _parse_dollar((bios.get(details.player, {}).get("salaries") or {}).get(season, ""))
     new_sal = _parse_dollar(details.contract.salaries.get(season, ""))
-    projected = current + new_sal
+    projected = current - existing_hold + new_sal
     r = _hard_cap_check(team, projected, season,
                         ctx["team_state"], ctx["cap_levels"])
     if r:
@@ -1267,10 +1339,11 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             "can_force": True,
         })
 
+    txn_id = secrets.token_hex(8)
     with _txn_lock:
         details = parsed_details
         if body.type == "sign":
-            _apply_sign(details, body.date, info)
+            _apply_sign(details, body.date, info, txn_id=txn_id)
             stored_details = details.model_dump()
         elif body.type == "pick":
             _apply_pick(details, body.date, info)
@@ -1297,11 +1370,11 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             stored_details = details.model_dump()
             stored_details["teams"] = teams
         elif body.type == "convert_twoway":
-            team = _apply_convert_twoway(details, body.date, info)
+            team = _apply_convert_twoway(details, body.date, info, txn_id=txn_id)
             stored_details = details.model_dump()
             stored_details["team"] = team
         elif body.type == "sign_pick":
-            team = _apply_sign_pick(details, body.date, info)
+            team = _apply_sign_pick(details, body.date, info, txn_id=txn_id)
             stored_details = details.model_dump()
             stored_details["team"] = team
 
@@ -1309,7 +1382,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             stored_details["_forced_checks"] = [c.check for c in failed]
 
         txn = {
-            "id": secrets.token_hex(8),
+            "id": txn_id,
             "type": body.type,
             "date": body.date,
             "created_by": info.get("name", "unknown"),

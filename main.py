@@ -4,7 +4,7 @@ import sys
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import auth, players, roster_picks, transactions, boxscores, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news
+from routers import auth, players, roster_picks, transactions, boxscores, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, discord
 
 logging.basicConfig(
     stream=sys.stdout,
@@ -40,3 +40,4 @@ app.include_router(strikes.router)
 app.include_router(draft.router)
 app.include_router(invest.router)
 app.include_router(news.router)
+app.include_router(discord.router)

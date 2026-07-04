@@ -57,7 +57,7 @@ JOIN_SUBMISSIONS_FILE = DATA_DIR / "join-submissions.json"
 JOIN_BLACKLIST_FILE   = DATA_DIR / "join-blacklist.json"
 MEMBER_SEEN_FILE      = DATA_DIR / "member-seen.json"
 
-PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PLAYER", "PROTECTED", "SWAP_OWNER", "NOTES"]
+PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PLAYER", "PROTECTED", "SWAP_OWNER", "NOTES", "FROZEN", "FROZEN_REASON"]
 
 _rules_lock         = threading.Lock()
 _picks_lock         = threading.Lock()

@@ -100,10 +100,12 @@ class PlayerBio(BaseModel):
     wingspan: str = ""
     type: str = ""
     cap_holds: dict[str, str] = {}
+    bird_tiers: dict[str, str] = {}
     salaries: dict[str, str] = {}
     guaranteed: dict[str, str] = {}
     guarantee_dates: dict[str, str] = {}
     guarantee_schedule: dict[str, list[dict]] = {}
+    contracts: list[dict] = []
     jersey_number: Optional[str] = None
     retired: bool = False
     notes: str = ""

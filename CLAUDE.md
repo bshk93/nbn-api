@@ -41,6 +41,81 @@ curl -X POST https://nbn.today/api/tokens \
 
 → **[docs/transactions.md](docs/transactions.md)** — all 6 types, what each mutates, request shapes
 
+## Discord slash commands
+
+`routers/discord.py` — a single signed endpoint, `POST /api/discord/interactions`,
+that Discord calls for every slash command. Stateless reads against the static
+stats CSVs; responses return inline (type 4). No bot gateway / long-running
+process.
+
+- **Signature:** every request is Ed25519-verified against `DISCORD_PUBLIC_KEY`
+  (PyNaCl). Until that env var is set the endpoint 401s everything — which is the
+  correct response to Discord's endpoint-validation probe.
+- **Config:** `DISCORD_PUBLIC_KEY` is loaded from `/home/skim/projects/nbn-api/.env`
+  (gitignored) via the unit's `EnvironmentFile`. After editing `.env`,
+  `sudo systemctl restart nbn-api`.
+- **Adding a command:** add its definition to `COMMANDS` in
+  `register_discord_commands.py` and a handler branch in `dispatch()` in
+  `routers/discord.py`, then re-run the register script. Set `DISCORD_GUILD_ID`
+  to register to one server instantly (global registration takes ~1h).
+- **Commands:** all take a `player` name option (fuzzy-resolved against players
+  who have stats rows); each replies with a team-colored embed (name links to the
+  profile, photo as a full-width `image` so it never narrows the tables).
+  - `/stats` — season-by-season averages (reg + playoffs), one row per season;
+    mid-season trades list teams chronologically joined with `/` (e.g. `BKN/ORL`).
+  - `/career` — career totals + per-game averages (reg + playoffs).
+  - `/awards` — honors (rings, MVP/DPOY/etc., All-NBN, All-Star…), counted with
+    the seasons earned, ordered by `_AWARD_ORDER`.
+  - `/team team:<abbr> [season:<YY-YY>]` — a team-season's roster + per-game
+    stats (sorted by scoring) with a record/seed/margin header from
+    `data/{abbr}-seasons.csv`. Season defaults to the most recent on record.
+    `TEAM_NAMES` maps abbr → full name; title links to the team page.
+  - `/leaders [stat] [season] [team]` — top-10 regular-season totals for a stat
+    (`LEADER_STATS`), aggregated from `player_seasons.csv` with optional
+    season/team filters. `stat` is a Discord choice list (default Points).
+  - `/compare player1 player2 [season]` — two players' per-game averages side by
+    side; career by default, or one season.
+  - `/standings [season]` — East/West standings from `standings-history.csv`,
+    sorted by `SEED_NUM`. Defaults to most recent season.
+  - `/playoff-series year team1 team2` — series result from
+    `playoff-brackets.csv` (round via `ROUND_NAMES`, 4 = Finals). Colored to the
+    winner. `year`/season args accept `YY-YY` or a 4-digit year (`_norm_season`).
+    Also appends game-by-game scores + series P/R/A leaders read from the raw
+    `allstats-playoffs-{YY}.csv` in NBS_DATA_DIR (`_series_games_and_leaders`);
+    gracefully omitted if that file is missing.
+  - `/nbyen-leaders` — net worth leaders: liquid NB¥ + NBN Wall Street equity,
+    via `invest.get_all_holdings()` (matches the site's valuation, incl. short
+    equity). Shows NET / CASH / STK columns, ranked by net worth.
+  - `/h2h team1 team2` — all-time regular-season + playoff record (the `h2h-*.csv`
+    matrices; cell is "W-L" from row team's perspective).
+  - `/champions` — every season's champion + runner-up, derived from
+    `PLAYOFF_RESULT` in `standings-history.csv` (NOT `league-history.csv`, whose
+    schema is multi-row-per-season).
+
+  **Economy + identity** (these write NB¥ / members.json):
+  - Members are linked to Discord via an optional `discord_id` field in
+    `members.json`. `member_by_discord_id()` reverse-looks-up the signed invoker
+    id (trustworthy) to a member. The interaction payload's invoker is passed
+    into `dispatch(data, invoker)`.
+  - `/whoami` — (ephemeral) your Discord id + linked member.
+  - `/link member user` — (admin) set a member's `discord_id`. Authorized by
+    `DISCORD_ADMIN_ID` env (bootstraps the first admin) OR an already-linked
+    `admin`-role member (`_is_discord_admin`). One Discord id maps to one member.
+  - `/nbyen` — (ephemeral) your NB¥ from `member-balances.json`.
+  - `/trades [member]` — per-stock realized + unrealized P&L via
+    `invest.compute_member_pnl()` (realized replayed from trade history,
+    unrealized = open positions marked to current market price). Defaults to the
+    invoker's linked member; embed is green/red by net P&L; `•` marks open
+    positions.
+  - `/tip user amount [message]` — moves NB¥ via `tips.perform_tip()` (the shared
+    money-move, also behind `POST /api/tips`). Both parties must be linked. Posts
+    a public confirmation; `message` shows for tips ≥ 25 (`TIP_MESSAGE_THRESHOLD`).
+  - Setup: set `DISCORD_ADMIN_ID` in `.env` (the owner's Discord user id, from
+    `/whoami`) so the first `/link` is authorized; then link everyone else.
+
+  - `/help` — ephemeral embed listing every command, grouped. Hand-maintained in
+    `_HELP_GROUPS`; update it when adding/removing a command.
+
 ## Docs discipline
 
 Keep `CLAUDE.md` and `docs/` in sync with every code change. If a change affects an endpoint, a data field, a transaction type, or any behavior described in the docs, update the relevant doc in the same commit.

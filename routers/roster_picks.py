@@ -166,6 +166,8 @@ def pick_to_response(p: dict) -> dict:
         "swap_owner":    swap_owner,
         "swap_conveys":  None,   # filled in by enrich_swap_conveys
         "notes":         p.get("NOTES", ""),
+        "frozen":        p.get("FROZEN", "").strip().upper() == "TRUE",
+        "frozen_reason": p.get("FROZEN_REASON", ""),
     }
 
 
@@ -213,6 +215,8 @@ class PickUpsert(BaseModel):
     protected: Optional[int] = None
     swap_owner: Optional[str] = None
     notes: str = ""
+    frozen: bool = False
+    frozen_reason: str = ""
 
 
 class PickEntry(BaseModel):
@@ -252,7 +256,9 @@ def upsert_pick(
                "PLAYER":     body.player.strip() if body.player    else "",
                "PROTECTED":  str(body.protected) if body.protected is not None else "",
                "SWAP_OWNER": swap_owner,
-               "NOTES":      body.notes}
+               "NOTES":      body.notes,
+               "FROZEN":        "TRUE" if body.frozen else "",
+               "FROZEN_REASON": body.frozen_reason.strip()}
 
     with _picks_lock:
         picks = load_picks()
@@ -262,7 +268,7 @@ def upsert_pick(
                 picks[i] = updated
                 save_picks(picks)
                 action = f"traded to {owner}" if old_owner.upper() != owner else "updated"
-                log_write(info, f"PUT picks {year} R{rnd} {orig} — {action} pick={body.pick} protected={body.protected} swap_owner={swap_owner or None} notes={body.notes!r}")
+                log_write(info, f"PUT picks {year} R{rnd} {orig} — {action} pick={body.pick} protected={body.protected} swap_owner={swap_owner or None} notes={body.notes!r} frozen={body.frozen}")
                 responses = [pick_to_response(p) for p in picks]
                 enrich_swap_conveys(responses)
                 return next(r for r in responses if r["orig"] == orig and r["year"] == year and r["round"] == rnd)

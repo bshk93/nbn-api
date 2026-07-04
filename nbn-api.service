@@ -5,6 +5,7 @@ After=network.target
 [Service]
 User=skim
 WorkingDirectory=/home/skim/projects/nbn-api
+EnvironmentFile=-/home/skim/projects/nbn-api/.env
 ExecStart=/home/skim/projects/nbn-api/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8001
 Restart=always
 RestartSec=5

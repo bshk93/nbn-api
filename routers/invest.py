@@ -720,6 +720,72 @@ def get_all_holdings():
     return rows
 
 
+def compute_member_pnl(member: str) -> dict:
+    """Per-team realized + unrealized P&L for one member. Realized is replayed
+    from the member's trade history (same math as _compute_realized_pnl_all);
+    unrealized marks open positions to the current market price (same valuation
+    as get_all_holdings). Returns {positions: [...], total_realized,
+    total_unrealized}, positions sorted by total P&L descending."""
+    prices_hist, cur = _get_prices()
+    all_trades = _load_trades()
+    holdings   = _load_holdings().get(member, {})
+    member_trades = sorted([t for t in all_trades if t["member"] == member],
+                           key=lambda t: t["ts"])
+
+    realized: dict[str, float] = {}
+    ls_state:  dict[str, dict] = {}
+    ss_state:  dict[str, dict] = {}
+    for t in member_trades:
+        team, action = t["team"], t["action"]
+        shares, price, nbyen = t["shares"], t["price"], t["nbyen"]
+        ls = ls_state.setdefault(team, {"shares": 0.0, "avg": 0.0})
+        ss = ss_state.setdefault(team, {"shares": 0.0, "avg": 0.0})
+        realized.setdefault(team, 0.0)
+        if action == "buy":
+            total = ls["shares"] + shares
+            ls["avg"] = (ls["shares"] * ls["avg"] + shares * price) / total if total else price
+            ls["shares"] = round(total, 6)
+        elif action == "sell":
+            realized[team] = round(realized[team] + (nbyen - shares * ls["avg"]), 2)
+            ls["shares"] = round(ls["shares"] - shares, 6)
+        elif action == "short":
+            total = ss["shares"] + shares
+            ss["avg"] = (ss["shares"] * ss["avg"] + shares * price) / total if total else price
+            ss["shares"] = round(total, 6)
+        elif action == "cover":
+            realized[team] = round(realized[team] + (nbyen - shares * ss["avg"]), 2)
+            ss["shares"] = round(ss["shares"] - shares, 6)
+
+    positions = []
+    for team in set(realized) | set(holdings):
+        entry = holdings.get(team, {})
+        lp, sp = entry.get("long", {}), entry.get("short", {})
+        open_pos = lp.get("shares", 0) > 0 or sp.get("shares", 0) > 0
+        unreal = 0.0
+        if open_pos:
+            price = _market_price(cur.get(team, 0.0),
+                                  _current_sentiment(team, prices_hist, all_trades))
+            if lp.get("shares", 0) > 0:
+                unreal += lp["shares"] * (price - lp.get("avg_buy_price", 0.0))
+            if sp.get("shares", 0) > 0:
+                unreal += sp["shares"] * (sp.get("avg_open_price", 0.0) - price)
+        positions.append({
+            "team":       team,
+            "realized":   round(realized.get(team, 0.0), 2),
+            "unrealized": round(unreal, 2),
+            "open":       open_pos,
+        })
+
+    positions = [p for p in positions
+                 if abs(p["realized"]) >= 0.005 or abs(p["unrealized"]) >= 0.005 or p["open"]]
+    positions.sort(key=lambda p: -(p["realized"] + p["unrealized"]))
+    return {
+        "positions":        positions,
+        "total_realized":   round(sum(p["realized"] for p in positions), 2),
+        "total_unrealized": round(sum(p["unrealized"] for p in positions), 2),
+    }
+
+
 def _compute_invest_stats(member: str, all_trades: list) -> dict:
     member_trades = sorted(
         [t for t in all_trades if t["member"] == member],

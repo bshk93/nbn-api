@@ -17,6 +17,13 @@ router = APIRouter()
 
 _news_lock = threading.Lock()
 
+# When True, only editors (curator/BOD/admin) may publish; authors must submit
+# their drafts to the queue for editorial approval. When False (current policy),
+# authors may publish their own articles directly with no approval step. The
+# submit/queue/reject machinery is left fully intact either way, so flipping this
+# flag back to True restores BOD approval without any further code changes.
+REQUIRE_PUBLISH_APPROVAL = False
+
 MAX_TAGS = 6
 MAX_TAG_LEN = 24
 
@@ -76,10 +83,23 @@ def save_articles(articles: list[dict]):
 
 
 def _can_publish(info: Optional[dict]) -> bool:
-    """Curator or BOD (BOD implies curator via ROLE_IMPLIES) or admin may publish."""
+    """Editorial rights: curator or BOD (BOD implies curator via ROLE_IMPLIES) or
+    admin. These roles may publish anyone's article and manage the queue."""
     if not info:
         return False
     return has_role(info, "curator") or has_role(info, "admin")
+
+
+def _may_publish_article(a: dict, info: Optional[dict]) -> bool:
+    """Who may move this specific article to 'published'. Editors always may.
+    When approval isn't required, the author may also publish their own work."""
+    if not info:
+        return False
+    if _can_publish(info):
+        return True
+    if not REQUIRE_PUBLISH_APPROVAL and a.get("author") == info.get("name"):
+        return True
+    return False
 
 
 def _clean_tags(tags: list[str]) -> list[str]:
@@ -281,7 +301,7 @@ def submit_article(article_id: str, info: dict = Depends(get_token_info)):
 
 
 @router.post("/api/news/{article_id}/publish")
-def publish_article(article_id: str, body: PublishIn, info: dict = Depends(require_role("curator"))):
+def publish_article(article_id: str, body: PublishIn, info: dict = Depends(get_token_info)):
     published_at = None
     if body.publish_date:
         try:
@@ -295,6 +315,10 @@ def publish_article(article_id: str, body: PublishIn, info: dict = Depends(requi
         if idx is None:
             raise HTTPException(status_code=404, detail="Article not found")
         a = articles[idx]
+        if not _may_publish_article(a, info):
+            raise HTTPException(status_code=403, detail="Not authorized to publish this article")
+        if not (a.get("body") or "").strip():
+            raise HTTPException(status_code=422, detail="Cannot publish an empty article")
         if a.get("status") not in ("submitted", "draft"):
             raise HTTPException(status_code=422, detail="Only queued or draft articles can be published")
         now = datetime.now(timezone.utc).isoformat()
