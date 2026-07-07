@@ -1,10 +1,12 @@
 import logging
 import sys
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from routers import auth, players, roster_picks, transactions, boxscores, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, discord
+from routers.picks_scheduler import start_picks_horizon_scheduler
 
 logging.basicConfig(
     stream=sys.stdout,
@@ -16,7 +18,13 @@ logging.basicConfig(
 logger = logging.getLogger("nbn-api")
 
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    start_picks_horizon_scheduler()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

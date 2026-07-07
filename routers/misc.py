@@ -26,6 +26,7 @@ from .auth import (
     load_tokens, _resolve_token,
 )
 from .bets import _load_balances, _save_balances, _init_bal, _append_ledger, _balances_lock
+from .picks_scheduler import wake_picks_horizon_scheduler
 
 router = APIRouter()
 
@@ -97,6 +98,7 @@ def put_league_rollover(season: str, body: LeagueRollover, info: dict = Depends(
     state.setdefault("rollovers", {})[season] = body.effective
     _save_json(LEAGUE_STATE_FILE, state)
     log_write(info, f"PUT league-year/{season} — effective={body.effective}")
+    wake_picks_horizon_scheduler()
     return {"current_season": _current_league_year(), "rollovers": state["rollovers"]}
 
 
@@ -106,6 +108,7 @@ def delete_league_rollover(season: str, info: dict = Depends(require_role("bod")
     if state.get("rollovers", {}).pop(season, None) is not None:
         _save_json(LEAGUE_STATE_FILE, state)
         log_write(info, f"DELETE league-year/{season} — reset to default")
+    wake_picks_horizon_scheduler()
     return {"current_season": _current_league_year(), "rollovers": state.get("rollovers", {})}
 
 

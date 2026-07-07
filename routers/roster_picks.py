@@ -9,7 +9,7 @@ from .constants import (
     DATA_DIR, RULES_DIR, VALID_TEAMS, PICKS_HEADERS, PICKS_FILE, TRADING_BLOCK_FILE,
     TEAM_STATE_FILE, _rules_lock, _picks_lock, _state_lock, _deadcap_lock,
 )
-from .storage import read_csv, write_csv, _load_json, _save_json, log_write, _current_season_str, _current_league_year
+from .storage import read_csv, write_csv, _load_json, _save_json, log_write, _current_season_str, _current_league_year, _season_start
 from .auth import get_token_info, has_role, require_role
 
 router = APIRouter()
@@ -147,6 +147,40 @@ def load_picks() -> list[dict]:
 
 def save_picks(picks: list[dict]):
     write_csv(PICKS_FILE, PICKS_HEADERS, picks)
+
+
+def picks_horizon_target_year() -> int:
+    """The farthest draft year the picks ledger should currently cover: the
+    current league year's start calendar year, plus a fixed 7-year horizon."""
+    return 2000 + _season_start(_current_league_year()) + 7
+
+
+def ensure_picks_horizon() -> list[int]:
+    """Idempotently make sure every draft year through the current horizon has
+    a full set of self-owned rows for all 30 teams. Only ever creates rows —
+    never deletes or modifies an existing one — so this is always safe to
+    re-run; retries, process restarts, and manual re-runs all converge to the
+    same result. Returns the list of years actually created (empty if the
+    ledger already reaches the horizon)."""
+    target = picks_horizon_target_year()
+    with _picks_lock:
+        picks = load_picks()
+        existing_years = {int(p["YEAR"]) for p in picks}
+        start = max(existing_years, default=target - 1) + 1
+        created = list(range(start, target + 1))
+        for year in created:
+            for team in sorted(VALID_TEAMS):
+                for rnd in (1, 2):
+                    picks.append({
+                        "YEAR": str(year), "ROUND": str(rnd), "ORIG": team,
+                        "OWNER": team, "PICK": "", "PLAYER": "",
+                        "PROTECTED": "", "SWAP_OWNER": "", "NOTES": "",
+                        "FROZEN": "", "FROZEN_REASON": "",
+                    })
+        if created:
+            picks.sort(key=lambda p: (p["YEAR"], p["ROUND"], p["ORIG"]))
+            save_picks(picks)
+    return created
 
 
 def pick_to_response(p: dict) -> dict:
