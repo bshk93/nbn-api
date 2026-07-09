@@ -142,6 +142,10 @@ class TradeTransfer(BaseModel):
 class TradeIn(BaseModel):
     transfers: list[TradeTransfer]
     legality: str = "tbd"
+    # Team abbr -> exception type ("ntmle" | "tmle" | "room_exception") used to
+    # absorb that team's incoming salary in lieu of matching outgoing salary.
+    # Omit or null for teams matching normally.
+    exceptions: dict[str, Optional[str]] = {}
 
 
 class TradeValidateInput(BaseModel):
@@ -619,6 +623,7 @@ def _apply_sign(details: SignDetails, txn_date: str, info: dict, txn_id: Optiona
                 resolved = details.signing_method
                 if resolved == "mle":
                     resolved = ts.get("mle_type") or "ntmle"
+                ts["mle_type"] = resolved
                 if resolved == "ntmle":
                     _maybe_set_hard_cap(ts, "first_apron", f"NTMLE signing: {details.player}")
                 elif resolved == "tmle":
@@ -704,7 +709,7 @@ def _apply_pick(details: PickDetails, txn_date: str, info: dict):
     log_write(info, f"TXN pick — {details.player} → {team} ({pick.year} R{pick.round} {orig} — new row)")
 
 
-def _apply_trade(details: TradeIn, info: dict) -> list[str]:
+def _apply_trade(details: TradeIn, txn_date: str, info: dict) -> list[str]:
     if len(details.transfers) < 1:
         raise HTTPException(status_code=422, detail="A trade requires at least 1 transfer")
 
@@ -823,12 +828,46 @@ def _apply_trade(details: TradeIn, info: dict) -> list[str]:
                 trade_removals.setdefault(xfer.from_team, set()).add(asset.slug)
     _scrub_trading_block(trade_removals, bios)
 
+    if details.exceptions:
+        cur_season = _season_for_date(txn_date)
+        _, incoming, _, _ = _trade_flows(details, bios, cur_season)
+        with _state_lock:
+            state = load_team_state()
+            for team, exc_type in details.exceptions.items():
+                if not exc_type:
+                    continue
+                team = team.upper()
+                inc = incoming.get(team, 0)
+                if inc <= 0:
+                    continue
+                if team not in state:
+                    state[team] = {}
+                ts = state[team].get(cur_season, dict(DEFAULT_SEASON_STATE))
+                ts["mle_used"] = ts.get("mle_used", 0) + inc
+                ts["mle_type"] = exc_type
+                if exc_type == "ntmle":
+                    _maybe_set_hard_cap(ts, "first_apron", f"NTMLE trade absorption ({txn_date})")
+                elif exc_type == "tmle":
+                    _maybe_set_hard_cap(ts, "second_apron", f"TMLE trade absorption ({txn_date})")
+                state[team][cur_season] = ts
+            save_team_state(state)
+
     teams = sorted({xfer.from_team for xfer in details.transfers} | {xfer.to_team for xfer in details.transfers})
     log_write(info, f"TXN trade — {' / '.join(teams)}: {len(seen_players)} players, {len(seen_picks)} picks")
     return teams
 
 
 # ── Validation helpers ────────────────────────────────────────────────────────
+
+# Roster-count-exempt bio types: two-way (own cap slot rules), draft-rights (no
+# contract yet — just held rights, not a roster spot), dead (a cap hit with no
+# active player). Only "player" (and unset "") occupy a standard roster spot.
+_ROSTER_EXEMPT_TYPES = {"two-way", "draft-rights", "dead"}
+
+
+def _is_standard_roster_slot(bio_type: str) -> bool:
+    return bio_type not in _ROSTER_EXEMPT_TYPES
+
 
 def _count_standard_roster(team: str) -> int:
     path = DATA_DIR / f"{team.lower()}-roster.csv"
@@ -839,7 +878,7 @@ def _count_standard_roster(team: str) -> int:
     return sum(
         1 for r in rows
         if r.get("SLUG", "").strip()
-        and bios.get(r["SLUG"], {}).get("type", "") != "two-way"
+        and _is_standard_roster_slot(bios.get(r["SLUG"], {}).get("type", ""))
     )
 
 
@@ -852,6 +891,39 @@ def _compute_team_salary(team: str, bios: dict, season: str) -> int:
         for row in rows:
             slug = row.get("SLUG", "").strip()
             bio = bios.get(slug, {})
+            total += _parse_dollar((bio.get("salaries") or {}).get(season, ""))
+    dc_path = DATA_DIR / f"{team.lower()}-deadcap.csv"
+    if dc_path.exists():
+        _, dc_rows = read_csv(dc_path)
+        for row in dc_rows:
+            total += _parse_dollar(row.get(season, ""))
+    return total
+
+
+_FA_HOLD_TYPES = {"UFA", "RFA"}
+
+
+def _compute_team_salary_ex_holds(team: str, bios: dict, season: str) -> int:
+    """Team Salary used for apron-level and league Hard Cap comparisons —
+    excludes pure free-agent cap holds (UFA/RFA). A hold is a placeholder that
+    reserves a roster spot during free agency, not a real salary obligation, so
+    it doesn't count toward which apron tier a team sits in, nor toward the
+    league Hard Cap (§ 1.3: "active player salaries plus dead cap" — a hold is
+    not an active player salary). Conditional-but-real salary (TEAM_OPT/
+    PLAYER_OPT/NON_GTD years) still counts, as does dead cap. The plain Salary
+    Cap / cap-room checks (Room Exception eligibility, cap-space signings)
+    still use the full `_compute_team_salary` figure — those track actual
+    spendable room against the cap, where an unrenounced hold still occupies
+    room until cleared."""
+    total = 0
+    path = DATA_DIR / f"{team.lower()}-roster.csv"
+    if path.exists():
+        _, rows = read_csv(path)
+        for row in rows:
+            slug = row.get("SLUG", "").strip()
+            bio = bios.get(slug, {})
+            if (bio.get("cap_holds") or {}).get(season) in _FA_HOLD_TYPES:
+                continue
             total += _parse_dollar((bio.get("salaries") or {}).get(season, ""))
     dc_path = DATA_DIR / f"{team.lower()}-deadcap.csv"
     if dc_path.exists():
@@ -960,6 +1032,92 @@ def _check_contract_raises(
     return None
 
 
+_MLE_EXCEPTION_LABELS = {
+    "ntmle": "Non-Taxpayer MLE",
+    "tmle": "Taxpayer MLE",
+    "room_exception": "Room Exception",
+}
+
+
+def _check_exception_absorption(
+    team: str,
+    incoming: int,
+    exception_type: str,
+    team_salary_before: int,
+    team_salary_ex_holds_before: int,
+    cl: dict,
+    team_state: Optional[dict],
+    season: str,
+) -> CheckResult:
+    """A team may absorb incoming trade salary using its remaining season MLE
+    balance in lieu of matching outgoing salary — incoming salary must not
+    exceed the exception's remaining amount (outgoing is not a factor). Same
+    apron-eligibility restrictions as free-agent signings apply (§ 1.5/§ 1.6,
+    § 3.2-§ 3.4): NTMLE unavailable at/above the First Apron, TMLE unavailable
+    at/above the Second Apron, Room Exception only below Cap - full NTMLE.
+
+    NTMLE/TMLE eligibility (apron-level checks) use `team_salary_ex_holds_before`
+    — pure free-agent cap holds (UFA/RFA) don't count toward apron level. Room
+    Exception eligibility is Cap-based, not apron-based, so it still uses the
+    full `team_salary_before` (with holds).
+    """
+    check_name = f"salary_matching_{team.lower()}"
+    label = _MLE_EXCEPTION_LABELS.get(exception_type)
+    if label is None:
+        return CheckResult(
+            check=check_name, passed=False, level="error",
+            message=f"{team}: unknown exception type {exception_type!r}.",
+        )
+
+    apron1 = cl.get("apron1")
+    apron2 = cl.get("apron2")
+    cap = cl.get("cap")
+    ntmle_amount = cl.get("ntmle_amount", 0) or 0
+
+    if exception_type == "ntmle":
+        eligible = apron1 is not None and team_salary_ex_holds_before < apron1
+        threshold_msg = f"the First Apron (${apron1:,}) — § 1.5" if apron1 is not None else "the First Apron"
+        salary_shown = team_salary_ex_holds_before
+    elif exception_type == "tmle":
+        eligible = apron2 is not None and team_salary_ex_holds_before < apron2
+        threshold_msg = f"the Second Apron (${apron2:,}) — § 1.6, § 3.4" if apron2 is not None else "the Second Apron"
+        salary_shown = team_salary_ex_holds_before
+    else:  # room_exception
+        room_ceiling = (cap - ntmle_amount) if cap is not None else None
+        eligible = room_ceiling is not None and team_salary_before < room_ceiling
+        threshold_msg = (f"the Cap minus the full NTMLE amount (${room_ceiling:,}) — § 3.2"
+                          if room_ceiling is not None else "the Room Exception eligibility line")
+        salary_shown = team_salary_before
+
+    if not eligible:
+        return CheckResult(
+            check=check_name, passed=False, level="error",
+            message=(f"{team} is not eligible for the {label} — Team Salary (${salary_shown:,}) "
+                      f"is at/above {threshold_msg}."),
+        )
+
+    ts = get_season_state(team_state or {}, team, season)
+    amount_key = {"ntmle": "ntmle_amount", "tmle": "tmle_amount", "room_exception": "room_amount"}[exception_type]
+    total = cl.get(amount_key, 0) or 0
+    used = ts.get("mle_used", 0) or 0
+    remaining = max(0, total - used)
+
+    if incoming > remaining:
+        over = incoming - remaining
+        return CheckResult(
+            check=check_name, passed=False, level="error",
+            message=(f"{team}: {label} absorption failed — incoming salary ${incoming:,} exceeds the "
+                      f"remaining {label} balance of ${remaining:,} (${total:,} total, ${used:,} used this "
+                      f"season) by ${over:,}."),
+        )
+
+    return CheckResult(
+        check=check_name, passed=True,
+        message=(f"{team}: incoming salary ${incoming:,} absorbed via the {label} (${remaining:,} of "
+                  f"${total:,} remaining before this trade) — no salary match required."),
+    )
+
+
 def _check_salary_matching(
     team: str,
     outgoing: int,
@@ -967,16 +1125,45 @@ def _check_salary_matching(
     team_salary_before: int,
     cap_levels: dict,
     season: str,
+    exception_type: Optional[str] = None,
+    team_state: Optional[dict] = None,
+    team_salary_ex_holds_before: Optional[int] = None,
 ) -> Optional[CheckResult]:
+    cl = cap_levels.get(season, {})
+    ex_holds = team_salary_ex_holds_before if team_salary_ex_holds_before is not None else team_salary_before
+
+    if exception_type:
+        return _check_exception_absorption(team, incoming, exception_type, team_salary_before,
+                                            ex_holds, cl, team_state, season)
+
     if incoming <= outgoing:
         return None
 
-    cl = cap_levels.get(season, {})
     apron1 = cl.get("apron1")
     if apron1 is None:
         return None
 
-    if team_salary_before >= apron1:
+    # ── Cap-room absorption ─────────────────────────────────────────────────
+    # A team below the Salary Cap can absorb an incoming player using its own
+    # cap room instead of matching salary — this is evaluated live, off the
+    # team's actual room at the moment of the trade. NBN has no persistent
+    # Traded Player Exceptions (§ 4.1), so this isn't banked for later use;
+    # it only has to hold for this trade, using this trade's own numbers.
+    cap = cl.get("cap")
+    if cap is not None and team_salary_before < cap:
+        projected = team_salary_before - outgoing + incoming
+        if projected <= cap:
+            return CheckResult(
+                check=f"salary_matching_{team.lower()}",
+                passed=True,
+                message=(
+                    f"{team} is below the Cap (${team_salary_before:,} < ${cap:,}) and stays "
+                    f"at/below it after the trade (${projected:,}) — absorbed via cap room, "
+                    "no salary match required."
+                ),
+            )
+
+    if ex_holds >= apron1:
         limit = outgoing + 250_000
         if incoming > limit:
             over = incoming - limit
@@ -1014,26 +1201,31 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
     bios = ctx["bios"]; season = ctx["cur_season"]
     team = details.team.upper()
 
-    current = _compute_team_salary(team, bios, season)
+    current_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
     # If the signee already sits on this team's own roster as a cap hold (e.g.
     # a Bird-rights re-signing), that hold's figure is still counted in
-    # `current` — the roster row only drops off once the contract is applied,
-    # after validation runs — so back it out here to avoid double-counting
-    # hold + new contract (rulebook § 3.10: the hold is replaced, not stacked,
-    # by the signed contract's Year 1 figure).
+    # `current_ex_holds` unless it's a pure UFA/RFA hold (already excluded) —
+    # so back it out here to avoid double-counting hold + new contract
+    # (rulebook § 3.10: the hold is replaced, not stacked, by the signed
+    # contract's Year 1 figure).
     existing_hold = 0
+    is_fa_hold = False
     roster_path = DATA_DIR / f"{team.lower()}-roster.csv"
     if roster_path.exists():
         _, roster_rows = read_csv(roster_path)
         if any(r.get("SLUG", "").strip() == details.player for r in roster_rows):
             existing_hold = _parse_dollar((bios.get(details.player, {}).get("salaries") or {}).get(season, ""))
+            is_fa_hold = (bios.get(details.player, {}).get("cap_holds") or {}).get(season) in _FA_HOLD_TYPES
     new_sal = _parse_dollar(details.contract.salaries.get(season, ""))
-    projected = current - existing_hold + new_sal
-    r = _hard_cap_check(team, projected, season,
+    projected_ex_holds = current_ex_holds - (0 if is_fa_hold else existing_hold) + new_sal
+    # Both the apron-triggered hard cap and the league-wide Hard Cap (§ 1.3)
+    # are computed on the ex-holds figure — a free-agent hold isn't an active
+    # player salary.
+    r = _hard_cap_check(team, projected_ex_holds, season,
                         ctx["team_state"], ctx["cap_levels"])
     if r:
         checks.append(r)
-    r = _universal_hard_cap_check(team, projected, season, ctx["cap_levels"])
+    r = _universal_hard_cap_check(team, projected_ex_holds, season, ctx["cap_levels"])
     if r:
         checks.append(r)
 
@@ -1106,7 +1298,8 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
     errors (warnings are force-through-able). The rules, in order:
 
       • Leg count          — § 4.1 (warning only; single legs are allowed for splits)
-      • Salary matching    — § 4.2 (tiered, below apron) / § 4.3 (apron + $250K)
+      • Salary matching    — § 4.2 (tiered, below apron) / § 4.3 (apron + $250K), or
+                              MLE trade absorption if `exceptions[team]` is set (§ 4.2a)
       • 2nd-apron aggreg.  — § 4.4 (warning only; apron-2 teams may not combine salaries)
       • Hard cap           — team apron hard cap (team-state) + league-wide hard cap
       • Roster size        — Article II: 15 in-season, 20 offseason ceiling
@@ -1138,22 +1331,29 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
         out = outgoing.get(team, 0)
         inc = incoming.get(team, 0)
         current = _compute_team_salary(team, bios, season)
+        current_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
         delta = inc - out
 
         if delta > 0:
-            projected = current + delta
-            hc = _hard_cap_check(team, projected, season,
+            projected_ex_holds = current_ex_holds + delta
+            # Both the apron-triggered hard cap and the league-wide Hard Cap
+            # (§ 1.3: "active player salaries plus dead cap") are computed on
+            # the ex-holds figure — a free-agent hold isn't an active salary.
+            hc = _hard_cap_check(team, projected_ex_holds, season,
                                  ctx["team_state"], ctx["cap_levels"])
             checks.append(hc or CheckResult(
                 check=f"hard_cap_{team.lower()}", passed=True,
-                message=f"{team}: projected salary ${projected:,} within hard-cap limits.",
+                message=f"{team}: projected salary ${projected_ex_holds:,} within hard-cap limits.",
             ))
-            lhc = _universal_hard_cap_check(team, projected, season, ctx["cap_levels"])
+            lhc = _universal_hard_cap_check(team, projected_ex_holds, season, ctx["cap_levels"])
             if lhc:
                 checks.append(lhc)
 
         if inc > 0:
-            sm = _check_salary_matching(team, out, inc, current, ctx["cap_levels"], season)
+            exc_type = (details.exceptions or {}).get(team)
+            sm = _check_salary_matching(team, out, inc, current, ctx["cap_levels"], season,
+                                         exception_type=exc_type, team_state=ctx.get("team_state"),
+                                         team_salary_ex_holds_before=current_ex_holds)
             checks.append(sm or CheckResult(
                 check=f"salary_matching_{team.lower()}", passed=True,
                 message=f"{team}: incoming ${inc:,} matches outgoing ${out:,} (§ 4.2/4.3).",
@@ -1165,11 +1365,11 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
         # salary. Surfaced as a warning for the office to verify — not auto-blocked.
         apron2 = ctx["cap_levels"].get(season, {}).get("apron2")
         out_count = len(out_players.get(team, []))
-        if apron2 and current >= apron2 and inc > 0:
+        if apron2 and current_ex_holds >= apron2 and inc > 0:
             if out_count >= 2:
                 checks.append(CheckResult(
                     check=f"apron2_aggregation_{team.lower()}", passed=False, level="warning",
-                    message=(f"{team} is at/above the 2nd apron (${current:,} ≥ ${apron2:,}) and is "
+                    message=(f"{team} is at/above the 2nd apron (${current_ex_holds:,} ≥ ${apron2:,}) and is "
                              f"aggregating {out_count} outgoing salaries (§ 4.4) — apron-2 teams may not "
                              "combine salaries to match incoming. Verify this leg manually."),
                 ))
@@ -1189,9 +1389,9 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
     for team in sorted(set(out_players) | set(in_players)):
         before = _count_standard_roster(team)
         out_std = sum(1 for s in out_players.get(team, [])
-                      if bios.get(s, {}).get("type", "") != "two-way")
+                      if _is_standard_roster_slot(bios.get(s, {}).get("type", "")))
         in_std  = sum(1 for s in in_players.get(team, [])
-                      if bios.get(s, {}).get("type", "") != "two-way")
+                      if _is_standard_roster_slot(bios.get(s, {}).get("type", "")))
         after = before - out_std + in_std
         key = f"roster_size_{team.lower()}"
         if after > ROSTER_OFFSEASON_MAX:
@@ -1247,13 +1447,13 @@ def _validate_convert_twoway(details: ConvertTwoWayDetails, ctx: dict) -> list[C
     delta = new_sal - old_sal
 
     if delta > 0 and team:
-        current = _compute_team_salary(team, bios, season)
-        projected = current + delta
-        r = _hard_cap_check(team, projected, season,
+        current_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
+        projected_ex_holds = current_ex_holds + delta
+        r = _hard_cap_check(team, projected_ex_holds, season,
                             ctx["team_state"], ctx["cap_levels"])
         if r:
             checks.append(r)
-        r = _universal_hard_cap_check(team, projected, season, ctx["cap_levels"])
+        r = _universal_hard_cap_check(team, projected_ex_holds, season, ctx["cap_levels"])
         if r:
             checks.append(r)
 
@@ -1366,7 +1566,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             stored_details = details.model_dump()
             stored_details["team"] = team
         elif body.type == "trade":
-            teams = _apply_trade(details, info)
+            teams = _apply_trade(details, body.date, info)
             stored_details = details.model_dump()
             stored_details["teams"] = teams
         elif body.type == "convert_twoway":
@@ -1469,16 +1669,19 @@ def _trade_fact_sheet(details, ctx: dict) -> dict:
         inc = incoming.get(team, 0)
         before = _count_standard_roster(team)
         out_std = sum(1 for s in out_players.get(team, [])
-                      if bios.get(s, {}).get("type", "") != "two-way")
+                      if _is_standard_roster_slot(bios.get(s, {}).get("type", "")))
         in_std  = sum(1 for s in in_players.get(team, [])
-                      if bios.get(s, {}).get("type", "") != "two-way")
+                      if _is_standard_roster_slot(bios.get(s, {}).get("type", "")))
         current = _compute_team_salary(team, bios, season)
+        current_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
         teams[team] = {
             "team": team,
             "current_salary": current,
+            "current_salary_ex_holds": current_ex_holds,
             "outgoing_salary": out,
             "incoming_salary": inc,
             "projected_salary": current - out + inc,
+            "projected_salary_ex_holds": current_ex_holds - out + inc,
             "players_out": out_players.get(team, []),
             "players_in": in_players.get(team, []),
             "standard_count_before": before,
