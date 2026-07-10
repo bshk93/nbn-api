@@ -87,6 +87,10 @@ class TransactionIn(BaseModel):
     description: str = ""
     details: dict
     force: bool = False
+    # Backfill a trade that predates this transaction log (or whose effects
+    # current roster/cap data already reflects) without re-applying it —
+    # skips _apply_trade and validation, just logs the record for display.
+    historical: bool = False
 
 
 class OptionDetails(BaseModel):
@@ -1494,6 +1498,41 @@ def _run_validation(txn_type: str, details, ctx: dict) -> list[CheckResult]:
     return fn(details, ctx) if fn else []
 
 
+def _create_historical_trade(details: TradeIn, body: TransactionIn, info: dict) -> dict:
+    """Log a trade for display on player/team pages without touching current
+    roster, cap, or team-state data. For backfilling trades that predate this
+    transaction log, whose effects current data already reflects — replaying
+    them through _apply_trade would re-move players that have already moved.
+    """
+    bios = load_player_bios()
+    teams_seen: set[str] = set()
+    for transfer in details.transfers:
+        for team in (transfer.from_team, transfer.to_team):
+            if team.upper() not in VALID_TEAMS:
+                raise HTTPException(status_code=422, detail=f"Unknown team: {team!r}")
+            teams_seen.add(team.upper())
+        for asset in transfer.assets:
+            if asset.type == "player" and (not asset.slug or asset.slug not in bios):
+                raise HTTPException(status_code=422, detail=f"Unknown player slug: {asset.slug!r}")
+
+    stored_details = details.model_dump()
+    stored_details["teams"] = sorted(teams_seen)
+    stored_details["historical"] = True
+
+    txn = {
+        "id": secrets.token_hex(8),
+        "type": "trade",
+        "date": body.date,
+        "created_by": info.get("name", "unknown"),
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "description": body.description,
+        "details": stored_details,
+    }
+    with _txn_lock:
+        _append_transaction(txn)
+    return txn
+
+
 # ── Transaction routes ────────────────────────────────────────────────────────
 
 @router.post("/api/transactions")
@@ -1505,6 +1544,9 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
 
     if body.type not in ("sign", "pick", "option", "guarantee", "release", "renounce", "trade", "convert_twoway", "sign_pick"):
         raise HTTPException(status_code=422, detail=f"Unsupported transaction type: {body.type!r}")
+
+    if body.historical and body.type != "trade":
+        raise HTTPException(status_code=422, detail="historical backfill only supports type=trade")
 
     _detail_models = {
         "sign":           (SignDetails,           "Invalid sign details"),
@@ -1522,6 +1564,9 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
         parsed_details = model_cls(**body.details)
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"{err_prefix}: {e}")
+
+    if body.historical:
+        return _create_historical_trade(parsed_details, body, info)
 
     _val_ctx = {
         "bios":        load_player_bios(),
