@@ -63,44 +63,100 @@ _alias_to_abbr = {
 _alias_pattern = "|".join(
     re.escape(a) for a in sorted(_alias_to_abbr, key=len, reverse=True)
 )
+# Team header verb: "receives"/"recieves"/"recives" (typo, missing ei/ie)/
+# "receivers"(typo)/"gets", optionally followed by ":" or ";" or nothing at
+# all (bare space before the asset list).
+_VERB = r"rec\w{0,3}vers?|rec\w{0,3}ves?|gets?"
+_HEADER_TAIL = rf"(?:(?:{_VERB})[ \t]*[:;]?|[:;])"
 BLOCK_RE = re.compile(
     rf"(?im)^[ \t]*(?P<team>{_alias_pattern})\b[ \t]*"
-    rf"(?:rec(?:ei|ie)ves?)?[ \t]*:[ \t]*"
+    rf"{_HEADER_TAIL}[ \t]*"
     rf"(?P<rest>.*?)"
-    rf"(?=\n[ \t]*(?:{_alias_pattern})\b[ \t]*(?:rec(?:ei|ie)ves?)?[ \t]*:|\Z)",
+    rf"(?=\n[ \t]*(?:{_alias_pattern})\b[ \t]*{_HEADER_TAIL}|\Z)",
     re.DOTALL,
 )
 
 PICK_RE = re.compile(
     r"(?i)\b(19|20)\d{2}\b|\b1st\b|\b2nd\b|\bpick\b|\bswap\b|\bprotect|"
-    r"\bright(s)? to\b|\bconditional\b|\bfavorable\b|\bfirst\b|\bsecond\b|\bround\b|"
-    r"^#\d+$|^\d+-\d+\b"
+    r"\bright(s)?\s+to\s+swap\b|\bconditional\b|\bfavorable\b|\bfirst\b|\bsecond\b|\bround\b|"
+    r"^#\d+$|^\d+-\d+\b|[‘’']\d{2}\b"
 )
 SUFFIX_RE = re.compile(r"(?i)\s+(jr\.?|sr\.?|ii|iii|iv)$")
+
+# Exact-string aliases for nicknames the last-name-only fallback can't safely
+# resolve because the surname isn't unique in bios (e.g. two Wagners, six
+# Martins, two Youngs) or the token isn't a surname at all (initials).
+NICKNAME_ALIASES = {
+    "mo wagner": "wagner-moritz",
+    "kj martin": "martin-kenyon",
+    "thad young": "young-thaddeus",
+    "kcp": "caldwell-pope-kentavious",
+    "cam johnson": "johnson-cameron",
+    # bio's name field is truncated to "TOSCANO, JUAN" (missing "-Anderson"),
+    # so the full "Juan Toscano-Anderson" the source text always uses never
+    # exact/fuzzy/lastname-matches on its own (ratio 0.73, below the 0.85 cutoff).
+    "juan toscano-anderson": "toscano-juan",
+    # bio name is "JONES GARCIA, DAVID" (no middle name, no accent); source
+    # text always includes the middle name "Apolinar" and the accented í.
+    "david apolinar jones garcía": "david-jones-garcia",
+}
+
+# Tokens where the last-name-only fallback would match a DIFFERENT real
+# player who happens to be the sole bio entry with that surname (e.g. "Cheick
+# Diallo" is a real distinct player from "Hamidou Diallo", the only Diallo in
+# bios) -- block the fallback here rather than silently attribute history to
+# the wrong person. Found by manual review of low-confidence matches.
+FALSE_MATCH_BLOCKLIST = {
+    "cheick diallo", "jacob evans", "lucas williamson",
+    # Found reviewing fa-news low-confidence matches (session 5): each of
+    # these is a real, distinct player with no bio entry of their own, wrongly
+    # attributed to the sole other same-surname bio via the lastname fallback.
+    "matt ryan",         # -> would incorrectly match cormac-ryan (Cormac Ryan)
+    "markquis nowell",   # -> would incorrectly match nowell-jaylen (Jaylen Nowell)
+    "kadary richmond",   # -> would incorrectly match richmond-billy (Billy Richmond)
+    "dj stewart jr",     # -> would incorrectly match stewart-isaiah (Isaiah Stewart)
+}
+
+# One-off source-text fixes for known typos in the raw Discord messages
+# (keyed by discord_id so a fix can't accidentally mangle unrelated messages).
+MESSAGE_TEXT_FIXES = {
+    "824771406695891012": ("Caris Levert Jaxson Hayes", "Caris Levert, Jaxson Hayes"),
+    "777612319072976906": ("PXC receives", "PHX receives"),
+}
 
 
 def split_assets(text: str) -> list[str]:
     tokens, depth, cur = [], 0, ""
-    for ch in text:
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
         if ch == "(":
             depth += 1
             cur += ch
+            i += 1
         elif ch == ")":
             depth = max(0, depth - 1)
             cur += ch
+            i += 1
         elif ch == "," and depth == 0:
             tokens.append(cur.strip())
             cur = ""
+            i += 1
+        elif depth == 0:
+            m = re.match(r"(?i)\s+(?:and|&|\+)\s+", text[i:])
+            if m:
+                tokens.append(cur.strip())
+                cur = ""
+                i += m.end()
+            else:
+                cur += ch
+                i += 1
         else:
             cur += ch
+            i += 1
     if cur.strip():
         tokens.append(cur.strip())
-    # Split further on top-level "and"/"&" joins (e.g. "Luke Kennard & Kevin Knox").
-    final = []
-    for t in tokens:
-        parts = re.split(r"(?i)\s+(?:and|&)\s+", t)
-        final.extend(p.strip() for p in parts if p.strip())
-    return final
+    return [t for t in tokens if t]
 
 
 def build_name_map(bios: dict) -> tuple[dict, dict]:
@@ -126,6 +182,11 @@ def resolve_player(token: str, name_map: dict, by_last: dict) -> tuple[str | Non
     cleaned = re.sub(r"[’'`.]", "", token).strip()
     cleaned = re.sub(r"\s+", " ", cleaned)
     candidates = [cleaned.lower(), SUFFIX_RE.sub("", cleaned.lower())]
+    if candidates[0] in FALSE_MATCH_BLOCKLIST:
+        return None, "unresolved"
+    for cand in candidates:
+        if cand in NICKNAME_ALIASES:
+            return NICKNAME_ALIASES[cand], "alias"
     for cand in candidates:
         if cand in name_map:
             return name_map[cand], "exact"
@@ -156,9 +217,11 @@ def parse_message(content: str, name_map: dict, by_last: dict) -> dict:
                 continue
             slug, note = resolve_player(a, name_map, by_last)
             if slug is None:
-                reasons.append(f"unresolved player text: {a!r}")
-            else:
-                players.append((slug, note, a))
+                # No player-bios.json entry for this name (never rostered
+                # in-league) -> drop the asset, keep the rest of the trade.
+                # The verbatim description text still records who was named.
+                continue
+            players.append((slug, note, a))
         parsed_blocks.append({"team": abbr, "players": players})
 
     teams = [b["team"] for b in parsed_blocks]
@@ -193,6 +256,20 @@ def parse_message(content: str, name_map: dict, by_last: dict) -> dict:
     return {"ok": True, "transfers": transfers}
 
 
+_TRADE_HEADER_INLINE_RE = re.compile(
+    rf"(?im)^(Trade\s*\d+:)[ \t]*(?={_alias_pattern}\b)"
+)
+
+
+def normalize_for_parsing(content: str) -> str:
+    """Cosmetic-only cleanup so BLOCK_RE can find team headers Discord's
+    markdown or inconsistent line-breaks would otherwise hide. Never used
+    for the stored `description` -- that stays verbatim."""
+    text = content.replace("*", "")
+    text = _TRADE_HEADER_INLINE_RE.sub(r"\1\n", text)
+    return text
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--in-dir", type=Path, default=IN_DIR_DEFAULT)
@@ -206,7 +283,12 @@ def main():
     for path in sorted(args.in_dir.glob("*.json")):
         messages = json.loads(path.read_text())
         for msg in messages:
-            result = parse_message(msg["content"], name_map, by_last)
+            content = msg["content"]
+            if msg["id"] in MESSAGE_TEXT_FIXES:
+                find, replace = MESSAGE_TEXT_FIXES[msg["id"]]
+                content = content.replace(find, replace)
+            content = normalize_for_parsing(content)
+            result = parse_message(content, name_map, by_last)
             date = msg["timestamp"][:10]
             if result["ok"]:
                 resolved.append({

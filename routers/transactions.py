@@ -1498,12 +1498,29 @@ def _run_validation(txn_type: str, details, ctx: dict) -> list[CheckResult]:
     return fn(details, ctx) if fn else []
 
 
-def _create_historical_trade(details: TradeIn, body: TransactionIn, info: dict) -> dict:
-    """Log a trade for display on player/team pages without touching current
-    roster, cap, or team-state data. For backfilling trades that predate this
-    transaction log, whose effects current data already reflects — replaying
-    them through _apply_trade would re-move players that have already moved.
+def _append_historical(txn_type: str, stored_details: dict, body: TransactionIn, info: dict) -> dict:
+    """Shared by the _create_historical_* helpers below: log a transaction for
+    display on player/team pages without touching current roster, cap, or
+    team-state data. For backfilling transactions that predate this log, or
+    whose effects current data already reflects — replaying them through the
+    normal _apply_* path would re-apply moves that have already happened.
     """
+    stored_details["historical"] = True
+    txn = {
+        "id": secrets.token_hex(8),
+        "type": txn_type,
+        "date": body.date,
+        "created_by": info.get("name", "unknown"),
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "description": body.description,
+        "details": stored_details,
+    }
+    with _txn_lock:
+        _append_transaction(txn)
+    return txn
+
+
+def _create_historical_trade(details: TradeIn, body: TransactionIn, info: dict) -> dict:
     bios = load_player_bios()
     teams_seen: set[str] = set()
     for transfer in details.transfers:
@@ -1517,20 +1534,23 @@ def _create_historical_trade(details: TradeIn, body: TransactionIn, info: dict) 
 
     stored_details = details.model_dump()
     stored_details["teams"] = sorted(teams_seen)
-    stored_details["historical"] = True
+    return _append_historical("trade", stored_details, body, info)
 
-    txn = {
-        "id": secrets.token_hex(8),
-        "type": "trade",
-        "date": body.date,
-        "created_by": info.get("name", "unknown"),
-        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "description": body.description,
-        "details": stored_details,
-    }
-    with _txn_lock:
-        _append_transaction(txn)
-    return txn
+
+def _create_historical_sign(details: SignDetails, body: TransactionIn, info: dict) -> dict:
+    bios = load_player_bios()
+    if not details.player or details.player not in bios:
+        raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
+    if details.team.upper() not in VALID_TEAMS:
+        raise HTTPException(status_code=422, detail=f"Unknown team: {details.team!r}")
+    return _append_historical("sign", details.model_dump(), body, info)
+
+
+def _create_historical_option(details: OptionDetails, body: TransactionIn, info: dict) -> dict:
+    bios = load_player_bios()
+    if not details.player or details.player not in bios:
+        raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
+    return _append_historical("option", details.model_dump(), body, info)
 
 
 # ── Transaction routes ────────────────────────────────────────────────────────
@@ -1545,8 +1565,8 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
     if body.type not in ("sign", "pick", "option", "guarantee", "release", "renounce", "trade", "convert_twoway", "sign_pick"):
         raise HTTPException(status_code=422, detail=f"Unsupported transaction type: {body.type!r}")
 
-    if body.historical and body.type != "trade":
-        raise HTTPException(status_code=422, detail="historical backfill only supports type=trade")
+    if body.historical and body.type not in ("trade", "sign", "option"):
+        raise HTTPException(status_code=422, detail="historical backfill only supports type=trade, sign, option")
 
     _detail_models = {
         "sign":           (SignDetails,           "Invalid sign details"),
@@ -1566,7 +1586,12 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
         raise HTTPException(status_code=422, detail=f"{err_prefix}: {e}")
 
     if body.historical:
-        return _create_historical_trade(parsed_details, body, info)
+        if body.type == "trade":
+            return _create_historical_trade(parsed_details, body, info)
+        if body.type == "sign":
+            return _create_historical_sign(parsed_details, body, info)
+        if body.type == "option":
+            return _create_historical_option(parsed_details, body, info)
 
     _val_ctx = {
         "bios":        load_player_bios(),

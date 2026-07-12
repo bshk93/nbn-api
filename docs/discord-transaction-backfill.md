@@ -9,10 +9,240 @@ original announcement text as a note. Not attempting to reconstruct draft picks,
 cap/salary state, or run any legality validation for these — they predate the live
 transaction system and current roster data already reflects their effects.
 
-Status as of 2026-07-10: **361 of 485 messages submitted to the live transaction
-log** (322 auto-resolved + 39 human-reviewed low-confidence promotions out of
-"flagged"). Picking this up again should start at "Next steps" below, which now
-covers only the remaining 124.
+Status as of 2026-07-10 (session 2): **378 of 485 messages submitted to the
+live transaction log.** Remaining 107 breaks down as 67 multi-team trades
+(needs human from/to judgment, see below) + ~40 picks-only/malformed no-ops
+with nothing to log either way. Picking this up again should start at "Next
+steps" below.
+
+## Session 4 (2026-07-11): manual multi-team trade resolution + a real live-data bug
+
+Went through the 64 flagged multi-team (3/4/5-team) trades with the user,
+newest-first (their idea — recent trades are easier to recall). Method that
+worked well: for each unresolved player, check `GET /api/transactions?player=`
+for their last known team, and cross-check against `players/player_seasons.csv`
+(the per-season `TEAM` column splits into multiple rows the season a player
+changes teams, which independently confirms a move even for players with zero
+logged transactions — e.g. founding-era players who've simply never been
+traded/signed since the log began).
+
+**Hard rule, learned the hard way:** a player's `from_team` must always be one
+of the teams the trade *text itself* names as a receiver — never an outside
+team, even when that's what their last tracked transaction says. Caught live:
+Jabari Walker's last transaction had him on SAC, but the trade only named
+NYK/SAS/ORL; using SAC produced a bogus 4th team. The real answer (confirmed
+by the user) was ORL — and the very next multi-team trade worked through
+(one day earlier chronologically, since we're going backwards) turned out to
+be the missing SAC→ORL leg that had simply not been backfilled yet. **A
+mismatch between tracked history and the trade's named participants means a
+transaction is missing upstream, not that a new team belongs in the trade.**
+Full writeup: [[feedback-trade-backfill-team-inference]].
+
+**This rule surfaced a real bug already live in production**, not just a risk
+for future reconstructions: 3 previously-submitted historical trades had
+silently collapsed a 3-team trade into 2, dropping the 3rd team's players
+entirely (a Jan 2026 DET/NOP/SAS trade missing DET; an Aug 2025 CHI/BKN/MIA
+trade missing CHI; a Jul 2023 NOP/SAC/GSW trade missing NOP). None of the
+three were in `discord-transactions-promoted.json` — they'd been entered
+off-pipeline in an earlier session, bypassing `resolve_discord_trades.py`'s
+parser (which correctly flags all three as unresolvable 3-team trades and
+would never have auto-promoted them wrong). Fixed via delete + reconstruct +
+resubmit.
+
+**Audit for more of these** (worth rerunning after any future off-pipeline
+edit): re-parse every live historical trade's stored `description` with
+`resolve_discord_trades.BLOCK_RE`, diff the set of teams the *text* mentions
+against the stored `details.teams`. Ran clean (0 mismatches) across all 388
+live historical trades after the 3 fixes.
+
+Result: 8 of the 64 multi-team trades resolved and submitted this session
+(388 total historical trades now live, up from 378 — includes the 3 bug
+fixes, which replace existing records rather than add new ones, so the net
+new content is 8 trades + 3 corrections). 56 multi-team trades remain,
+still going newest-first next time this is picked up.
+
+## Session 3 (2026-07-11): expanded to fa-news (signings + options)
+
+Extended the same backfill idea to the league's `fa-news` channels (dated
+`2020-fanews`/`2021-fanews` — no hyphen — and `2022-fa-news`…`2025-fa-news`).
+The bare current-era `fa-news` channel was excluded per the same policy as
+`#transactions`: it's live/current, not historical.
+
+**Scope decision (user, 2026-07-11):** signings (including UDFA signings once
+they resolve to an actual signing, not the procedural round/window
+announcements) **and** team/player option accept/decline decisions. Releases,
+renounces, two-way conversions, retirements, and trade-block chatter that also
+live in these channels are explicitly out of scope for this pass.
+
+**API change:** `historical: true` on `POST /api/transactions` was trade-only;
+extended to also accept `type=sign` and `type=option` (`_create_historical_sign`,
+`_create_historical_option` in `routers/transactions.py`, sharing a new
+`_append_historical` helper with the trade path). Validates player slug (and
+team, for signs) exist, skips `_apply_sign`/`_apply_option` and validation
+entirely — same rationale as trades: replaying would re-apply moves current
+data already reflects. Contract terms are **not** reconstructed from text
+(`contract: {}` on historical signs) — the verbatim `description` carries the
+prose deal terms; only `option`'s structured fields (decision/type/year) are
+populated since those drive display. Tested end-to-end against the live
+service (create sign + option, verify via `?player=`, confirm roster
+untouched, delete) before submitting anything at scale.
+
+**Pipeline:** `resolve_discord_fa_signings.py` reuses `resolve_discord_trades.py`'s
+player-resolution machinery (name_map, nickname aliases, false-match blocklist)
+unchanged via import, but needed its own team-matching: fa-news messages
+consistently spell out the full "City Nickname" ("The Houston Rockets sign…")
+rather than the single-token team references trade headers use, so
+`FULL_TEAM_NAMES` adds the 30 full names as extra aliases. Messages also
+frequently @-mention a team's Discord role instead of naming it in text — the
+guild's role names happen to already match team nicknames 1:1, so a one-time
+`GET /guilds/{id}/roles` fetch produced `discord-role-team-map.json`
+(role_id -> abbr), and role mentions are substituted with the plain abbr
+before pattern matching (never in the stored `description`, which stays
+verbatim). One message can yield multiple candidate records (one signing
+each), unlike trades where a message is one transaction — `resolved`/`flagged`
+entries are per-candidate, several can share a `discord_id`.
+
+Patterns covered: team-first and player-first signings (`"TEAM sign(s)
+PLAYER…"`, `"PLAYER (has signed|signs) with (the) TEAM…"`, with or without a
+leading "The"), single- and dual-player team-option accept/decline (`"…'s
+YYYY-YY team option…"`, `"X's and Y's options of A and B respectively"`), and
+player-option accept/decline (`"PLAYER accepts his player option…"`, `"PLAYER
+(has) opted out of…"`). A single message containing **both** signing and
+option language (e.g. "declining his Player Option and signing a new deal") is
+flagged as compound rather than guessed at — only 4 in the whole corpus. A
+one-off list-format batch of ~30 option decisions with no team/type stated per
+line (2024-06-12, `2024-fa-news`) is flagged whole rather than guessed at
+per-player.
+
+**Live-overlap handling:** unlike the transactions channels (clean handoff —
+last dated message predates the first live trade), `2025-fa-news` runs through
+2026-05-21, past when live `type=sign` records start (2026-04-10). Confirmed
+by cross-reference that the 2 auto-resolved + 3 flagged candidates dated on/
+after the cutoff are exact duplicates (by player + date) of 5 of the 8 live
+`sign` records. `resolve_discord_fa_signings.py` excludes anything dated
+`>= LIVE_SIGN_CUTOFF` ("2026-04-10") into its own `excluded_live_overlap`
+bucket rather than silently dropping it.
+
+**Result after two rounds, 2081 messages across 6 channels:**
+
+| Bucket | Count |
+|---|---|
+| Resolved (submitted) | 1352 (1123 sign, 229 option) |
+| Flagged (needs human review) | 209 (110 unresolved player, 96 low-confidence match, 2 compound sign+option, 1 list-format batch) |
+| Skipped (out of scope or unmatched) | 611 (496 no sign/option language — renounce/waiver/retirement/trade-block chatter; ~down from 108+74 option/sign-template misses after round 2) |
+| Excluded (2025-fa-news live overlap) | 6 |
+
+First pass (session start) landed 1305; a second pass same session fixed three
+concrete gaps found by spot-checking `skipped`/`flagged` samples (user's
+instinct that fa-news "should parse easily" was right — these were regexes
+missing common phrasings, not fundamentally hard cases):
+- `TEAM_OPTION_RE` required a possessive marker (`'s`/`s'`) after the player
+  name; some messages have none ("...decline Trey Lyles 2020-21 team
+  option") — made it optional.
+- `PLAYER_OPTION_ACCEPT_RE`/`DECLINE_RE` only matched "accepts/opted out of
+  ... player option"; missed the equally common "declines his player option
+  worth $X" and "has opted in to his $X player option" phrasings — added both.
+- Signing clauses naming two players ("sign Reggie Perry and Immanuel
+  Quickley", "signing Jordan Nwora (pick 48) and Markus Howard(pick 51)")
+  were captured as one garbled string and dropped or mismatched — added
+  `_split_players()` (parenthetical-stripping + "and"/"&" split, same idea as
+  the trades parser's `split_assets`) so each name resolves independently.
+
+Verified the full 1352 for correctness with a bulk sanity check (bio's last
+name must appear in the matched raw text) — 0 failures — in addition to
+spot-checking individual records via `GET /api/transactions?player=`
+(coherent per-player histories, e.g. `wade-dean`'s option decline -> 3 later
+signings in date order).
+
+**Remaining 209 flagged + 611 skipped are not yet worked** — same next-step
+shape as the trades multi-team bucket: needs a human pass (mostly players
+with no bio entry at all — verified against `/api/players`, nothing to parse
+better there) or another round of parser refinement for smaller recurring
+shapes (negated statements like "did not sign", qualifying-offer signings,
+name-in-quotes nicknames, a handful of messed-up multi-player UDFA-batch
+messages).
+
+Scripts: `resolve_discord_fa_signings.py`, `submit_discord_fa_signings.py`
+(state file `discord-fa-signings-submitted.json`, keyed by a composite
+`discord_id:kind:slug:team:decision:year` since one message can yield several
+candidates — a plain discord_id would collide). Raw messages fetched into
+`discord-fa-signings-raw/` via the existing `fetch_discord_transactions.py`
+(run twice — `--pattern fanews` and `--pattern fa-news`, since the two eras
+spell the channel name differently — then the bare `fa-news.json` output
+deleted).
+
+### Session 2 changes (parser fixes + corrections)
+
+Went back through `resolve_discord_trades.py` and found several real parser
+bugs, not just ambiguity, that were silently mis-parsing or mis-attributing
+messages:
+
+- **Paren-depth bug in the "and"/"&" splitter**: `split_assets` did a
+  paren-aware comma split, then a *second*, non-paren-aware pass splitting on
+  " and "/" & ", which incorrectly sliced inside parentheticals like
+  "(best between HOU and ORL)" and dropped fragments as phantom unresolved
+  players. Fixed by making the whole tokenizer paren-depth-aware in one pass;
+  also added "+" as a top-level joiner (e.g. "Blake Griffin + 2021 MIA 1st").
+- **Team header regex too rigid**: only matched "TEAM receives:" with a
+  literal colon. Real messages also used markdown bold (`*TEAM receives:*`),
+  semicolons (`TEAM Recieves;`), no punctuation at all (`TEAM receives Player`),
+  "TEAM Gets:", "TEAM receivers:" (typo), and "TEAM: Trade N: ..." on the same
+  line as the header. All now handled (`normalize_for_parsing`,
+  broadened `_VERB`/`_HEADER_TAIL` patterns). This alone fixed 14 of the 15
+  "malformed parse" messages (the 15th has no second team block in the actual
+  Discord text — genuinely incomplete, and moot since it names no player).
+- **`PICK_RE` too broad on "rights to X"**: the pick-swap-right pattern
+  `\bright(s)? to\b` also matched "draft rights to VJ Edgecombe" / "rights to
+  Grant Riller" etc. — real player draft-rights assets, not picks — causing
+  them to be silently dropped. Narrowed to require "swap" specifically
+  (`\bright(s)?\s+to\s+swap\b`). **This had already caused 6 live trades to be
+  submitted missing a player** (NYK/RJ Luis, NOP/VJ Edgecombe+Ben Saraf,
+  CHA/VJ Edgecombe, NYK/Miles McBride, SAC/Johnny Furphy) — fixed by
+  delete + resubmit of those 6 `historical` records via the admin API
+  (`DELETE /api/transactions/{id}` has no roster side effects for historical
+  trades, so this is safe).
+- **Nickname/abbreviation gaps**: last-name-only fallback refuses when a
+  surname isn't unique (6 Martins, 2 Wagners, 2 Youngs in bios), so "Mo
+  Wagner", "KJ Martin", "Thad Young", "KCP" all failed. Added exact-string
+  `NICKNAME_ALIASES` for these four plus "Cam Johnson" (see below).
+- **Two false-positive name matches found by manual eyeball review**: "Cheick
+  Diallo" got last-name-matched to `diallo-hamidou` (Hamidou Diallo) and
+  "Jacob Evans" to `evans-isaiah` (Isaiah Evans) — real, *different* players
+  who happen to be the only bio entry with that surname. Added
+  `FALSE_MATCH_BLOCKLIST` to refuse the fallback for these specific tokens
+  (drops the player, keeps the rest of the trade, per the missing-player
+  policy below) rather than silently misattribute. **One of these three
+  categories of bug had already reached production**: a "Cam Johnson" mention
+  was fuzzy-matched to `johnson-aj` (wrong) instead of `johnson-cameron`
+  (right, and already in bios) in the *original* human-reviewed promotion —
+  i.e. the manual eyeball pass in session 1 missed it too. Fixed the alias,
+  corrected the stale `discord-transactions-promoted.json` entry, and
+  delete+resubmitted that live record. **Take away for future review passes:
+  don't assume a human-reviewed promotion is automatically correct** — a
+  same-surname collision is easy to miss at a skim.
+- **One-off text fixes** (`MESSAGE_TEXT_FIXES`, keyed by discord_id): "PXC" ->
+  "PHX" typo, and a missing comma in "Caris Levert Jaxson Hayes" (two players
+  run together).
+- **Missing-player policy decided**: for the 4 real gaps (Dzanan Musa, Zhaire
+  Smith, John Petty, Yang Hansen — real journeymen never added to
+  `player-bios.json`) and the 2 false-match cases above, the chosen policy is
+  **skip the player, log the rest of the trade** — no bio page exists for
+  them anyway, so nothing is lost by omitting that one asset. Implemented by
+  having `resolve_player` return unresolved silently (no longer a blocking
+  "reason") rather than flagging the whole message.
+
+Net effect: 322+39 (session 1) -> 378 submitted. The multi-team bucket grew
+from 60 to 67 because several previously-"malformed parse" messages turned
+out, once parseable, to be 3/4/5-team trades.
+
+**Known residual risk, not yet addressed**: the fuzzy matcher
+(`difflib.get_close_matches`, cutoff 0.85) can match a mention to the wrong
+real person when their full "first last" strings happen to be similar (this
+is exactly how the Cam Johnson bug happened). No full re-audit of all
+already-submitted fuzzy-matched entries across all 378 was done this
+session — only the ~45 flagged-as-low-confidence-this-run were eyeballed.
+If something looks wrong on a player's transaction history page, this is the
+first place to check.
 
 ---
 
@@ -127,13 +357,15 @@ the same fields plus `reasons: [...]`.
 
 | Bucket | Count | Status |
 |---|---|---|
-| Auto-resolved | 322 | **Submitted 2026-07-10** via `submit_discord_trades.py` |
-| Low-confidence player match, cleanly promotable | 39 | **Submitted 2026-07-10** — re-parsed via `parse_message` directly (not persisted by `resolve_discord_trades.py`, which only writes `reasons` for flagged entries, not `blocks`), validated (unique ids, valid teams/slugs, no self-trades), eyeballed the full player-name list for sanity. Saved as `discord-transactions-promoted.json` — kept separate from `resolved` so a from-scratch rerun of the resolver can't clobber this reviewed work. |
-| 3-5 team trades | 60 | Still flagged. Needs a human decision per trade on from/to — can't be automated (see "3+ team trades" note below) |
-| Picks-only trades | 39 | Not actionable — no players moved, nothing to log. Correctly a no-op, not really "flagged" |
-| Unresolved player text | 15 | Real gaps: missing comma in source text ("Caris Levert Jaxson Hayes" concatenated), or player never got a `player-bios.json` entry (e.g. Dzanan Musa, John Petty — journeymen who may never have been rostered in-league) |
-| Malformed parse (0 or 1 team blocks found) | 15 | Format outliers, not yet individually reviewed |
-| Low-confidence match, other reasons also present | ~25 | Flagged for a reason beyond just the fuzzy match (e.g. also multi-team) — folded into whichever other bucket applies once that's resolved |
+| Submitted to live transaction log | 378 | 322 original auto-resolved + 39 original promotions + 17 more auto-resolved after session-2 parser fixes (see above) |
+| 3-5 team trades | 67 | Still flagged. Needs a human decision per trade on from/to — can't be automated (see "3+ team trades" note below). Grew from 60 as previously-malformed messages became parseable and turned out to be multi-team. |
+| Picks-only / truly unfixable no-op | ~43 | Not actionable — no players moved (or, for 1 message, no second team block exists in the actual Discord text). Correctly excluded, not really "flagged" |
+
+Note: `resolve_discord_trades.py`'s flagged-bucket output is stateless per run
+— it doesn't know which discord_ids are already in `discord-transactions-
+submitted.json` or `-promoted.json`, so messages that are actually done will
+still show up as "flagged" on a fresh run. Always cross-reference against the
+submitted-state file before treating a flagged entry as new work.
 
 **Submission mechanics:** `submit_discord_trades.py` tracks submitted
 `discord_id`s in `discord-transactions-submitted.json`, written immediately
@@ -157,20 +389,30 @@ any other side — not derivable from text alone (`resolve_discord_trades.py:172
 2. ~~Skim the 322 auto-resolved + cleanly-promotable low-confidence trades,
    submit via `POST /api/transactions` with `historical: true`.~~ Done —
    361 submitted 2026-07-10.
-3. Work through the 60 multi-team trades one at a time — each needs a human
-   (or an LLM read of the full message plus judgment) to assign from/to per
-   asset, since the text doesn't state it explicitly.
-4. Decide what to do about the 15 unresolved-player messages: skip the
-   unresolvable player (log the rest of the trade without them), create
-   missing `player-bios.json` stub entries first, or skip the whole message.
-   No decision made yet.
-5. Read the 15 malformed-parse messages directly and either hand-fix the
-   parser regex for whatever pattern they share, or hand-enter them.
-6. Revisit the ~25 low-confidence matches that also had another issue, once
-   that other issue's bucket (3) or (5) is resolved.
+3. **Work through the 67 multi-team trades one at a time** — each needs a
+   human to assign from/to per asset, since the text doesn't state it
+   explicitly. Started this in session 2 but the user chose to defer after
+   the first 2 (skipped, no memory of the specific direction) rather than
+   grind through 67 rounds — resume when there's appetite for it. Use
+   `parse_message` to get per-team resolved player blocks (as done earlier
+   this session) so each trade can be presented compactly rather than
+   re-typed from raw text.
+4. ~~Decide what to do about the 15 unresolved-player messages~~ Done —
+   policy is skip-the-player-log-the-rest, implemented in `resolve_player`.
+5. ~~Read the 15 malformed-parse messages~~ Done — fixed via broadened
+   header regex + text normalization; 14/15 fixed, 1 has no second team block
+   in the source text and is moot (no player named).
+6. ~~Revisit the low-confidence matches~~ Done — eyeballed all 45 remaining
+   low-confidence-only flagged messages (43 turned out already submitted from
+   session 1, 1 was new, 1 more surfaced from the malformed-parse fix), plus
+   caught and fixed 3 wrong-attribution bugs (Cam Johnson, Cheick Diallo,
+   Jacob Evans — see session-2 notes above), including one that had already
+   reached production from the session-1 review.
 7. Once nbn-api changes are validated end-to-end, split the `transactions.py`
    diff out of the `draft-trades-manual-advance` branch's other WIP and commit
    it separately (or ask whether it should just ride along with that branch).
+   Note `resolve_discord_trades.py`'s bug fixes from this session are also
+   uncommitted — worth bundling into the same commit.
 
 ## Open item unrelated to the backfill itself
 
