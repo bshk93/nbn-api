@@ -1,5 +1,6 @@
 import re
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -7,7 +8,8 @@ from pydantic import BaseModel
 
 from .constants import (
     DATA_DIR, RULES_DIR, VALID_TEAMS, PICKS_HEADERS, PICKS_FILE, TRADING_BLOCK_FILE,
-    TEAM_STATE_FILE, _rules_lock, _picks_lock, _state_lock, _deadcap_lock,
+    TEAM_STATE_FILE, TRADE_EXCEPTIONS_FILE, _rules_lock, _picks_lock, _state_lock,
+    _deadcap_lock, _trade_exc_lock,
 )
 from .storage import read_csv, write_csv, _load_json, _save_json, log_write, _current_season_str, _current_league_year, _season_start
 from .auth import get_token_info, has_role, require_role
@@ -482,3 +484,131 @@ def put_team_state(
         save_team_state(state)
     log_write(info, f"PUT team-state/{team}/{cur} — hard_cap={body.hard_cap} mle_used={body.mle_used} bae_used={body.bae_used} mle_type={body.mle_type}")
     return {"season": cur, **state[team][cur], "bae_available": _bae_available(state, team, cur)}
+
+
+# ── Trade Exceptions (TPE) ──────────────────────────────────────────────────
+# Rulebook § 4.1a. Not itself a tradeable asset — belongs to the team that
+# banked it. Creation/consumption is manual for now (entered from the league's
+# roster/cap spreadsheet); nothing here computes a TPE from a trade
+# transaction or lets the trade builder draw one down.
+
+def load_trade_exceptions() -> dict:
+    return _load_json(TRADE_EXCEPTIONS_FILE, {})
+
+
+def save_trade_exceptions(data: dict):
+    _save_json(TRADE_EXCEPTIONS_FILE, data)
+
+
+def _tpe_response(e: dict) -> dict:
+    expired = e["expires_date"] < datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return {**e, "expired": expired}
+
+
+class TradeExceptionCreate(BaseModel):
+    amount: int
+    acquired_date: Optional[str] = None  # YYYY-MM-DD, defaults to today
+    expires_date: Optional[str] = None   # YYYY-MM-DD, defaults to acquired_date + 365 days
+    note: str = ""
+
+
+class TradeExceptionUpdate(BaseModel):
+    remaining: Optional[int] = None
+    expires_date: Optional[str] = None
+    note: Optional[str] = None
+
+
+@router.get("/api/trade-exceptions")
+def get_all_trade_exceptions():
+    data = load_trade_exceptions()
+    return {team: [_tpe_response(e) for e in data.get(team, [])] for team in sorted(VALID_TEAMS)}
+
+
+@router.get("/api/trade-exceptions/{team}")
+def get_team_trade_exceptions(team: str):
+    team = team.upper()
+    if team not in VALID_TEAMS:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    data = load_trade_exceptions()
+    return [_tpe_response(e) for e in data.get(team, [])]
+
+
+@router.post("/api/trade-exceptions/{team}")
+def create_trade_exception(
+    team: str,
+    body: TradeExceptionCreate,
+    info: dict = Depends(require_role("rosters")),
+):
+    team = team.upper()
+    if team not in VALID_TEAMS:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    if body.amount <= 0:
+        raise HTTPException(status_code=422, detail="amount must be positive")
+    acquired = body.acquired_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        acquired_dt = datetime.strptime(acquired, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=422, detail="acquired_date must be YYYY-MM-DD")
+    if body.expires_date:
+        expires = body.expires_date
+    else:
+        expires = (acquired_dt + timedelta(days=365)).strftime("%Y-%m-%d")
+    entry = {
+        "id": uuid.uuid4().hex[:12],
+        "amount": body.amount,
+        "remaining": body.amount,
+        "acquired_date": acquired,
+        "expires_date": expires,
+        "note": body.note,
+    }
+    with _trade_exc_lock:
+        data = load_trade_exceptions()
+        data.setdefault(team, []).append(entry)
+        save_trade_exceptions(data)
+    log_write(info, f"POST trade-exceptions/{team} — ${body.amount:,} exp {expires}")
+    return _tpe_response(entry)
+
+
+@router.patch("/api/trade-exceptions/{team}/{exc_id}")
+def update_trade_exception(
+    team: str,
+    exc_id: str,
+    body: TradeExceptionUpdate,
+    info: dict = Depends(require_role("rosters")),
+):
+    team = team.upper()
+    if team not in VALID_TEAMS:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    with _trade_exc_lock:
+        data = load_trade_exceptions()
+        for e in data.get(team, []):
+            if e["id"] == exc_id:
+                if body.remaining is not None:
+                    if body.remaining < 0 or body.remaining > e["amount"]:
+                        raise HTTPException(status_code=422, detail="remaining must be between 0 and amount")
+                    e["remaining"] = body.remaining
+                if body.expires_date is not None:
+                    e["expires_date"] = body.expires_date
+                if body.note is not None:
+                    e["note"] = body.note
+                save_trade_exceptions(data)
+                log_write(info, f"PATCH trade-exceptions/{team}/{exc_id}")
+                return _tpe_response(e)
+    raise HTTPException(status_code=404, detail="Trade exception not found")
+
+
+@router.delete("/api/trade-exceptions/{team}/{exc_id}")
+def delete_trade_exception(team: str, exc_id: str, info: dict = Depends(require_role("rosters"))):
+    team = team.upper()
+    if team not in VALID_TEAMS:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    with _trade_exc_lock:
+        data = load_trade_exceptions()
+        team_list = data.get(team, [])
+        new_list = [e for e in team_list if e["id"] != exc_id]
+        if len(new_list) == len(team_list):
+            raise HTTPException(status_code=404, detail="Trade exception not found")
+        data[team] = new_list
+        save_trade_exceptions(data)
+    log_write(info, f"DELETE trade-exceptions/{team}/{exc_id}")
+    return {"ok": True}

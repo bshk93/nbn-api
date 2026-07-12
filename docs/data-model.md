@@ -167,6 +167,36 @@ Keyed by team abbreviation (uppercase). Each value is a list of `{player, notes}
 
 ---
 
+## trade-exceptions.json
+
+Trade Exceptions (TPEs), rulebook § 4.1a. Keyed by team abbreviation (uppercase); each value is a list of exception objects for that team. Not itself a tradeable asset — stays with the team that banked it.
+
+Creation/consumption is currently manual (`POST`/`PATCH`), ported over from the league's roster/cap spreadsheet — nothing computes a TPE from a trade transaction, and the trade builder does not yet draw one down.
+
+```json
+{
+  "NYK": [
+    {
+      "id": "a1b2c3d4e5f6",
+      "amount": 4200000,
+      "remaining": 4200000,
+      "acquired_date": "2026-01-15",
+      "expires_date": "2027-01-15",
+      "note": "From the Smith-for-Jones trade"
+    }
+  ]
+}
+```
+
+`GET` responses add a computed `expired` bool (`expires_date` < today). Endpoints:
+- `GET /api/trade-exceptions` — all teams (public)
+- `GET /api/trade-exceptions/{team}` — one team's list (public)
+- `POST /api/trade-exceptions/{team}` — create; body `{amount, acquired_date?, expires_date?, note?}` (`rosters` role). `expires_date` defaults to `acquired_date + 365 days`.
+- `PATCH /api/trade-exceptions/{team}/{id}` — update `remaining`/`expires_date`/`note` (`rosters` role)
+- `DELETE /api/trade-exceptions/{team}/{id}` (`rosters` role)
+
+---
+
 ## cap-levels.json
 
 Keyed by season string. Used to display cap context on the site.

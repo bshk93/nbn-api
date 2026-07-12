@@ -28,6 +28,7 @@ ROOKIE_SCALE_FILE  = DATA_DIR / "rookie-scale.json"
 PICKS_FILE         = DATA_DIR / "draft-picks.csv"
 TRANSACTIONS_FILE  = DATA_DIR / "transactions.json"
 TEAM_STATE_FILE    = DATA_DIR / "team-state.json"
+TRADE_EXCEPTIONS_FILE = DATA_DIR / "trade-exceptions.json"
 LEAGUE_STATE_FILE  = DATA_DIR / "league-state.json"
 AWARDS_CONFIG_FILE    = DATA_DIR / "awards-config.json"
 AWARDS_HISTORY_FILE   = DATA_DIR / "awards-history.json"
@@ -67,6 +68,7 @@ _manual_queue_lock  = threading.Lock()
 _ovr_lock      = threading.Lock()
 _state_lock    = threading.Lock()
 _deadcap_lock  = threading.Lock()
+_trade_exc_lock = threading.Lock()
 _invest_lock   = threading.Lock()
 _market_lock   = threading.Lock()
 
