@@ -110,10 +110,29 @@ class GuaranteeDetails(BaseModel):
 
 class ReleaseDetails(BaseModel):
     player: str
+    # Stretch provision (rulebook §5.1 method 2): spread the total remaining
+    # dead-cap obligation evenly across this many seasons starting at the
+    # release season, instead of the default original-payment-schedule method.
+    # The rulebook formula is (2 * remaining contract years) + 1, but this is
+    # taken as an explicit input rather than auto-derived, since "remaining
+    # years" is ambiguous across NON_GTD/option contracts — the submitter
+    # states the stretch length the team actually elected.
+    stretch_years: Optional[int] = None
 
 
 class RenounceDetails(BaseModel):
     player: str
+
+
+class VoidPlayerDetails(BaseModel):
+    player: str
+    reason: str = ""
+
+
+class SetHardCapDetails(BaseModel):
+    team: str
+    level: str          # "first_apron" | "second_apron" | "default"
+    reason: str = ""
 
 
 class ConvertTwoWayDetails(BaseModel):
@@ -150,6 +169,21 @@ class TradeIn(BaseModel):
     # absorb that team's incoming salary in lieu of matching outgoing salary.
     # Omit or null for teams matching normally.
     exceptions: dict[str, Optional[str]] = {}
+    # Sign-and-trade: whoever submits the trade must know and declare this —
+    # nothing in the data lets us infer it (a team signing then trading a
+    # player days later can be a coincidence, not a sign-and-trade). When set,
+    # every team acquiring a player in this trade is hard-capped at First Apron
+    # (rulebook §1.4 row C). sign_and_trade_txn_id optionally links to the
+    # paired `sign` transaction's id for traceability from the log.
+    is_sign_and_trade: bool = False
+    sign_and_trade_txn_id: Optional[str] = None
+    # Player slugs whose acquisition is the sign-and-trade portion of this
+    # trade. When set, only the team(s) receiving these specific players are
+    # hard-capped — needed when a multi-team trade bundles an S&T together
+    # with unrelated player-for-player legs, so the cap doesn't spill onto
+    # teams that aren't party to the S&T. Omit to fall back to "every team
+    # acquiring any player is capped", which is correct for a plain two-team S&T.
+    sign_and_trade_players: list[str] = []
 
 
 class TradeValidateInput(BaseModel):
@@ -334,9 +368,32 @@ def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[
             continue
         dead_cap[season] = guaranteed.get(season, salary)
 
+    # Stretch provision (§5.1 method 2): re-flatten the same total obligation
+    # computed above evenly across `stretch_years` seasons starting at the
+    # release season, instead of the original per-season payment schedule.
+    if details.stretch_years:
+        total = sum(_parse_dollar(v) for v in dead_cap.values())
+        if total > 0:
+            n = details.stretch_years
+            per_year = total // n
+            seasons = []
+            s = cur_season
+            for _ in range(n):
+                seasons.append(s)
+                s = _season_after(s)
+            stretched: dict[str, str] = {}
+            running = 0
+            for i, season in enumerate(seasons):
+                amt = total - running if i == n - 1 else per_year
+                running += amt
+                stretched[season] = f"${amt:,}"
+            dead_cap = stretched
+
     # Preserve earnings history: keep every season already played (<= cur_season)
     # plus any future season that's guaranteed (the player still collects it, as
     # the dead-cap amount). Drop only unplayed, non-guaranteed future years.
+    # Stretch years beyond the player's original contract horizon are added in
+    # since they won't already be keys in bio["salaries"].
     def _kept(season: str) -> bool:
         return season <= cur_season or season in dead_cap
     bio["salaries"] = {
@@ -344,6 +401,9 @@ def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[
         for season, salary in bio.get("salaries", {}).items()
         if _kept(season)
     }
+    for season, amount in dead_cap.items():
+        if season > cur_season and season not in bio["salaries"]:
+            bio["salaries"][season] = amount
     bio["cap_holds"] = {}
     bio["guaranteed"] = {k: v for k, v in guaranteed.items() if _kept(k)}
     bio["guarantee_dates"] = {k: v for k, v in guarantee_dates.items() if _kept(k)}
@@ -433,6 +493,69 @@ def _apply_renounce(details: RenounceDetails, txn_date: str, info: dict) -> str:
 
     _scrub_trading_block({team: {details.player}}, bios)
     log_write(info, f"TXN renounce — {details.player} from {team}")
+    return team
+
+
+def _apply_void_player(details: VoidPlayerDetails, txn_date: str, info: dict) -> str:
+    """Removes a player from their roster with no dead cap and no remaining
+    obligation (rulebook §5.1 void circumstances: real-life retirement, not
+    present in the current game build, or an unwanted 2nd-rounder/UDFA before
+    the July 31 deadline). Unlike release, no dead_cap CSV entry is written —
+    the team owes nothing. Returns the player's former team."""
+    bios = load_player_bios()
+    if details.player not in bios:
+        raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
+
+    team_map = _build_team_map()
+    team = team_map.get(details.player)
+    if not team:
+        raise HTTPException(status_code=422, detail=f"Player {details.player!r} is not on any roster")
+
+    cur_season = _season_for_date(txn_date)
+    bio = bios[details.player]
+    past, past_gtd, past_gtd_dates, past_gtd_sched = _retained_history(bio, cur_season)
+    bio["salaries"] = past
+    bio["guaranteed"] = past_gtd
+    bio["guarantee_dates"] = past_gtd_dates
+    bio["guarantee_schedule"] = past_gtd_sched
+    bio["cap_holds"] = {}
+    bio["type"] = ""
+    save_player_bios(bios)
+
+    path = DATA_DIR / f"{team.lower()}-roster.csv"
+    headers, rows = read_csv(path)
+    rows = [r for r in rows if r.get("SLUG", "").strip() != details.player]
+    write_csv(path, headers, rows)
+
+    _scrub_trading_block({team: {details.player}}, bios)
+    log_write(info, f"TXN void_player — {details.player} from {team} ({details.reason or 'no reason given'})")
+    return team
+
+
+def _apply_set_hard_cap(details: SetHardCapDetails, txn_date: str, info: dict) -> str:
+    """Manually sets or clears a team's hard-cap level for the season, through
+    the transaction log instead of the silent PUT /api/team-state side door
+    (which leaves no reason/author trail). Unlike _maybe_set_hard_cap — the
+    auto-trigger path used by sign/trade, which only ever raises the level —
+    this is an explicit override and can also lower or clear it. Returns the
+    team abbr."""
+    team = details.team.upper()
+    if team not in VALID_TEAMS:
+        raise HTTPException(status_code=422, detail=f"Unknown team: {details.team!r}")
+    if details.level not in ("first_apron", "second_apron", "default"):
+        raise HTTPException(status_code=422, detail="level must be 'first_apron', 'second_apron', or 'default'")
+
+    cur_season = _season_for_date(txn_date)
+    new_cap = None if details.level == "default" else details.level
+    with _state_lock:
+        state = load_team_state()
+        ts = state.get(team, {}).get(cur_season, dict(DEFAULT_SEASON_STATE))
+        ts["hard_cap"] = new_cap
+        ts["hard_cap_reason"] = details.reason
+        state.setdefault(team, {})[cur_season] = ts
+        save_team_state(state)
+
+    log_write(info, f"TXN set_hard_cap_level — {team} {cur_season} -> {details.level}")
     return team
 
 
@@ -772,7 +895,14 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict) -> list[str]:
                 pick_row = pick_index.get(key)
                 if not pick_row:
                     raise HTTPException(status_code=422, detail=f"Pick {asset.year} R{asset.round} {asset.orig} not found")
-                if pick_row["OWNER"].upper() != xfer.from_team:
+                owner_raw = pick_row["OWNER"].upper()
+                # "?" means unresolved -> falls back to orig team (mirrors GET /api/picks/{team});
+                # otherwise OWNER may be a single team or a pipe-separated compound of candidates.
+                if owner_raw == "?":
+                    owned_by_from_team = pick_row["ORIG"].upper() == xfer.from_team
+                else:
+                    owned_by_from_team = xfer.from_team in owner_raw.split("|")
+                if not owned_by_from_team:
                     raise HTTPException(
                         status_code=422,
                         detail=f"Pick {asset.year} R{asset.round} {asset.orig} is owned by {pick_row['OWNER']}, not {xfer.from_team}",
@@ -853,6 +983,31 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict) -> list[str]:
                     _maybe_set_hard_cap(ts, "first_apron", f"NTMLE trade absorption ({txn_date})")
                 elif exc_type == "tmle":
                     _maybe_set_hard_cap(ts, "second_apron", f"TMLE trade absorption ({txn_date})")
+                state[team][cur_season] = ts
+            save_team_state(state)
+
+    if details.is_sign_and_trade:
+        cur_season = _season_for_date(txn_date)
+        if details.sign_and_trade_players:
+            acquiring_teams = sorted({
+                xfer.to_team for xfer in details.transfers
+                if any(a.type == "player" and a.slug in details.sign_and_trade_players
+                       for a in xfer.assets)
+            })
+        else:
+            acquiring_teams = sorted({
+                xfer.to_team for xfer in details.transfers
+                if any(a.type == "player" for a in xfer.assets)
+            })
+        reason = (f"Sign-and-trade acquisition (txn {details.sign_and_trade_txn_id})"
+                  if details.sign_and_trade_txn_id else f"Sign-and-trade acquisition ({txn_date})")
+        with _state_lock:
+            state = load_team_state()
+            for team in acquiring_teams:
+                if team not in state:
+                    state[team] = {}
+                ts = state[team].get(cur_season, dict(DEFAULT_SEASON_STATE))
+                _maybe_set_hard_cap(ts, "first_apron", reason)
                 state[team][cur_season] = ts
             save_team_state(state)
 
@@ -1562,7 +1717,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid date; use YYYY-MM-DD")
 
-    if body.type not in ("sign", "pick", "option", "guarantee", "release", "renounce", "trade", "convert_twoway", "sign_pick"):
+    if body.type not in ("sign", "pick", "option", "guarantee", "release", "renounce", "trade", "convert_twoway", "sign_pick", "void_player", "set_hard_cap_level"):
         raise HTTPException(status_code=422, detail=f"Unsupported transaction type: {body.type!r}")
 
     if body.historical and body.type not in ("trade", "sign", "option"):
@@ -1578,6 +1733,8 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
         "trade":          (TradeIn,               "Invalid trade details"),
         "convert_twoway": (ConvertTwoWayDetails,  "Invalid convert_twoway details"),
         "sign_pick":      (SignPickDetails,       "Invalid sign_pick details"),
+        "void_player":       (VoidPlayerDetails,  "Invalid void_player details"),
+        "set_hard_cap_level": (SetHardCapDetails, "Invalid set_hard_cap_level details"),
     }
     model_cls, err_prefix = _detail_models[body.type]
     try:
@@ -1645,6 +1802,14 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             stored_details["team"] = team
         elif body.type == "sign_pick":
             team = _apply_sign_pick(details, body.date, info, txn_id=txn_id)
+            stored_details = details.model_dump()
+            stored_details["team"] = team
+        elif body.type == "void_player":
+            team = _apply_void_player(details, body.date, info)
+            stored_details = details.model_dump()
+            stored_details["team"] = team
+        elif body.type == "set_hard_cap_level":
+            team = _apply_set_hard_cap(details, body.date, info)
             stored_details = details.model_dump()
             stored_details["team"] = team
 
@@ -1722,6 +1887,23 @@ def delete_transaction(txn_id: str, info: dict = Depends(require_role("rosters")
         TRANSACTIONS_FILE.write_text(json.dumps(filtered, indent=2))
     log_write(info, f"TXN delete — {txn_id}")
     return {"deleted": txn_id}
+
+
+class TransactionPatch(BaseModel):
+    description: str
+
+
+@router.patch("/api/transactions/{txn_id}")
+def patch_transaction(txn_id: str, body: TransactionPatch, info: dict = Depends(require_role("rosters"))):
+    with _txn_lock:
+        txns = _load_transactions()
+        for t in txns:
+            if t.get("id") == txn_id:
+                t["description"] = body.description
+                TRANSACTIONS_FILE.write_text(json.dumps(txns, indent=2))
+                log_write(info, f"TXN note edit — {txn_id}")
+                return t
+        raise HTTPException(status_code=404, detail="Transaction not found")
 
 
 # ── Trade validation endpoint ─────────────────────────────────────────────────

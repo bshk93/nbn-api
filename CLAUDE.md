@@ -39,7 +39,7 @@ curl -X POST https://nbn.today/api/tokens \
 
 ## Transaction system
 
-→ **[docs/transactions.md](docs/transactions.md)** — all 6 types, what each mutates, request shapes
+→ **[docs/transactions.md](docs/transactions.md)** — every transaction type, what each mutates, request shapes
 
 ## Discord slash commands
 
@@ -123,6 +123,6 @@ Keep `CLAUDE.md` and `docs/` in sync with every code change. If a change affects
 ## Key design notes
 
 - All writes are synchronous; no database. Concurrent writes to the same file are guarded by `_txn_lock` and `_picks_lock` threading locks.
-- `player-bios.json` is the source of truth for all player identity and contract data. Roster CSVs only store `SLUG` + optional `TYPE`; everything else is joined from bios at render time.
+- `player-bios.json` is the source of truth for all player identity and contract data. Roster CSVs only store `SLUG`; everything else is joined from bios (and OVR from `ovr-history.json`) at render time. Transaction handlers that rewrite a roster row (`_apply_sign` etc.) write a bare `{"SLUG": ...}` — any other key is dropped on write (`extrasaction="ignore"`), so don't rely on a roster CSV carrying anything beyond `SLUG`.
 - Dead cap is stored in `bio["dead_cap"]` (dict keyed by season). Old players released before this field existed may have dead cap in `bio["salaries"]` instead — the frontend handles both.
 - OVR history is separate from bios: `ovr-history.json` keyed by slug, each value a list of `{date, ovr}` entries.

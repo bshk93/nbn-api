@@ -121,6 +121,45 @@ Removes player from their roster and converts guaranteed money to dead cap.
 
 ---
 
+### `void_player` — Void a player with no cap hit
+
+Removes a player from their roster with no dead cap and no remaining obligation. Rulebook §5.1 limits this to: real-life retirement (incl. medical), the player not being present in the current NBA 2K build, or an unwanted 2nd-round pick/UDFA voided by the July 31 deadline. Manual-review only — no automatic checks, and no automatic trigger; always entered by hand.
+
+**Details:**
+```json
+{
+  "player": "slug",
+  "reason": "retired"
+}
+```
+
+**Mutates:**
+- `player-bios.json` → clears `cap_holds`; drops future `salaries`/`guaranteed`/`guarantee_dates`/`guarantee_schedule` (past seasons preserved); sets `type = ""`
+- `{team}-roster.csv` → removes the player's row
+- Does **not** write to `{team}-deadcap.csv` — that's the whole difference from `release`
+
+---
+
+### `set_hard_cap_level` — Manually set/clear a team's hard cap
+
+Sets a team's season hard-cap level directly, going through the transaction log instead of the silent `PUT /api/team-state/{team}` side door (which leaves no reason/author trail — see the "17 teams with empty hard_cap_reason" audit finding). Unlike the automatic trigger path (`_maybe_set_hard_cap`, used internally by `sign`/`trade` for BAE/NTMLE/TMLE absorption), this can also lower or clear the level. No automatic triggers are wired to this type yet (e.g. sign-and-trade, mid-season buyout re-sign — rulebook §1.4 rows C/D remain manual).
+
+**Details:**
+```json
+{
+  "team": "GSW",
+  "level": "first_apron",
+  "reason": "NTMLE trade absorption"
+}
+```
+
+`level` must be `"first_apron"`, `"second_apron"`, or `"default"` (clears back to no team-specific cap — only the league-wide absolute hard cap applies).
+
+**Mutates:**
+- `team-state.json` → sets `hard_cap` (`null` for `"default"`) and `hard_cap_reason` for the team's current season
+
+---
+
 ### `trade` — Multi-team trade
 
 Moves players and/or picks between teams.
@@ -151,10 +190,13 @@ Moves players and/or picks between teams.
 
 Optional pick fields: `protection` (sets `PROTECTED`), `swap_with` (sets `SWAP_OWNER`).
 
+Optional sign-and-trade fields: `is_sign_and_trade` (bool, default `false`), `sign_and_trade_txn_id` (optional string). A sign-and-trade is submitted as **two separate transactions** — a `sign` (with `signing_method: "sign_and_trade"` for display) followed by this `trade` — there's no atomic combined type. Nothing in the data lets the API infer that a sign and a later trade are related, so the caller must declare it explicitly with `is_sign_and_trade: true`; `sign_and_trade_txn_id` optionally records the paired `sign` transaction's `id` so the log is traceable from the trade back to the contract that enabled it.
+
 **Mutates:**
 - For each player asset: removes from `from_team` roster CSV, adds to `to_team` roster CSV
 - For each pick asset: updates `OWNER` in `draft-picks.csv`; if `protection`/`swap_with` set, updates those fields too
 - Does not touch `player-bios.json` (salaries/contract stay as-is)
+- If `is_sign_and_trade` is true: every team that is the `to_team` of at least one **player** asset in this trade is hard-capped at First Apron in `team-state.json` (rulebook §1.4 row C) — teams only receiving picks in the same trade are not affected
 
 ---
 

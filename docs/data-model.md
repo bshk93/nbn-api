@@ -84,9 +84,8 @@ New format (post-migration):
 | Column | Description | Example |
 |---|---|---|
 | `SLUG` | Player slug | `barnes-scottie` |
-| `TYPE` | `"two-way"` or `""` | |
 
-All other player data (name, pos, age, ovr, salary) is joined from `player-bios.json` and `ovr-history.json` at render time. OVR is **not** stored in the roster CSV — it comes exclusively from `ovr-history.json`.
+All other player data (name, pos, age, ovr, type, salary) is joined from `player-bios.json` and `ovr-history.json` at render time. OVR is **not** stored in the roster CSV — it comes exclusively from `ovr-history.json`. Contract `type` (`"two-way"` etc.) lives in `player-bios.json`, not the roster CSV — transaction handlers that rewrite a roster row write only `SLUG`; any other key is silently dropped on write (`extrasaction="ignore"`).
 
 One file per team: `atl-roster.csv`, `bkn-roster.csv`, … `was-roster.csv`.
 

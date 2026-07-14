@@ -79,19 +79,13 @@ The token is saved in their browser (localStorage), so they only ever enter it o
 
 ## Roster column reference
 
-When editing a roster, the columns are the raw CSV fields:
+The roster CSV (`{abbr}-roster.csv`) has a single column:
 
 | Column | Description | Example |
 |--------|-------------|---------|
-| `PLAYER` | Full player name | `Scottie Barnes` |
-| `POS` | Position(s) | `SF/PF` |
-| `AGE` | Age as integer | `24` |
-| `OVR` | Overall rating | `86` |
-| `TYPE` | Contract type | `player`, `two-way`, or `dead` |
-| `CAP_HOLDS` | Option/hold flags | `29-30:PLAYER_OPT,30-31:UFA` |
-| `25-26`, `26-27`, etc. | Salary by year | `$38,661,750` |
+| `SLUG` | Player slug (key into `player-bios.json`) | `barnes-scottie` |
 
-**CAP_HOLDS format:** comma-separated `YEAR:TYPE` pairs. Valid types: `UFA`, `RFA`, `PLAYER_OPT`, `TEAM_OPT`, `NON_GTD`. Leave blank if no holds.
+Editing a roster just adds/removes players (via a searchable name picker) — it does not edit name, position, age, OVR, contract type, cap holds, or salary. Those all live in `player-bios.json` and `ovr-history.json` and are changed via player transactions (`POST /api/transactions`, `PUT /api/players/{slug}`, `PUT /api/ovr/{slug}`), not by editing the roster CSV directly.
 
 ## Picks column reference
 

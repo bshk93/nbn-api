@@ -31,12 +31,27 @@ def _member_current_positions(name: str) -> set[str]:
     return {t["position"] for t in tenures if not t.get("end") and t.get("position") and t["position"] != "none"}
 
 
+def _member_current_team(name: str, members: Optional[dict] = None) -> Optional[str]:
+    """Return the team of a member's active (end=null) tenure, excluding 'none' positions."""
+    members = members if members is not None else load_members()
+    tenures = members.get(name, {}).get("tenures", [])
+    for t in tenures:
+        if not t.get("end") and t.get("position") and t["position"] != "none" and t.get("team"):
+            return t["team"]
+    return None
+
+
 def load_proposals() -> list[dict]:
     return _load_json(PROPOSALS_FILE, [])
 
 
 def save_proposals(proposals: list[dict]):
     _save_json(PROPOSALS_FILE, proposals)
+
+
+def _next_proposal_number(proposals: list[dict]) -> int:
+    numbers = [p["number"] for p in proposals if p.get("number")]
+    return max(numbers, default=0) + 1
 
 
 def load_constitution() -> dict:
@@ -49,15 +64,27 @@ def save_constitution(data: dict):
     _save_json(CONSTITUTION_FILE, data)
 
 
-def _proposal_view(p: dict, viewer_name: Optional[str] = None) -> dict:
+def _proposal_view(p: dict, viewer_name: Optional[str] = None, is_privileged: bool = False, is_admin: bool = False) -> dict:
     """Return a safe copy of the proposal with votes masked appropriately."""
     votes = p.get("votes", {})
     status = p.get("status", "draft")
     out = {k: v for k, v in p.items() if k != "votes"}
     out["comment_count"] = len(p.get("comments", []))
+    if is_admin:
+        members = load_members()
+        out["voter_breakdown"] = {
+            name: {"vote": vote, "team": _member_current_team(name, members)}
+            for name, vote in votes.items()
+        }
     if status == "voting":
         out["vote_count"] = len(votes)
         out["my_vote"] = votes.get(viewer_name) if viewer_name else None
+        if is_privileged:
+            tally = {"yes": 0, "no": 0, "abstain": 0}
+            for v in votes.values():
+                if v in tally:
+                    tally[v] += 1
+            out["live_results"] = tally
     elif status == "closed":
         tally = {"yes": 0, "no": 0, "abstain": 0}
         for v in votes.values():
@@ -70,6 +97,14 @@ def _proposal_view(p: dict, viewer_name: Optional[str] = None) -> dict:
         out["vote_count"] = 0
         out["my_vote"] = None
     return out
+
+
+def _is_privileged(info: Optional[dict]) -> bool:
+    return bool(info) and (has_role(info, "bod") or has_role(info, "admin"))
+
+
+def _is_admin(info: Optional[dict]) -> bool:
+    return bool(info) and has_role(info, "admin")
 
 
 def _proposal_can_edit(p: dict, info: dict) -> bool:
@@ -89,6 +124,7 @@ class ProposalCreate(BaseModel):
     body: str
     eligible_roles: list[str] = []
     eligible_positions: list[str] = []
+    allow_abstain: bool = True
 
 
 class ProposalPatch(BaseModel):
@@ -96,6 +132,11 @@ class ProposalPatch(BaseModel):
     body: Optional[str] = None
     eligible_roles: Optional[list[str]] = None
     eligible_positions: Optional[list[str]] = None
+    allow_abstain: Optional[bool] = None
+
+
+class AllowAbstainUpdate(BaseModel):
+    allow_abstain: bool
 
 
 class CommentCreate(BaseModel):
@@ -104,6 +145,10 @@ class CommentCreate(BaseModel):
 
 class VoteIn(BaseModel):
     vote: str
+
+
+class ProposalDecision(BaseModel):
+    outcome: str
 
 
 class ConstitutionUpdate(BaseModel):
@@ -117,15 +162,17 @@ class ConstitutionUpdate(BaseModel):
 def list_proposals(authorization: Optional[str] = Header(None)):
     info = _resolve_token(authorization)
     viewer = info["name"] if info else None
+    privileged = _is_privileged(info)
+    admin = _is_admin(info)
     proposals = load_proposals()
     result: dict = {"proposals": [], "drafts": []}
     for p in proposals:
         status = p.get("status", "draft")
         if status == "draft":
             if viewer and p.get("author") == viewer:
-                result["drafts"].append(_proposal_view(p, viewer))
+                result["drafts"].append(_proposal_view(p, viewer, privileged, admin))
         else:
-            result["proposals"].append(_proposal_view(p, viewer))
+            result["proposals"].append(_proposal_view(p, viewer, privileged, admin))
     result["proposals"].sort(key=lambda x: x.get("submitted_at") or x.get("created_at") or "", reverse=True)
     result["drafts"].sort(key=lambda x: x.get("updated_at") or x.get("created_at") or "", reverse=True)
     return result
@@ -144,17 +191,22 @@ def create_proposal(body: ProposalCreate, info: dict = Depends(get_token_info)):
     now = datetime.now(timezone.utc).isoformat()
     proposal = {
         "id": str(uuid.uuid4()),
+        "number": None,
         "title": body.title.strip(),
         "body": body.body,
         "author": info["name"],
         "status": "draft",
         "eligible_roles": body.eligible_roles,
         "eligible_positions": body.eligible_positions,
+        "allow_abstain": body.allow_abstain,
         "created_at": now,
         "updated_at": now,
         "submitted_at": None,
         "voting_opened_at": None,
         "voting_closed_at": None,
+        "outcome": None,
+        "decided_at": None,
+        "decided_by": None,
         "comments": [],
         "votes": {},
     }
@@ -163,7 +215,7 @@ def create_proposal(body: ProposalCreate, info: dict = Depends(get_token_info)):
         proposals.append(proposal)
         save_proposals(proposals)
     log_write(info, f"POST proposals — {proposal['id']!r} {body.title!r}")
-    return _proposal_view(proposal, info["name"])
+    return _proposal_view(proposal, info["name"], _is_privileged(info), _is_admin(info))
 
 
 @router.get("/api/proposals/{proposal_id}")
@@ -176,7 +228,7 @@ def get_proposal(proposal_id: str, authorization: Optional[str] = Header(None)):
     if p.get("status") == "draft":
         if not info or p.get("author") != info["name"]:
             raise HTTPException(status_code=403, detail="Not authorized to view this draft")
-    return _proposal_view(p, info["name"] if info else None)
+    return _proposal_view(p, info["name"] if info else None, _is_privileged(info), _is_admin(info))
 
 
 @router.patch("/api/proposals/{proposal_id}")
@@ -203,11 +255,13 @@ def patch_proposal(proposal_id: str, body: ProposalPatch, info: dict = Depends(g
             if invalid_positions:
                 raise HTTPException(status_code=422, detail=f"Invalid positions: {invalid_positions}")
             p["eligible_positions"] = body.eligible_positions
+        if body.allow_abstain is not None:
+            p["allow_abstain"] = body.allow_abstain
         p["updated_at"] = datetime.now(timezone.utc).isoformat()
         proposals[idx] = p
         save_proposals(proposals)
     log_write(info, f"PATCH proposals/{proposal_id}")
-    return _proposal_view(p, info["name"])
+    return _proposal_view(p, info["name"], _is_privileged(info), _is_admin(info))
 
 
 @router.post("/api/proposals/{proposal_id}/submit")
@@ -229,7 +283,7 @@ def submit_proposal(proposal_id: str, info: dict = Depends(get_token_info)):
         proposals[idx] = p
         save_proposals(proposals)
     log_write(info, f"POST proposals/{proposal_id}/submit")
-    return _proposal_view(p, info["name"])
+    return _proposal_view(p, info["name"], _is_privileged(info), _is_admin(info))
 
 
 @router.post("/api/proposals/{proposal_id}/open-voting")
@@ -244,12 +298,13 @@ def open_proposal_voting(proposal_id: str, info: dict = Depends(require_role("bo
             raise HTTPException(status_code=422, detail="Only submitted proposals can be opened for voting")
         now = datetime.now(timezone.utc).isoformat()
         p["status"] = "voting"
+        p["number"] = _next_proposal_number(proposals)
         p["voting_opened_at"] = now
         p["updated_at"] = now
         proposals[idx] = p
         save_proposals(proposals)
     log_write(info, f"POST proposals/{proposal_id}/open-voting")
-    return _proposal_view(p, info["name"])
+    return _proposal_view(p, info["name"], _is_privileged(info), _is_admin(info))
 
 
 @router.post("/api/proposals/{proposal_id}/close-voting")
@@ -269,7 +324,60 @@ def close_proposal_voting(proposal_id: str, info: dict = Depends(require_role("b
         proposals[idx] = p
         save_proposals(proposals)
     log_write(info, f"POST proposals/{proposal_id}/close-voting")
-    return _proposal_view(p, info["name"])
+    return _proposal_view(p, info["name"], _is_privileged(info), _is_admin(info))
+
+
+@router.post("/api/proposals/{proposal_id}/decide")
+def decide_proposal(proposal_id: str, body: ProposalDecision, info: dict = Depends(require_role("bod"))):
+    if body.outcome not in ("passed", "failed"):
+        raise HTTPException(status_code=422, detail="outcome must be 'passed' or 'failed'")
+    with _proposals_lock:
+        proposals = load_proposals()
+        idx = next((i for i, p in enumerate(proposals) if p["id"] == proposal_id), None)
+        if idx is None:
+            raise HTTPException(status_code=404, detail="Proposal not found")
+        p = proposals[idx]
+        if p.get("status") != "closed":
+            raise HTTPException(status_code=422, detail="Proposal must be closed before it can be decided")
+        now = datetime.now(timezone.utc).isoformat()
+        p["outcome"] = body.outcome
+        p["decided_at"] = now
+        p["decided_by"] = info["name"]
+        p["updated_at"] = now
+        proposals[idx] = p
+        save_proposals(proposals)
+    log_write(info, f"POST proposals/{proposal_id}/decide — {body.outcome}")
+    return _proposal_view(p, info["name"], _is_privileged(info), _is_admin(info))
+
+
+@router.post("/api/proposals/{proposal_id}/allow-abstain")
+def set_allow_abstain(proposal_id: str, body: AllowAbstainUpdate, info: dict = Depends(get_token_info)):
+    if not _is_privileged(info):
+        raise HTTPException(status_code=403, detail="BOD or admin only")
+    with _proposals_lock:
+        proposals = load_proposals()
+        idx = next((i for i, p in enumerate(proposals) if p["id"] == proposal_id), None)
+        if idx is None:
+            raise HTTPException(status_code=404, detail="Proposal not found")
+        p = proposals[idx]
+        if p.get("status") not in ("submitted", "voting"):
+            raise HTTPException(status_code=422, detail="Can only change this on a submitted or open proposal")
+        refunded = 0
+        if not body.allow_abstain:
+            votes = p.get("votes", {})
+            abstain_voters = [name for name, v in votes.items() if v == "abstain"]
+            for name in abstain_voters:
+                del votes[name]
+            refunded = len(abstain_voters)
+            p["votes"] = votes
+        p["allow_abstain"] = body.allow_abstain
+        p["updated_at"] = datetime.now(timezone.utc).isoformat()
+        proposals[idx] = p
+        save_proposals(proposals)
+    log_write(info, f"POST proposals/{proposal_id}/allow-abstain — allow_abstain={body.allow_abstain} refunded={refunded}")
+    result = _proposal_view(p, info["name"], True, _is_admin(info))
+    result["refunded"] = refunded
+    return result
 
 
 @router.post("/api/proposals/{proposal_id}/vote")
@@ -284,6 +392,8 @@ def cast_vote(proposal_id: str, body: VoteIn, info: dict = Depends(get_token_inf
         p = proposals[idx]
         if p.get("status") != "voting":
             raise HTTPException(status_code=422, detail="Voting is not open for this proposal")
+        if body.vote == "abstain" and not p.get("allow_abstain", True):
+            raise HTTPException(status_code=422, detail="Abstain voting is disabled for this proposal")
         eligible_roles = p.get("eligible_roles", [])
         eligible_positions = p.get("eligible_positions", [])
         voter_roles = set(info.get("roles", []))

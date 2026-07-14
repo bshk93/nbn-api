@@ -156,6 +156,10 @@ COMMANDS = [
         "description": "Check your NB¥ balance (only you can see it)",
     },
     {
+        "name": "token",
+        "description": "Show your NBN API token (only you can see it)",
+    },
+    {
         "name": "tip",
         "description": "Tip NB¥ to another member",
         "options": [

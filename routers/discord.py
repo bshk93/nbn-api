@@ -1057,6 +1057,19 @@ def balance_response(invoker: dict) -> dict:
     return _ephemeral(f"💰 **{member}** — NB¥{bal:,.2f}")
 
 
+def token_response(invoker: dict) -> dict:
+    member = member_by_discord_id(invoker.get("id", ""))
+    if not member:
+        return _ephemeral("You're not linked to a member yet. Run `/whoami`, then ask "
+                          "an admin to `/link` you.")
+    token = load_members().get(member, {}).get("token")
+    if not token:
+        return _ephemeral(f"**{member}** has no API token on file. Ask an admin to set one up.")
+    logger.info("discord: /token issued to member=%s discord_id=%s", member, invoker.get("id", ""))
+    return _ephemeral(f"🔑 **{member}**'s API token:\n`{token}`\n"
+                      f"Keep this private — anyone with it can act as you.")
+
+
 def tip_response(invoker: dict, target_id: str, amount_arg: str, message: str) -> dict:
     sender = member_by_discord_id(invoker.get("id", ""))
     if not sender:
@@ -1137,6 +1150,7 @@ _HELP_GROUPS = [
         "`/trades [member]` — Wall Street P&L per stock (realized + unrealized)",
         "`/tip user amount [message]` — tip NB¥ to a member",
         "`/whoami` — your Discord link status",
+        "`/token` — your API token (private)",
         "`/link member user` — (admin) link a Discord user to a member",
     ]),
 ]
@@ -1175,6 +1189,8 @@ def dispatch(data: dict, invoker: dict) -> dict:
         return link_response(invoker, _option(data, "member"), _option(data, "user"))
     if cmd == "nbyen":
         return balance_response(invoker)
+    if cmd == "token":
+        return token_response(invoker)
     if cmd == "tip":
         return tip_response(invoker, _option(data, "user"), _option(data, "amount"),
                             _option(data, "message"))
