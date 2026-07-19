@@ -9,10 +9,9 @@ the improved model (pipe-joined candidates, real protection thresholds).
 
 Returns 503 if the store hasn't been seeded yet (nothing depends on it existing).
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
-from picks_conveyance import store as conv_store
-from picks_conveyance import projection
+from picks_conveyance.serve import flat_rows
 from routers.roster_picks import enrich_swap_conveys
 
 router = APIRouter()
@@ -20,14 +19,7 @@ router = APIRouter()
 
 @router.get("/api/picks-preview")
 def get_picks_preview():
-    try:
-        store = conv_store.load_store()
-    except FileNotFoundError:
-        raise HTTPException(
-            status_code=503,
-            detail="conveyance store not seeded "
-                   "(run: python -m picks_conveyance.seed_store --curated)")
-    rows = [projection.project_to_flat(p, store) for p in store.get("picks", [])]
+    rows = flat_rows()
     # match the live endpoint's swap_conveys enrichment (affects the not-yet-
     # modeled flat-structured rows that still carry a swap_owner)
     enrich_swap_conveys(rows)

@@ -47,6 +47,7 @@ def resolve_all(store: dict, positions: dict) -> dict:
     swap_groups = store.get("swap_groups", {})
     binary_swaps = store.get("binary_swaps", {})
     out: dict = {}
+    pick_nodes: dict = {}
 
     # Pass 1: settled + protected (self-contained per pick)
     for pick in store.get("picks", []):
@@ -54,6 +55,7 @@ def resolve_all(store: dict, positions: dict) -> dict:
         pk = key(pick)
         if not node:
             continue
+        pick_nodes[pk] = node
         t = node["type"]
         if t == "settled":
             out[pk] = node["team"]
@@ -73,7 +75,7 @@ def resolve_all(store: dict, positions: dict) -> dict:
     out.update(_resolve_binary_chains(binary_swaps, positions))
 
     # Pass 4: protection ladders (multi-year chained protections)
-    out.update(_resolve_ladders(store.get("ladders", []), positions))
+    out.update(_resolve_ladders(store.get("ladders", []), positions, pick_nodes))
 
     return out
 
@@ -179,28 +181,45 @@ def _resolve_binary_chains(binary_swaps: dict, positions: dict) -> dict:
 
 # --- protection ladders ----------------------------------------------------
 
-def _resolve_ladders(ladders: list, positions: dict) -> dict:
+def _resolve_ladders(ladders: list, positions: dict, pick_nodes: dict | None = None) -> dict:
     """Walk each ladder's steps in year order. A step conveys (owner = `to`) when
     the origin's position is beyond `protect_top` (or the step is unprotected,
     protect_top == 0); otherwise it stays with `from` and the next year's step is
     tried. If every step stays protected and a `fixed_asset` fallback exists, the
-    fallback picks convey to `to`."""
+    fallback picks convey to `to`.
+
+    A step's own pick key defaults its `orig` to `L["from"]` (the common case:
+    a team's own future pick rolling forward) but a step may set an explicit
+    `orig` when the ladder governs someone else's share of a pick that
+    originated from a third team (e.g. team A holds the unprotected share of
+    team C's pick, and owes team B a fallback if it stays protected).
+
+    `pick_nodes` (pickkey -> conveyance node, from pass 1) lets a step defer to
+    a genuine `protected`/`swap`/`binary` node already governing that exact
+    pick — e.g. a third party's independent claim layered on via a separate
+    trade — instead of blindly overwriting it. The ladder still uses the real
+    `positions` lookup to decide whether its own fallback fires; it just
+    doesn't clobber a more specific existing answer for the step's own key."""
+    pick_nodes = pick_nodes or {}
     out: dict = {}
     for L in ladders:
         conveyed = False
         evaluated_all = True
         for step in L["steps"]:
-            k = (step["year"], _round_int(step["round"]), L["from"])
+            k = (step["year"], _round_int(step["round"]), step.get("orig") or L["from"])
             pos = positions.get(k)
             if pos is None:
                 evaluated_all = False
                 break                      # can't look past an unknown year
             top = step["protect_top"]
+            authoritative = pick_nodes.get(k, {}).get("type") in ("protected", "swap", "binary")
             if top == 0 or pos > top:
-                out[k] = L["to"]           # conveys
+                if not authoritative:
+                    out[k] = L["to"]       # conveys
                 conveyed = True
                 break
-            out[k] = L["from"]             # protected this year; roll forward
+            if not authoritative:
+                out[k] = L["from"]         # protected this year; roll forward
         if not conveyed and evaluated_all:
             fb = L.get("fallback")
             if fb and fb.get("type") == "fixed_asset":

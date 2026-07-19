@@ -55,7 +55,10 @@ SWAP_GROUPS = {
     "sg_cha_bkn_28_2": {"members": [pk(2028, 2, "CHA"), pk(2028, 2, "BKN")],
                         "priority": ["CHA", "CHI"]},
     "sg_bos_tor_28_2": {"members": [pk(2028, 2, "BOS"), pk(2028, 2, "TOR")],
-                        "priority": ["MIA", "TOR"]},
+                        "priority": ["DAL", "TOR"]},   # was MIA; superseded by
+                        # Trade 35 (2026-07-15) — DAL received the "2028
+                        # BOS/TOR 2nd" swap right from MIA. Caught stale via
+                        # the shadow ownership check (2026-07-19).
     "sg_ind_hou_32_2": {"members": [pk(2032, 2, "IND"), pk(2032, 2, "HOU")],
                         "priority": ["IND", "CLE"]},
     "sg_sas_okc_27_2": {"members": [pk(2027, 2, "SAS"), pk(2027, 2, "OKC")],
@@ -72,45 +75,60 @@ SWAP_GROUPS = {
 
 
 # --- binary-swap chains (chain id -> ordered list of binary_swap nodes) -----
-def _bs(id, a, b, better_to, worse_to):
+# `txn_ids`: the real transaction(s) (id + date) in transactions.json that
+# created this specific swap step, surfaced to `GET /api/picks` via
+# ownership.list_leaves so the site can show "why does this exist" instead of
+# just the resulting structure. Left as [] where no backing transaction could
+# be found (pre-dates the tracked ledger, or the Discord backfill hasn't
+# reached it yet) — don't guess a citation, an empty list is the honest state.
+def _bs(id, a, b, better_to, worse_to, txn_ids=None):
     return {"type": "binary_swap", "id": id, "a": a, "b": b,
-            "better_to": better_to, "worse_to": worse_to}
+            "better_to": better_to, "worse_to": worse_to,
+            "txn_ids": txn_ids or []}
 
 
 BINARY_CHAINS = {
     # 2030 NOP/MIL/POR/DET/HOU (spec 7.5b)
     "nmpdh": [
         _bs("nmpdh_s1", pk(2030, 1, "NOP"), pk(2030, 1, "MIL"),
-            {"ref": "nmpdh_s2", "as": "b"}, "MIL"),
+            {"ref": "nmpdh_s2", "as": "b"}, "MIL",
+            txn_ids=[{"id": "52c52018e46f8bb4", "date": "2024-06-22"}]),  # Trade 11
         _bs("nmpdh_s2", pk(2030, 1, "POR"), {"ref": "nmpdh_s1", "output": "better"},
-            "POR", {"ref": "nmpdh_s3", "as": "b"}),
+            "POR", {"ref": "nmpdh_s3", "as": "b"},
+            txn_ids=[{"id": "280699c56ef58b63", "date": "2025-07-30"}]),  # Trade 29
         _bs("nmpdh_s3", pk(2030, 1, "DET"), {"ref": "nmpdh_s2", "output": "worse"},
-            "DET", {"ref": "nmpdh_s4", "as": "a"}),
+            "DET", {"ref": "nmpdh_s4", "as": "a"},
+            txn_ids=[{"id": "23eb5d48412327c5", "date": "2026-01-21"}]),  # Trade 46
         _bs("nmpdh_s4", {"ref": "nmpdh_s3", "output": "worse"}, pk(2030, 1, "HOU"),
-            "NOP", "HOU"),
+            "NOP", "HOU"),  # no transactions.json record found for the NOP/HOU leg
     ],
     # 2028 ORL/MIL/WAS 3-way (spec 7.5c)
     "omw": [
         _bs("omw_s1", pk(2028, 1, "MIL"), pk(2028, 1, "ORL"),
-            {"ref": "omw_s2", "as": "a"}, "MIL"),
+            {"ref": "omw_s2", "as": "a"}, "MIL"),  # no transactions.json record found for the MIL/ORL leg
         _bs("omw_s2", {"ref": "omw_s1", "output": "better"}, pk(2028, 1, "WAS"),
-            "ORL", "WAS"),
+            "ORL", "WAS",
+            txn_ids=[{"id": "c92f582f69144473", "date": "2021-08-02"}]),  # Trade 23
     ],
     # 2028 SAS/NOP then DET tail (block A compound)
     "snd": [
         _bs("snd_s1", pk(2028, 1, "SAS"), pk(2028, 1, "NOP"),
-            {"ref": "snd_s2", "as": "b"}, "NOP"),
+            {"ref": "snd_s2", "as": "b"}, "NOP",
+            txn_ids=[{"id": "367133dabab00c59", "date": "2022-02-10"}]),  # Trade 71
         _bs("snd_s2", pk(2028, 1, "DET"), {"ref": "snd_s1", "output": "better"},
-            "DET", "SAS"),
+            "DET", "SAS",
+            txn_ids=[{"id": "23eb5d48412327c5", "date": "2026-01-21"}]),  # Trade 46
     ],
     # 2029 NOP: two separate NOP-favor swap rights on NOP's own 2029 1st --
     # vs BOS (Trade 30, 2026-07-10) and vs HOU (Trade 34, 2026-07-14). Resolves
     # as NOP takes best of the three; whoever NOP took from gets NOP's pick.
     "nop29": [
         _bs("nop29_s1", pk(2029, 1, "NOP"), pk(2029, 1, "BOS"),
-            {"ref": "nop29_s2", "as": "a"}, "BOS"),
+            {"ref": "nop29_s2", "as": "a"}, "BOS",
+            txn_ids=[{"id": "3013f6472e569110", "date": "2026-07-10"}]),  # Trade 30
         _bs("nop29_s2", {"ref": "nop29_s1", "output": "better"}, pk(2029, 1, "HOU"),
-            "NOP", "HOU"),
+            "NOP", "HOU",
+            txn_ids=[{"id": "682ab5647c51e84f", "date": "2026-07-14"}]),  # Trade 34
     ],
 }
 # pickkeys whose owner each chain decides (for display markers)
@@ -171,6 +189,13 @@ def apply_curated(store: dict) -> dict:
         p = by_key.get(k)
         if p is None:
             raise KeyError(f"curated pick {k} not present in store")
+        if p.get("player"):
+            # Already drafted: the flat CSV's OWNER is now a settled historical
+            # fact, not a pending contingency (_apply_pick stamps OWNER=team
+            # directly when a pick is used). The base seed already captured
+            # that as settled(OWNER) — trust it over this static curated
+            # snapshot, which predates the draft and doesn't know it resolved.
+            return
         p["conveyance"] = node
         p.pop("needs_structure", None)
         p.pop("_flat", None)

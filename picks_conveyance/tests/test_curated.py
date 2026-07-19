@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from picks_conveyance import model, resolver, seed_store, curated  # noqa: E402
+from picks_conveyance import model, resolver, seed_store, curated, registry  # noqa: E402
 
 TEAMS = sorted(["ATL", "BKN", "BOS", "CHA", "CHI", "CLE", "DAL", "DEN", "DET",
                 "GSW", "HOU", "IND", "LAC", "LAL", "MEM", "MIA", "MIL", "MIN",
@@ -36,7 +36,8 @@ def synthetic_positions(years):
 
 def main():
     store = seed_store.build_store(seed_store.DEFAULT_IN)
-    curated.apply_curated(store)
+    registry.seed_registry_from_curated()
+    registry.apply_registry(store)
 
     # 1. validate every node
     nerr = 0

@@ -36,6 +36,21 @@ def run(csv_path: Path) -> int:
             skipped += 1
             continue
         got = projection.project_to_flat(sp)
+        # `leaves` is a deliberate additive field the old flat API never had
+        # (CUTOVER STEP 9 leaf-node-id addressing) — always [] for a settled
+        # pick, since there's nothing to disambiguate; assert that, then
+        # exclude it from the exact-match comparison below, which is checking
+        # for accidental regressions in the ORIGINAL contract, not flagging
+        # every intentional schema extension since as a mismatch.
+        assert got.pop("leaves") == [], f"{k}: settled pick has non-empty leaves"
+        # `group_id` is the same kind of deliberate additive field (dedup key
+        # for swap/binary groups) -- always None for a settled pick.
+        assert got.pop("group_id") is None, f"{k}: settled pick has non-null group_id"
+        # `ladder` is the same kind of deliberate additive field (surfaces a
+        # ladder step's protect_top/fallback) -- always None here since this
+        # test calls project_to_flat with no store, so there's no ladders
+        # list to match against.
+        assert got.pop("ladder") is None, f"{k}: settled pick has non-null ladder"
         want = live_by_key[k]
         # swap_conveys is always None for settled picks; live agrees (no swap_owner)
         if got != want:

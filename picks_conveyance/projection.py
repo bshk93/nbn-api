@@ -49,6 +49,23 @@ def _swap_candidates(node: dict, store: dict) -> list[str]:
     return _distinct(t for t in group.get("priority", []) if isinstance(t, str))
 
 
+def _swap_owner_flat(node: dict, pick: dict, store: dict):
+    """For a 2-member swap group, the flat `swap_owner` field: the OTHER
+    member's orig team. Restores enrich_swap_conveys' live-draft real-time
+    resolution (routers/roster_picks.py) for the common 2-team case — it looks
+    up the counterpart's *current* pick number by this team abbreviation.
+    N-member groups (3+) have no single counterpart, so left unset (None);
+    those are only reached via a `binary` chain node in this model, not `swap`."""
+    group = (store or {}).get("swap_groups", {}).get(node["group"], {})
+    members = group.get("members", [])
+    if len(members) != 2:
+        return None
+    other = next((m for m in members
+                 if not (m["year"] == pick["year"] and m["round"] == pick["round"]
+                        and m["orig"] == pick["orig"])), None)
+    return other["orig"] if other else None
+
+
 def _chain_candidates(node: dict, store: dict) -> list[str]:
     """Teams that can end up owning a pick decided by this binary chain."""
     sids = (store or {}).get("chains", {}).get(node["chain"], [])
@@ -61,6 +78,22 @@ def _chain_candidates(node: dict, store: dict) -> list[str]:
             if isinstance(v, str):
                 teams.append(v)
     return _distinct(teams)
+
+
+def _group_id(node: dict) -> str | None:
+    """Stable id shared by every pick that's part of the same swap group or
+    binary chain — i.e. every pick whose owner is jointly decided by the same
+    multi-pick contingency. None for node types that decide only their own
+    pick (settled/protected/legacy/extinguished). Lets a consumer collapse
+    the N picks a chain/group spans into a single displayed entry per team,
+    instead of showing what looks like N separate picks when the team is
+    actually only ever going to end up with one of them."""
+    t = node.get("type")
+    if t == "swap":
+        return f"swap:{node['group']}"
+    if t == "binary":
+        return f"chain:{node['chain']}"
+    return None
 
 
 def nominal_owner(pick: dict, store: dict | None = None) -> str:
@@ -98,6 +131,8 @@ def project_to_flat(pick: dict, store: dict | None = None) -> dict:
     swap_owner = None
     if t == "protected":
         protected = _protected_flat(node, pick["orig"])["protected"]
+    elif t == "swap":
+        swap_owner = _swap_owner_flat(node, pick, store)
     elif t == "settled" and pick.get("needs_structure") and pick.get("_flat"):
         # not-yet-modeled flat-structured row: pass its structured fields through
         # so the preview stays a faithful superset of /api/picks (no regression)
@@ -120,4 +155,46 @@ def project_to_flat(pick: dict, store: dict | None = None) -> dict:
         "notes":         pick.get("notes", "") or "",
         "frozen":        bool(pick.get("frozen", False)),
         "frozen_reason": pick.get("frozen_reason", "") or "",
+        # Additive field, not part of the original flat contract: every
+        # addressable leaf on this pick with its stable leaf_id, for a trade
+        # to reference via TradeAsset.leaf_id when a team holds more than one
+        # (routers/transactions.py CUTOVER STEP 9). Empty for settled/legacy/
+        # extinguished picks, which have nothing to disambiguate.
+        "leaves":        _leaves_field(pick, store),
+        # Additive, like `leaves`: non-null only for swap/binary nodes, shared
+        # across every pick belonging to the same group/chain. See _group_id.
+        "group_id":      _group_id(node),
+        # Additive: non-null only when a ladder step governs this exact pick —
+        # surfaces the protect_top threshold and fixed-asset fallback that
+        # nothing else in the flat contract shows (a ladder is a container in
+        # `store["ladders"]`, not part of this pick's own `conveyance` node,
+        # so without this a ladder-governed pick displays no different from
+        # an ordinary settled one — see the sas_tor/sas_was/mem_bkn gap).
+        "ladder":        _ladder_field(pick, store),
     }
+
+
+def _leaves_field(pick: dict, store: dict | None) -> list[dict]:
+    if pick["conveyance"].get("type") not in ("protected", "swap", "binary"):
+        return []
+    from . import ownership
+    return ownership.list_leaves(pick, store or {})
+
+
+def _ladder_field(pick: dict, store: dict | None) -> dict | None:
+    """First ladder step matching this pick's own (year, round, orig) — a
+    pick is governed by at most one ladder step in practice. Returns
+    {from, to, protect_top, fallback: [pick_ref, ...]} or None."""
+    for ladder in (store or {}).get("ladders", []):
+        for step in ladder.get("steps", []):
+            step_orig = step.get("orig") or ladder.get("from")
+            if (step["year"] == pick["year"] and step["round"] == pick["round"]
+                    and step_orig == pick["orig"]):
+                fb = ladder.get("fallback")
+                return {
+                    "from": ladder["from"],
+                    "to": ladder["to"],
+                    "protect_top": step["protect_top"],
+                    "fallback": (fb or {}).get("picks", []) if fb else [],
+                }
+    return None

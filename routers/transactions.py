@@ -1,4 +1,6 @@
 import json
+import logging
+import os
 import re
 import secrets
 from datetime import datetime, timezone
@@ -22,6 +24,215 @@ from .roster_picks import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+def _register_trade_protection(pick_key: tuple, from_team: str, to_team: str,
+                               threshold: int) -> None:
+    """Build a real conveyance protected-node the moment a trade sets a
+    protection — see picks_conveyance/from_trade.py for the direction
+    convention. Fails open: this must never block or corrupt the real trade
+    write happening around it (save_picks(), just below, is the actual source
+    of truth and completes regardless)."""
+    try:
+        from picks_conveyance import from_trade
+        from_trade.register_protection(pick_key, from_team, to_team, threshold)
+    except Exception:
+        logger.exception("picks_conveyance: failed to register trade protection "
+                         f"for {pick_key} (flat PROTECTED field is unaffected)")
+
+
+def _register_trade_swap(pick_key: tuple, to_team: str, swap_with: str,
+                         picks_snapshot: list[dict]) -> None:
+    """Build a real conveyance swap-group the moment a trade sets a swap
+    partner. Fails open, same guarantee as above."""
+    try:
+        from picks_conveyance import from_trade
+        from_trade.register_swap(pick_key, to_team, swap_with, picks_snapshot)
+    except Exception:
+        logger.exception("picks_conveyance: failed to register trade swap "
+                         f"for {pick_key} (flat SWAP_OWNER field is unaffected)")
+
+
+def _register_trade_ladder(pick_key: tuple, from_team: str, to_team: str,
+                          protect_top: int, fallback_picks: list[tuple]) -> None:
+    """Build a real protection-ladder compensation trigger the moment a trade
+    sets ladder_protect_top — see picks_conveyance/from_trade.py for the
+    layered-not-replacing convention. Fails open, same guarantee as the
+    protection/swap registrations above: the flat trade write completes
+    regardless."""
+    try:
+        from picks_conveyance import from_trade
+        from_trade.register_ladder(pick_key, from_team, to_team, protect_top, fallback_picks)
+    except Exception:
+        logger.exception("picks_conveyance: failed to register trade ladder "
+                         f"for {pick_key} (fallback compensation not modeled)")
+
+
+def _lookup_pick(pick_key: tuple, conveyance_store):
+    if conveyance_store is None:
+        return None
+    return next((p for p in conveyance_store.get("picks", [])
+                if (p["year"], p["round"], p["orig"]) == pick_key), None)
+
+
+def _lookup_conveyance_node(pick_key: tuple, conveyance_store):
+    pick = _lookup_pick(pick_key, conveyance_store)
+    return pick["conveyance"] if pick else None
+
+
+def _check_retrade_allowed(pick_key: tuple, asset, from_team: str,
+                           conveyance_store) -> None:
+    """Validation-pass gate for a pick with existing conveyance structure —
+    mirrors the existing flat FROZEN check's shape and placement (before any
+    writes happen). Two things can reject the trade here:
+
+    - `legacy`: frozen from re-trade by design (docs/picks-conveyance.md §5)
+      until someone manually converts it to real structure — it's tagged
+      legacy specifically because nothing here can confidently represent
+      what happens to it, so trading it further would just compound that.
+      Always checked, regardless of what this trade supplies.
+
+    - Ambiguous leaf: only relevant when this trade ISN'T creating new
+      structure (no protection/swap_with supplied) — from_team would be
+      conveying whatever claim it holds. If it holds more than one distinct
+      claim, `asset.leaf_id` must say which (CUTOVER STEP 9,
+      docs/picks-migration-worksheet.md — real leaf-node-id addressing, not
+      just the ambiguity-detection stand-in from Step 7). No `leaf_id` and
+      more than one claim → rejected with the available leaf_ids listed, so
+      the trade can be resubmitted precisely instead of guessed at. A
+      supplied `leaf_id` the team doesn't actually hold is rejected too.
+
+    Fails open only on genuine infra issues (store unavailable) — a real
+    legacy pick or a real ambiguity must actually block, the same way a real
+    FROZEN pick does."""
+    try:
+        pick = _lookup_pick(pick_key, conveyance_store)
+    except Exception:
+        logger.exception(f"picks_conveyance: retrade check failed for {pick_key}, "
+                         "allowing the trade to proceed (infra issue, not a real pick)")
+        return
+    if pick is None:
+        return
+    node = pick["conveyance"]
+    if node.get("type") == "legacy":
+        raise HTTPException(
+            status_code=422,
+            detail=f"Pick {asset.year} R{asset.round} {asset.orig} is a legacy "
+                   f"pick, frozen from re-trade until manually converted to "
+                   f"real structure: {node.get('reason')}",
+        )
+    if asset.protection is None and asset.swap_with is None:
+        try:
+            from picks_conveyance import ownership
+            leaves = ownership.team_leaves(pick, from_team, conveyance_store)
+        except Exception:
+            logger.exception(f"picks_conveyance: ambiguity check failed for "
+                             f"{pick_key}, allowing the trade to proceed")
+            return
+        if len(leaves) > 1:
+            leaf_id = getattr(asset, "leaf_id", None)
+            if leaf_id is None:
+                options = "; ".join(f"{l['leaf_id']} ({l['description']})" for l in leaves)
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Pick {asset.year} R{asset.round} {asset.orig}: "
+                           f"{from_team} holds {len(leaves)} distinct claims — "
+                           f"specify which with asset.leaf_id. Options: {options}",
+                )
+            if leaf_id not in {l["leaf_id"] for l in leaves}:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Pick {asset.year} R{asset.round} {asset.orig}: "
+                           f"{from_team} does not hold leaf_id {leaf_id!r}",
+                )
+
+
+def _handle_pick_retrade(pick_key: tuple, from_team: str, to_team: str,
+                         conveyance_store, leaf_id: str | None = None) -> None:
+    """A pick with existing contingent structure (swap/protected/binary) is
+    being re-traded with no new protection/swap_with supplied — update the
+    registry so that structure reflects the new party instead of going stale
+    the way the flat model always did. Fails open: this is a best-effort sync
+    of the derived model, not a gate — `_check_retrade_allowed` above is what
+    actually blocks a trade when blocking is warranted; by the time this
+    runs, the trade has already been decided to proceed. `leaf_id`, when the
+    trade supplied one to disambiguate, is passed straight through so the
+    mutation targets that exact leaf."""
+    try:
+        node = _lookup_conveyance_node(pick_key, conveyance_store)
+        if node is None:
+            return
+        from picks_conveyance import registry
+        registry.handle_retrade(pick_key, from_team, to_team, node, leaf_id=leaf_id)
+    except Exception:
+        logger.exception(f"picks_conveyance: retrade sync failed for {pick_key} "
+                         "(flat OWNER write is unaffected; model may be stale "
+                         "until next manual resync)")
+
+
+def _load_conveyance_store_for_shadow_check():
+    """Best-effort load of the conveyance store for the ownership check below.
+    Never raises — a missing/broken store just falls back to the flat check
+    for this request; trading never goes fully dark over a file-read issue."""
+    try:
+        from picks_conveyance import store as conv_store
+        return conv_store.load_store()
+    except Exception:
+        return None
+
+
+def _flat_owns(pick_row: dict, from_team: str) -> bool:
+    owner_raw = pick_row["OWNER"].upper()
+    # "?" means unresolved -> falls back to orig team (mirrors GET /api/picks/{team});
+    # otherwise OWNER may be a single team or a pipe-separated compound of candidates.
+    if owner_raw == "?":
+        return pick_row["ORIG"].upper() == from_team
+    return from_team in owner_raw.split("|")
+
+
+def _check_pick_ownership(pick_key: tuple, from_team: str, pick_row: dict,
+                          conveyance_store, leaf_id: str | None = None) -> bool:
+    """The real ownership gate a trade must pass. CUTOVER STEP 5 (2026-07-19,
+    see docs/picks-migration-worksheet.md): the tree-based check is now
+    authoritative, replacing the flat OWNER check it superseded — this is the
+    whole point of the conveyance model, letting a team re-trade a contingent
+    share the flat OWNER field could never represent. Falls back to the flat
+    check only if the conveyance store can't be loaded or doesn't have this
+    pick — an infrastructure safety net, not a design hedge. Any disagreement
+    between the two is logged (not just failures) so real trades keep
+    providing evidence about the new check as they happen.
+
+    CUTOVER STEP 9: when `leaf_id` is supplied (a trade disambiguating which
+    of several claims it's conveying — see `_check_retrade_allowed`), checks
+    that specific leaf (`ownership.team_holds_leaf`) instead of the coarse
+    "any claim" check."""
+    flat_result = _flat_owns(pick_row, from_team)
+    # Explicit revert lever, separate from the infra-failure fallback below:
+    # set PICKS_OWNERSHIP_ENFORCE=flat in nbn-api/.env + restart to go back to
+    # the old flat-only check instantly, no code change, if this needs to be
+    # turned off in a hurry.
+    if conveyance_store is None or os.environ.get("PICKS_OWNERSHIP_ENFORCE") == "flat":
+        return flat_result
+    try:
+        from picks_conveyance import ownership
+        pick = _lookup_pick(pick_key, conveyance_store)
+        if pick is None:
+            return flat_result
+        if leaf_id is not None:
+            return ownership.team_holds_leaf(pick, from_team, leaf_id, conveyance_store)
+        tree_result = ownership.team_holds_claim(pick, from_team, conveyance_store)
+        if tree_result != flat_result:
+            logger.warning(
+                "picks_conveyance ownership check diverged from flat: pick=%s "
+                "from_team=%s flat_check=%s tree_check=%s (tree_check wins) "
+                "node_type=%s", pick_key, from_team, flat_result, tree_result,
+                pick["conveyance"].get("type"))
+        return tree_result
+    except Exception:
+        logger.exception(f"picks_conveyance: ownership check failed for "
+                         f"{pick_key}, falling back to the flat check")
+        return flat_result
 
 
 # ── CheckResult must come first — forward-referenced by validation helpers ────
@@ -155,6 +366,22 @@ class TradeAsset(BaseModel):
     orig: Optional[str] = None
     protection: Optional[int] = None
     swap_with: Optional[str] = None
+    # CUTOVER STEP 9 (docs/picks-migration-worksheet.md): disambiguates which
+    # of several contingent claims from_team is conveying, when it holds more
+    # than one on this pick. Get valid values from GET /api/picks/{team} (a
+    # contingent pick's response includes them) or the 422 error this asset
+    # would otherwise get, which lists them. Only needed in that ambiguous
+    # case — omit for every ordinary trade.
+    leaf_id: Optional[str] = None
+    # Protection ladder: a compensation trigger layered on top of this pick's
+    # own conveyance (which `protection`/`swap_with`/plain re-trade already
+    # decide) — not a replacement for it. If the pick doesn't convey to
+    # to_team because it lands within ladder_protect_top, to_team is instead
+    # owed ladder_fallback (a list of {year, round, orig} pick refs) as
+    # compensation. Only set these together; only needed for a "protected,
+    # else substitute pick(s)" clause explicitly stated in the trade.
+    ladder_protect_top: Optional[int] = None
+    ladder_fallback: Optional[list[dict]] = None
 
 
 class TradeTransfer(BaseModel):
@@ -942,6 +1169,7 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict) -> list[str]:
     team_map = _build_team_map()
     picks    = load_picks()
     pick_index = {(int(p["YEAR"]), int(p["ROUND"]), p["ORIG"].upper()): p for p in picks}
+    conveyance_store = _load_conveyance_store_for_shadow_check()
 
     for xfer in details.transfers:
         for asset in xfer.assets:
@@ -959,13 +1187,8 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict) -> list[str]:
                 pick_row = pick_index.get(key)
                 if not pick_row:
                     raise HTTPException(status_code=422, detail=f"Pick {asset.year} R{asset.round} {asset.orig} not found")
-                owner_raw = pick_row["OWNER"].upper()
-                # "?" means unresolved -> falls back to orig team (mirrors GET /api/picks/{team});
-                # otherwise OWNER may be a single team or a pipe-separated compound of candidates.
-                if owner_raw == "?":
-                    owned_by_from_team = pick_row["ORIG"].upper() == xfer.from_team
-                else:
-                    owned_by_from_team = xfer.from_team in owner_raw.split("|")
+                owned_by_from_team = _check_pick_ownership(
+                    key, xfer.from_team, pick_row, conveyance_store, asset.leaf_id)
                 if not owned_by_from_team:
                     raise HTTPException(
                         status_code=422,
@@ -977,6 +1200,7 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict) -> list[str]:
                     if reason:
                         detail += f": {reason}"
                     raise HTTPException(status_code=422, detail=detail)
+                _check_retrade_allowed(key, asset, xfer.from_team, conveyance_store)
 
     roster_moves: list[tuple[str, str, dict]] = []
     for xfer in details.transfers:
@@ -1012,11 +1236,29 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict) -> list[str]:
                 for p in picks:
                     if (int(p["YEAR"]) == asset.year and int(p["ROUND"]) == asset.round
                             and p["ORIG"].upper() == asset.orig):
-                        p["OWNER"] = xfer.to_team
+                        pick_key = (asset.year, asset.round, asset.orig)
                         if asset.protection is not None:
                             p["PROTECTED"] = str(asset.protection)
+                            _register_trade_protection(pick_key, xfer.from_team,
+                                                       xfer.to_team, asset.protection)
                         if asset.swap_with is not None:
                             p["SWAP_OWNER"] = asset.swap_with
+                            _register_trade_swap(pick_key, xfer.to_team,
+                                                 asset.swap_with, picks)
+                        if asset.protection is None and asset.swap_with is None:
+                            _handle_pick_retrade(pick_key, xfer.from_team,
+                                                 xfer.to_team, conveyance_store,
+                                                 leaf_id=asset.leaf_id)
+                        if asset.ladder_protect_top is not None:
+                            fallback_tuples = [
+                                (fb["year"], fb["round"], fb["orig"].upper())
+                                for fb in (asset.ladder_fallback or [])
+                            ]
+                            _register_trade_ladder(pick_key, xfer.from_team,
+                                                   xfer.to_team,
+                                                   asset.ladder_protect_top,
+                                                   fallback_tuples)
+                        p["OWNER"] = xfer.to_team
     save_picks(picks)
 
     trade_removals: dict[str, set[str]] = {}

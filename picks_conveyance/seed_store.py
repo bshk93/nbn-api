@@ -85,8 +85,9 @@ def main():
 
     store = build_store(Path(args.inp))
     if args.curated:
-        from . import curated
-        curated.apply_curated(store)
+        from . import registry
+        registry.seed_registry_from_curated()
+        registry.apply_registry(store)
         # recompute top-level counts by resolved node type
         types = {}
         for p in store["picks"]:

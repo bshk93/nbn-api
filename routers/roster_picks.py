@@ -1,3 +1,4 @@
+import os
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -149,6 +150,11 @@ def load_picks() -> list[dict]:
 
 def save_picks(picks: list[dict]):
     write_csv(PICKS_FILE, PICKS_HEADERS, picks)
+    # Keep the conveyance model (picks_conveyance/) in sync with every write to
+    # the flat ledger — fails open internally, never raises, so a bug here can
+    # never block or corrupt the real write above (which has already completed).
+    from picks_conveyance import resync as _pc_resync
+    _pc_resync.resync()
 
 
 def picks_horizon_target_year() -> int:
@@ -222,11 +228,23 @@ def enrich_swap_conveys(picks: list[dict]) -> None:
         # else stays None
 
 
-@router.get("/api/picks")
-def get_all_picks():
-    picks = [pick_to_response(p) for p in load_picks()]
+def _all_picks_flat() -> list[dict]:
+    """The rows GET /api/picks serves — from the conveyance model when
+    PICKS_READ_SOURCE=conveyance is set (cutover flag), else the flat CSV
+    (default, unchanged behavior). Reads the env var per-call so the flag can
+    be flipped without a restart."""
+    if os.environ.get("PICKS_READ_SOURCE") == "conveyance":
+        from picks_conveyance.serve import flat_rows
+        picks = flat_rows()
+    else:
+        picks = [pick_to_response(p) for p in load_picks()]
     enrich_swap_conveys(picks)
     return picks
+
+
+@router.get("/api/picks")
+def get_all_picks():
+    return _all_picks_flat()
 
 
 @router.get("/api/picks/{team}")
@@ -234,8 +252,7 @@ def get_team_picks(team: str):
     team = team.upper()
     if team not in VALID_TEAMS:
         raise HTTPException(status_code=404, detail="Unknown team")
-    all_picks = [pick_to_response(p) for p in load_picks()]
-    enrich_swap_conveys(all_picks)
+    all_picks = _all_picks_flat()
     def matches(p):
         owner = p["owner"]
         if owner == "?":

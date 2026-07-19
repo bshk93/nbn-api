@@ -11,11 +11,11 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from picks_conveyance import seed_store, curated, projection  # noqa: E402
+from picks_conveyance import seed_store, registry, projection  # noqa: E402
 
 FLAT_KEYS = {"year", "round", "orig", "owner", "pick", "player", "protected",
              "conveys", "swap_owner", "swap_conveys", "notes", "frozen",
-             "frozen_reason"}
+             "frozen_reason", "leaves", "group_id", "ladder"}
 FAILS = []
 
 
@@ -28,7 +28,8 @@ def check(name, got, want):
 
 def main():
     store = seed_store.build_store(seed_store.DEFAULT_IN)
-    curated.apply_curated(store)
+    registry.seed_registry_from_curated()
+    registry.apply_registry(store)
     by_key = {(p["year"], p["round"], p["orig"]): p for p in store["picks"]}
 
     # 1. project every pick — no exceptions, well-formed, non-empty owner
@@ -57,14 +58,51 @@ def main():
     # 3. swap group -> pipe-joined priority teams
     check("2028 BOS 1st swap -> BOS|CHI", proj((2028, 1, "BOS"))["owner"], "BOS|CHI")
     check("2027 OKC 2nd swap -> BOS|NOP", proj((2027, 2, "OKC"))["owner"], "BOS|NOP")
+    # 3b. 2-team swap -> swap_owner restored (live-draft real-time resolution)
+    check("2028 BOS 1st swap_owner -> CHI (counterpart orig)",
+          proj((2028, 1, "BOS"))["swap_owner"], "CHI")
+    check("2028 CHI 1st swap_owner -> BOS (counterpart orig)",
+          proj((2028, 1, "CHI"))["swap_owner"], "BOS")
+    # 3c. leaves field (CUTOVER STEP 9) -- addressable leaf_ids for the trade
+    # payload to reference; each leaf's own team must round-trip back through
+    # team_holds_leaf.
+    bos_leaves = proj((2028, 1, "BOS"))["leaves"]
+    check("2028 BOS 1st has 2 leaves (BOS, CHI)",
+          sorted(l["team"] for l in bos_leaves), ["BOS", "CHI"])
+    check("settled pick has empty leaves",
+          proj((2029, 1, "ATL"))["leaves"], [])
+    # 3d. group_id -- dedup key shared by every pick in the same swap group or
+    # binary chain (lets a consumer collapse N picks into 1 displayed entry).
+    check("2028 BOS 1st group_id -> swap:sg_bos_chi_28_1",
+          proj((2028, 1, "BOS"))["group_id"], "swap:sg_bos_chi_28_1")
+    check("2028 CHI 1st shares the same group_id as 2028 BOS 1st",
+          proj((2028, 1, "CHI"))["group_id"], proj((2028, 1, "BOS"))["group_id"])
+    check("settled pick has null group_id",
+          proj((2029, 1, "ATL"))["group_id"], None)
 
     # 4. binary chain -> candidate teams from the chain
     nop = proj((2030, 1, "NOP"))["owner"].split("|")
     check("2030 NOP chain candidates incl MIL,POR,DET,NOP,HOU",
           set(["MIL", "POR", "DET", "NOP", "HOU"]).issubset(set(nop)), True)
+    check("2030 NOP chain group_id -> chain:nmpdh",
+          proj((2030, 1, "NOP"))["group_id"], "chain:nmpdh")
+    check("2030 MIL shares the same group_id as 2030 NOP (same chain)",
+          proj((2030, 1, "MIL"))["group_id"], proj((2030, 1, "NOP"))["group_id"])
 
     # 5. legacy -> nominal owner preserved from the CSV
     check("2027 DET legacy owner preserved", proj((2027, 1, "DET"))["owner"], "DET")
+
+    # 6. ladder -> additive field surfaces protect_top + fallback (previously
+    # invisible: a ladder-governed pick showed no different from a plain
+    # settled one, per the sas_tor gap)
+    sas_tor_ladder = proj((2029, 1, "SAS"))["ladder"]
+    check("2029 SAS 1st ladder protect_top -> 10",
+          (sas_tor_ladder or {}).get("protect_top"), 10)
+    check("2029 SAS 1st ladder fallback -> 2029/2030 SAS 2nds",
+          sorted((p["year"], p["orig"]) for p in (sas_tor_ladder or {}).get("fallback", [])),
+          [(2029, "SAS"), (2030, "SAS")])
+    check("settled non-ladder pick has null ladder",
+          proj((2029, 1, "ATL"))["ladder"], None)
 
     print()
     if FAILS:
