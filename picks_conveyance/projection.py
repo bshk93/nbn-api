@@ -171,6 +171,17 @@ def project_to_flat(pick: dict, store: dict | None = None) -> dict:
         # so without this a ladder-governed pick displays no different from
         # an ordinary settled one — see the sas_tor/sas_was/mem_bkn gap).
         "ladder":        _ladder_field(pick, store),
+        # Additive: non-null only for `legacy` nodes — a real historical deal
+        # too tangled to model structurally (docs/picks-conveyance.md §5),
+        # frozen from re-trade until manually converted. Without this, a
+        # legacy pick's `owner`/`protected`/`swap_owner` look exactly like an
+        # ordinary settled pick (single team, no leaves, nothing flagged) even
+        # though the truth is a multi-team cascade living only in `notes`
+        # prose — e.g. OKC's 2027 1st shows `owner: "OKC"` with nothing to
+        # indicate PHX/LAC are actually the real parties per its own notes.
+        # `reason` is the short internal label (curated.py's LEGACY dict);
+        # the full prose is still `notes`, unchanged.
+        "legacy":        {"reason": node.get("reason")} if t == "legacy" else None,
     }
 
 

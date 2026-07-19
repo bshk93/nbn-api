@@ -15,7 +15,7 @@ from picks_conveyance import seed_store, registry, projection  # noqa: E402
 
 FLAT_KEYS = {"year", "round", "orig", "owner", "pick", "player", "protected",
              "conveys", "swap_owner", "swap_conveys", "notes", "frozen",
-             "frozen_reason", "leaves", "group_id", "ladder"}
+             "frozen_reason", "leaves", "group_id", "ladder", "legacy"}
 FAILS = []
 
 
@@ -91,6 +91,11 @@ def main():
 
     # 5. legacy -> nominal owner preserved from the CSV
     check("2027 DET legacy owner preserved", proj((2027, 1, "DET"))["owner"], "DET")
+    check("2027 DET legacy field flags it, with the real reason",
+          proj((2027, 1, "DET"))["legacy"],
+          {"reason": "2027 DET 5-team cascade (PHX/OKC/LAC/DET/HOU, then DET<->GSW)"})
+    check("settled non-legacy pick has null legacy field",
+          proj((2029, 1, "ATL"))["legacy"], None)
 
     # 6. ladder -> additive field surfaces protect_top + fallback (previously
     # invisible: a ladder-governed pick showed no different from a plain

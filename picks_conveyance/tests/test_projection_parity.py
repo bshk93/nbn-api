@@ -51,6 +51,9 @@ def run(csv_path: Path) -> int:
         # test calls project_to_flat with no store, so there's no ladders
         # list to match against.
         assert got.pop("ladder") is None, f"{k}: settled pick has non-null ladder"
+        # `legacy` is the same kind of deliberate additive field (flags a
+        # `legacy`-type node) -- always None for a settled pick.
+        assert got.pop("legacy") is None, f"{k}: settled pick has non-null legacy"
         want = live_by_key[k]
         # swap_conveys is always None for settled picks; live agrees (no swap_owner)
         if got != want:
