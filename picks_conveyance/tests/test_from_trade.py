@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from picks_conveyance import from_trade, model, registry, resolver  # noqa: E402
+from picks_conveyance import from_trade, model, ownership, registry, resolver  # noqa: E402
 
 FAILS = []
 
@@ -115,6 +115,44 @@ def main():
               ladder["steps"][0]["orig"] == "DET")
         check("ladder fallback references the compensation pick",
               ladder["fallback"]["picks"] == [{"year": 2101, "round": 1, "orig": "OKC"}])
+
+        # 6. txn_id/txn_date round-trip end to end: registration -> stored on
+        # the band/group -> surfaced by ownership.list_leaves. This is what
+        # teams/team.js's tooltip reads to show "originating trade" instead of
+        # "not yet linked" — a real gap found live (the trade write path never
+        # threaded txn_id through at all before this).
+        registry.REGISTRY_FILE.unlink(missing_ok=True)
+        registry.save_registry(registry._empty())
+        registry.add_protected(
+            (2099, 1, "SAC"),
+            on={"year": 2099, "round": 1, "orig": "SAC"},
+            bands=[{"min": 1, "max": 4, "to": "SAC"}, {"min": 5, "max": 60, "to": "LAL"}],
+        )
+        from_trade.register_protection((2099, 2, "MIL"), from_team="MIL", to_team="ATL",
+                                       threshold=30, txn_id="abc123", txn_date="2026-07-17")
+        spec = registry.load_registry()["protected"]["2099|2|MIL"]
+        check("fresh protection stamps txn_ids on both new bands",
+              all(b.get("txn_ids") == [{"id": "abc123", "date": "2026-07-17"}]
+                  for b in spec["bands"]))
+
+        pick_node = {"type": "protected", "id": "x", **spec}
+        pick = {"year": 2099, "round": 2, "orig": "MIL", "conveyance": pick_node}
+        leaves = ownership.list_leaves(pick, {})
+        atl_leaf = next(l for l in leaves if l["team"] == "ATL")
+        check("list_leaves surfaces the txn_ids on the conveying leaf",
+              atl_leaf["txn_ids"] == [{"id": "abc123", "date": "2026-07-17"}])
+
+        # subdivide also stamps only the two new bands, not the untouched sibling
+        from_trade.register_protection((2099, 2, "MIL"), from_team="ATL", to_team="BOS",
+                                       threshold=40, txn_id="def456", txn_date="2026-07-18")
+        spec2 = registry.load_registry()["protected"]["2099|2|MIL"]
+        untouched_band = next(b for b in spec2["bands"] if b["to"] == "MIL")
+        new_bands = [b for b in spec2["bands"] if b["to"] in ("ATL", "BOS")]
+        check("subdivide leaves the untouched sibling band's original txn_ids alone",
+              untouched_band.get("txn_ids") == [{"id": "abc123", "date": "2026-07-17"}])
+        check("subdivide stamps the new txn on both freshly-split bands",
+              all(b.get("txn_ids") == [{"id": "def456", "date": "2026-07-18"}]
+                  for b in new_bands))
 
     finally:
         registry.REGISTRY_FILE = orig_registry

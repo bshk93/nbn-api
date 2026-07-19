@@ -28,34 +28,41 @@ logger = logging.getLogger(__name__)
 
 
 def _register_trade_protection(pick_key: tuple, from_team: str, to_team: str,
-                               threshold: int) -> None:
+                               threshold: int, txn_id: str | None = None,
+                               txn_date: str | None = None) -> None:
     """Build a real conveyance protected-node the moment a trade sets a
     protection — see picks_conveyance/from_trade.py for the direction
     convention. Fails open: this must never block or corrupt the real trade
     write happening around it (save_picks(), just below, is the actual source
-    of truth and completes regardless)."""
+    of truth and completes regardless). `txn_id`/`txn_date` let the resulting
+    band(s) link back to the real transaction record (teams/team.js's
+    tooltip otherwise shows "originating trade(s) not yet linked")."""
     try:
         from picks_conveyance import from_trade
-        from_trade.register_protection(pick_key, from_team, to_team, threshold)
+        from_trade.register_protection(pick_key, from_team, to_team, threshold,
+                                       txn_id=txn_id, txn_date=txn_date)
     except Exception:
         logger.exception("picks_conveyance: failed to register trade protection "
                          f"for {pick_key} (flat PROTECTED field is unaffected)")
 
 
 def _register_trade_swap(pick_key: tuple, to_team: str, swap_with: str,
-                         picks_snapshot: list[dict]) -> None:
+                         picks_snapshot: list[dict], txn_id: str | None = None,
+                         txn_date: str | None = None) -> None:
     """Build a real conveyance swap-group the moment a trade sets a swap
     partner. Fails open, same guarantee as above."""
     try:
         from picks_conveyance import from_trade
-        from_trade.register_swap(pick_key, to_team, swap_with, picks_snapshot)
+        from_trade.register_swap(pick_key, to_team, swap_with, picks_snapshot,
+                                 txn_id=txn_id, txn_date=txn_date)
     except Exception:
         logger.exception("picks_conveyance: failed to register trade swap "
                          f"for {pick_key} (flat SWAP_OWNER field is unaffected)")
 
 
 def _register_trade_ladder(pick_key: tuple, from_team: str, to_team: str,
-                          protect_top: int, fallback_picks: list[tuple]) -> None:
+                          protect_top: int, fallback_picks: list[tuple],
+                          txn_id: str | None = None, txn_date: str | None = None) -> None:
     """Build a real protection-ladder compensation trigger the moment a trade
     sets ladder_protect_top — see picks_conveyance/from_trade.py for the
     layered-not-replacing convention. Fails open, same guarantee as the
@@ -63,7 +70,8 @@ def _register_trade_ladder(pick_key: tuple, from_team: str, to_team: str,
     regardless."""
     try:
         from picks_conveyance import from_trade
-        from_trade.register_ladder(pick_key, from_team, to_team, protect_top, fallback_picks)
+        from_trade.register_ladder(pick_key, from_team, to_team, protect_top,
+                                   fallback_picks, txn_id=txn_id, txn_date=txn_date)
     except Exception:
         logger.exception("picks_conveyance: failed to register trade ladder "
                          f"for {pick_key} (fallback compensation not modeled)")
@@ -1127,7 +1135,8 @@ def _apply_pick(details: PickDetails, txn_date: str, info: dict):
     log_write(info, f"TXN pick — {details.player} → {team} ({pick.year} R{pick.round} {orig} — new row)")
 
 
-def _apply_trade(details: TradeIn, txn_date: str, info: dict) -> list[str]:
+def _apply_trade(details: TradeIn, txn_date: str, info: dict,
+                 txn_id: str | None = None) -> list[str]:
     if len(details.transfers) < 1:
         raise HTTPException(status_code=422, detail="A trade requires at least 1 transfer")
 
@@ -1240,11 +1249,13 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict) -> list[str]:
                         if asset.protection is not None:
                             p["PROTECTED"] = str(asset.protection)
                             _register_trade_protection(pick_key, xfer.from_team,
-                                                       xfer.to_team, asset.protection)
+                                                       xfer.to_team, asset.protection,
+                                                       txn_id=txn_id, txn_date=txn_date)
                         if asset.swap_with is not None:
                             p["SWAP_OWNER"] = asset.swap_with
                             _register_trade_swap(pick_key, xfer.to_team,
-                                                 asset.swap_with, picks)
+                                                 asset.swap_with, picks,
+                                                 txn_id=txn_id, txn_date=txn_date)
                         if asset.protection is None and asset.swap_with is None:
                             _handle_pick_retrade(pick_key, xfer.from_team,
                                                  xfer.to_team, conveyance_store,
@@ -1257,7 +1268,8 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict) -> list[str]:
                             _register_trade_ladder(pick_key, xfer.from_team,
                                                    xfer.to_team,
                                                    asset.ladder_protect_top,
-                                                   fallback_tuples)
+                                                   fallback_tuples,
+                                                   txn_id=txn_id, txn_date=txn_date)
                         p["OWNER"] = xfer.to_team
     save_picks(picks)
 
@@ -2169,7 +2181,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             stored_details = details.model_dump()
             stored_details["team"] = team
         elif body.type == "trade":
-            teams = _apply_trade(details, body.date, info)
+            teams = _apply_trade(details, body.date, info, txn_id=txn_id)
             stored_details = details.model_dump()
             stored_details["teams"] = teams
         elif body.type == "convert_twoway":

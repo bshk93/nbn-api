@@ -105,12 +105,18 @@ def _validate_registry(reg: dict) -> None:
         model.validate_binary_chain(nodes)
 
 
-def add_protected(pick_key: tuple, on: dict, bands: list[dict]) -> None:
+def add_protected(pick_key: tuple, on: dict, bands: list[dict],
+                  txn_entry: dict | None = None) -> None:
     """Register a new protected-pick structure (called by the write path when
     a trade sets a protection threshold). Validated before it ever reaches
     disk — a malformed band structure fails loudly here instead of quietly
-    corrupting the store on the next resync."""
+    corrupting the store on the next resync. `txn_entry` ({"id", "date"}), if
+    given, is stamped onto every band — the whole node is being created by
+    this one trade, so every band it produces traces back to it (mirrors how
+    binary chains already carry `txn_ids` — see ownership.list_leaves)."""
     from . import model
+    if txn_entry:
+        bands = [{**b, "txn_ids": [txn_entry]} for b in bands]
     model.validate({"type": "protected", "id": "tmp", "on": on, "bands": bands})
     with _lock:
         reg = load_registry()
@@ -128,7 +134,7 @@ def get_protected_spec(pick_key: tuple) -> dict | None:
 
 
 def subdivide_protected_band(pick_key: tuple, from_team: str, to_team: str,
-                             threshold: int) -> None:
+                             threshold: int, txn_entry: dict | None = None) -> None:
     """A pick already has real protected structure (e.g. an earlier trade's
     band split gave a third team a claim on part of it) and this trade adds a
     NEW protection threshold on top of whichever single band `from_team`
@@ -137,7 +143,10 @@ def subdivide_protected_band(pick_key: tuple, from_team: str, to_team: str,
     leaving every other band untouched — the N-way generalization
     `add_protected`'s blind overwrite couldn't do: a pick can accumulate band
     splits across multiple trades instead of the newest trade erasing
-    whatever an earlier trade's counterparty was owed.
+    whatever an earlier trade's counterparty was owed. `txn_entry`
+    ({"id", "date"}), if given, is stamped onto the two NEW bands this split
+    produces — the sibling band(s) this trade didn't touch keep whatever
+    txn_ids (if any) they already had.
 
     Raises ValueError if from_team doesn't occupy exactly one band (ambiguous
     or absent — same posture as handle_retrade's ambiguity check) or if
@@ -161,8 +170,13 @@ def subdivide_protected_band(pick_key: tuple, from_team: str, to_team: str,
         new_bands = []
         for b in spec["bands"]:
             if b is band:
-                new_bands.append({"min": b["min"], "max": threshold, "to": from_team})
-                new_bands.append({"min": threshold + 1, "max": b["max"], "to": to_team})
+                keep = {"min": b["min"], "max": threshold, "to": from_team}
+                convey = {"min": threshold + 1, "max": b["max"], "to": to_team}
+                if txn_entry:
+                    keep["txn_ids"] = [txn_entry]
+                    convey["txn_ids"] = [txn_entry]
+                new_bands.append(keep)
+                new_bands.append(convey)
             else:
                 new_bands.append(b)
         model.validate({"type": "protected", "id": "tmp", "on": spec["on"], "bands": new_bands})
@@ -182,11 +196,16 @@ def add_ladder(ladder: dict) -> None:
         save_registry(reg)
 
 
-def add_swap_group(group_id: str, members: list[dict], priority: list) -> None:
+def add_swap_group(group_id: str, members: list[dict], priority: list,
+                   txn_entry: dict | None = None) -> None:
     """Register a new 2-team swap group (called by the write path when a
-    trade sets a swap partner). Validated before it reaches disk."""
+    trade sets a swap partner). Validated before it reaches disk. `txn_entry`
+    ({"id", "date"}), if given, is stamped at the group level (mirrors how
+    binary chains already carry `txn_ids` — see ownership.list_leaves)."""
     from . import model
     group = {"members": members, "priority": priority}
+    if txn_entry:
+        group["txn_ids"] = [txn_entry]
     model.validate_swap_group(group)
     with _lock:
         reg = load_registry()

@@ -66,16 +66,22 @@ def list_leaves(pick: dict, store: dict) -> list[dict]:
 
     if t == "protected":
         for i, band in enumerate(node["bands"]):
-            out.extend(_expand_leaf(
+            leaves = _expand_leaf(
                 band.get("to"), f"{prefix}:protected:{i}",
-                f"protected band {band['min']}-{band['max']}"))
+                f"protected band {band['min']}-{band['max']}")
+            for leaf in leaves:
+                leaf["txn_ids"] = band.get("txn_ids", [])
+            out.extend(leaves)
 
     elif t == "swap":
         group = (store or {}).get("swap_groups", {}).get(node["group"], {})
         for i, slot in enumerate(group.get("priority", [])):
             label = "better" if i == 0 else "worse" if i == 1 else f"slot {i}"
-            out.extend(_expand_leaf(
-                slot, f"{prefix}:swap:{i}", f"swap priority ({label} pick)"))
+            leaves = _expand_leaf(
+                slot, f"{prefix}:swap:{i}", f"swap priority ({label} pick)")
+            for leaf in leaves:
+                leaf["txn_ids"] = group.get("txn_ids", [])
+            out.extend(leaves)
 
     elif t == "binary":
         sids = (store or {}).get("chains", {}).get(node["chain"], [])

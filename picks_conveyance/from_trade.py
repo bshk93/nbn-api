@@ -23,25 +23,35 @@ from . import registry
 
 
 def register_protection(pick_key: tuple, from_team: str, to_team: str,
-                        threshold: int) -> None:
+                        threshold: int, txn_id: str | None = None,
+                        txn_date: str | None = None) -> None:
     """Brand new protection (no existing structure): spans the whole pick with
     a simple 2-band split. If the pick already carries real protected
     structure — e.g. a third team's claim from an earlier, unrelated trade —
     defer to subdivide_protected_band instead, so that earlier claim survives
-    and only the band from_team actually holds gets split."""
+    and only the band from_team actually holds gets split.
+
+    `txn_id`/`txn_date`, when given, get stamped onto the band(s) this call
+    creates as `txn_ids: [{"id", "date"}]` — otherwise a pick's `leaves`
+    display (teams/team.js's tooltip) has nothing to point at and shows
+    "originating trade(s) not yet linked" even for a pick this very system
+    just modeled (the gap this parameter closes)."""
+    txn_entry = {"id": txn_id, "date": txn_date} if txn_id else None
     if registry.get_protected_spec(pick_key) is not None:
-        registry.subdivide_protected_band(pick_key, from_team, to_team, threshold)
+        registry.subdivide_protected_band(pick_key, from_team, to_team, threshold,
+                                          txn_entry=txn_entry)
         return
     year, rnd, orig = pick_key
     on = {"year": year, "round": rnd, "orig": orig}
     bands = [{"min": 1, "max": threshold, "to": from_team},
              {"min": threshold + 1, "max": 60, "to": to_team}]
-    registry.add_protected(pick_key, on=on, bands=bands)
+    registry.add_protected(pick_key, on=on, bands=bands, txn_entry=txn_entry)
 
 
 def register_ladder(pick_key: tuple, from_team: str, to_team: str,
                     protect_top: int,
-                    fallback_picks: list[tuple] | None = None) -> None:
+                    fallback_picks: list[tuple] | None = None,
+                    txn_id: str | None = None, txn_date: str | None = None) -> None:
     """Register a protection ladder — a compensation trigger layered on top
     of a pick's own conveyance, not a replacement for it. If the pick's real
     recipient (whether decided by its own protected/swap/binary node or a
@@ -52,7 +62,8 @@ def register_ladder(pick_key: tuple, from_team: str, to_team: str,
     `pick_key`'s `orig` is threaded through as the step's explicit `orig` —
     see resolver._resolve_ladders — since the pick being protected here may
     have originated from a different team than `from_team` (e.g. `from_team`
-    holds only a share of a pick some third team originated)."""
+    holds only a share of a pick some third team originated). `txn_id`/
+    `txn_date`, when given, are stamped on the ladder itself."""
     year, rnd, orig = pick_key
     ladder = {
         "id": f"ladder_trade_{year}_{rnd}_{orig}_{to_team}",
@@ -63,6 +74,8 @@ def register_ladder(pick_key: tuple, from_team: str, to_team: str,
                                for (y, r, o) in fallback_picks]}
                      if fallback_picks else None),
     }
+    if txn_id:
+        ladder["txn_ids"] = [{"id": txn_id, "date": txn_date}]
     registry.add_ladder(ladder)
 
 
@@ -80,11 +93,13 @@ def _find_counterpart(pick_key: tuple, swap_with: str, picks_snapshot: list[dict
 
 
 def register_swap(pick_key: tuple, to_team: str, swap_with: str,
-                  picks_snapshot: list[dict]) -> bool:
+                  picks_snapshot: list[dict], txn_id: str | None = None,
+                  txn_date: str | None = None) -> bool:
     """Register a 2-team SwapGroup: swap_with gets the better pick, to_team
     gets the worse. Returns True if a counterpart pick was found and
     registered, False if not (caller falls back to flat passthrough, same as
-    before this feature existed — never silently drops data)."""
+    before this feature existed — never silently drops data). `txn_id`/
+    `txn_date`, when given, are stamped at the group level."""
     counterpart = _find_counterpart(pick_key, swap_with, picks_snapshot)
     if counterpart is None:
         return False
@@ -92,5 +107,7 @@ def register_swap(pick_key: tuple, to_team: str, swap_with: str,
     members = [{"year": year, "round": rnd, "orig": orig},
                {"year": counterpart[0], "round": counterpart[1], "orig": counterpart[2]}]
     gid = f"sg_auto_{year}_{rnd}_{'_'.join(sorted([orig, counterpart[2]]))}"
-    registry.add_swap_group(gid, members=members, priority=[swap_with, to_team])
+    txn_entry = {"id": txn_id, "date": txn_date} if txn_id else None
+    registry.add_swap_group(gid, members=members, priority=[swap_with, to_team],
+                            txn_entry=txn_entry)
     return True

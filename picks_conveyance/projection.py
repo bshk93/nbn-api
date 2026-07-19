@@ -196,5 +196,6 @@ def _ladder_field(pick: dict, store: dict | None) -> dict | None:
                     "to": ladder["to"],
                     "protect_top": step["protect_top"],
                     "fallback": (fb or {}).get("picks", []) if fb else [],
+                    "txn_ids": ladder.get("txn_ids", []),
                 }
     return None
