@@ -71,6 +71,17 @@ SWAP_GROUPS = {
                         "priority": ["WAS", "BOS"]},   # WAS swap right (sheet WAS F77)
     "sg_nop_hou_32_1": {"members": [pk(2032, 1, "NOP"), pk(2032, 1, "HOU")],
                         "priority": ["NOP", "HOU"]},   # sheet HOU F87
+    # Resolved out of LEGACY 2026-07-19: Trade 54 (2026-02-03) gave IND the
+    # 2031 MIN 1st; Trade 73 (2026-02-06, 3 days later) granted HOU swap
+    # rights over "2031 MIN/HOU 1st" -- HOU takes the better of its own pick
+    # vs. the MIN pick IND now holds, IND keeps whichever is worse. The old
+    # LEGACY note's "protected (meaning/origin unclear)" fragment on HOU's own
+    # pick doesn't appear in either trade's text -- not carried forward here;
+    # flag if real evidence for it ever turns up.
+    "sg_hou_min_31_1": {"members": [pk(2031, 1, "HOU"), pk(2031, 1, "MIN")],
+                        "priority": ["HOU", "IND"],
+                        "txn_ids": [{"id": "5c8d8e94e26d940a", "date": "2026-02-06"},   # Trade 73
+                                   {"id": "c65f1a6c7036afd3", "date": "2026-02-03"}]},  # Trade 54
 }
 
 
@@ -130,6 +141,23 @@ BINARY_CHAINS = {
             "NOP", "HOU",
             txn_ids=[{"id": "682ab5647c51e84f", "date": "2026-07-14"}]),  # Trade 34
     ],
+    # Resolved out of LEGACY 2026-07-19: 2027 PHI/CHA/TOR/DAL chained swap.
+    # "Charlotte has the right to swap Philadelphia's '27 1st for Toronto's
+    # '27 1st; afterwards, Toronto has the right to swap the less favorable
+    # pick for '27 Dallas 1st." Trade 18 (2025-07-01) sent PHI's own pick
+    # (already carrying TOR swap rights) to NOP; Trade 27 (2025-07-21) sent it
+    # onward from NOP to CHA, where it sits today. No transactions.json record
+    # found for the TOR/DAL leg itself (or for the original grant of TOR's
+    # swap right over PHI's pick, predating both trades above) -- the
+    # structure matches the note's prose exactly regardless.
+    "pctd": [
+        _bs("pctd_s1", pk(2027, 1, "PHI"), pk(2027, 1, "TOR"),
+            "CHA", {"ref": "pctd_s2", "as": "a"},
+            txn_ids=[{"id": "cf9ae5b6831e3e36", "date": "2025-07-01"},    # Trade 18
+                     {"id": "520fbf101c33f24f", "date": "2025-07-21"}]),  # Trade 27
+        _bs("pctd_s2", {"ref": "pctd_s1", "output": "worse"}, pk(2027, 1, "DAL"),
+            "TOR", "DAL"),  # no transactions.json record found for the TOR/DAL leg
+    ],
 }
 # pickkeys whose owner each chain decides (for display markers)
 CHAIN_MEMBERS = {
@@ -137,6 +165,7 @@ CHAIN_MEMBERS = {
     "omw":   [(2028, 1, t) for t in ("MIL", "ORL", "WAS")],
     "snd":   [(2028, 1, t) for t in ("SAS", "NOP", "DET")],
     "nop29": [(2029, 1, t) for t in ("NOP", "BOS", "HOU")],
+    "pctd":  [(2027, 1, t) for t in ("PHI", "TOR", "DAL")],
 }
 
 
@@ -158,17 +187,21 @@ LADDERS = [
 
 
 # --- legacy (unmodelable; resolver skips, prose kept) ----------------------
+# 2031 HOU/MIN and 2027 PHI/CHA/TOR/DAL resolved out 2026-07-19 (real
+# transactions found, see SWAP_GROUPS/BINARY_CHAINS above). 2027 DET cascade
+# and 2028 SAC/DAL/MIA/MEM/NYK/CHA cluster remain here deliberately: the
+# former has a real unresolved ambiguity (does DET's swap-right-vs-GSW still
+# apply if the HOU/2026-TOR-1st conditional reroutes the underlying asset to
+# HOU instead of DET?) and the latter's only found transaction record
+# (8685c0dfc2717083) captured a plain 2-team SAC/MIA trade, not the 3-way
+# "MIA gets best of SAC/DAL/PHX" swap its own description claims -- don't
+# guess at either without more digging or committee confirmation.
 LEGACY = {
     (2028, 1, "MIA"): "2028 SAC/DAL/MIA/MEM/NYK/CHA sequential swap-of-swaps cluster",
     (2027, 1, "DET"): "2027 DET 5-team cascade (PHX/OKC/LAC/DET/HOU, then DET<->GSW)",
     (2027, 1, "GSW"): "part of 2027 DET cascade (see 2027 DET 1st)",
     (2027, 1, "OKC"): "part of 2027 DET cascade",
     (2027, 1, "LAC"): "part of 2027 DET cascade",
-    (2027, 1, "PHI"): "PHI/CHA/TOR/DAL chained swap",
-    (2027, 1, "DAL"): "PHI/CHA/TOR/DAL chained swap",
-    (2027, 1, "TOR"): "PHI/CHA/TOR/DAL chained swap",
-    (2031, 1, "HOU"): "2031 HOU/IND-MIN swap, note meaning unclear (held with 2031 MIN)",
-    (2031, 1, "MIN"): "2031 HOU/IND-MIN swap (partner of 2031 HOU)",
     (2028, 1, "CHA"): "part of 2028 SAC/DAL/MIA/MEM/NYK/CHA cluster (NYK swaps into CHA)",
 }
 

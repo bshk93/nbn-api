@@ -91,6 +91,41 @@ def main():
               (2028, 1, "WAS"), (2027, 1, "CHI"), (2027, 2, "GSW")]:
         print(f"  {k} -> {owners.get(k)}")
 
+    # 5. deal-specific direction checks for the two picks resolved out of
+    # LEGACY 2026-07-19 (real transactions found, not synthetic) -- the
+    # generic loop above only proves these resolve at all, not that the
+    # actual better/worse direction matches what the real trades granted.
+    def check(name, got, want):
+        ok = got == want
+        print(f"  [{'ok' if ok else 'FAIL'}] {name}" + ("" if ok else f"  got={got!r} want={want!r}"))
+        if not ok:
+            FAILS.append(name)
+
+    print("\n2031 HOU/MIN swap (Trade 54 + Trade 73):")
+    r_hou_better = resolver.resolve_all(store, {(2031, 1, "HOU"): 5, (2031, 1, "MIN"): 20})
+    check("HOU's own pick better -> HOU keeps it",
+          r_hou_better.get((2031, 1, "HOU")), "HOU")
+    check("HOU's own pick better -> IND keeps the MIN pick",
+          r_hou_better.get((2031, 1, "MIN")), "IND")
+    r_min_better = resolver.resolve_all(store, {(2031, 1, "HOU"): 25, (2031, 1, "MIN"): 3})
+    check("MIN pick better -> HOU swaps for it",
+          r_min_better.get((2031, 1, "MIN")), "HOU")
+    check("MIN pick better -> IND keeps HOU's own pick instead",
+          r_min_better.get((2031, 1, "HOU")), "IND")
+
+    print("\n2027 PHI/CHA/TOR/DAL chain (Trade 18 + Trade 27):")
+    r_a = resolver.resolve_all(store, {(2027, 1, "PHI"): 2, (2027, 1, "TOR"): 15, (2027, 1, "DAL"): 8})
+    check("PHI best -> CHA takes it", r_a.get((2027, 1, "PHI")), "CHA")
+    check("TOR's leftover (15) worse than DAL (8) -> TOR swaps for DAL's",
+          r_a.get((2027, 1, "DAL")), "TOR")
+    check("DAL keeps TOR's own leftover pick", r_a.get((2027, 1, "TOR")), "DAL")
+    r_b = resolver.resolve_all(store, {(2027, 1, "PHI"): 10, (2027, 1, "TOR"): 4, (2027, 1, "DAL"): 25})
+    check("TOR best -> CHA takes it", r_b.get((2027, 1, "TOR")), "CHA")
+    check("PHI's leftover (10) better than DAL (25) -> TOR keeps it, no swap",
+          r_b.get((2027, 1, "PHI")), "TOR")
+    check("DAL keeps its own pick (worse than PHI's leftover)",
+          r_b.get((2027, 1, "DAL")), "DAL")
+
     print()
     if FAILS:
         print(f"FAILED: {FAILS}")
