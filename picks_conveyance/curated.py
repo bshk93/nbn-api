@@ -158,6 +158,30 @@ BINARY_CHAINS = {
         _bs("pctd_s2", {"ref": "pctd_s1", "output": "worse"}, pk(2027, 1, "DAL"),
             "TOR", "DAL"),  # no transactions.json record found for the TOR/DAL leg
     ],
+    # Resolved out of LEGACY 2026-07-19: 2027 PHX/OKC/LAC/DET/GSW cascade.
+    # Originally tagged legacy over an apparent HOU conditional ("Houston
+    # will receive [DET's pick] if 2026 TOR 1st lands 1-4") that turned out
+    # to be a completely separate deal (DET pledged its own cascade pick as
+    # collateral when trading away the 2026 TOR 1st in an unrelated trade,
+    # Trade 22 2025-07-07, later passed ORL->PHX->HOU). That 2026 TOR 1st has
+    # since been drafted at #25 (player evans-isaiah) -- nowhere near top-4 --
+    # so the contingency never fired and is moot; DET's 2027 cascade pick was
+    # never actually at risk of going to HOU. The cascade itself is a clean
+    # 3-step comparison, each leg backed by a real trade:
+    #   1. OKC's own vs LAC's own -> PHX takes the better (Trade 42, 2026-01-08)
+    #   2. loser of #1 vs DET's own -> LAC takes the better (Trade 74, 2023-02-02)
+    #   3. loser of #2 vs GSW's own -> DET takes the better (Trade 83, 2024-02-08)
+    "pold": [
+        _bs("pold_s1", pk(2027, 1, "OKC"), pk(2027, 1, "LAC"),
+            "PHX", {"ref": "pold_s2", "as": "b"},
+            txn_ids=[{"id": "eb9143b4c063c123", "date": "2026-01-08"}]),  # Trade 42
+        _bs("pold_s2", pk(2027, 1, "DET"), {"ref": "pold_s1", "output": "worse"},
+            "LAC", {"ref": "pold_s3", "as": "a"},
+            txn_ids=[{"id": "89df50802594d3fc", "date": "2023-02-02"}]),  # Trade 74
+        _bs("pold_s3", {"ref": "pold_s2", "output": "worse"}, pk(2027, 1, "GSW"),
+            "DET", "GSW",
+            txn_ids=[{"id": "eefc5f995ce91165", "date": "2024-02-08"}]),  # Trade 83
+    ],
 }
 # pickkeys whose owner each chain decides (for display markers)
 CHAIN_MEMBERS = {
@@ -166,6 +190,7 @@ CHAIN_MEMBERS = {
     "snd":   [(2028, 1, t) for t in ("SAS", "NOP", "DET")],
     "nop29": [(2029, 1, t) for t in ("NOP", "BOS", "HOU")],
     "pctd":  [(2027, 1, t) for t in ("PHI", "TOR", "DAL")],
+    "pold":  [(2027, 1, t) for t in ("OKC", "LAC", "DET", "GSW")],
 }
 
 
@@ -187,21 +212,16 @@ LADDERS = [
 
 
 # --- legacy (unmodelable; resolver skips, prose kept) ----------------------
-# 2031 HOU/MIN and 2027 PHI/CHA/TOR/DAL resolved out 2026-07-19 (real
-# transactions found, see SWAP_GROUPS/BINARY_CHAINS above). 2027 DET cascade
-# and 2028 SAC/DAL/MIA/MEM/NYK/CHA cluster remain here deliberately: the
-# former has a real unresolved ambiguity (does DET's swap-right-vs-GSW still
-# apply if the HOU/2026-TOR-1st conditional reroutes the underlying asset to
-# HOU instead of DET?) and the latter's only found transaction record
-# (8685c0dfc2717083) captured a plain 2-team SAC/MIA trade, not the 3-way
-# "MIA gets best of SAC/DAL/PHX" swap its own description claims -- don't
-# guess at either without more digging or committee confirmation.
+# 2031 HOU/MIN, 2027 PHI/CHA/TOR/DAL, and 2027 PHX/OKC/LAC/DET/GSW all
+# resolved out 2026-07-19 (real transactions found for every leg, see
+# SWAP_GROUPS/BINARY_CHAINS above). Only the 2028 SAC/DAL/MIA/MEM/NYK/CHA
+# cluster remains: its only found transaction record (8685c0dfc2717083)
+# captured a plain 2-team SAC/MIA trade, not the 3-way "MIA gets best of
+# SAC/DAL/PHX" swap its own description claims, and no thread to
+# MEM/NYK/CHA was found at all -- don't guess without more digging or
+# committee confirmation.
 LEGACY = {
     (2028, 1, "MIA"): "2028 SAC/DAL/MIA/MEM/NYK/CHA sequential swap-of-swaps cluster",
-    (2027, 1, "DET"): "2027 DET 5-team cascade (PHX/OKC/LAC/DET/HOU, then DET<->GSW)",
-    (2027, 1, "GSW"): "part of 2027 DET cascade (see 2027 DET 1st)",
-    (2027, 1, "OKC"): "part of 2027 DET cascade",
-    (2027, 1, "LAC"): "part of 2027 DET cascade",
     (2028, 1, "CHA"): "part of 2028 SAC/DAL/MIA/MEM/NYK/CHA cluster (NYK swaps into CHA)",
 }
 

@@ -49,8 +49,9 @@ def main():
         check(f"binary chain: {team} holds a claim", holds((2030, 1, "NOP"), team))
     check("binary chain: unrelated team does not", not holds((2030, 1, "NOP"), "BOS"))
 
-    # legacy (2027 DET cascade)
-    p = by_key[(2027, 1, "DET")]
+    # legacy (2028 SAC/DAL/MIA/MEM/NYK/CHA cluster -- the 2027 DET cascade this
+    # used to test was resolved out of legacy 2026-07-19, see curated.py)
+    p = by_key[(2028, 1, "MIA")]
     check("legacy: preserved nominal owner holds a claim",
           ownership.team_holds_claim(p, p["conveyance"]["owner"], store))
 

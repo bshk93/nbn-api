@@ -126,6 +126,26 @@ def main():
     check("DAL keeps its own pick (worse than PHI's leftover)",
           r_b.get((2027, 1, "DAL")), "DAL")
 
+    print("\n2027 PHX/OKC/LAC/DET/GSW cascade (Trade 42 + Trade 74 + Trade 83):")
+    r_c = resolver.resolve_all(store, {(2027, 1, "OKC"): 3, (2027, 1, "LAC"): 20,
+                                       (2027, 1, "DET"): 10, (2027, 1, "GSW"): 15})
+    check("OKC best overall -> PHX takes it", r_c.get((2027, 1, "OKC")), "PHX")
+    check("DET (10) better than LAC's leftover (20) -> LAC takes DET's pick",
+          r_c.get((2027, 1, "DET")), "LAC")
+    check("GSW (15) better than LAC's leftover (20) -> DET takes GSW's pick",
+          r_c.get((2027, 1, "GSW")), "DET")
+    check("LAC's own leftover ends up with GSW (worst of the whole chain)",
+          r_c.get((2027, 1, "LAC")), "GSW")
+    r_d = resolver.resolve_all(store, {(2027, 1, "OKC"): 18, (2027, 1, "LAC"): 2,
+                                       (2027, 1, "DET"): 25, (2027, 1, "GSW"): 9})
+    check("LAC best overall -> PHX takes it", r_d.get((2027, 1, "LAC")), "PHX")
+    check("OKC's leftover (18) better than DET (25) -> LAC takes OKC's pick",
+          r_d.get((2027, 1, "OKC")), "LAC")
+    check("GSW (9) better than DET's leftover (25) -> DET takes GSW's pick",
+          r_d.get((2027, 1, "GSW")), "DET")
+    check("DET's own leftover ends up with GSW (worst of the whole chain)",
+          r_d.get((2027, 1, "DET")), "GSW")
+
     print()
     if FAILS:
         print(f"FAILED: {FAILS}")
