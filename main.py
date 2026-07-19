@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import auth, players, roster_picks, transactions, boxscores, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, discord
+from routers import auth, players, roster_picks, transactions, boxscores, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, discord, picks_preview
 from routers.picks_scheduler import start_picks_horizon_scheduler
 
 logging.basicConfig(
@@ -36,6 +36,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(players.router)
 app.include_router(roster_picks.router)
+app.include_router(picks_preview.router)   # additive: GET /api/picks-preview (conveyance model)
 app.include_router(transactions.router)
 app.include_router(boxscores.router)
 app.include_router(bets.router)
