@@ -89,13 +89,17 @@ def main():
     check("2030 MIL shares the same group_id as 2030 NOP (same chain)",
           proj((2030, 1, "MIL"))["group_id"], proj((2030, 1, "NOP"))["group_id"])
 
-    # 5. legacy -> nominal owner preserved from the CSV. Uses the 2028
-    # SAC/DAL/MIA/MEM/NYK/CHA cluster -- the 2027 DET cascade this used to
-    # test was resolved out of legacy 2026-07-19, see curated.py.
-    check("2028 MIA legacy owner preserved", proj((2028, 1, "MIA"))["owner"], "SAC")
-    check("2028 MIA legacy field flags it, with the real reason",
-          proj((2028, 1, "MIA"))["legacy"],
-          {"reason": "2028 SAC/DAL/MIA/MEM/NYK/CHA sequential swap-of-swaps cluster"})
+    # 5. legacy -> nominal owner preserved from the CSV. Synthetic node: as
+    # of 2026-07-19 all 6 real legacy picks have been resolved to real
+    # structure (see curated.py), so a real example would only be
+    # transient -- this is deliberately not tied to live data.
+    legacy_pick = {"year": 2099, "round": 1, "orig": "ATL", "pick": None, "player": None,
+                  "notes": "", "frozen": False, "frozen_reason": "",
+                  "conveyance": {"type": "legacy", "reason": "test reason", "owner": "BOS"}}
+    legacy_proj = projection.project_to_flat(legacy_pick, store)
+    check("synthetic legacy owner preserved", legacy_proj["owner"], "BOS")
+    check("synthetic legacy field flags it, with the real reason",
+          legacy_proj["legacy"], {"reason": "test reason"})
     check("settled non-legacy pick has null legacy field",
           proj((2029, 1, "ATL"))["legacy"], None)
 

@@ -44,21 +44,29 @@ def _protected_flat(node: dict, orig: str) -> dict:
     return {"owner": "|".join(teams), "protected": None}
 
 
-def _swap_candidates(node: dict, store: dict) -> list[str]:
+def _swap_candidates(node: dict, store: dict, pick: dict | None = None) -> list[str]:
+    """Named priority teams, plus — only when `pick` is itself one of the
+    group's plain (non-dynamic) members and could rank beyond the named
+    priority — that SAME pick's own team as a fallback candidate.
+
+    Deliberately does NOT union in every other member's possible origs: a
+    ranked group can have several members, but a given pick's own row only
+    ever ends up with a named priority team or, failing that, its own orig
+    — never a different member's fallback identity (e.g. in a 3-way group
+    ranking {DAL/CHA feeder output, SAC/MIA feeder output, PHX's own} with
+    priority [MIA, SAC], PHX's own pick can only end up with MIA, SAC, or
+    PHX — never CHA or DAL, even though those are "possible" for a
+    *different* member of the same group)."""
     group = (store or {}).get("swap_groups", {}).get(node["group"], {})
     priority = group.get("priority", [])
     named = _distinct(t for t in priority if isinstance(t, str))
     members = group.get("members", [])
-    if len(members) > len(priority):
-        # rank(s) beyond the named priority default to staying with whoever
-        # originated them (see model.validate_swap_group) — since which
-        # specific member ends up at that rank isn't knowable pre-draft,
-        # include every team that could possibly land there rather than
-        # silently omitting a real possibility.
-        fallback = set()
-        for m in members:
-            fallback |= model.possible_origs(m, store)
-        named = _distinct(named + sorted(fallback))
+    if pick is not None and len(members) > len(priority):
+        this_member = next((m for m in members if model.is_pick_ref(m)
+                            and m["year"] == pick["year"] and m["round"] == pick["round"]
+                            and m["orig"] == pick["orig"]), None)
+        if this_member is not None:
+            named = _distinct(named + sorted(model.possible_origs(this_member, store)))
     return named
 
 
@@ -119,7 +127,7 @@ def nominal_owner(pick: dict, store: dict | None = None) -> str:
     if t == "protected":
         return _protected_flat(node, pick["orig"])["owner"]
     if t == "swap":
-        return "|".join(_swap_candidates(node, store)) or pick["orig"]
+        return "|".join(_swap_candidates(node, store, pick)) or pick["orig"]
     if t == "binary":
         return "|".join(_chain_candidates(node, store)) or pick["orig"]
     if t == "legacy":

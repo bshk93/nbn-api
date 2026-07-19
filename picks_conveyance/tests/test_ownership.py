@@ -49,33 +49,46 @@ def main():
         check(f"binary chain: {team} holds a claim", holds((2030, 1, "NOP"), team))
     check("binary chain: unrelated team does not", not holds((2030, 1, "NOP"), "BOS"))
 
-    # legacy (2028 SAC/DAL/MIA/MEM/NYK/CHA cluster -- the 2027 DET cascade this
-    # used to test was resolved out of legacy 2026-07-19, see curated.py)
-    p = by_key[(2028, 1, "MIA")]
+    # legacy -- synthetic node, since as of 2026-07-19 all 6 real legacy
+    # picks have been resolved to real structure (see curated.py); a real
+    # example would only be transient, so this is deliberately not tied to
+    # live data.
+    legacy_pick = {"year": 2099, "round": 1, "orig": "ATL",
+                  "conveyance": {"type": "legacy", "reason": "test", "owner": "BOS"}}
     check("legacy: preserved nominal owner holds a claim",
-          ownership.team_holds_claim(p, p["conveyance"]["owner"], store))
+          ownership.team_holds_claim(legacy_pick, "BOS", store))
+    check("legacy: unrelated team does not",
+          not ownership.team_holds_claim(legacy_pick, "MIA", store))
 
     # ranked swap group (priority shorter than members): list_leaves must
-    # surface a synthetic fallback leaf per team that could land at the
-    # unnamed rank, not just the named priority slots -- otherwise a team
-    # that could end up keeping its own pick wouldn't show up as holding
-    # any claim at all.
+    # surface a fallback leaf for the team that could end up keeping ITS OWN
+    # pick at the unnamed rank -- but ONLY that specific member's own team,
+    # never a *different* member's fallback identity. SAC's own row can only
+    # ever end up owned by MIA, SAC, or (if it's the unranked one) SAC
+    # itself -- never DAL or PHX, even though DAL/PHX are "possible" for
+    # their OWN rows in the same group.
     synth_store = {"swap_groups": {"rg_test": {
         "members": [{"year": 2028, "round": 1, "orig": "SAC"},
                    {"year": 2028, "round": 1, "orig": "DAL"},
                    {"year": 2028, "round": 1, "orig": "PHX"}],
         "priority": ["MIA", "SAC"],
     }}}
-    synth_pick = {"year": 2028, "round": 1, "orig": "SAC",
-                 "conveyance": {"type": "swap", "id": "x", "group": "rg_test"}}
-    leaves = ownership.list_leaves(synth_pick, synth_store)
-    check("ranked group: named priority leaves present (MIA, SAC)",
-          {"MIA", "SAC"}.issubset({l["team"] for l in leaves}))
-    check("ranked group: fallback leaves cover every member's own team too",
-          {"SAC", "DAL", "PHX"}.issubset({l["team"] for l in leaves}))
-    check("ranked group: DAL/PHX hold a claim via the fallback leaf",
-          ownership.team_holds_claim(synth_pick, "DAL", synth_store)
-          and ownership.team_holds_claim(synth_pick, "PHX", synth_store))
+    sac_pick = {"year": 2028, "round": 1, "orig": "SAC",
+               "conveyance": {"type": "swap", "id": "x", "group": "rg_test"}}
+    dal_pick = {"year": 2028, "round": 1, "orig": "DAL",
+               "conveyance": {"type": "swap", "id": "x", "group": "rg_test"}}
+    sac_leaves = ownership.list_leaves(sac_pick, synth_store)
+    check("ranked group: SAC's row shows the named priorities (MIA, SAC)",
+          {"MIA", "SAC"}.issubset({l["team"] for l in sac_leaves}))
+    check("ranked group: SAC's row does NOT show DAL/PHX's fallback identity",
+          {"DAL", "PHX"}.isdisjoint({l["team"] for l in sac_leaves}))
+    check("ranked group: DAL does not hold a claim on SAC's own row",
+          not ownership.team_holds_claim(sac_pick, "DAL", synth_store))
+    dal_leaves = ownership.list_leaves(dal_pick, synth_store)
+    check("ranked group: DAL's own row includes its own fallback",
+          "DAL" in {l["team"] for l in dal_leaves})
+    check("ranked group: DAL holds a claim on its own row's fallback",
+          ownership.team_holds_claim(dal_pick, "DAL", synth_store))
 
     print()
     if FAILS:

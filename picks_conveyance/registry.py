@@ -461,6 +461,7 @@ def apply_registry(store: dict) -> dict:
     """Merge the persistent registry into a seeded store — the runtime
     replacement for curated.apply_curated. Same override semantics (skips
     already-drafted picks; see curated.py's set_node docstring)."""
+    from . import model
     reg = load_registry()
     store.setdefault("swap_groups", {})
     store.setdefault("binary_swaps", {})
@@ -486,6 +487,12 @@ def apply_registry(store: dict) -> dict:
     for gid, g in reg["swap_groups"].items():
         store["swap_groups"][gid] = g
         for m in g["members"]:
+            if not model.is_pick_ref(m):
+                continue   # dynamic member (output-ref into a binary_swap
+                          # chain) -- its underlying pick's base conveyance
+                          # is tagged "binary" by whichever chain it
+                          # actually belongs to (see the binary_chains loop
+                          # below), not "swap" by this group
             set_node((m["year"], m["round"], m["orig"]),
                      {"type": "swap", "id": f"s_{gid}", "group": gid})
 

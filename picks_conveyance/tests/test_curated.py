@@ -67,9 +67,13 @@ def main():
     owners = resolver.resolve_all(store, pos)
 
     # 3. every contingent curated pick must resolve; every legacy pick must not
+    # (a swap group member can be a dynamic output-ref rather than a fixed
+    # pick -- its underlying pick is already covered via CHAIN_MEMBERS, so
+    # only plain pick-ref members need adding here)
     contingent = (list(curated.PROTECTED)
                   + [(m["year"], m["round"], m["orig"])
-                     for g in curated.SWAP_GROUPS.values() for m in g["members"]]
+                     for g in curated.SWAP_GROUPS.values() for m in g["members"]
+                     if "orig" in m]
                   + [k for ks in curated.CHAIN_MEMBERS.values() for k in ks])
     unresolved = [k for k in contingent if k not in owners]
     if unresolved:
@@ -145,6 +149,34 @@ def main():
           r_d.get((2027, 1, "GSW")), "DET")
     check("DET's own leftover ends up with GSW (worst of the whole chain)",
           r_d.get((2027, 1, "DET")), "GSW")
+
+    print("\n2028 SAC/DAL/MIA/PHX/CHA cluster (Trades 53/31, 15/3/28, manual edit):")
+    r_e = resolver.resolve_all(store, {(2028, 1, "DAL"): 20, (2028, 1, "CHA"): 5,
+                                       (2028, 1, "SAC"): 8, (2028, 1, "MIA"): 25,
+                                       (2028, 1, "PHX"): 3})
+    check("feeder: CHA-origin (5) beats DAL's own (20) -> MIL takes CHA-origin",
+          r_e.get((2028, 1, "CHA")), "MIL")
+    check("feeder: SAC's own (8) beats MIA-origin (25) -> CHA takes MIA-origin",
+          r_e.get((2028, 1, "MIA")), "CHA")
+    check("3-way: PHX (3) best overall -> MIA takes it", r_e.get((2028, 1, "PHX")), "MIA")
+    check("3-way: SAC's own (8) 2nd -> SAC keeps it", r_e.get((2028, 1, "SAC")), "SAC")
+    check("3-way: DAL's own (20) worst, no named claimant -> stays DAL",
+          r_e.get((2028, 1, "DAL")), "DAL")
+    r_f = resolver.resolve_all(store, {(2028, 1, "DAL"): 4, (2028, 1, "CHA"): 18,
+                                       (2028, 1, "SAC"): 22, (2028, 1, "MIA"): 6,
+                                       (2028, 1, "PHX"): 30})
+    check("feeder: DAL's own (4) beats CHA-origin (18) -> MIL takes DAL's own",
+          r_f.get((2028, 1, "DAL")), "MIL")
+    # Note: the 3-way ranked group's own assignment for its dynamic members
+    # runs after the feeder chain and correctly overwrites it (same ordering
+    # as test_resolver.py's dynamic-member test) -- only the final merged
+    # value is checked, not an intermediate feeder-only snapshot.
+    check("3-way: MIA-origin (6, held by SAC after the feeder) best overall -> MIA takes it",
+          r_f.get((2028, 1, "MIA")), "MIA")
+    check("3-way: CHA's own (18, worse-of-feeder-A) 2nd -> SAC takes it",
+          r_f.get((2028, 1, "CHA")), "SAC")
+    check("3-way: PHX's own (30) worst, no named claimant -> stays PHX",
+          r_f.get((2028, 1, "PHX")), "PHX")
 
     print()
     if FAILS:

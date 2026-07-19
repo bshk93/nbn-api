@@ -82,6 +82,23 @@ SWAP_GROUPS = {
                         "priority": ["HOU", "IND"],
                         "txn_ids": [{"id": "5c8d8e94e26d940a", "date": "2026-02-06"},   # Trade 73
                                    {"id": "c65f1a6c7036afd3", "date": "2026-02-03"}]},  # Trade 54
+    # Resolved out of LEGACY 2026-07-19: the 2028 SAC/DAL/MIA/PHX/CHA cluster's
+    # 3-way ranking -- "MIA receives best of SAC/DAL/PHX, SAC receives 2nd"
+    # (a "manual edit" entry, 2026-06-20). This is the general ranked-group
+    # case (priority shorter than members: whichever ends up 3rd has no named
+    # claimant and just stays with whoever originated it -- see
+    # model.validate_swap_group). Two of the three inputs are DYNAMIC, not
+    # fixed picks: they're the outputs of the c28 binary chain above (worked
+    # out with the owner: the SAC/MIA feeder swap resolves first, and
+    # whichever pick each team ends up holding from that then enters this
+    # 3-way alongside PHX's own).
+    "sg_c28_3way": {
+        "members": [{"ref": "c28_a", "output": "worse"},   # DAL's post-swap holding
+                   {"ref": "c28_b", "output": "better"},    # SAC's post-swap holding
+                   pk(2028, 1, "PHX")],
+        "priority": ["MIA", "SAC"],
+        "txn_ids": [{"id": "8685c0dfc2717083", "date": "2026-06-20"}],
+    },
 }
 
 
@@ -182,6 +199,29 @@ BINARY_CHAINS = {
             "DET", "GSW",
             txn_ids=[{"id": "eefc5f995ce91165", "date": "2024-02-08"}]),  # Trade 83
     ],
+    # Partially resolved out of LEGACY 2026-07-19: the two feeder comparisons
+    # of the 2028 SAC/DAL/MIA/PHX/CHA cluster (the 3-way ranking itself is a
+    # SWAP_GROUPS entry below, sg_c28_3way -- these two nodes just feed it
+    # dynamic inputs). Each is its own clean 2-team swap:
+    #   c28_a: DAL's own vs the CHA-origin pick DAL already held -> MIL takes
+    #     the better, DAL keeps the worse (Trade 53 2026-02-02 granted NYK
+    #     this swap right; Trade 31 2026-07-10 explicitly "restor[ed] the
+    #     swap grant from Trade 53 that was not persisted in SWAP_OWNER",
+    #     moving it from NYK to MIL).
+    #   c28_b: SAC's own vs a MIA-origin pick -> SAC takes the better, CHA
+    #     keeps the worse (Trade 15 2024-07-01 gave SAC swap rights over
+    #     MIA's pick; Trade 3 2025-06-18, the De'Aaron Fox deal, sent that
+    #     same MIA-origin pick on to MIN; Trade 28 2025-07-26 sent it again,
+    #     MIN->CHA, where it sits today).
+    "c28": [
+        _bs("c28_a", pk(2028, 1, "DAL"), pk(2028, 1, "CHA"), "MIL", "DAL",
+            txn_ids=[{"id": "978556774e578813", "date": "2026-02-02"},   # Trade 53
+                     {"id": "8f288314921b0603", "date": "2026-07-10"}]),  # Trade 31
+        _bs("c28_b", pk(2028, 1, "SAC"), pk(2028, 1, "MIA"), "SAC", "CHA",
+            txn_ids=[{"id": "9c36669e3ebcb5c4", "date": "2024-07-01"},    # Trade 15
+                     {"id": "c56e2797b4a7468f", "date": "2025-06-18"},    # Trade 3
+                     {"id": "18ea40fc05533bfe", "date": "2025-07-26"}]),  # Trade 28
+    ],
 }
 # pickkeys whose owner each chain decides (for display markers)
 CHAIN_MEMBERS = {
@@ -191,6 +231,7 @@ CHAIN_MEMBERS = {
     "nop29": [(2029, 1, t) for t in ("NOP", "BOS", "HOU")],
     "pctd":  [(2027, 1, t) for t in ("PHI", "TOR", "DAL")],
     "pold":  [(2027, 1, t) for t in ("OKC", "LAC", "DET", "GSW")],
+    "c28":   [(2028, 1, t) for t in ("DAL", "CHA", "SAC", "MIA")],
 }
 
 
@@ -212,18 +253,18 @@ LADDERS = [
 
 
 # --- legacy (unmodelable; resolver skips, prose kept) ----------------------
-# 2031 HOU/MIN, 2027 PHI/CHA/TOR/DAL, and 2027 PHX/OKC/LAC/DET/GSW all
-# resolved out 2026-07-19 (real transactions found for every leg, see
-# SWAP_GROUPS/BINARY_CHAINS above). Only the 2028 SAC/DAL/MIA/MEM/NYK/CHA
-# cluster remains: its only found transaction record (8685c0dfc2717083)
-# captured a plain 2-team SAC/MIA trade, not the 3-way "MIA gets best of
-# SAC/DAL/PHX" swap its own description claims, and no thread to
-# MEM/NYK/CHA was found at all -- don't guess without more digging or
-# committee confirmation.
-LEGACY = {
-    (2028, 1, "MIA"): "2028 SAC/DAL/MIA/MEM/NYK/CHA sequential swap-of-swaps cluster",
-    (2028, 1, "CHA"): "part of 2028 SAC/DAL/MIA/MEM/NYK/CHA cluster (NYK swaps into CHA)",
-}
+# All 6 originally-legacy deals resolved out 2026-07-19: 2031 HOU/MIN, 2027
+# PHI/CHA/TOR/DAL, 2027 PHX/OKC/LAC/DET/GSW, and finally the 2028
+# SAC/DAL/MIA/MEM/NYK/CHA cluster (see c28 chain + sg_c28_3way above) --
+# turned out to be two clean 2-team swaps (DAL-vs-CHA-origin benefiting MIL,
+# SAC-vs-MIA-origin benefiting SAC) feeding into a 3-way ranked group
+# (MIA best, SAC 2nd). MEM and NYK, despite being named in the cluster's
+# original one-line summary, never actually held a still-live entangled
+# asset here: MEM's own 2028 1st was clean the whole time, and NYK's
+# transient swap-right stake (Trade 53) was explicitly superseded by Trade 31
+# before it ever mattered. Empty for now -- a new legacy tag only gets added
+# here again if a future deal turns out too tangled to model confidently.
+LEGACY: dict = {}
 
 
 def _tup_bands(bands):
@@ -260,6 +301,11 @@ def apply_curated(store: dict) -> dict:
     for gid, g in SWAP_GROUPS.items():
         store["swap_groups"][gid] = g
         for m in g["members"]:
+            if "orig" not in m:
+                continue   # dynamic member (output-ref into a binary_swap
+                          # chain) -- its underlying pick's base conveyance
+                          # is tagged "binary" by whichever chain it
+                          # actually belongs to, not "swap" by this group
             set_node((m["year"], m["round"], m["orig"]),
                      {"type": "swap", "id": f"s_{gid}", "group": gid})
 

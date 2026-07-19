@@ -85,23 +85,26 @@ def list_leaves(pick: dict, store: dict) -> list[dict]:
                 leaf["txn_ids"] = group.get("txn_ids", [])
             out.extend(leaves)
         if len(members) > len(priority):
-            # rank(s) beyond the named priority default to staying with
-            # whoever originated them — synthesize a leaf per team that
-            # could possibly land there (see _swap_candidates' twin in
-            # projection.py; which specific member ends up at this rank
-            # isn't knowable pre-draft, so this isn't addressable by a real
-            # leaf_id today, just surfaced for display).
+            # This pick's own row might be the one ranked beyond the named
+            # priority, in which case it just stays with its own team —
+            # synthesize that ONE fallback leaf (only if THIS pick is
+            # itself a plain, non-dynamic member; a different member's
+            # fallback identity is never a real possibility for this row —
+            # see _swap_candidates' twin restriction in projection.py).
+            # Not addressable by a real leaf_id today, just shown for
+            # display.
             from . import model
-            fallback = set()
-            for m in members:
-                fallback |= model.possible_origs(m, store)
-            for team in sorted(fallback):
-                out.append({
-                    "leaf_id": f"{prefix}:swap:{len(priority)}:{team}",
-                    "team": team,
-                    "description": "swap priority (stays with original team)",
-                    "txn_ids": group.get("txn_ids", []),
-                })
+            this_member = next((m for m in members if model.is_pick_ref(m)
+                                and m["year"] == pick["year"] and m["round"] == pick["round"]
+                                and m["orig"] == pick["orig"]), None)
+            if this_member is not None:
+                for team in sorted(model.possible_origs(this_member, store)):
+                    out.append({
+                        "leaf_id": f"{prefix}:swap:{len(priority)}:{team}",
+                        "team": team,
+                        "description": "swap priority (stays with original team)",
+                        "txn_ids": group.get("txn_ids", []),
+                    })
 
     elif t == "binary":
         sids = (store or {}).get("chains", {}).get(node["chain"], [])
