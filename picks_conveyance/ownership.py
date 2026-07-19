@@ -75,13 +75,33 @@ def list_leaves(pick: dict, store: dict) -> list[dict]:
 
     elif t == "swap":
         group = (store or {}).get("swap_groups", {}).get(node["group"], {})
-        for i, slot in enumerate(group.get("priority", [])):
+        priority = group.get("priority", [])
+        members = group.get("members", [])
+        for i, slot in enumerate(priority):
             label = "better" if i == 0 else "worse" if i == 1 else f"slot {i}"
             leaves = _expand_leaf(
                 slot, f"{prefix}:swap:{i}", f"swap priority ({label} pick)")
             for leaf in leaves:
                 leaf["txn_ids"] = group.get("txn_ids", [])
             out.extend(leaves)
+        if len(members) > len(priority):
+            # rank(s) beyond the named priority default to staying with
+            # whoever originated them — synthesize a leaf per team that
+            # could possibly land there (see _swap_candidates' twin in
+            # projection.py; which specific member ends up at this rank
+            # isn't knowable pre-draft, so this isn't addressable by a real
+            # leaf_id today, just surfaced for display).
+            from . import model
+            fallback = set()
+            for m in members:
+                fallback |= model.possible_origs(m, store)
+            for team in sorted(fallback):
+                out.append({
+                    "leaf_id": f"{prefix}:swap:{len(priority)}:{team}",
+                    "team": team,
+                    "description": "swap priority (stays with original team)",
+                    "txn_ids": group.get("txn_ids", []),
+                })
 
     elif t == "binary":
         sids = (store or {}).get("chains", {}).get(node["chain"], [])

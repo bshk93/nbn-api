@@ -65,14 +65,18 @@ def resolve_all(store: dict, positions: dict) -> dict:
                 out[pk] = owner
         # swap / binary_swap handled in later passes
 
-    # Pass 2: swap groups
+    # Pass 2: binary-swap chains (topological by operand dependency) -- run
+    # BEFORE swap groups, since a ranked swap group's member can be a dynamic
+    # reference to a chain's output (see _resolve_swap_group), not just a
+    # fixed pick; the chain must already be resolved for that lookup to work.
+    chain_owners, chain_memo = _resolve_binary_chains(binary_swaps, positions)
+    out.update(chain_owners)
+
+    # Pass 3: swap groups (may consume chain_memo for dynamic members)
     for gid, group in swap_groups.items():
-        assigned = _resolve_swap_group(group, positions)
+        assigned = _resolve_swap_group(group, positions, chain_memo)
         if assigned:
             out.update(assigned)
-
-    # Pass 3: binary-swap chains (topological by operand dependency)
-    out.update(_resolve_binary_chains(binary_swaps, positions))
 
     # Pass 4: protection ladders (multi-year chained protections)
     out.update(_resolve_ladders(store.get("ladders", []), positions, pick_nodes))
@@ -108,15 +112,50 @@ def _resolve_leaf(leaf, pos: int, positions: dict):
 
 # --- swap groups -----------------------------------------------------------
 
-def _resolve_swap_group(group: dict, positions: dict):
-    members = [key(m) for m in group["members"]]
+def _resolve_swap_group(group: dict, positions: dict, chain_memo: dict | None = None):
+    """Resolve a swap group's members, ranked by actual draft position.
+
+    A member is either a fixed pick ref, or an output ref
+    (`{"ref": sid, "output": "better"|"worse"}`) pointing at an earlier
+    binary_swap's result — `chain_memo` (from `_resolve_binary_chains`) is
+    where that lookup happens, so this can rank a *dynamic* input (e.g.
+    "whichever pick this team ended up with from an earlier swap")
+    alongside plain fixed picks. Returns None (deferred) if any member's
+    underlying pick isn't yet resolvable — either its position is unknown,
+    or (for an output-ref member) the chain it depends on hasn't resolved.
+
+    `priority` may be shorter than `members`: the best-ranked member goes to
+    `priority[0]`, next to `priority[1]`, and so on; any member ranked
+    beyond the end of `priority` has no named claimant and simply stays
+    with whoever originated it (the general "nobody said anything about
+    3rd place, so it's obviously unaffected" case). An explicit `None`
+    *within* `priority`'s range is different — a deliberate no-claim for
+    that specific rank — and still resolves to no assignment, same as
+    always.
+    """
+    chain_memo = chain_memo or {}
+    members = []
+    for m in group["members"]:
+        if model.is_pick_ref(m):
+            members.append(key(m))
+        elif model.is_output_ref(m):
+            sid = m["ref"]
+            resolved = chain_memo.get(sid)
+            if resolved is None:
+                return None               # dependency not yet resolved
+            members.append(resolved[m["output"]])
+        else:
+            raise ResolutionError(f"bad swap group member {m!r}")
     if any(m not in positions for m in members):
         return None                      # need every member's position
     ordered = sorted(members, key=lambda m: positions[m])   # best (lowest) first
     priority = group["priority"]
     result = {}
     for i, m in enumerate(ordered):
-        slot = priority[i] if i < len(priority) else None
+        if i >= len(priority):
+            result[m] = m[2]             # no named claimant -> stays with orig
+            continue
+        slot = priority[i]
         if slot is None:
             continue
         if isinstance(slot, str):
@@ -140,10 +179,14 @@ def _resolve_leaf_for_pick(node: dict, pick_key: tuple, positions: dict):
 
 # --- binary-swap chains ----------------------------------------------------
 
-def _resolve_binary_chains(binary_swaps: dict, positions: dict) -> dict:
+def _resolve_binary_chains(binary_swaps: dict, positions: dict) -> tuple[dict, dict]:
     """Evaluate binary_swap nodes in dependency order. Operands (a/b) drive the
     dataflow (pull); better_to/worse_to route outputs to terminal team owners.
-    Returns {pickkey: team} for outputs whose recipient is a team."""
+    Returns (owners, memo): `owners` is {pickkey: team} for outputs whose
+    recipient is a team; `memo` is {sid: {"better": pickkey, "worse": pickkey}
+    | None} for every evaluated node, exposed so a ranked swap group
+    (_resolve_swap_group) can use a chain's output as one of its own dynamic
+    members, instead of only fixed picks."""
     memo: dict = {}          # swap id -> {"better": pickkey, "worse": pickkey}
     owners: dict = {}
 
@@ -176,7 +219,7 @@ def _resolve_binary_chains(binary_swaps: dict, positions: dict) -> dict:
 
     for sid in binary_swaps:
         _eval(sid)
-    return owners
+    return owners, memo
 
 
 # --- protection ladders ----------------------------------------------------

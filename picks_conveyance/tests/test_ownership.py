@@ -55,6 +55,28 @@ def main():
     check("legacy: preserved nominal owner holds a claim",
           ownership.team_holds_claim(p, p["conveyance"]["owner"], store))
 
+    # ranked swap group (priority shorter than members): list_leaves must
+    # surface a synthetic fallback leaf per team that could land at the
+    # unnamed rank, not just the named priority slots -- otherwise a team
+    # that could end up keeping its own pick wouldn't show up as holding
+    # any claim at all.
+    synth_store = {"swap_groups": {"rg_test": {
+        "members": [{"year": 2028, "round": 1, "orig": "SAC"},
+                   {"year": 2028, "round": 1, "orig": "DAL"},
+                   {"year": 2028, "round": 1, "orig": "PHX"}],
+        "priority": ["MIA", "SAC"],
+    }}}
+    synth_pick = {"year": 2028, "round": 1, "orig": "SAC",
+                 "conveyance": {"type": "swap", "id": "x", "group": "rg_test"}}
+    leaves = ownership.list_leaves(synth_pick, synth_store)
+    check("ranked group: named priority leaves present (MIA, SAC)",
+          {"MIA", "SAC"}.issubset({l["team"] for l in leaves}))
+    check("ranked group: fallback leaves cover every member's own team too",
+          {"SAC", "DAL", "PHX"}.issubset({l["team"] for l in leaves}))
+    check("ranked group: DAL/PHX hold a claim via the fallback leaf",
+          ownership.team_holds_claim(synth_pick, "DAL", synth_store)
+          and ownership.team_holds_claim(synth_pick, "PHX", synth_store))
+
     print()
     if FAILS:
         print(f"FAILED: {FAILS}")

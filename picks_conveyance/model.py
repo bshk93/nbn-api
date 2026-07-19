@@ -79,6 +79,29 @@ def is_node(x) -> bool:
     return isinstance(x, dict) and x.get("type") in NODE_TYPES
 
 
+def possible_origs(ref, store: dict | None = None, _depth: int = 0) -> set[str]:
+    """The set of team abbreviations a swap-group member (or binary_swap
+    operand) could possibly resolve to, for pre-draft display purposes only
+    — never for resolution, which uses real positions instead. A plain pick
+    ref is just its own `orig`; a dynamic output ref (`{"ref": sid,
+    "output": ...}`) is the union of both of the referenced binary_swap's
+    operands' possible origs, walked recursively (an operand can itself be
+    another output ref, chained arbitrarily deep — same depth guard as
+    `validate`'s recursion, since a real store's chains are finite but this
+    walks a caller-supplied structure that isn't otherwise depth-checked)."""
+    if _depth > 32:
+        return set()
+    if is_pick_ref(ref):
+        return {ref["orig"]}
+    if is_output_ref(ref):
+        node = (store or {}).get("binary_swaps", {}).get(ref["ref"])
+        if not node:
+            return set()
+        return (possible_origs(node["a"], store, _depth + 1)
+                | possible_origs(node["b"], store, _depth + 1))
+    return set()
+
+
 # --- validation ------------------------------------------------------------
 
 def validate(node: dict, *, _depth: int = 0, _max_depth: int = 32) -> None:
@@ -178,15 +201,33 @@ def _validate_leaf(leaf, *, _depth: int, _max_depth: int) -> None:
 # get their own validators here rather than being folded into validate().
 
 def validate_swap_group(group: dict) -> None:
+    """A member is either a fixed pick ref, or an output ref
+    (`{"ref": binary_swap_id, "output": "better"|"worse"}`) pointing at an
+    earlier binary_swap's result — this is what lets a swap group rank a
+    *dynamic* input (e.g. "whichever pick team X ended up with from a prior
+    swap") alongside plain picks, rather than only fixed, known picks.
+
+    `priority` may be SHORTER than `members` — a ranked-N group, not just a
+    2-team swap: sorted by actual draft position, the best-ranked member
+    goes to `priority[0]`, the next to `priority[1]`, and so on. Any member
+    ranked beyond the end of `priority` has no named claimant and simply
+    stays with whoever originated it — this is the general "best goes to X,
+    2nd goes to Y, nobody said anything about 3rd so it's obviously
+    unaffected" case a 2-team-only swap group couldn't express."""
     members = group.get("members")
     if not isinstance(members, list) or not members:
         raise ConveyanceError("swap group requires a non-empty 'members' list")
     for m in members:
-        if not is_pick_ref(m):
-            raise ConveyanceError(f"swap group member must be a pick ref, got {m!r}")
+        if not (is_pick_ref(m) or is_output_ref(m)):
+            raise ConveyanceError(
+                f"swap group member must be a pick ref or output ref, got {m!r}")
     priority = group.get("priority")
     if not isinstance(priority, list) or not priority:
         raise ConveyanceError("swap group requires a non-empty 'priority' list")
+    if len(priority) > len(members):
+        raise ConveyanceError(
+            f"swap group priority list ({len(priority)}) can't be longer than "
+            f"its members list ({len(members)})")
     for slot in priority:
         if not (isinstance(slot, str) or is_node(slot)):
             raise ConveyanceError(f"priority slot must be a team or a node, got {slot!r}")

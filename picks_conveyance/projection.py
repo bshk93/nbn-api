@@ -46,7 +46,20 @@ def _protected_flat(node: dict, orig: str) -> dict:
 
 def _swap_candidates(node: dict, store: dict) -> list[str]:
     group = (store or {}).get("swap_groups", {}).get(node["group"], {})
-    return _distinct(t for t in group.get("priority", []) if isinstance(t, str))
+    priority = group.get("priority", [])
+    named = _distinct(t for t in priority if isinstance(t, str))
+    members = group.get("members", [])
+    if len(members) > len(priority):
+        # rank(s) beyond the named priority default to staying with whoever
+        # originated them (see model.validate_swap_group) — since which
+        # specific member ends up at that rank isn't knowable pre-draft,
+        # include every team that could possibly land there rather than
+        # silently omitting a real possibility.
+        fallback = set()
+        for m in members:
+            fallback |= model.possible_origs(m, store)
+        named = _distinct(named + sorted(fallback))
+    return named
 
 
 def _swap_owner_flat(node: dict, pick: dict, store: dict):
