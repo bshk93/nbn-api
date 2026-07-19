@@ -157,7 +157,8 @@ def _check_retrade_allowed(pick_key: tuple, asset, from_team: str,
 
 
 def _handle_pick_retrade(pick_key: tuple, from_team: str, to_team: str,
-                         conveyance_store, leaf_id: str | None = None) -> None:
+                         conveyance_store, leaf_id: str | None = None,
+                         txn_id: str | None = None, txn_date: str | None = None) -> None:
     """A pick with existing contingent structure (swap/protected/binary) is
     being re-traded with no new protection/swap_with supplied — update the
     registry so that structure reflects the new party instead of going stale
@@ -166,13 +167,17 @@ def _handle_pick_retrade(pick_key: tuple, from_team: str, to_team: str,
     actually blocks a trade when blocking is warranted; by the time this
     runs, the trade has already been decided to proceed. `leaf_id`, when the
     trade supplied one to disambiguate, is passed straight through so the
-    mutation targets that exact leaf."""
+    mutation targets that exact leaf. `txn_id`/`txn_date` get appended to the
+    mutated leaf's `txn_ids` (registry.handle_retrade) — otherwise a
+    re-traded leaf's tooltip would keep pointing at only its original
+    creating trade forever, silently wrong the moment it moves again."""
     try:
         node = _lookup_conveyance_node(pick_key, conveyance_store)
         if node is None:
             return
         from picks_conveyance import registry
-        registry.handle_retrade(pick_key, from_team, to_team, node, leaf_id=leaf_id)
+        registry.handle_retrade(pick_key, from_team, to_team, node, leaf_id=leaf_id,
+                                txn_id=txn_id, txn_date=txn_date)
     except Exception:
         logger.exception(f"picks_conveyance: retrade sync failed for {pick_key} "
                          "(flat OWNER write is unaffected; model may be stale "
@@ -1259,7 +1264,8 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
                         if asset.protection is None and asset.swap_with is None:
                             _handle_pick_retrade(pick_key, xfer.from_team,
                                                  xfer.to_team, conveyance_store,
-                                                 leaf_id=asset.leaf_id)
+                                                 leaf_id=asset.leaf_id,
+                                                 txn_id=txn_id, txn_date=txn_date)
                         if asset.ladder_protect_top is not None:
                             fallback_tuples = [
                                 (fb["year"], fb["round"], fb["orig"].upper())

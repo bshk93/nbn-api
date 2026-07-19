@@ -259,13 +259,21 @@ def _terminal_team(value):
 
 
 def _mutate_leaf_path(container: list, index_path: list, from_team: str,
-                      to_team: str) -> None:
+                      to_team: str, txn_entry: dict | None = None) -> None:
     """Recursively mutate the leaf at `index_path` within `container` (a
     protected `bands` list or a swap `priority` list — both are plain lists
     where element i's leaf value lives at `container[i]` for priority, or
     `container[i]["to"]` for bands; both are handled via `_leaf_slot` below).
     Verifies the current occupant matches `from_team` before mutating —
-    mismatch raises ValueError rather than mutating the wrong thing."""
+    mismatch raises ValueError rather than mutating the wrong thing.
+
+    `txn_entry` ({"id", "date"}), if given, is APPENDED (not replaced) to the
+    terminal band's `txn_ids` when that band is a dict (a protected band) —
+    the leaf's provenance is a chain (created by trade A, re-traded by trade
+    B, ...), not a single fact, and the tooltip already joins multiple linked
+    transactions. A swap priority slot is a bare team string, not a dict, so
+    it has nowhere to carry a per-slot stamp — the caller stamps the swap
+    GROUP itself instead (see handle_retrade)."""
     i, *rest = index_path
     get, set_ = _leaf_slot(container, i)
     value = get()
@@ -275,11 +283,15 @@ def _mutate_leaf_path(container: list, index_path: list, from_team: str,
             raise ValueError(f"leaf does not currently belong to "
                              f"{from_team!r} (found {value!r})")
         set_(to_team)
+        if txn_entry:
+            item = container[i]
+            if isinstance(item, dict):
+                item.setdefault("txn_ids", []).append(txn_entry)
         return
     if not (isinstance(value, dict) and value.get("type") == "protected"):
         raise ValueError("leaf_id path continues past a leaf that isn't a "
                          "nested protected node")
-    _mutate_leaf_path(value["bands"], rest, from_team, to_team)
+    _mutate_leaf_path(value["bands"], rest, from_team, to_team, txn_entry=txn_entry)
 
 
 def _leaf_slot(container: list, i: int):
@@ -292,7 +304,8 @@ def _leaf_slot(container: list, i: int):
 
 
 def handle_retrade(pick_key: tuple, from_team: str, to_team: str, node: dict,
-                   leaf_id: str | None = None) -> bool:
+                   leaf_id: str | None = None, txn_id: str | None = None,
+                   txn_date: str | None = None) -> bool:
     """A pick with an EXISTING conveyance structure is being re-traded — this
     trade supplied no new protection/swap_with, so `from_team` is conveying
     whatever claim it holds *within* that existing structure to `to_team`.
@@ -313,6 +326,13 @@ def handle_retrade(pick_key: tuple, from_team: str, to_team: str, node: dict,
     whatever level the leaf_id addresses, mirroring the read side's
     `ownership._expand_leaf`.
 
+    `txn_id`/`txn_date`, when given, get APPENDED to whatever `txn_ids` the
+    mutated band/group/chain-node already carries — a re-trade doesn't erase
+    the leaf's provenance, it extends it (created by trade A, re-traded by
+    trade B, ...), matching the tooltip's existing multi-txn join. Without
+    this, a re-traded leaf would keep showing only its original creating
+    trade forever, silently wrong the moment it moves again.
+
     Returns True if the registry was changed, False if there was nothing to
     update (a `settled` pick, or a leaf_id that matched nothing). Raises
     RetradeBlocked for `legacy` (frozen from re-trade by design). Raises
@@ -328,6 +348,8 @@ def handle_retrade(pick_key: tuple, from_team: str, to_team: str, node: dict,
         raise RetradeBlocked(
             f"{pick_key} is a legacy pick (frozen from re-trade until "
             f"manually converted to real structure): {node.get('reason')}")
+
+    txn_entry = {"id": txn_id, "date": txn_date} if txn_id else None
 
     with _lock:
         reg = load_registry()
@@ -346,7 +368,7 @@ def handle_retrade(pick_key: tuple, from_team: str, to_team: str, node: dict,
                 spec = reg["protected"].get(_kstr(pick_key))
                 if spec:
                     _mutate_leaf_path(spec["bands"], parsed["index_path"],
-                                      from_team, to_team)
+                                      from_team, to_team, txn_entry=txn_entry)
                     changed = True
                     model.validate({"type": "protected", "id": "tmp", **spec})
 
@@ -355,6 +377,8 @@ def handle_retrade(pick_key: tuple, from_team: str, to_team: str, node: dict,
                 if group:
                     _mutate_leaf_path(group["priority"], parsed["index_path"],
                                       from_team, to_team)
+                    if txn_entry:
+                        group.setdefault("txn_ids", []).append(txn_entry)
                     changed = True
                     model.validate_swap_group(group)
 
@@ -369,6 +393,8 @@ def handle_retrade(pick_key: tuple, from_team: str, to_team: str, node: dict,
                             f"leaf_id {leaf_id!r}: {slot} is "
                             f"{target.get(slot)!r}, not {from_team!r}")
                     target[slot] = to_team
+                    if txn_entry:
+                        target.setdefault("txn_ids", []).append(txn_entry)
                     changed = True
                     model.validate_binary_chain(chain_nodes)
 
@@ -388,6 +414,8 @@ def handle_retrade(pick_key: tuple, from_team: str, to_team: str, node: dict,
                         f"without a leaf_id")
                 if matches:
                     matches[0]["to"] = to_team
+                    if txn_entry:
+                        matches[0].setdefault("txn_ids", []).append(txn_entry)
                     changed = True
                     model.validate({"type": "protected", "id": "tmp", **spec})
 
@@ -402,6 +430,8 @@ def handle_retrade(pick_key: tuple, from_team: str, to_team: str, node: dict,
                 if count == 1:
                     idx = group["priority"].index(from_team)
                     group["priority"][idx] = to_team
+                    if txn_entry:
+                        group.setdefault("txn_ids", []).append(txn_entry)
                     changed = True
                     model.validate_swap_group(group)
 
@@ -417,6 +447,8 @@ def handle_retrade(pick_key: tuple, from_team: str, to_team: str, node: dict,
             if occurrences:
                 n, slot = occurrences[0]
                 n[slot] = to_team
+                if txn_entry:
+                    n.setdefault("txn_ids", []).append(txn_entry)
                 changed = True
                 model.validate_binary_chain(chain_nodes)
 
