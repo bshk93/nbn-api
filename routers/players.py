@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from .constants import (
-    DATA_DIR, PLAYER_BIOS_FILE, OVR_FILE, VALID_TEAMS,
+    DATA_DIR, PLAYER_BIOS_FILE, OVR_FILE, ATTRIBUTES_FILE, VALID_TEAMS,
     _ovr_lock, CURATOR_FIELDS, BIO_REWARD_FIELDS, BIO_REWARDS_FILE, _bio_rewards_lock,
 )
 from .storage import _load_json, _save_json, read_csv, log_write
@@ -94,6 +94,7 @@ class PlayerBio(BaseModel):
     draft_year: Optional[int] = None
     draft_round: Optional[int] = None
     draft_pick: Optional[int] = None
+    draft_team: Optional[str] = None
     photo_url: str = ""
     height: str = ""
     weight: Optional[int] = None
@@ -201,7 +202,12 @@ def update_player(slug: str, body: PlayerBio, info: dict = Depends(require_any_r
         bios[slug] = existing
         new_bio = existing
     else:
-        bios[slug] = body.model_dump()
+        # Merge onto the existing record instead of replacing it wholesale.
+        # Any key the PlayerBio model doesn't declare (e.g. draft_team, stamped
+        # directly by the draft-pick transaction) or that this particular caller
+        # simply didn't include in its JSON body must survive untouched — a full
+        # replace has silently wiped fields like this before (jersey_number).
+        bios[slug] = {**old_bio, **body.model_dump(exclude_unset=True)}
         new_bio = bios[slug]
     save_player_bios(bios)
     log_write(info, f"PUT players/{slug} ({body.name})")
@@ -298,6 +304,44 @@ def post_ovr_batch(body: list[OvrBatchEntry], info: dict = Depends(require_admin
         save_ovr(history)
     log_write(info, f"POST ovr/batch — {len(body)} entries")
     return {"ok": True, "count": len(body)}
+
+
+# ── Attribute routes ──────────────────────────────────────────────────────────
+# player-attributes.json is written by build/scrape_2k_attributes.py (2kratings.com
+# scrape), not through this API — these routes are read-only.
+# Stored as {slug: [snapshot, ...]} (append-only, oldest first, mirrors
+# ovr-history.json) — a new snapshot is only appended when the scrape detects
+# a real change, so "current" is always the last entry in the list.
+
+def load_attributes() -> dict:
+    return _load_json(ATTRIBUTES_FILE, {})
+
+
+@router.get("/api/attributes")
+def get_attributes():
+    return load_attributes()
+
+
+@router.get("/api/attributes/current")
+def get_attributes_current():
+    history = load_attributes()
+    return {slug: entries[-1] for slug, entries in history.items() if entries}
+
+
+@router.get("/api/attributes/{slug}")
+def get_player_attributes(slug: str):
+    entries = load_attributes().get(slug)
+    if not entries:
+        raise HTTPException(status_code=404, detail="No attribute data for this player")
+    return entries[-1]
+
+
+@router.get("/api/attributes/{slug}/history")
+def get_player_attributes_history(slug: str):
+    entries = load_attributes().get(slug)
+    if not entries:
+        raise HTTPException(status_code=404, detail="No attribute data for this player")
+    return entries
 
 
 # ── Team map ──────────────────────────────────────────────────────────────────

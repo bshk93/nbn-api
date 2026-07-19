@@ -395,7 +395,14 @@ DEFAULT_SEASON_STATE: dict = {
     "hard_cap": None, "hard_cap_reason": "", "mle_used": 0, "bae_used": False, "mle_type": None,
 }
 
-CAP_RANK = {None: 0, "first_apron": 1, "second_apron": 2}
+# Ranked by actual restrictiveness (dollar ceiling), not apron number — First
+# Apron ($209M-ish) is the *tighter* cap, Second Apron ($221M-ish) the looser
+# one. _maybe_set_hard_cap only ever tightens, so first_apron must outrank
+# second_apron or a later second-apron trigger would loosen an existing
+# first-apron lock, contradicting "effective ceiling is the lowest of any
+# triggered apron lock" (rulebook § 1.4) and the "for the remainder of the
+# season" language on the NTMLE/TMLE triggers (§ 3.3, § 3.4).
+CAP_RANK = {None: 0, "second_apron": 1, "first_apron": 2}
 
 
 def load_team_state() -> dict:

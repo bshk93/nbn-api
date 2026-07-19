@@ -16,6 +16,7 @@ Setup (one-time, see register_discord_commands.py and docs):
   * Point the portal's "Interactions Endpoint URL" at /api/discord/interactions.
 """
 
+import colorsys
 import csv
 import io
 import json
@@ -30,7 +31,8 @@ from fastapi import APIRouter, Request, Response
 from nacl.exceptions import BadSignatureError
 from nacl.signing import VerifyKey
 
-from .constants import DATA_DIR  # NBS_DATA_DIR; holds raw playoff box scores
+from .constants import DATA_DIR, ATTRIBUTES_FILE, PLAYER_BIOS_FILE  # NBS_DATA_DIR; holds raw playoff box scores
+from .storage import _load_json, _current_league_year
 from .auth import load_members, save_members
 from .tips import perform_tip, TipError
 from .invest import get_all_holdings, compute_member_pnl  # net worth + per-stock P&L
@@ -152,21 +154,24 @@ def _display(player_field: str) -> str:
     return player_field
 
 
-def resolve_player(query: str):
+def resolve_player(query: str, players: dict[str, str] | None = None, usage: str = "/stats player:<name>"):
     """Resolve a free-form name to (slug, display_name), or return a dict of
-    suggestions / not-found info. Only players who actually have stats rows are
-    considered, since those are the only ones we can show."""
-    rows = _load_csv(SEASONS_CSV)
-    # slug -> display name (one entry per player)
-    players: dict[str, str] = {}
-    for r in rows:
-        slug = (r.get("SLUG") or "").strip()
-        if slug and slug not in players:
-            players[slug] = _display(r.get("PLAYER", ""))
+    suggestions / not-found info. By default, only players who actually have
+    stats rows are considered (those are the only ones /stats et al. can show);
+    pass a different slug->display_name universe (e.g. attribute data) to
+    resolve against that instead."""
+    if players is None:
+        rows = _load_csv(SEASONS_CSV)
+        # slug -> display name (one entry per player)
+        players = {}
+        for r in rows:
+            slug = (r.get("SLUG") or "").strip()
+            if slug and slug not in players:
+                players[slug] = _display(r.get("PLAYER", ""))
 
     q = _norm(query)
     if not q:
-        return {"error": "Usage: `/stats player:<name>`"}
+        return {"error": f"Usage: `{usage}`"}
 
     # Index normalized name + slug -> slug.
     by_name: dict[str, str] = {}
@@ -409,6 +414,211 @@ def career_response(query: str) -> dict:
                           _career_block("Playoffs", po_rows)) if b]
     return _player_embed(slug, name, reg_rows or po_rows,
                          "\n\n".join(blocks), "NBN career")
+
+
+# ── /ratings ──────────────────────────────────────────────────────────────────
+# Backed by player-attributes.json (scraped from 2kratings.com by
+# build/scrape_2k_attributes.py in the site repo), keyed by NBN slug ->
+# a list of snapshots (append-only, current = last entry). Mirrors the
+# category grouping used on the player profile page (players/index.html).
+
+_ATTR_CATEGORIES = [
+    ("Shooting", ["three_point_shot", "mid_range_shot", "close_shot", "free_throw", "shot_iq", "offensive_consistency"]),
+    ("Finishing", ["layup", "driving_dunk", "standing_dunk", "post_hook", "post_fade", "post_control", "draw_foul", "hands"]),
+    ("Athleticism", ["speed", "strength", "agility", "vertical", "hustle", "stamina", "overall_durability"]),
+    ("Playmaking", ["ball_handle", "speed_with_ball", "pass_accuracy", "pass_vision", "pass_iq"]),
+    ("Defense & Rebounding", ["block", "steal", "pass_perception", "interior_defense", "perimeter_defense",
+                              "defensive_consistency", "help_defense_iq", "defensive_rebound", "offensive_rebound"]),
+    ("Intangibles", ["intangibles"]),
+]
+
+_ATTR_LABELS = {
+    "three_point_shot": "3PT Shot", "mid_range_shot": "Mid-Range", "close_shot": "Close Shot",
+    "free_throw": "Free Throw", "shot_iq": "Shot IQ", "offensive_consistency": "Off. Consistency",
+    "layup": "Layup", "driving_dunk": "Driving Dunk", "standing_dunk": "Standing Dunk",
+    "post_hook": "Post Hook", "post_fade": "Post Fade", "post_control": "Post Control",
+    "draw_foul": "Draw Foul", "hands": "Hands",
+    "speed": "Speed", "strength": "Strength", "agility": "Agility", "vertical": "Vertical",
+    "hustle": "Hustle", "stamina": "Stamina", "overall_durability": "Durability",
+    "ball_handle": "Ball Handle", "speed_with_ball": "Speed w/ Ball", "pass_accuracy": "Pass Accuracy",
+    "pass_vision": "Pass Vision", "pass_iq": "Pass IQ",
+    "block": "Block", "steal": "Steal", "pass_perception": "Pass Perception",
+    "interior_defense": "Interior Def.", "perimeter_defense": "Perimeter Def.",
+    "defensive_consistency": "Def. Consistency", "help_defense_iq": "Help Def. IQ",
+    "defensive_rebound": "Def. Rebound", "offensive_rebound": "Off. Rebound",
+    "intangibles": "Intangibles",
+}
+
+
+def _kv_table(rows: list[tuple[str, str]]) -> str:
+    label_w = max(len(lbl) for lbl, _ in rows)
+    val_w = max(len(val) for _, val in rows)
+    return "\n".join(f"{lbl.ljust(label_w)} {val.rjust(val_w)}" for lbl, val in rows)
+
+
+def _ovr_color(ovr) -> int:
+    try:
+        n = int(ovr)
+    except (TypeError, ValueError):
+        return NBN_BLUE
+    t = max(0.0, min(1.0, (n - 60) / 40))
+    r, g, b = colorsys.hls_to_rgb(t * 120 / 360, 0.45, 0.55)
+    return (int(r * 255) << 16) + (int(g * 255) << 8) + int(b * 255)
+
+
+def ratings_response(query: str) -> dict:
+    attrs_data = _load_json(ATTRIBUTES_FILE, {})
+    bios = _load_json(PLAYER_BIOS_FILE, {})
+    # player-bios.json stores names upper-cased ("ADEBAYO, BAM"), unlike the
+    # stats CSVs other commands read (already properly cased) -- title-case
+    # here to match, same as _display_name() in routers/players.py.
+    players = {slug: _display(bios[slug]["name"]).title()
+               for slug, entries in attrs_data.items() if entries and slug in bios}
+
+    resolved = resolve_player(query, players=players, usage="/ratings player:<name>")
+    if isinstance(resolved, dict):
+        return _error(resolved["error"])
+    slug, name = resolved
+
+    snap = attrs_data[slug][-1]
+    attrs = snap.get("attributes", {})
+    ovr = snap.get("2k_ovr")
+    potential = attrs.get("potential")
+
+    fields = []
+    for label, keys in _ATTR_CATEGORIES:
+        rows = [(_ATTR_LABELS.get(k, k), str(attrs[k])) for k in keys if k in attrs]
+        if not rows:
+            continue
+        fields.append({"name": label, "value": f"```\n{_kv_table(rows)}\n```", "inline": True})
+
+    header = f"**OVR {ovr}**" if ovr is not None else "**OVR —**"
+    if potential:
+        header += f"  ·  Potential **{potential}**"
+
+    photo = (bios.get(slug, {}).get("photo_url") or "").strip()
+    embed = {
+        "title": name,
+        "url": f"https://nbn.today/players/?p={slug}",
+        "color": _ovr_color(ovr),
+        "description": header,
+        "fields": fields,
+        "footer": {"text": f"2K attributes via 2kratings.com · as of {snap.get('date', '?')}"},
+    }
+    if photo:
+        embed["image"] = {"url": photo}
+    return {"type": CHANNEL_MESSAGE, "data": {"embeds": [embed]}}
+
+
+# ── /team-ratings ────────────────────────────────────────────────────────────
+# Mirrors the "Team Attributes" tab on /frivolities: each team's average 2K
+# attributes across its top 8 rostered players by 2K overall, plus that team's
+# rank (1 = best) among all 30 teams in each attribute.
+
+def _team_top8(team: str, attrs_data: dict, bios: dict, current_season: str) -> list[dict]:
+    """Top 8 rostered players by 2K overall for one team. The SLUG-only roster
+    CSV lists every roster-adjacent entry, which includes non-players like
+    "draft-rights" (stashed/undrafted draft rights -- a cap hold, not an
+    active roster spot) and "" (unsigned, no salary). Bio type alone isn't
+    enough either: a player whose contract has expired into a UFA/RFA cap
+    hold keeps type == "player" until re-signed or renounced (§3.10), so also
+    require an actual salary figure for the current season -- a hold with no
+    real contract has none.
+    """
+    roster_path = SITE_DIR / "data" / f"{team.lower()}-roster.csv"
+    players = []
+    for r in _load_csv(roster_path):
+        slug = (r.get("SLUG") or "").strip()
+        if not slug:
+            continue
+        bio = bios.get(slug, {})
+        if bio.get("type") not in ("player", "two-way"):
+            continue
+        if not bio.get("salaries", {}).get(current_season):
+            continue
+        entries = attrs_data.get(slug)
+        if not entries:
+            continue
+        snap = entries[-1]
+        ovr = snap.get("2k_ovr")
+        if not isinstance(ovr, int):
+            continue
+        players.append({"slug": slug, "ovr": ovr, "attrs": snap.get("attributes", {})})
+    players.sort(key=lambda p: -p["ovr"])
+    return players[:8]
+
+
+def _league_attr_table(attrs_data: dict, bios: dict, current_season: str) -> dict[str, dict]:
+    """{team: {'ovr': avg, attr_key: avg, ...}} built the same way for every
+    team, so columns are comparable for ranking."""
+    keys = [k for _, ks in _ATTR_CATEGORIES for k in ks]
+    out = {}
+    for team in TEAM_NAMES:
+        top8 = _team_top8(team, attrs_data, bios, current_season)
+        if not top8:
+            continue
+        row = {"ovr": sum(p["ovr"] for p in top8) / len(top8)}
+        for k in keys:
+            vals = [p["attrs"][k] for p in top8 if k in p["attrs"]]
+            row[k] = sum(vals) / len(vals) if vals else None
+        out[team] = row
+    return out
+
+
+def _ranks_for(league: dict[str, dict], key: str) -> dict[str, int]:
+    """Standard competition ranking (ties share a rank, e.g. 4, 4, 6) for one
+    column across teams -- an 8-player average has denominator 8, so exact
+    ties between teams are common and shouldn't be split apart arbitrarily."""
+    ordered = sorted(
+        ((team, row[key]) for team, row in league.items() if row.get(key) is not None),
+        key=lambda tv: -tv[1],
+    )
+    ranks, rank = {}, 1
+    for i, (team, v) in enumerate(ordered):
+        if i > 0 and v != ordered[i - 1][1]:
+            rank = i + 1
+        ranks[team] = rank
+    return ranks
+
+
+def team_ratings_response(team_arg: str) -> dict:
+    team = team_arg.strip().upper()
+    if team not in TEAM_NAMES:
+        return _error(f"Unknown team **{team_arg}**. Use a 3-letter abbreviation, e.g. `HOU`.")
+
+    attrs_data = _load_json(ATTRIBUTES_FILE, {})
+    bios = _load_json(PLAYER_BIOS_FILE, {})
+    league = _league_attr_table(attrs_data, bios, _current_league_year())
+    row = league.get(team)
+    if not row:
+        return _error(f"No 2K attribute data for **{TEAM_NAMES[team]}**'s roster yet.")
+
+    n_teams = len(league)
+    ovr_rank = _ranks_for(league, "ovr").get(team)
+
+    fields = []
+    for label, ks in _ATTR_CATEGORIES:
+        rows = []
+        for k in ks:
+            v = row.get(k)
+            if v is None:
+                continue
+            rank = _ranks_for(league, k).get(team)
+            rows.append((_ATTR_LABELS.get(k, k), f"{v:.1f} (#{rank})"))
+        if rows:
+            fields.append({"name": label, "value": f"```\n{_kv_table(rows)}\n```", "inline": True})
+
+    header = f"**2K OVR {row['ovr']:.1f}** (#{ovr_rank} of {n_teams})"
+
+    embed = {
+        "title": f"{TEAM_NAMES[team]} — Team Ratings",
+        "url": "https://nbn.today/frivolities/",
+        "color": TEAM_COLORS.get(team, NBN_BLUE),
+        "description": header,
+        "fields": fields,
+        "footer": {"text": "2K attributes via 2kratings.com · average + league rank across top 8 rostered players by 2K overall"},
+    }
+    return {"type": CHANNEL_MESSAGE, "data": {"embeds": [embed]}}
 
 
 # ── /awards ───────────────────────────────────────────────────────────────────
@@ -1134,9 +1344,11 @@ _HELP_GROUPS = [
         "`/career player` — career totals + averages",
         "`/awards player` — rings, MVP, All-NBN, All-Star…",
         "`/compare player1 player2 [season]` — side-by-side averages",
+        "`/ratings player` — NBA 2K attribute ratings",
     ]),
     ("Teams & League", [
         "`/team team [season]` — roster + per-game stats",
+        "`/team-ratings team` — average 2K attributes + league rank across a team's top 8 players",
         "`/standings [season]` — conference standings",
         "`/leaders [stat] [season] [team]` — top-10 totals",
         "`/h2h team1 team2` — all-time H2H between two teams",
@@ -1202,8 +1414,12 @@ def dispatch(data: dict, invoker: dict) -> dict:
         return career_response(_option(data, "player"))
     if cmd == "awards":
         return awards_response(_option(data, "player"))
+    if cmd == "ratings":
+        return ratings_response(_option(data, "player"))
     if cmd == "team":
         return team_response(_option(data, "team"), _option(data, "season"))
+    if cmd == "team-ratings":
+        return team_ratings_response(_option(data, "team"))
     if cmd == "leaders":
         return leaders_response(_option(data, "stat"), _option(data, "season"),
                                 _option(data, "team"))

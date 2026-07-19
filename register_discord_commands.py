@@ -52,6 +52,11 @@ COMMANDS = [
         "options": [_PLAYER_OPT],
     },
     {
+        "name": "ratings",
+        "description": "A player's NBA 2K attribute ratings (shooting, finishing, defense, etc.)",
+        "options": [_PLAYER_OPT],
+    },
+    {
         "name": "team",
         "description": "A team's roster + per-game stats for a season (defaults to latest)",
         "options": [
@@ -66,6 +71,18 @@ COMMANDS = [
                 "description": "Season, e.g. 25-26 (defaults to most recent)",
                 "type": 3,
                 "required": False,
+            },
+        ],
+    },
+    {
+        "name": "team-ratings",
+        "description": "A team's average NBA 2K attributes (+ league rank) across its top 8 rostered players",
+        "options": [
+            {
+                "name": "team",
+                "description": "Team abbreviation, e.g. HOU",
+                "type": 3,
+                "required": True,
             },
         ],
     },

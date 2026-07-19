@@ -138,6 +138,7 @@ class SetHardCapDetails(BaseModel):
 class ConvertTwoWayDetails(BaseModel):
     player: str
     contract: ContractIn
+    signing_method: Optional[str] = None
 
 
 class SignPickDetails(BaseModel):
@@ -477,12 +478,18 @@ def _apply_renounce(details: RenounceDetails, txn_date: str, info: dict) -> str:
         )
 
     # Preserve earnings; drop the hold salary and the renounced cap hold(s).
-    past, past_gtd, past_gtd_dates, past_gtd_sched = _retained_history(bio, cur_season)
-    bio["salaries"] = past
-    bio["guaranteed"] = past_gtd
-    bio["guarantee_dates"] = past_gtd_dates
-    bio["guarantee_schedule"] = past_gtd_sched
+    # The `salaries` entry for the hold season itself (and any season after) is
+    # never real pay — it's just the cap-hold number — so the cutoff is the
+    # earliest FA hold, not cur_season (which would wrongly keep a hold-season
+    # entry that happens to equal the current in-progress season).
+    cutoff = fa_years[0]
+    keep = lambda s: s < cutoff
+    bio["salaries"] = {k: v for k, v in bio.get("salaries", {}).items() if keep(k)}
+    bio["guaranteed"] = {k: v for k, v in bio.get("guaranteed", {}).items() if keep(k)}
+    bio["guarantee_dates"] = {k: v for k, v in bio.get("guarantee_dates", {}).items() if keep(k)}
+    bio["guarantee_schedule"] = {k: v for k, v in bio.get("guarantee_schedule", {}).items() if keep(k)}
     bio["cap_holds"] = {y: t for y, t in holds.items() if y > next_season}
+    bio["type"] = ""
     save_player_bios(bios)
 
     # Remove from roster CSV
@@ -586,7 +593,7 @@ def _apply_convert_twoway(details: ConvertTwoWayDetails, txn_date: str, info: di
     bio["contracts"] = (bio.get("contracts") or []) + [{
         "team": team,
         "date": txn_date,
-        "signing_method": "convert_twoway",
+        "signing_method": details.signing_method or "convert_twoway",
         "bird_rights_type": None,
         "salaries": details.contract.salaries,
         "guaranteed": details.contract.guaranteed,
@@ -607,7 +614,48 @@ def _apply_convert_twoway(details: ConvertTwoWayDetails, txn_date: str, info: di
                 break
         write_csv(roster_path, headers, rows)
 
-    log_write(info, f"TXN convert_twoway — {details.player} ({team})")
+    # A two-way conversion adds real salary against a team's cap exactly like a
+    # sign does (rulebook §847: "must have either cap space or a valid
+    # exception") -- so it needs the same MLE/BAE bookkeeping and hard-cap
+    # trigger as _apply_sign, keyed off the same self-declared signing_method.
+    if details.signing_method in ("mle", "ntmle", "tmle", "room_exception", "bae", "cap_space"):
+        with _state_lock:
+            state = load_team_state()
+            if team not in state:
+                state[team] = {}
+            ts = state[team].get(cur_season, dict(DEFAULT_SEASON_STATE))
+
+            if details.signing_method == "cap_space":
+                if not ts.get("mle_type"):
+                    ts["mle_type"] = "room"
+
+            elif details.signing_method in ("mle", "ntmle", "tmle", "room_exception"):
+                yr1 = 0
+                for yr in sorted(details.contract.salaries.keys()):
+                    if yr >= cur_season:
+                        yr1 = int(str(details.contract.salaries[yr])
+                                  .replace("$", "").replace(",", "").strip() or 0)
+                        break
+                ts["mle_used"] = ts.get("mle_used", 0) + yr1
+
+                resolved = details.signing_method
+                if resolved == "mle":
+                    resolved = ts.get("mle_type") or "ntmle"
+                ts["mle_type"] = resolved
+                if resolved == "ntmle":
+                    _maybe_set_hard_cap(ts, "first_apron", f"NTMLE two-way conversion: {details.player}")
+                elif resolved == "tmle":
+                    _maybe_set_hard_cap(ts, "second_apron", f"TMLE two-way conversion: {details.player}")
+
+            elif details.signing_method == "bae":
+                ts["bae_used"] = True
+                _maybe_set_hard_cap(ts, "first_apron", f"BAE two-way conversion: {details.player}")
+
+            state[team][cur_season] = ts
+            save_team_state(state)
+
+    log_write(info, f"TXN convert_twoway — {details.player} ({team}) [{details.signing_method or 'cap_space'}]")
+    return team
 
 
 def _apply_sign_pick(details: SignPickDetails, txn_date: str, info: dict, txn_id: Optional[str] = None) -> str:
@@ -675,11 +723,20 @@ def _apply_sign(details: SignDetails, txn_date: str, info: dict, txn_id: Optiona
     if team not in VALID_TEAMS:
         raise HTTPException(status_code=422, detail=f"Unknown team: {team!r}")
 
+    cur_season = _season_for_date(txn_date)
     team_map = _build_team_map()
+    old_hold_team = None
     if details.player in team_map:
         existing = team_map[details.player]
         if existing != team:
-            raise HTTPException(status_code=409, detail=f"Player {details.player!r} is already on {existing}")
+            existing_hold = (bios.get(details.player, {}).get("cap_holds") or {}).get(cur_season)
+            if existing_hold not in _FA_HOLD_TYPES:
+                raise HTTPException(status_code=409, detail=f"Player {details.player!r} is already on {existing}")
+            # The old team only carries a free-agent cap hold (UFA/RFA), not an
+            # active contract — signing elsewhere supersedes the hold, same as
+            # an explicit renounce (rulebook § 3.10), so clean it up here rather
+            # than requiring the old team to renounce first.
+            old_hold_team = existing
 
     path = DATA_DIR / f"{team.lower()}-roster.csv"
     if not path.exists():
@@ -688,13 +745,20 @@ def _apply_sign(details: SignDetails, txn_date: str, info: dict, txn_id: Optiona
     if "SLUG" not in headers:
         raise HTTPException(status_code=422, detail=f"Roster for {team} uses legacy format; migrate before using transactions")
 
+    if old_hold_team:
+        old_path = DATA_DIR / f"{old_hold_team.lower()}-roster.csv"
+        if old_path.exists():
+            old_headers, old_rows = read_csv(old_path)
+            old_rows = [r for r in old_rows if r.get("SLUG", "").strip() != details.player]
+            write_csv(old_path, old_headers, old_rows)
+        _scrub_trading_block({old_hold_team: {details.player}}, bios)
+
     rows = [r for r in rows if r.get("SLUG", "").strip() != details.player]
     row_type = "two-way" if details.contract.type == "two-way" else ""
     rows.append({"SLUG": details.player, "TYPE": row_type})
     write_csv(path, headers, rows)
 
     bio = bios[details.player]
-    cur_season = _season_for_date(txn_date)
     past, past_gtd, past_gtd_dates, past_gtd_sched = _retained_history(bio, cur_season)
     bio["salaries"] = {**past, **details.contract.salaries}
     bio["cap_holds"] = details.contract.cap_holds
@@ -961,6 +1025,44 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict) -> list[str]:
             if asset.type == "player":
                 trade_removals.setdefault(xfer.from_team, set()).add(asset.slug)
     _scrub_trading_block(trade_removals, bios)
+
+    # ── § 4.4 contagion: below-apron-2 aggregation hard-caps the team ──────────
+    # Mirrors _validate_trade's aggregation check (per outgoing leg's salary
+    # tested independently against total incoming) so the trigger condition
+    # never drifts from what the validator already decided was legal.
+    cur_season = _season_for_date(txn_date)
+    _validation_bios = load_player_bios()
+    _cap_levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
+    outgoing_sal, incoming_sal, out_players_map, _ = _trade_flows(details, _validation_bios, cur_season)
+    contagion_teams = []
+    for aggr_team, slugs in out_players_map.items():
+        if len(slugs) < 2 or incoming_sal.get(aggr_team, 0) <= 0:
+            continue
+        inc = incoming_sal[aggr_team]
+        team_current = _compute_team_salary(aggr_team, _validation_bios, cur_season)
+        team_current_ex_holds = _compute_team_salary_ex_holds(aggr_team, _validation_bios, cur_season)
+        needs_aggregation = any(
+            (lc := _check_salary_matching(
+                aggr_team,
+                _parse_dollar((_validation_bios.get(slug, {}).get("salaries") or {}).get(cur_season, "")),
+                inc, team_current, _cap_levels, cur_season,
+                team_state=None, team_salary_ex_holds_before=team_current_ex_holds,
+            )) is not None and not lc.passed
+            for slug in slugs
+        )
+        if needs_aggregation:
+            contagion_teams.append(aggr_team)
+
+    if contagion_teams:
+        with _state_lock:
+            state = load_team_state()
+            for aggr_team in contagion_teams:
+                if aggr_team not in state:
+                    state[aggr_team] = {}
+                ts = state[aggr_team].get(cur_season, dict(DEFAULT_SEASON_STATE))
+                _maybe_set_hard_cap(ts, "second_apron", f"Salary aggregation in trade (§ 4.4 contagion, {txn_date})")
+                state[aggr_team][cur_season] = ts
+            save_team_state(state)
 
     if details.exceptions:
         cur_season = _season_for_date(txn_date)
@@ -1459,7 +1561,10 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
       • Leg count          — § 4.1 (warning only; single legs are allowed for splits)
       • Salary matching    — § 4.2 (tiered, below apron) / § 4.3 (apron + $250K), or
                               MLE trade absorption if `exceptions[team]` is set (§ 4.2a)
-      • 2nd-apron aggreg.  — § 4.4 (warning only; apron-2 teams may not combine salaries)
+      • 2nd-apron aggreg.  — § 4.4 (apron-2 teams may not combine outgoing salaries to
+                              match incoming; each outgoing leg must independently clear
+                              the match — error if the team is at/above the 2nd apron,
+                              contagion warning if aggregating below it)
       • Hard cap           — team apron hard cap (team-state) + league-wide hard cap
       • Roster size        — Article II: 15 in-season, 20 offseason ceiling
     """
@@ -1519,24 +1624,53 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
             ))
 
         # ── 2nd-apron aggregation (§ 4.4) ──────────────────────────────────────
-        # A team whose pre-trade salary is at/above the second apron may not
-        # aggregate (combine) two or more outgoing salaries to match incoming
-        # salary. Surfaced as a warning for the office to verify — not auto-blocked.
-        apron2 = ctx["cap_levels"].get(season, {}).get("apron2")
-        out_count = len(out_players.get(team, []))
-        if apron2 and current_ex_holds >= apron2 and inc > 0:
-            if out_count >= 2:
+        # A team may not aggregate (combine) two or more outgoing salaries to
+        # match a single incoming salary while at/above the second apron — each
+        # outgoing leg's salary must independently satisfy the match against the
+        # same incoming total. Since an apron-2 team is always also above the
+        # first apron, that per-leg test is exactly the § 4.3 flat-limit branch
+        # of _check_salary_matching, called once per player instead of once with
+        # the summed outgoing total — so this reuses the real matching logic
+        # rather than a second copy of it. A team below the second apron that
+        # needs the sum (i.e. no single leg independently clears the match) is
+        # legal now but triggers a Second Apron hard cap for the rest of the
+        # season (§ 1.4, § 4.4 contagion) — flagged as a warning here.
+        out_slugs = out_players.get(team, [])
+        if inc > 0 and len(out_slugs) >= 2:
+            leg_salaries = {
+                slug: _parse_dollar((bios.get(slug, {}).get("salaries") or {}).get(season, ""))
+                for slug in out_slugs
+            }
+            failing = sorted(
+                slug for slug, sal in leg_salaries.items()
+                if (lc := _check_salary_matching(team, sal, inc, current, ctx["cap_levels"], season,
+                                                  team_state=ctx.get("team_state"),
+                                                  team_salary_ex_holds_before=current_ex_holds)) is not None
+                and not lc.passed
+            )
+            apron2 = ctx["cap_levels"].get(season, {}).get("apron2")
+            at_apron2 = apron2 is not None and current_ex_holds >= apron2
+
+            if failing and at_apron2:
+                checks.append(CheckResult(
+                    check=f"apron2_aggregation_{team.lower()}", passed=False, level="error",
+                    message=(f"{team} is at/above the 2nd apron (${current_ex_holds:,} ≥ ${apron2:,}) and is "
+                             f"aggregating {len(out_slugs)} outgoing salaries to match ${inc:,} incoming "
+                             f"(§ 4.4) — combining salaries is prohibited above the 2nd apron, and "
+                             f"{', '.join(failing)} would not independently clear the match."),
+                ))
+            elif failing:
                 checks.append(CheckResult(
                     check=f"apron2_aggregation_{team.lower()}", passed=False, level="warning",
-                    message=(f"{team} is at/above the 2nd apron (${current_ex_holds:,} ≥ ${apron2:,}) and is "
-                             f"aggregating {out_count} outgoing salaries (§ 4.4) — apron-2 teams may not "
-                             "combine salaries to match incoming. Verify this leg manually."),
+                    message=(f"{team} is aggregating {len(out_slugs)} outgoing salaries to match ${inc:,} "
+                             "incoming — legal below the 2nd apron, but triggers a Second Apron hard cap "
+                             "for the rest of the season (§ 1.4, § 4.4 contagion) once submitted."),
                 ))
             else:
                 checks.append(CheckResult(
                     check=f"apron2_aggregation_{team.lower()}", passed=True,
-                    message=(f"{team} is at/above the 2nd apron but matches with a single outgoing "
-                             "salary — no aggregation (§ 4.4)."),
+                    message=(f"{team} is trading {len(out_slugs)} players — each outgoing salary "
+                             "independently satisfies the match, no aggregation needed (§ 4.4)."),
                 ))
 
     # ── Roster size (Article II) ───────────────────────────────────────────────
@@ -1844,7 +1978,7 @@ def list_transactions(
         t_upper = team.upper()
         def _team_match(t):
             d = t.get("details", {})
-            if d.get("team", "").upper() == t_upper:
+            if (d.get("team") or "").upper() == t_upper:
                 return True
             return t_upper in [x.upper() for x in d.get("teams", [])]
         txns = [t for t in txns if _team_match(t)]

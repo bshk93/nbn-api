@@ -41,6 +41,29 @@ def _member_current_team(name: str, members: Optional[dict] = None) -> Optional[
     return None
 
 
+def _member_is_bod(name: str, members: Optional[dict] = None) -> bool:
+    """True if the member has the 'bod' role. Used to split vote tallies into
+    mutually exclusive BOD vs non-BOD groups."""
+    members = members if members is not None else load_members()
+    return "bod" in members.get(name, {}).get("roles", [])
+
+
+def _tally_votes(votes: dict, members: Optional[dict] = None) -> dict:
+    """Tally votes into overall counts plus a mutually-exclusive BOD / non-BOD split.
+    Shape: {yes, no, abstain, bod: {yes,no,abstain}, non_bod: {yes,no,abstain}}."""
+    members = members if members is not None else load_members()
+    tally = {"yes": 0, "no": 0, "abstain": 0,
+             "bod": {"yes": 0, "no": 0, "abstain": 0},
+             "non_bod": {"yes": 0, "no": 0, "abstain": 0}}
+    for name, v in votes.items():
+        if v not in ("yes", "no", "abstain"):
+            continue
+        tally[v] += 1
+        group = "bod" if _member_is_bod(name, members) else "non_bod"
+        tally[group][v] += 1
+    return tally
+
+
 def load_proposals() -> list[dict]:
     return _load_json(PROPOSALS_FILE, [])
 
@@ -70,27 +93,20 @@ def _proposal_view(p: dict, viewer_name: Optional[str] = None, is_privileged: bo
     status = p.get("status", "draft")
     out = {k: v for k, v in p.items() if k != "votes"}
     out["comment_count"] = len(p.get("comments", []))
+    members = load_members()
     if is_admin:
-        members = load_members()
         out["voter_breakdown"] = {
-            name: {"vote": vote, "team": _member_current_team(name, members)}
+            name: {"vote": vote, "team": _member_current_team(name, members),
+                   "bod": _member_is_bod(name, members)}
             for name, vote in votes.items()
         }
     if status == "voting":
         out["vote_count"] = len(votes)
         out["my_vote"] = votes.get(viewer_name) if viewer_name else None
         if is_privileged:
-            tally = {"yes": 0, "no": 0, "abstain": 0}
-            for v in votes.values():
-                if v in tally:
-                    tally[v] += 1
-            out["live_results"] = tally
+            out["live_results"] = _tally_votes(votes, members)
     elif status == "closed":
-        tally = {"yes": 0, "no": 0, "abstain": 0}
-        for v in votes.values():
-            if v in tally:
-                tally[v] += 1
-        out["results"] = tally
+        out["results"] = _tally_votes(votes, members)
         out["vote_count"] = len(votes)
         out["my_vote"] = votes.get(viewer_name) if viewer_name else None
     else:
