@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from .constants import (
     DATA_DIR, CAP_LEVELS_FILE, TRANSACTIONS_FILE, VALID_TEAMS,
-    _txn_lock, _deadcap_lock, _state_lock, _picks_lock,
+    _txn_lock, _deadcap_lock, _state_lock, _picks_lock, _trade_exc_lock,
     ROSTER_MAX, ROSTER_OFFSEASON_MAX, SALARY_MATCH_TIER1_CAP, SALARY_MATCH_TIER2_CAP,
 )
 from .storage import read_csv, write_csv, _load_json, log_write, _parse_dollar, _season_start, _season_for_date, _current_league_year
@@ -20,7 +20,8 @@ from .players import load_player_bios, save_player_bios, _build_team_map, _scrub
 from .roster_picks import (
     load_picks, save_picks,
     load_team_state, save_team_state, get_season_state,
-    DEFAULT_SEASON_STATE, _maybe_set_hard_cap,
+    DEFAULT_SEASON_STATE, _maybe_set_hard_cap, _bae_available,
+    load_trade_exceptions, save_trade_exceptions,
 )
 
 router = APIRouter()
@@ -406,10 +407,17 @@ class TradeTransfer(BaseModel):
 class TradeIn(BaseModel):
     transfers: list[TradeTransfer]
     legality: str = "tbd"
-    # Team abbr -> exception type ("ntmle" | "tmle" | "room_exception") used to
-    # absorb that team's incoming salary in lieu of matching outgoing salary.
-    # Omit or null for teams matching normally.
+    # Team abbr -> exception type ("ntmle" | "tmle" | "room_exception" | "bae")
+    # used to absorb that team's incoming salary in lieu of matching outgoing
+    # salary. Omit or null for teams matching normally. TPE absorption is a
+    # separate field (tpe_usage, below) since it needs to name a specific
+    # banked exception, not just a type.
     exceptions: dict[str, Optional[str]] = {}
+    # Team abbr -> Trade Exception id (see GET /api/trade-exceptions/{team})
+    # used to absorb that team's incoming salary (§ 4.1a). Mutually exclusive
+    # with `exceptions[team]` for the same team, and with any outgoing salary
+    # from that team in this trade — both are rejected by the validator.
+    tpe_usage: dict[str, str] = {}
     # Sign-and-trade: whoever submits the trade must know and declare this —
     # nothing in the data lets us infer it (a team signing then trading a
     # player days later can be a coincidence, not a sign-and-trade). When set,
@@ -425,12 +433,23 @@ class TradeIn(BaseModel):
     # teams that aren't party to the S&T. Omit to fall back to "every team
     # acquiring any player is capped", which is correct for a plain two-team S&T.
     sign_and_trade_players: list[str] = []
+    # The proposed new contract(s) being signed as part of the S&T, keyed by
+    # player slug. Reuses SignDetails verbatim (player/team/contract/
+    # signing_method/bird_rights_type) so the § 3.14 contract-requirement
+    # checks (length, raise cap, MLE exclusion, Bird-rights eligibility) can
+    # run here even though the real contract is applied via a separate `sign`
+    # transaction in practice (see .claude/commands/enter-transaction.md) —
+    # this only informs validation, it never itself writes a contract.
+    sign_and_trade_signings: list[SignDetails] = []
 
 
 class TradeValidateInput(BaseModel):
     transfers: list[TradeTransfer]
     is_sign_and_trade: bool = False
+    sign_and_trade_players: list[str] = []
+    sign_and_trade_signings: list[SignDetails] = []
     exceptions: dict[str, Optional[str]] = {}
+    tpe_usage: dict[str, str] = {}
 
 
 class TradeValidationResult(BaseModel):
@@ -1324,29 +1343,54 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
                 state[aggr_team][cur_season] = ts
             save_team_state(state)
 
-    if details.exceptions:
+    if details.exceptions or details.tpe_usage:
         cur_season = _season_for_date(txn_date)
         _, incoming, _, _ = _trade_flows(details, bios, cur_season)
-        with _state_lock:
-            state = load_team_state()
-            for team, exc_type in details.exceptions.items():
-                if not exc_type:
-                    continue
-                team = team.upper()
-                inc = incoming.get(team, 0)
-                if inc <= 0:
-                    continue
-                if team not in state:
-                    state[team] = {}
-                ts = state[team].get(cur_season, dict(DEFAULT_SEASON_STATE))
-                ts["mle_used"] = ts.get("mle_used", 0) + inc
-                ts["mle_type"] = exc_type
-                if exc_type == "ntmle":
-                    _maybe_set_hard_cap(ts, "first_apron", f"NTMLE trade absorption ({txn_date})")
-                elif exc_type == "tmle":
-                    _maybe_set_hard_cap(ts, "second_apron", f"TMLE trade absorption ({txn_date})")
-                state[team][cur_season] = ts
-            save_team_state(state)
+
+        if details.exceptions:
+            with _state_lock:
+                state = load_team_state()
+                for team, exc_type in details.exceptions.items():
+                    if not exc_type:
+                        continue
+                    team = team.upper()
+                    inc = incoming.get(team, 0)
+                    if inc <= 0:
+                        continue
+                    if team not in state:
+                        state[team] = {}
+                    ts = state[team].get(cur_season, dict(DEFAULT_SEASON_STATE))
+                    if exc_type == "bae":
+                        # Boolean-per-season, not a running balance like NTMLE/
+                        # TMLE/Room — mirrors the BAE-signing bookkeeping in
+                        # _apply_sign (§ 3.5), just triggered from a trade.
+                        ts["bae_used"] = True
+                        _maybe_set_hard_cap(ts, "first_apron", f"BAE trade absorption ({txn_date})")
+                    else:
+                        ts["mle_used"] = ts.get("mle_used", 0) + inc
+                        ts["mle_type"] = exc_type
+                        if exc_type == "ntmle":
+                            _maybe_set_hard_cap(ts, "first_apron", f"NTMLE trade absorption ({txn_date})")
+                        elif exc_type == "tmle":
+                            _maybe_set_hard_cap(ts, "second_apron", f"TMLE trade absorption ({txn_date})")
+                    state[team][cur_season] = ts
+                save_team_state(state)
+
+        if details.tpe_usage:
+            with _trade_exc_lock:
+                tpe_data = load_trade_exceptions()
+                for team, tpe_id in details.tpe_usage.items():
+                    if not tpe_id:
+                        continue
+                    team = team.upper()
+                    inc = incoming.get(team, 0)
+                    if inc <= 0:
+                        continue
+                    for e in tpe_data.get(team, []):
+                        if e.get("id") == tpe_id:
+                            e["remaining"] = max(0, e.get("remaining", 0) - inc)
+                            break
+                save_trade_exceptions(tpe_data)
 
     if details.is_sign_and_trade:
         cur_season = _season_for_date(txn_date)
@@ -1557,7 +1601,117 @@ _MLE_EXCEPTION_LABELS = {
     "ntmle": "Non-Taxpayer MLE",
     "tmle": "Taxpayer MLE",
     "room_exception": "Room Exception",
+    "bae": "Bi-Annual Exception",
 }
+
+
+def _check_bae_absorption(
+    team: str,
+    incoming: int,
+    team_salary_ex_holds_before: int,
+    cl: dict,
+    team_state: Optional[dict],
+    season: str,
+) -> CheckResult:
+    """BAE trade absorption (§ 4.2a, extended to include the BAE alongside
+    NTMLE/TMLE/Room Exception). Unlike those three, the BAE isn't a running
+    dollar balance — it's a once-per-season boolean (`bae_used`), so it can't
+    share `_check_exception_absorption`'s amount-key/`mle_used` bookkeeping;
+    eligibility mirrors free-agent BAE use instead (§ 3.5): below the First
+    Apron, not already used this season, not used in the immediately prior
+    season (`_bae_available`), and not already used alongside cap space or the
+    Room Exception this same season."""
+    check_name = f"salary_matching_{team.lower()}"
+    apron1 = cl.get("apron1")
+    ts = get_season_state(team_state or {}, team, season)
+
+    if apron1 is None or team_salary_ex_holds_before >= apron1:
+        return CheckResult(
+            check=check_name, passed=False, level="error",
+            message=(f"{team} is not eligible for the Bi-Annual Exception — Team Salary "
+                      f"(${team_salary_ex_holds_before:,}) is at/above the First Apron "
+                      f"({'$' + format(apron1, ',') if apron1 is not None else 'unset'}) — § 3.5."),
+        )
+    if ts.get("bae_used"):
+        return CheckResult(
+            check=check_name, passed=False, level="error",
+            message=f"{team} has already used the Bi-Annual Exception this season (§ 3.5).",
+        )
+    if ts.get("mle_type") == "room":
+        return CheckResult(
+            check=check_name, passed=False, level="error",
+            message=(f"{team} has already used cap space or the Room Exception this season — "
+                      "the BAE cannot also be used the same season (§ 3.5)."),
+        )
+    if not _bae_available(team_state or {}, team, season):
+        return CheckResult(
+            check=check_name, passed=False, level="error",
+            message=f"{team} used the Bi-Annual Exception last season — unavailable in consecutive years (§ 3.5).",
+        )
+
+    total = cl.get("bae_amount", 0) or 0
+    if incoming > total:
+        over = incoming - total
+        return CheckResult(
+            check=check_name, passed=False, level="error",
+            message=(f"{team}: Bi-Annual Exception absorption failed — incoming salary ${incoming:,} "
+                      f"exceeds the BAE amount of ${total:,} by ${over:,}."),
+        )
+    return CheckResult(
+        check=check_name, passed=True,
+        message=(f"{team}: incoming salary ${incoming:,} absorbed via the Bi-Annual Exception "
+                  f"(${total:,} available this season) — no salary match required."),
+    )
+
+
+def _check_tpe_absorption(
+    team: str,
+    incoming: int,
+    outgoing: int,
+    tpe_id: str,
+    trade_exceptions: dict,
+    season: str,
+) -> CheckResult:
+    """Trade Exception (TPE) absorption (§ 4.1a): a team may use a banked TPE
+    to acquire a player at or below its remaining balance, without sending
+    matching salary back. Cannot be combined with outgoing salary in the same
+    acquisition (checked here) or with another exception (checked by the
+    caller, which picks this path or the MLE path, never both)."""
+    check_name = f"salary_matching_{team.lower()}"
+    record = next((e for e in trade_exceptions.get(team, []) if e.get("id") == tpe_id), None)
+    if record is None:
+        return CheckResult(
+            check=check_name, passed=False, level="error",
+            message=f"{team}: no Trade Exception with id {tpe_id!r} on file.",
+        )
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if record.get("expires_date", "") < today:
+        return CheckResult(
+            check=check_name, passed=False, level="error",
+            message=(f"{team}: Trade Exception {tpe_id} expired {record['expires_date']} "
+                      f"(banked {record['acquired_date']}) — cannot be used (§ 4.1a)."),
+        )
+    if outgoing > 0:
+        return CheckResult(
+            check=check_name, passed=False, level="error",
+            message=(f"{team}: a Trade Exception cannot be combined with outgoing salary in the "
+                      f"same acquisition (§ 4.1a) — this leg sends ${outgoing:,} in outgoing salary."),
+        )
+    remaining = record.get("remaining", 0)
+    if incoming > remaining:
+        over = incoming - remaining
+        return CheckResult(
+            check=check_name, passed=False, level="error",
+            message=(f"{team}: Trade Exception {tpe_id} absorption failed — incoming salary "
+                      f"${incoming:,} exceeds the remaining balance of ${remaining:,} "
+                      f"(${record['amount']:,} original, expires {record['expires_date']}) by ${over:,}."),
+        )
+    return CheckResult(
+        check=check_name, passed=True,
+        message=(f"{team}: incoming salary ${incoming:,} absorbed via Trade Exception {tpe_id} "
+                  f"(${remaining:,} of ${record['amount']:,} remaining before this trade, "
+                  f"expires {record['expires_date']}) — no salary match required."),
+    )
 
 
 def _check_exception_absorption(
@@ -1583,6 +1737,8 @@ def _check_exception_absorption(
     full `team_salary_before` (with holds).
     """
     check_name = f"salary_matching_{team.lower()}"
+    if exception_type == "bae":
+        return _check_bae_absorption(team, incoming, team_salary_ex_holds_before, cl, team_state, season)
     label = _MLE_EXCEPTION_LABELS.get(exception_type)
     if label is None:
         return CheckResult(
@@ -1820,16 +1976,36 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
 
       • Leg count          — § 4.1 (warning only; single legs are allowed for splits)
       • Salary matching    — § 4.2 (tiered, below apron) / § 4.3 (apron + $250K), or
-                              MLE trade absorption if `exceptions[team]` is set (§ 4.2a)
+                              MLE trade absorption if `exceptions[team]` is set (§ 4.2a),
+                              or Trade Exception absorption if `tpe_usage[team]` is set (§ 4.1a)
       • 2nd-apron aggreg.  — § 4.4 (apron-2 teams may not combine outgoing salaries to
                               match incoming; each outgoing leg must independently clear
                               the match — error if the team is at/above the 2nd apron,
                               contagion warning if aggregating below it)
       • Hard cap           — team apron hard cap (team-state) + league-wide hard cap
       • Roster size        — Article II: 15 in-season, 20 offseason ceiling
+      • Sign-and-trade     — § 3.14 contract rules + § 4.3 receiving-team apron limit,
+                              only when `is_sign_and_trade` is set
     """
     checks = []
     bios = ctx["bios"]; season = ctx["cur_season"]
+
+    # Sign-and-trade: the player's bio doesn't yet reflect the NEW contract
+    # being proposed — that's a separate `sign` transaction in the real
+    # two-step submission flow (see .claude/commands/enter-transaction.md),
+    # which may not have happened yet at validation time. Overlay the
+    # proposed contract's current-season salary/cap_holds onto a local copy of
+    # `bios` so salary-matching computes against the real proposed terms
+    # (mirrors what `_apply_sign` itself would write), not a stale cap-hold
+    # placeholder or an expired old contract. ctx["bios"] itself is untouched.
+    signings_by_slug = {s.player: s for s in (details.sign_and_trade_signings or [])}
+    if signings_by_slug:
+        bios = dict(bios)
+        for slug, signing in signings_by_slug.items():
+            base_bio = dict(bios.get(slug, {}))
+            base_bio["salaries"] = {**base_bio.get("salaries", {}), season: signing.contract.salaries.get(season, "")}
+            base_bio["cap_holds"] = {k: v for k, v in base_bio.get("cap_holds", {}).items() if k != season}
+            bios[slug] = base_bio
 
     # ── Leg count (§ 4.1) ──────────────────────────────────────────────────────
     legs = len(details.transfers)
@@ -1850,9 +2026,51 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
     outgoing, incoming, out_players, in_players = _trade_flows(details, bios, season)
     teams = sorted(set(outgoing) | set(incoming) | set(out_players) | set(in_players))
 
+    # ── Base Year Compensation (§ 4.2, sign-and-trade only) ────────────────────
+    # For a sign-and-trade player meeting all four BYC criteria, the SENDING
+    # team's outgoing figure for salary-MATCHING purposes only is the greater
+    # of the player's previous salary or 50% of the new salary — real
+    # cap/hard-cap accounting above still uses the true new salary, since
+    # that's what actually leaves the sender's books. Kept as a separate dict
+    # (not a mutation of `outgoing`) so the two uses never get conflated.
+    # Scope note: only applied to the primary § 4.2 tiered-matching check
+    # below, not the § 4.4 aggregation-independence test — the rulebook
+    # doesn't specify that interaction and it has no real precedent yet.
+    matching_outgoing = dict(outgoing)
+    if details.is_sign_and_trade:
+        for slug, signing in signings_by_slug.items():
+            from_team = next(
+                (xfer.from_team.upper() for xfer in details.transfers
+                 for a in xfer.assets if a.type == "player" and a.slug == slug),
+                None,
+            )
+            if not from_team:
+                continue
+            new_sal = _parse_dollar(signing.contract.salaries.get(season, ""))
+            orig_bio = ctx["bios"].get(slug, {})
+            prior_seasons = sorted(s for s in (orig_bio.get("salaries") or {}) if s < season)
+            prev_sal = _parse_dollar(orig_bio["salaries"][prior_seasons[-1]]) if prior_seasons else 0
+            bird_ok = signing.bird_rights_type in ("QVFA", "EQVFA")
+            raise_pct = ((new_sal - prev_sal) / prev_sal) if prev_sal else 0
+            team_salary_after = _compute_team_salary(from_team, bios, season)
+            cap = ctx["cap_levels"].get(season, {}).get("cap")
+            at_or_above_cap = cap is not None and team_salary_after >= cap
+            if bird_ok and new_sal > 0 and prev_sal > 0 and raise_pct > 0.20 and at_or_above_cap:
+                byc_credit = max(prev_sal, round(0.5 * new_sal))
+                if byc_credit < new_sal:
+                    matching_outgoing[from_team] = matching_outgoing.get(from_team, 0) - (new_sal - byc_credit)
+                    checks.append(CheckResult(
+                        check=f"byc_{slug}", passed=True,
+                        message=(f"{from_team}: Base Year Compensation applies to {slug} (§ 4.2) — "
+                                  f"outgoing credit for salary matching is ${byc_credit:,} (greater of "
+                                  f"previous salary ${prev_sal:,} or 50% of new salary ${round(0.5*new_sal):,}), "
+                                  f"not the full new salary ${new_sal:,}."),
+                    ))
+
     # ── Salary matching (§ 4.2 / § 4.3) + hard cap ─────────────────────────────
     for team in teams:
         out = outgoing.get(team, 0)
+        match_out = matching_outgoing.get(team, 0)
         inc = incoming.get(team, 0)
         current = _compute_team_salary(team, bios, season)
         current_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
@@ -1875,13 +2093,24 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
 
         if inc > 0:
             exc_type = (details.exceptions or {}).get(team)
-            sm = _check_salary_matching(team, out, inc, current, ctx["cap_levels"], season,
-                                         exception_type=exc_type, team_state=ctx.get("team_state"),
-                                         team_salary_ex_holds_before=current_ex_holds)
-            checks.append(sm or CheckResult(
-                check=f"salary_matching_{team.lower()}", passed=True,
-                message=f"{team}: incoming ${inc:,} matches outgoing ${out:,} (§ 4.2/4.3).",
-            ))
+            tpe_id = (details.tpe_usage or {}).get(team)
+            if exc_type and tpe_id:
+                checks.append(CheckResult(
+                    check=f"salary_matching_{team.lower()}", passed=False, level="error",
+                    message=(f"{team}: cannot combine a Trade Exception with another exception "
+                              "in the same trade (§ 4.1a)."),
+                ))
+            elif tpe_id:
+                checks.append(_check_tpe_absorption(team, inc, out, tpe_id,
+                                                    ctx.get("trade_exceptions", {}), season))
+            else:
+                sm = _check_salary_matching(team, match_out, inc, current, ctx["cap_levels"], season,
+                                             exception_type=exc_type, team_state=ctx.get("team_state"),
+                                             team_salary_ex_holds_before=current_ex_holds)
+                checks.append(sm or CheckResult(
+                    check=f"salary_matching_{team.lower()}", passed=True,
+                    message=f"{team}: incoming ${inc:,} matches outgoing ${match_out:,} (§ 4.2/4.3).",
+                ))
 
         # ── 2nd-apron aggregation (§ 4.4) ──────────────────────────────────────
         # A team may not aggregate (combine) two or more outgoing salaries to
@@ -1972,6 +2201,114 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
                 check=key, passed=True,
                 message=f"{team}: {after} standard players after trade (max {ROSTER_MAX}).",
             ))
+
+    # ── Sign-and-trade (§ 3.14 contract rules + § 4.3 receiving restriction) ───
+    # Only runs when the submitter declares is_sign_and_trade — nothing here is
+    # inferred. `sign_and_trade_signings` is optional even then (the real
+    # two-step submission flow may not have collected contract terms at
+    # validate-time); the contract-specific checks below simply don't fire for
+    # a signing with no entry, but the receiving-team apron restriction below
+    # still runs off `sign_and_trade_players`/`is_sign_and_trade` alone.
+    if details.is_sign_and_trade:
+        for slug, signing in signings_by_slug.items():
+            signing_team = signing.team.upper()
+            ts_signer = get_season_state(ctx["team_state"], signing_team, season)
+
+            bird_ok = signing.bird_rights_type in ("QVFA", "EQVFA")
+            if bird_ok:
+                checks.append(CheckResult(
+                    check=f"sat_bird_rights_{slug}", passed=True,
+                    message=f"{slug}: has at least Early Bird Rights (EQVFA) with {signing_team} (§ 3.14).",
+                ))
+            else:
+                checks.append(CheckResult(
+                    check=f"sat_bird_rights_{slug}", passed=False, level="error",
+                    message=(f"{slug}: sign-and-trade requires at least Early Bird Rights (EQVFA) with "
+                              f"{signing_team} — declared bird_rights_type is {signing.bird_rights_type!r} (§ 3.14)."),
+                ))
+
+            mle_funded = signing.signing_method in ("mle", "ntmle", "tmle")
+            if mle_funded:
+                checks.append(CheckResult(
+                    check=f"sat_no_mle_{slug}", passed=False, level="error",
+                    message=(f"{slug}: the MLE may not fund any part of a sign-and-trade contract — "
+                              f"signing_method is {signing.signing_method!r} (§ 3.14)."),
+                ))
+            else:
+                checks.append(CheckResult(
+                    check=f"sat_no_mle_{slug}", passed=True,
+                    message=f"{slug}: contract is not funded by the MLE (§ 3.14).",
+                ))
+
+            tmle_locked_out = ts_signer.get("mle_type") == "tmle" and ts_signer.get("mle_used", 0) > 0
+            if tmle_locked_out:
+                checks.append(CheckResult(
+                    check=f"sat_tmle_exclusion_{slug}", passed=False, level="error",
+                    message=(f"{signing_team}: has already used the Taxpayer MLE this season — may not "
+                              "participate in a sign-and-trade (§ 3.14)."),
+                ))
+            else:
+                checks.append(CheckResult(
+                    check=f"sat_tmle_exclusion_{slug}", passed=True,
+                    message=f"{signing_team}: has not used the Taxpayer MLE this season, eligible to sign-and-trade (§ 3.14).",
+                ))
+
+            hold_types = {"UFA", "RFA", "PLAYER_OPT", "TEAM_OPT"}
+            real_years = sorted(
+                yr for yr in signing.contract.salaries
+                if yr >= season and (signing.contract.cap_holds or {}).get(yr) not in hold_types
+            )
+            length_ok = len(real_years) in (3, 4)
+            if length_ok:
+                checks.append(CheckResult(
+                    check=f"sat_contract_length_{slug}", passed=True,
+                    message=f"{slug}: {len(real_years)}-year contract — valid sign-and-trade length (§ 3.14).",
+                ))
+            else:
+                checks.append(CheckResult(
+                    check=f"sat_contract_length_{slug}", passed=False, level="error",
+                    message=(f"{slug}: sign-and-trade contracts must be 3 or 4 years — this one is "
+                              f"{len(real_years)} years ({', '.join(real_years) or 'none'}) (§ 3.14)."),
+                ))
+
+            r = _check_contract_raises(signing.contract, bird_pct=False, cur_season=season)
+            if r:
+                r.check = f"sat_raise_limit_{slug}"
+                checks.append(r)
+
+            for sr in _validate_sign(signing, ctx):
+                sr.check = f"sat_{sr.check}_{slug}"
+                checks.append(sr)
+
+        apron1 = ctx["cap_levels"].get(season, {}).get("apron1")
+        if apron1 is not None:
+            if details.sign_and_trade_players:
+                receiving_teams = sorted({
+                    xfer.to_team.upper() for xfer in details.transfers
+                    if any(a.type == "player" and a.slug in details.sign_and_trade_players for a in xfer.assets)
+                })
+            else:
+                receiving_teams = sorted({
+                    xfer.to_team.upper() for xfer in details.transfers
+                    if any(a.type == "player" for a in xfer.assets)
+                })
+            for team in receiving_teams:
+                current_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
+                projected = current_ex_holds - outgoing.get(team, 0) + incoming.get(team, 0)
+                ok = projected < apron1
+                if ok:
+                    checks.append(CheckResult(
+                        check=f"sat_receiving_apron_{team.lower()}", passed=True,
+                        message=(f"{team}: projected salary ${projected:,} is below the First Apron "
+                                  f"(${apron1:,}) after the sign-and-trade (§ 4.3)."),
+                    ))
+                else:
+                    checks.append(CheckResult(
+                        check=f"sat_receiving_apron_{team.lower()}", passed=False, level="error",
+                        message=(f"{team}: sign-and-trade acquisition would leave them at ${projected:,}, "
+                                  f"at/above the First Apron (${apron1:,}) — a team may only receive via "
+                                  "sign-and-trade if outgoing salary brings them under the threshold (§ 4.3)."),
+                    ))
 
     return checks
 
@@ -2149,6 +2486,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
         "team_state":  load_team_state(),
         "cap_levels":  json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {},
         "cur_season":  _season_for_date(body.date),
+        "trade_exceptions": load_trade_exceptions(),
     }
     checks = _run_validation(body.type, parsed_details, _val_ctx)
     failed = [c for c in checks if not c.passed]
@@ -2348,6 +2686,7 @@ def validate_trade(body: TradeValidateInput):
         "team_state": load_team_state(),
         "cap_levels": json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {},
         "cur_season": _current_league_year(),
+        "trade_exceptions": load_trade_exceptions(),
     }
     checks = _validate_trade(body, ctx)
     # Warnings (e.g. a single-leg trade) don't make a deal illegal — only errors do,
