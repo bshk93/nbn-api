@@ -35,7 +35,17 @@ def register_protection(pick_key: tuple, from_team: str, to_team: str,
     creates as `txn_ids: [{"id", "date"}]` — otherwise a pick's `leaves`
     display (teams/team.js's tooltip) has nothing to point at and shows
     "originating trade(s) not yet linked" even for a pick this very system
-    just modeled (the gap this parameter closes)."""
+    just modeled (the gap this parameter closes).
+
+    `threshold` is an absolute draft-position cutoff (as the committee states
+    it — "protected 31-50" means positions 31-50, not "top 20 of this round"),
+    so the keep-band's floor must be the round's own starting position, not a
+    hardcoded 1 — every hand-reconciled 2nd-round band in the registry starts
+    at 31 (e.g. 2027 IND/GSW/LAC 2nds, 2028 NOP/IND 2nds), never 1. Getting
+    this wrong doesn't break resolution (an actual 2nd-round pick never lands
+    below 31 anyway, so the dead [1,30] sub-range is never reached) but it
+    does make the stored band — and therefore every `leaves`/tooltip display
+    reading it — say "protected band 1-50" instead of the true "31-50"."""
     txn_entry = {"id": txn_id, "date": txn_date} if txn_id else None
     if registry.get_protected_spec(pick_key) is not None:
         registry.subdivide_protected_band(pick_key, from_team, to_team, threshold,
@@ -43,7 +53,8 @@ def register_protection(pick_key: tuple, from_team: str, to_team: str,
         return
     year, rnd, orig = pick_key
     on = {"year": year, "round": rnd, "orig": orig}
-    bands = [{"min": 1, "max": threshold, "to": from_team},
+    domain_min = 1 if rnd == 1 else 31
+    bands = [{"min": domain_min, "max": threshold, "to": from_team},
              {"min": threshold + 1, "max": 60, "to": to_team}]
     registry.add_protected(pick_key, on=on, bands=bands, txn_entry=txn_entry)
 

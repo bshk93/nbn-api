@@ -129,11 +129,20 @@ def main():
             bands=[{"min": 1, "max": 4, "to": "SAC"}, {"min": 5, "max": 60, "to": "LAL"}],
         )
         from_trade.register_protection((2099, 2, "MIL"), from_team="MIL", to_team="ATL",
-                                       threshold=30, txn_id="abc123", txn_date="2026-07-17")
+                                       threshold=40, txn_id="abc123", txn_date="2026-07-17")
         spec = registry.load_registry()["protected"]["2099|2|MIL"]
         check("fresh protection stamps txn_ids on both new bands",
               all(b.get("txn_ids") == [{"id": "abc123", "date": "2026-07-17"}]
                   for b in spec["bands"]))
+        # A 2nd-round pick's keep-band must start at 31 (where round 2 actually
+        # begins), never 1 — an actual 2nd-round pick can't land there, so a
+        # band starting at 1 would just be dead space and, worse, would render
+        # as the wrong number everywhere `leaves`/tooltips display it (every
+        # hand-reconciled 2nd-round band in the live registry starts at 31,
+        # e.g. 2027 IND/GSW/LAC 2nds, 2028 NOP/IND 2nds).
+        check("2nd-round protection keep-band floors at 31, not 1",
+              {"min": 31, "max": 40, "to": "MIL", "txn_ids": [{"id": "abc123", "date": "2026-07-17"}]}
+              in spec["bands"])
 
         pick_node = {"type": "protected", "id": "x", **spec}
         pick = {"year": 2099, "round": 2, "orig": "MIL", "conveyance": pick_node}
@@ -144,7 +153,7 @@ def main():
 
         # subdivide also stamps only the two new bands, not the untouched sibling
         from_trade.register_protection((2099, 2, "MIL"), from_team="ATL", to_team="BOS",
-                                       threshold=40, txn_id="def456", txn_date="2026-07-18")
+                                       threshold=50, txn_id="def456", txn_date="2026-07-18")
         spec2 = registry.load_registry()["protected"]["2099|2|MIL"]
         untouched_band = next(b for b in spec2["bands"] if b["to"] == "MIL")
         new_bands = [b for b in spec2["bands"] if b["to"] in ("ATL", "BOS")]

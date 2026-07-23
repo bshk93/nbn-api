@@ -12,13 +12,13 @@ from pydantic import BaseModel
 from .constants import (
     DATA_DIR, CAP_LEVELS_FILE, TRANSACTIONS_FILE, VALID_TEAMS,
     _txn_lock, _deadcap_lock, _state_lock, _picks_lock, _trade_exc_lock,
-    ROSTER_MAX, ROSTER_OFFSEASON_MAX, SALARY_MATCH_TIER1_CAP, SALARY_MATCH_TIER2_CAP,
+    ROSTER_MAX, ROSTER_OFFSEASON_MAX, ROSTER_MIN, ROSTER_CHARGE_MIN, SALARY_MATCH_TIER1_CAP, SALARY_MATCH_TIER2_CAP,
 )
 from .storage import read_csv, write_csv, _load_json, log_write, _parse_dollar, _season_start, _season_for_date, _current_league_year
 from .auth import require_role
 from .players import load_player_bios, save_player_bios, _build_team_map, _scrub_trading_block
 from .roster_picks import (
-    load_picks, save_picks,
+    load_picks, save_picks, _all_picks_flat,
     load_team_state, save_team_state, get_season_state,
     DEFAULT_SEASON_STATE, _maybe_set_hard_cap, _bae_available,
     load_trade_exceptions, save_trade_exceptions,
@@ -347,6 +347,13 @@ class ReleaseDetails(BaseModel):
 
 class RenounceDetails(BaseModel):
     player: str
+
+
+class OfferSheetDetails(BaseModel):
+    player: str
+    offering_team: str
+    contract: ContractIn
+    outcome: str  # "matched" or "not_matched"
 
 
 class VoidPlayerDetails(BaseModel):
@@ -760,6 +767,73 @@ def _apply_renounce(details: RenounceDetails, txn_date: str, info: dict) -> str:
     _scrub_trading_block({team: {details.player}}, bios)
     log_write(info, f"TXN renounce — {details.player} from {team}")
     return team
+
+
+def _apply_offer_sheet(details: OfferSheetDetails, txn_date: str, info: dict,
+                        txn_id: Optional[str] = None) -> tuple[str, str]:
+    """Records and immediately applies an RFA offer sheet (§ 3.15) — matched
+    means the retaining team signs the player to these exact terms, not
+    matched means the offering team does. There's no independent decision
+    left once `outcome` is known, so this is one atomic transaction rather
+    than a two-step "record the offer, then submit a separate sign" flow: the
+    earlier two-step design let an offer_sheet be submitted with no follow-up
+    sign, silently leaving the player on nothing but the old RFA hold with no
+    error (this bit a real transaction — Dyson Daniels' matched offer sheet
+    went in but his LAL contract never updated). Reuses `_apply_sign`'s
+    existing old_hold_team logic, which already handles both outcomes
+    (same-team re-sign on match, cross-team sign clearing the old hold on a
+    non-match) — this function just resolves `team` from `outcome` and calls
+    it directly instead of requiring a second API call to do the same thing.
+    """
+    bios = load_player_bios()
+    if details.player not in bios:
+        raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
+
+    offering_team = details.offering_team.upper()
+    if offering_team not in VALID_TEAMS:
+        raise HTTPException(status_code=422, detail=f"Unknown team: {offering_team!r}")
+
+    team_map = _build_team_map()
+    retaining_team = team_map.get(details.player)
+    if not retaining_team:
+        raise HTTPException(status_code=422, detail=f"Player {details.player!r} is not on any roster")
+    if retaining_team == offering_team:
+        raise HTTPException(status_code=422, detail="offering_team cannot be the player's own team")
+
+    cur_season = _season_for_date(txn_date)
+    next_season = _season_after(cur_season)
+    holds = bios[details.player].get("cap_holds") or {}
+    rfa_years = sorted(y for y, t in holds.items() if t == "RFA")
+    earliest_hold = min(holds) if holds else None
+    if not rfa_years or earliest_hold not in rfa_years or rfa_years[0] > next_season:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"Player {details.player!r} is not an RFA hold for {next_season} — "
+                    "offer sheets only apply to restricted free agents."),
+        )
+
+    # § 3.15: offer must be for at least 2 guaranteed years. `salaries` year
+    # count is a proxy — this doesn't check that each year is actually
+    # guaranteed (see `guaranteed`/NON_GTD), same manual-review caveat as the
+    # minimum-contract cap-hit check above.
+    if len(details.contract.salaries) < 2:
+        raise HTTPException(status_code=422, detail="Offer sheet must cover at least 2 guaranteed years (§ 3.15)")
+
+    if details.outcome not in ("matched", "not_matched"):
+        raise HTTPException(status_code=422, detail="outcome must be 'matched' or 'not_matched'")
+
+    signing_team = retaining_team if details.outcome == "matched" else offering_team
+    sign_details = SignDetails(
+        player=details.player,
+        team=signing_team,
+        contract=details.contract,
+        signing_method="offer_sheet_matched" if details.outcome == "matched" else "offer_sheet_not_matched",
+    )
+    _apply_sign(sign_details, txn_date, info, txn_id=txn_id)
+
+    log_write(info, (f"TXN offer_sheet — {offering_team} offered {details.player} "
+                      f"({retaining_team} RFA); outcome={details.outcome} — signed by {signing_team}"))
+    return offering_team, retaining_team
 
 
 def _apply_void_player(details: VoidPlayerDetails, txn_date: str, info: dict) -> str:
@@ -1343,6 +1417,40 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
                 state[aggr_team][cur_season] = ts
             save_team_state(state)
 
+    # ── § 4.3 contagion: below-apron-1 trade with incoming > outgoing+$250K ──
+    # Distinct from the § 4.4 block above, which only fires on salary
+    # aggregation (2+ outgoing legs) and locks the looser Second Apron ceiling.
+    # This is the general rule for ANY trade, including a straight one-for-one
+    # swap: a team below the First Apron that takes on more than outgoing +
+    # $250,000 is hard-capped at the First Apron for the rest of the season,
+    # even though the trade is perfectly legal under standard § 4.2 tiered
+    # matching. Skips teams whose incoming salary used an exception (NTMLE/
+    # TMLE/BAE/TPE) — those already carry their own dedicated hard-cap trigger
+    # above and shouldn't double up on a plain-trade reason string.
+    apron1 = _cap_levels.get(cur_season, {}).get("apron1")
+    apron1_contagion_teams = []
+    if apron1 is not None:
+        exception_teams = {t.upper() for t in (details.exceptions or {})} | {t.upper() for t in (details.tpe_usage or {})}
+        for team, inc in incoming_sal.items():
+            if team in exception_teams:
+                continue
+            out = outgoing_sal.get(team, 0)
+            if inc <= out + 250_000:
+                continue
+            if _compute_team_salary_ex_holds(team, _validation_bios, cur_season) < apron1:
+                apron1_contagion_teams.append(team)
+
+    if apron1_contagion_teams:
+        with _state_lock:
+            state = load_team_state()
+            for team in apron1_contagion_teams:
+                if team not in state:
+                    state[team] = {}
+                ts = state[team].get(cur_season, dict(DEFAULT_SEASON_STATE))
+                _maybe_set_hard_cap(ts, "first_apron", f"Trade incoming exceeds outgoing +$250K (§ 4.3 contagion, {txn_date})")
+                state[team][cur_season] = ts
+            save_team_state(state)
+
     if details.exceptions or details.tpe_usage:
         cur_season = _season_for_date(txn_date)
         _, incoming, _, _ = _trade_flows(details, bios, cur_season)
@@ -1445,6 +1553,63 @@ def _count_standard_roster(team: str) -> int:
         if r.get("SLUG", "").strip()
         and _is_standard_roster_slot(bios.get(r["SLUG"], {}).get("type", ""))
     )
+
+
+def _rookie_min_salary(season: str, cap_levels: dict) -> int:
+    """The 0-years-experience tier of that season's minimum salary scale
+    (§ 1.7) — the figure an Empty Roster Charge (§ 2.1a) uses per open slot."""
+    return (cap_levels.get(season, {}).get("min_salary_scale") or {}).get("0", 0)
+
+
+def _min_salary_scale_tier(years_exp: int) -> str:
+    """Maps a raw years-of-NBA-experience count to a min_salary_scale key
+    ("0".."9","10+")."""
+    return "10+" if years_exp >= 10 else str(max(0, years_exp))
+
+
+def _one_year_min_cap_hit(bio: dict, season: str, cap_levels: dict) -> Optional[int]:
+    """§ 3.12: a 1-year minimum contract's cap hit is capped at the 2-year
+    veteran minimum, regardless of the player's actual NBA experience tier —
+    the league reimburses the difference, mirroring the NBA's veteran-minimum
+    hardship exception. `draft_year` on the bio is the player's real NBA
+    draft year (not the NBN fantasy draft), so it's a reasonable proxy for
+    years of NBA experience. Returns None if experience or the season's scale
+    can't be determined (e.g. undrafted player, scale not configured yet) —
+    callers should treat that as "can't check," not "no cap applies."
+    """
+    draft_year = bio.get("draft_year")
+    scale = (cap_levels.get(season, {}) or {}).get("min_salary_scale") or {}
+    if not draft_year or not scale:
+        return None
+    years_exp = _season_start(season) + 2000 - int(draft_year)
+    tier_amt = scale.get(_min_salary_scale_tier(years_exp), 0)
+    two_yr_amt = scale.get("2", 0)
+    if tier_amt <= 0:
+        return None
+    # Only 2+ year tiers get capped down — the 0/1-yr tiers already sit at or
+    # below the 2-yr number, so there's nothing to reimburse for them.
+    if _min_salary_scale_tier(years_exp) in ("0", "1") or not two_yr_amt:
+        return tier_amt
+    return min(tier_amt, two_yr_amt)
+
+
+def _empty_roster_charge(standard_count_after: int, season: str, cap_levels: dict) -> tuple[int, int]:
+    """Returns (deficiency, charge) for a team projected below the ROSTER_MIN
+    (14) standard-roster minimum, for TRADE-LEGALITY purposes only — § 2.1a.
+    This is a wider floor than ROSTER_CHARGE_MIN (12), which is where a real,
+    persisted Empty Roster Charge actually posts to a team's roster/guaranteed
+    salary (see team.js's computeEmptyRosterCharge for that one — it isn't
+    computed here, since it isn't specific to trades). This function's charge
+    applies immediately and year-round for the hard-cap comparison (not gated
+    on the § 2.1 one-week grace period, which separately governs when activity
+    strikes escalate for a team that stays non-compliant): a team can't use a
+    trade to duck under a hard cap by shedding headcount, since the league
+    treats the empty slot(s) up to 14 as costing at least that season's
+    rookie minimum, whether or not the team is actually below 12 yet."""
+    deficiency = max(0, ROSTER_MIN - standard_count_after)
+    if deficiency == 0:
+        return 0, 0
+    return deficiency, deficiency * _rookie_min_salary(season, cap_levels)
 
 
 def _compute_team_salary(team: str, bios: dict, season: str) -> int:
@@ -1924,7 +2089,46 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
     if r:
         checks.append(r)
 
+    r = _check_minimum_contract_cap_hit(details, bios, season, ctx["cap_levels"])
+    if r:
+        checks.append(r)
+
     return checks
+
+
+def _check_minimum_contract_cap_hit(details: SignDetails, bios: dict, season: str,
+                                     cap_levels: dict) -> Optional[CheckResult]:
+    """§ 3.12: a 1-year `minimum` signing's cap hit should equal the 2-year
+    veteran minimum regardless of the player's actual experience tier. Only
+    checked for genuinely 1-year minimum deals (a single salary year) signed
+    via signing_method="minimum" — a multi-year minimum contract follows the
+    scale per-year instead and isn't checked here. This is advisory (a
+    warning, force-through-able) since § 3.12 is manual review, not
+    system-enforced — the player's real NBA experience isn't independently
+    verified, just inferred from draft_year.
+    """
+    if details.signing_method != "minimum":
+        return None
+    salaries = details.contract.salaries or {}
+    if len(salaries) != 1 or season not in salaries:
+        return None
+    expected = _one_year_min_cap_hit(bios.get(details.player, {}), season, cap_levels)
+    if expected is None:
+        return None
+    submitted = _parse_dollar(salaries[season])
+    if submitted == expected:
+        return CheckResult(
+            check="minimum_contract_cap_hit", passed=True,
+            message=f"1-yr minimum cap hit (${expected:,}) matches the 2-yr veteran minimum (§ 3.12).",
+        )
+    return CheckResult(
+        check="minimum_contract_cap_hit",
+        passed=False,
+        level="warning",
+        message=(f"Submitted salary (${submitted:,}) doesn't match the § 3.12 1-yr minimum cap hit "
+                 f"of ${expected:,} (2-year veteran minimum) inferred from this player's real NBA "
+                 f"draft year — double check before submitting."),
+    )
 
 
 def _validate_release(details: ReleaseDetails, ctx: dict) -> list[CheckResult]:
@@ -1932,6 +2136,10 @@ def _validate_release(details: ReleaseDetails, ctx: dict) -> list[CheckResult]:
 
 
 def _validate_renounce(details: RenounceDetails, ctx: dict) -> list[CheckResult]:
+    return []
+
+
+def _validate_offer_sheet(details: OfferSheetDetails, ctx: dict) -> list[CheckResult]:
     return []
 
 
@@ -1965,6 +2173,84 @@ def _trade_flows(details, bios: dict, season: str) -> tuple[dict, dict, dict, di
     return outgoing, incoming, out_players, in_players
 
 
+def _check_stepien_rule(details: TradeIn) -> list[CheckResult]:
+    """§ 7.2 Stepien Rule: a team must retain the ability to make a
+    first-round selection at least once every two draft years — a proposed
+    trade is illegal if, after it, a team would have no first-round pick in
+    two or more consecutive draft years. "Ability to make a selection" counts
+    any first-round pick the team holds, own or acquired (not just its own).
+
+    Uses the same resolved, conveyance-aware ownership `GET /api/picks`
+    serves (`_all_picks_flat`) — not the raw flat-CSV OWNER column, which
+    under the conveyance cutover (PICKS_READ_SOURCE=conveyance) no longer
+    reflects final ownership for protected/swap picks. "Has a pick that
+    year" mirrors `get_team_picks`'s own matching rule: an exact owner, or
+    the orig team when a pick's owner is still fully undetermined ("?").
+
+    Only plain, unconditional first-round retrades are simulated here — a
+    protected pick, a swap right, or a protection ladder doesn't hand over a
+    definite claim on draft day, so folding those into this year-by-year
+    ownership count would be guessing at a still-contingent outcome (see
+    picks_conveyance's `leaves` model). Those cases fall back to committee
+    manual review, same as the rest of § 7.2's badge in the rulebook.
+    """
+    all_picks = _all_picks_flat()
+    owner_map: dict[tuple[int, str], str] = {}
+    for p in all_picks:
+        if p.get("round") != 1 or p.get("player"):
+            continue
+        owner_map[(p["year"], p["orig"].upper())] = p.get("owner") or "?"
+
+    affected_teams: set[str] = set()
+    for xfer in details.transfers:
+        from_t = xfer.from_team.upper()
+        to_t = xfer.to_team.upper()
+        for asset in xfer.assets:
+            if asset.type != "pick" or asset.round != 1:
+                continue
+            affected_teams.add(from_t)
+            affected_teams.add(to_t)
+            if asset.swap_with or asset.protection is not None or asset.ladder_protect_top is not None:
+                continue
+            key = (asset.year, (asset.orig or "").upper())
+            if key in owner_map:
+                owner_map[key] = to_t
+
+    if not affected_teams or not owner_map:
+        return []
+
+    years = sorted({y for (y, _orig) in owner_map})
+    lo, hi = years[0], years[-1]
+    checks: list[CheckResult] = []
+    for team in sorted(affected_teams):
+        have = {y for (y, orig), owner in owner_map.items()
+                if (owner == "?" and orig == team) or team in owner.split("|")}
+        gap = None
+        run_start = None
+        for y in range(lo, hi + 1):
+            if y in have:
+                run_start = None
+                continue
+            if run_start is None:
+                run_start = y
+            elif y - run_start >= 1:
+                gap = (run_start, y)
+                break
+        if gap:
+            checks.append(CheckResult(
+                check=f"stepien_rule_{team.lower()}", passed=False, level="error",
+                message=(f"{team} would have no first-round pick in {gap[0]} and {gap[1]} after this "
+                         "trade — violates the Stepien Rule (§ 7.2): a team must retain the ability to "
+                         "make a first-round selection at least once every two draft years."),
+            ))
+        else:
+            checks.append(CheckResult(
+                check=f"stepien_rule_{team.lower()}", passed=True,
+                message=f"{team}: retains a first-round pick at least once every two draft years (§ 7.2).",
+            ))
+    return checks
+
+
 def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
     """Canonical trade validation, shared verbatim by the submit endpoint
     (``POST /api/transactions``) and the simulator (``POST /api/validate/trade``).
@@ -1982,10 +2268,19 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
                               match incoming; each outgoing leg must independently clear
                               the match — error if the team is at/above the 2nd apron,
                               contagion warning if aggregating below it)
-      • Hard cap           — team apron hard cap (team-state) + league-wide hard cap
+      • Hard cap           — team apron hard cap (team-state) + league-wide hard cap,
+                              inclusive of any Empty Roster Charge (below)
       • Roster size        — Article II: 15 in-season, 20 offseason ceiling
+      • Empty Roster Charge — § 2.1a: trade legality is judged against the full 14-player
+                              minimum (wider than the 12-player floor for a *real*, persisted
+                              charge) — a team left below 14 has that gap assumed filled at
+                              that season's rookie minimum for hard-cap comparison purposes,
+                              folded into the hard-cap figures above, not just reported standalone
       • Sign-and-trade     — § 3.14 contract rules + § 4.3 receiving-team apron limit,
                               only when `is_sign_and_trade` is set
+      • Stepien Rule       — § 7.2 (no first-round pick in 2+ consecutive draft years,
+                              own or acquired; unconditional pick retrades only — protected/
+                              swap/ladder legs are left to manual review)
     """
     checks = []
     bios = ctx["bios"]; season = ctx["cur_season"]
@@ -2025,6 +2320,25 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
 
     outgoing, incoming, out_players, in_players = _trade_flows(details, bios, season)
     teams = sorted(set(outgoing) | set(incoming) | set(out_players) | set(in_players))
+
+    # ── Roster-after counts + Empty Roster Charge (§ 2.1a) ─────────────────────
+    # Computed up front so the hard-cap projections below can already account
+    # for a charge — a trade can't duck a hard cap by shedding headcount, since
+    # any slot left below the 14-player minimum still costs at least that
+    # season's rookie minimum to fill. Reused verbatim by the roster-size
+    # section further down so the two never compute "after" differently.
+    roster_after: dict[str, int] = {}
+    erc_deficiency: dict[str, int] = {}
+    erc_charge: dict[str, int] = {}
+    for team in sorted(set(out_players) | set(in_players)):
+        before = _count_standard_roster(team)
+        out_std = sum(1 for s in out_players.get(team, [])
+                      if _is_standard_roster_slot(bios.get(s, {}).get("type", "")))
+        in_std  = sum(1 for s in in_players.get(team, [])
+                      if _is_standard_roster_slot(bios.get(s, {}).get("type", "")))
+        after = before - out_std + in_std
+        roster_after[team] = after
+        erc_deficiency[team], erc_charge[team] = _empty_roster_charge(after, season, ctx["cap_levels"])
 
     # ── Base Year Compensation (§ 4.2, sign-and-trade only) ────────────────────
     # For a sign-and-trade player meeting all four BYC criteria, the SENDING
@@ -2068,6 +2382,7 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
                     ))
 
     # ── Salary matching (§ 4.2 / § 4.3) + hard cap ─────────────────────────────
+    charge_decisive: dict[str, bool] = {}
     for team in teams:
         out = outgoing.get(team, 0)
         match_out = matching_outgoing.get(team, 0)
@@ -2075,9 +2390,15 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
         current = _compute_team_salary(team, bios, season)
         current_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
         delta = inc - out
+        charge = erc_charge.get(team, 0)
 
-        if delta > 0:
-            projected_ex_holds = current_ex_holds + delta
+        if delta > 0 or charge > 0:
+            # Empty Roster Charge (§ 2.1a) folds straight into the projected
+            # figure — it's guaranteed money the team is on the hook for the
+            # moment the roster dips below 14, so it counts toward both the
+            # apron-triggered hard cap and the league-wide Hard Cap exactly
+            # like a real contract would.
+            projected_ex_holds = current_ex_holds + delta + charge
             # Both the apron-triggered hard cap and the league-wide Hard Cap
             # (§ 1.3: "active player salaries plus dead cap") are computed on
             # the ex-holds figure — a free-agent hold isn't an active salary.
@@ -2090,6 +2411,18 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
             lhc = _universal_hard_cap_check(team, projected_ex_holds, season, ctx["cap_levels"])
             if lhc:
                 checks.append(lhc)
+
+            # Was the charge actually decisive — would this team have cleared
+            # the hard cap without it? Drives whether the empty_roster_charge_
+            # check below reads as a mere assumption or the reason the trade
+            # fails (§ 2.1a) — surfaced so the UI doesn't show a plain "passed"
+            # checkmark next to the very thing that sank the trade.
+            if charge > 0 and (hc is not None or lhc is not None):
+                projected_without_charge = current_ex_holds + delta
+                hc_wo = _hard_cap_check(team, projected_without_charge, season,
+                                        ctx["team_state"], ctx["cap_levels"])
+                lhc_wo = _universal_hard_cap_check(team, projected_without_charge, season, ctx["cap_levels"])
+                charge_decisive[team] = hc_wo is None and lhc_wo is None
 
         if inc > 0:
             exc_type = (details.exceptions or {}).get(team)
@@ -2111,6 +2444,26 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
                     check=f"salary_matching_{team.lower()}", passed=True,
                     message=f"{team}: incoming ${inc:,} matches outgoing ${match_out:,} (§ 4.2/4.3).",
                 ))
+
+                # § 4.3 contagion (below First Apron, any trade — not just
+                # aggregation): legal under § 4.2 tiered matching, but still
+                # locks the team to the First Apron for the rest of the
+                # season once submitted. Mirrors the § 4.4 aggregation
+                # warning below, one apron tier up and without the 2+-leg
+                # requirement. Doesn't apply when an exception funded the
+                # acquisition — that path has its own dedicated trigger.
+                if not exc_type and (sm is None or sm.passed):
+                    apron1 = ctx["cap_levels"].get(season, {}).get("apron1")
+                    if apron1 is not None and current_ex_holds < apron1 and inc > match_out + 250_000:
+                        over = inc - match_out - 250_000
+                        checks.append(CheckResult(
+                            check=f"apron1_contagion_{team.lower()}", passed=False, level="warning",
+                            message=(f"{team} is below the First Apron (${current_ex_holds:,} < ${apron1:,}) "
+                                     f"but incoming ${inc:,} exceeds outgoing + $250K "
+                                     f"(${match_out + 250_000:,}) by ${over:,} — legal under standard tiered "
+                                     "matching (§ 4.2), but triggers a First Apron hard cap for the rest of "
+                                     "the season (§ 1.4, § 4.3 contagion) once submitted."),
+                        ))
 
         # ── 2nd-apron aggregation (§ 4.4) ──────────────────────────────────────
         # A team may not aggregate (combine) two or more outgoing salaries to
@@ -2170,11 +2523,7 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
     # quiet note), and anything above 20 is a hard block.
     for team in sorted(set(out_players) | set(in_players)):
         before = _count_standard_roster(team)
-        out_std = sum(1 for s in out_players.get(team, [])
-                      if _is_standard_roster_slot(bios.get(s, {}).get("type", "")))
-        in_std  = sum(1 for s in in_players.get(team, [])
-                      if _is_standard_roster_slot(bios.get(s, {}).get("type", "")))
-        after = before - out_std + in_std
+        after = roster_after[team]
         key = f"roster_size_{team.lower()}"
         if after > ROSTER_OFFSEASON_MAX:
             checks.append(CheckResult(
@@ -2201,6 +2550,37 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
                 check=key, passed=True,
                 message=f"{team}: {after} standard players after trade (max {ROSTER_MAX}).",
             ))
+
+        deficiency, charge = erc_deficiency[team], erc_charge[team]
+        if deficiency > 0:
+            rookie_min = _rookie_min_salary(season, ctx["cap_levels"])
+            real_deficiency = max(0, ROSTER_CHARGE_MIN - after)
+            if real_deficiency > 0:
+                real_note = (f" {real_deficiency} of those slot(s) fall below the {ROSTER_CHARGE_MIN}-player "
+                              "real-charge floor, so that portion also lands on the roster as an actual "
+                              "Empty Roster Charge (real guaranteed salary), not just a trade-legality assumption.")
+            else:
+                real_note = (f" {after} is at/above the {ROSTER_CHARGE_MIN}-player real-charge floor, so nothing "
+                              "actually posts to the roster — this is a trade-legality assumption only.")
+            decisive = charge_decisive.get(team, False)
+            if decisive:
+                checks.append(CheckResult(
+                    check=f"empty_roster_charge_{team.lower()}", passed=False, level="error",
+                    message=(f"{team}: {after} standard players after trade — {deficiency} slot(s) below the "
+                             f"{ROSTER_MIN}-player trade-legality floor (§ 2.1a). This is the reason the hard-cap "
+                             f"check above fails: without this ${charge:,} assumed charge "
+                             f"(${rookie_min:,} × {deficiency}), {team} would clear their hard cap; with it, "
+                             f"they don't.{real_note}"),
+                ))
+            else:
+                checks.append(CheckResult(
+                    check=f"empty_roster_charge_{team.lower()}", passed=True, level="warning",
+                    message=(f"{team}: {after} standard players after trade — {deficiency} slot(s) below the "
+                             f"{ROSTER_MIN}-player trade-legality floor (§ 2.1a). For hard-cap comparison purposes "
+                             f"only, the trade math assumes those slots get filled at the rookie minimum — a "
+                             f"hypothetical ${charge:,} (${rookie_min:,} × {deficiency}), already folded into the "
+                             f"hard-cap figures above.{real_note}"),
+                ))
 
     # ── Sign-and-trade (§ 3.14 contract rules + § 4.3 receiving restriction) ───
     # Only runs when the submitter declares is_sign_and_trade — nothing here is
@@ -2310,6 +2690,9 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
                                   "sign-and-trade if outgoing salary brings them under the threshold (§ 4.3)."),
                     ))
 
+    # ── Stepien Rule (§ 7.2) ────────────────────────────────────────────────────
+    checks.extend(_check_stepien_rule(details))
+
     return checks
 
 
@@ -2376,6 +2759,7 @@ _VALIDATORS = {
     "guarantee":      _validate_guarantee,
     "pick":           _validate_pick,
     "convert_twoway": _validate_convert_twoway,
+    "offer_sheet":    _validate_offer_sheet,
 }
 
 
@@ -2448,7 +2832,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid date; use YYYY-MM-DD")
 
-    if body.type not in ("sign", "pick", "option", "guarantee", "release", "renounce", "trade", "convert_twoway", "sign_pick", "void_player", "set_hard_cap_level"):
+    if body.type not in ("sign", "pick", "option", "guarantee", "release", "renounce", "trade", "convert_twoway", "sign_pick", "void_player", "set_hard_cap_level", "offer_sheet"):
         raise HTTPException(status_code=422, detail=f"Unsupported transaction type: {body.type!r}")
 
     if body.historical and body.type not in ("trade", "sign", "option"):
@@ -2466,6 +2850,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
         "sign_pick":      (SignPickDetails,       "Invalid sign_pick details"),
         "void_player":       (VoidPlayerDetails,  "Invalid void_player details"),
         "set_hard_cap_level": (SetHardCapDetails, "Invalid set_hard_cap_level details"),
+        "offer_sheet":       (OfferSheetDetails,  "Invalid offer_sheet details"),
     }
     model_cls, err_prefix = _detail_models[body.type]
     try:
@@ -2544,6 +2929,10 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             team = _apply_set_hard_cap(details, body.date, info)
             stored_details = details.model_dump()
             stored_details["team"] = team
+        elif body.type == "offer_sheet":
+            offering_team, retaining_team = _apply_offer_sheet(details, body.date, info, txn_id=txn_id)
+            stored_details = details.model_dump()
+            stored_details["teams"] = [offering_team, retaining_team]
 
         if body.force and failed:
             stored_details["_forced_checks"] = [c.check for c in failed]
@@ -2658,18 +3047,37 @@ def _trade_fact_sheet(details, ctx: dict) -> dict:
                       if _is_standard_roster_slot(bios.get(s, {}).get("type", "")))
         current = _compute_team_salary(team, bios, season)
         current_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
+        after = before - out_std + in_std
+        deficiency, charge = _empty_roster_charge(after, season, ctx["cap_levels"])
+        # Which hard cap (if any) this team is actually locked to (§ 1.4) — the
+        # sim needs this to show the *correct* apron, not always "1st Apron"
+        # regardless of whether the team is capped at the 1st, the 2nd, or not
+        # hard-capped at all (only the league-wide Hard Cap then applies).
+        ts = get_season_state(ctx["team_state"], team, season)
+        hard_cap_level = ts.get("hard_cap")
+        cl_season = ctx["cap_levels"].get(season, {})
+        hard_cap_limit = (cl_season.get("apron1") if hard_cap_level == "first_apron"
+                           else cl_season.get("apron2") if hard_cap_level == "second_apron"
+                           else None)
         teams[team] = {
             "team": team,
             "current_salary": current,
             "current_salary_ex_holds": current_ex_holds,
             "outgoing_salary": out,
             "incoming_salary": inc,
-            "projected_salary": current - out + inc,
-            "projected_salary_ex_holds": current_ex_holds - out + inc,
+            # Empty Roster Charge (§ 2.1a) is folded in here too, so the sim's
+            # displayed "New salary" / apron-room figures match exactly what
+            # _validate_trade judged — no parallel, divergent cap math.
+            "projected_salary": current - out + inc + charge,
+            "projected_salary_ex_holds": current_ex_holds - out + inc + charge,
             "players_out": out_players.get(team, []),
             "players_in": in_players.get(team, []),
             "standard_count_before": before,
-            "standard_count_after": before - out_std + in_std,
+            "standard_count_after": after,
+            "empty_roster_deficiency": deficiency,
+            "empty_roster_charge": charge,
+            "hard_cap_level": hard_cap_level,
+            "hard_cap_limit": hard_cap_limit,
         }
 
     return {

@@ -203,6 +203,17 @@ def project_to_flat(pick: dict, store: dict | None = None) -> dict:
         # `reason` is the short internal label (curated.py's LEGACY dict);
         # the full prose is still `notes`, unchanged.
         "legacy":        {"reason": node.get("reason")} if t == "legacy" else None,
+        # Additive: non-null only when this pick is itself the *fallback*
+        # target of another pick's ladder (e.g. the 2029/2030 SAS 2nds that
+        # only activate if the 2029 SAS 1st's top-10 protection conveys).
+        # `_ladder_field` above only looks at ladders where THIS pick is the
+        # governed step; a fallback target is never a step of its own ladder,
+        # so without this it displays identically to a plain unencumbered
+        # pick even though a real, already-modeled contingency governs it
+        # (found via poopoo richness_gap false positives, 2026-07-22: the
+        # 2029/2030 SAS 2nds and 2031 OKC 1st all looked bare despite their
+        # governing ladders already existing in the store).
+        "ladder_fallback_of": _ladder_fallback_field(pick, store),
     }
 
 
@@ -228,6 +239,34 @@ def _ladder_field(pick: dict, store: dict | None) -> dict | None:
                     "to": ladder["to"],
                     "protect_top": step["protect_top"],
                     "fallback": (fb or {}).get("picks", []) if fb else [],
+                    "txn_ids": ladder.get("txn_ids", []),
+                }
+    return None
+
+
+def _ladder_fallback_field(pick: dict, store: dict | None) -> dict | None:
+    """The reciprocal of `_ladder_field`: non-null when this pick is itself
+    one of the `fixed_asset` fallback targets named by another pick's ladder
+    (rather than the pick a ladder step actually governs). Surfaces which
+    ladder step has to convey before this pick is ever live, so a fallback
+    target doesn't read as an ordinary, unencumbered pick."""
+    for ladder in (store or {}).get("ladders", []):
+        fb = ladder.get("fallback") or {}
+        if fb.get("type") != "fixed_asset":
+            continue
+        for fp in fb.get("picks", []):
+            if (fp["year"] == pick["year"] and fp["round"] == pick["round"]
+                    and fp["orig"] == pick["orig"]):
+                step = ladder["steps"][-1] if ladder.get("steps") else None
+                return {
+                    "ladder_id": ladder.get("id"),
+                    "from": ladder["from"],
+                    "to": ladder["to"],
+                    "governing_pick": ({
+                        "year": step["year"], "round": step["round"],
+                        "orig": step.get("orig") or ladder["from"],
+                    } if step else None),
+                    "protect_top": step["protect_top"] if step else None,
                     "txn_ids": ladder.get("txn_ids", []),
                 }
     return None

@@ -15,7 +15,8 @@ from picks_conveyance import seed_store, registry, projection  # noqa: E402
 
 FLAT_KEYS = {"year", "round", "orig", "owner", "pick", "player", "protected",
              "conveys", "swap_owner", "swap_conveys", "notes", "frozen",
-             "frozen_reason", "leaves", "group_id", "ladder", "legacy"}
+             "frozen_reason", "leaves", "group_id", "ladder", "legacy",
+             "ladder_fallback_of"}
 FAILS = []
 
 
@@ -114,6 +115,22 @@ def main():
           [(2029, "SAS"), (2030, "SAS")])
     check("settled non-ladder pick has null ladder",
           proj((2029, 1, "ATL"))["ladder"], None)
+
+    # 7. ladder_fallback_of -> the reciprocal of #6: the fallback TARGET pick
+    # (2029 SAS 2nd) previously showed no trace of the sas_tor ladder that
+    # governs it, even though the ladder's own row (2029 SAS 1st, above)
+    # already listed it as a fallback (poopoo richness_gap false positive,
+    # 2026-07-22).
+    sas_2nd_fb = proj((2029, 2, "SAS"))["ladder_fallback_of"]
+    check("2029 SAS 2nd ladder_fallback_of -> sas_tor",
+          (sas_2nd_fb or {}).get("ladder_id"), "sas_tor")
+    check("2029 SAS 2nd ladder_fallback_of governing pick -> 2029 SAS 1st",
+          (sas_2nd_fb or {}).get("governing_pick"),
+          {"year": 2029, "round": 1, "orig": "SAS"})
+    check("2029 SAS 1st (the governing pick itself) has null ladder_fallback_of",
+          proj((2029, 1, "SAS"))["ladder_fallback_of"], None)
+    check("settled unrelated pick has null ladder_fallback_of",
+          proj((2029, 1, "ATL"))["ladder_fallback_of"], None)
 
     print()
     if FAILS:

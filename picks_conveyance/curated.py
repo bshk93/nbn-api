@@ -31,6 +31,51 @@ PROTECTED = {
                        "bands": [(31, 38, "LAC"), (39, 60, "NYK")]},
     (2028, 2, "IND"): {"on": pk(2028, 2, "IND"),
                        "bands": [(31, 44, "TOR"), (45, 60, "POR")]},
+    (2028, 2, "NOP"): {"on": pk(2028, 2, "NOP"),
+                       "bands": [(31, 50, "HOU"), (51, 60, "ATL")]},
+                       # flat CSV had no PROTECTED/NOTES signal at all for this
+                       # row (owner=ATL, plain) — split only existed as a cell
+                       # Note in the sheet, confirmed 2026-07-22 via poopoo.json
+                       # richness-gap read: "HOU Receives 31-50 / ATL Receives 51-60".
+    (2030, 2, "HOU"): {"on": pk(2030, 2, "HOU"),
+                       "bands": [(31, 55, "HOU"), (56, 60, "OKC")]},
+                       # flat CSV had PROTECTED=55 but blank NOTES, so it never
+                       # matched the 2026-07-19 walkthrough's NOTES-text scan
+                       # ("bare protected" / "conditional: X/Y") despite being
+                       # flagged needs_structure. Confirmed via sheet 2026-07-22:
+                       # "31-55 to HOU / 56-60 to OKC".
+    (2027, 2, "CHA"): {"on": pk(2027, 2, "CHA"),
+                       "bands": [(31, 38, "CHA"), (39, 60, "NOP")]},
+                       # sheet: "protected for selections 31-38 ... obligation
+                       # extinguished if not conveyed". Real retrade WAS->NOP
+                       # (8c65c66f59e1160d, 2026-06-21) confirms NOP holds the
+                       # conveys-share today; original protection-creation
+                       # trade not found. Resolved from poopoo richness_gap,
+                       # 2026-07-22.
+    (2029, 2, "MIN"): {"on": pk(2029, 2, "MIN"),
+                       "bands": [(31, 35, "MIN"), (36, 60, "LAL")]},
+                       # sheet: "31-35 to MIN, 36-60 to LAL". No corroborating
+                       # logged trade found; flat CSV clean (owner=LAL, no
+                       # conflicting NOTES). Resolved from poopoo richness_gap,
+                       # 2026-07-22.
+    (2031, 2, "MIN"): {"on": pk(2031, 2, "MIN"),
+                       "bands": [(31, 35, "MIN"), (36, 60, "MIL")]},
+                       # sheet: "31-35 to MIN, 36-60 to MIL". Flat NOTES had a
+                       # stale "NYK*" leftover from before the real NYK->MIL
+                       # retrade (9105970608c4a298, 2026-06-21), which confirms
+                       # MIL as the current conveys-share holder. Resolved from
+                       # poopoo richness_gap, 2026-07-22.
+    (2030, 1, "CHA"): {"on": pk(2030, 1, "CHA"),
+                       "bands": [(1, 3, "CHA"), (4, 60, "DAL")]},
+                       # sheet: "protected for selections 1-3 ... obligation
+                       # extinguished if not conveyed". No corroborating logged
+                       # trade found. Resolved from poopoo richness_gap,
+                       # 2026-07-22.
+    (2030, 2, "NYK"): {"on": pk(2030, 2, "NYK"),
+                       "bands": [(31, 35, "NYK"), (36, 60, "IND")]},
+                       # sheet: "31-35 to NYK, 36-60 to IND". No corroborating
+                       # logged trade found. Resolved from poopoo richness_gap,
+                       # 2026-07-22.
 }
 
 
@@ -98,6 +143,17 @@ SWAP_GROUPS = {
                    pk(2028, 1, "PHX")],
         "priority": ["MIA", "SAC"],
         "txn_ids": [{"id": "8685c0dfc2717083", "date": "2026-06-20"}],
+    },
+    # 2027 LAL/HOU 1st: DET holds the right to the better of the two.
+    # Trade 65 (2021-01-19) grants SAS "Right to swap 2027 LAL 1st with 2027
+    # HOU 1st" (SAS already held 2027 LAL 1st unconditionally). Trade 46
+    # (2026-01-21) moves the right from SAS to DET ("more favorable of 2027
+    # LAL/HOU 1st"). Resolved from poopoo richness_gap, 2026-07-22.
+    "sg_det_lal_hou_27_1": {
+        "members": [pk(2027, 1, "LAL"), pk(2027, 1, "HOU")],
+        "priority": ["DET", "HOU"],
+        "txn_ids": [{"id": "23eb5d48412327c5", "date": "2026-01-21"},   # Trade 46
+                   {"id": "6719948689818913", "date": "2021-01-19"}],  # Trade 65
     },
 }
 

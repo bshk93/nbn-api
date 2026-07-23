@@ -54,6 +54,11 @@ def run(csv_path: Path) -> int:
         # `legacy` is the same kind of deliberate additive field (flags a
         # `legacy`-type node) -- always None for a settled pick.
         assert got.pop("legacy") is None, f"{k}: settled pick has non-null legacy"
+        # `ladder_fallback_of` is the same kind of deliberate additive field
+        # (reciprocal of `ladder` -- flags a pick that's itself a ladder's
+        # fallback target) -- always None here since this test calls
+        # project_to_flat with no store, so there's no ladders list to match.
+        assert got.pop("ladder_fallback_of") is None, f"{k}: settled pick has non-null ladder_fallback_of"
         want = live_by_key[k]
         # swap_conveys is always None for settled picks; live agrees (no swap_owner)
         if got != want:

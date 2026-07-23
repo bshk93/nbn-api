@@ -44,7 +44,43 @@ Adds player to a team roster and sets their contract.
 - `{team}-roster.csv` → appends `{SLUG, TYPE}` row
 - If player was previously `"dead"` and had dead cap in `salaries` (old format), migrates it to `dead_cap` before overwriting
 
-**Validation:** player must not already be on any roster.
+**Validation:** player must not already be on any roster. Exception: a player currently held only as a UFA/RFA cap hold on another team (their contract has lapsed, they haven't been renounced) can be signed elsewhere directly — the old team's hold and roster row are cleared automatically, no separate renounce needed.
+
+---
+
+### `offer_sheet` — RFA offer sheet (§ 3.15)
+
+Records **and immediately applies** a team extending an offer sheet to another team's restricted free agent. This is one atomic transaction, not two — once `outcome` is known there's no independent decision left, so it directly signs the player (internally calling the same logic as `sign`, above) to `retaining_team` if `matched` or `offering_team` if `not_matched`. Entered after the outcome is known (no live 48-hour match-period clock is modeled — see rulebook § 3.15 for the real-time procedure GMs follow out of band).
+
+> An earlier version of this type only *recorded* the offer and required a separate follow-up `sign` transaction to actually apply the contract. That two-step design shipped a real bug on first use: an offer sheet was submitted with `outcome: "matched"`, the follow-up `sign` was never submitted, and the player's contract silently never updated — nothing in the flow forced or even flagged the second step. `offer_sheet` is now self-contained specifically because of that failure.
+
+**Details:**
+```json
+{
+  "player": "slug",
+  "offering_team": "LAL",
+  "contract": {
+    "type": "player",
+    "salaries": { "26-27": "$8,000,000", "27-28": "$8,500,000" },
+    "cap_holds": {}
+  },
+  "outcome": "matched"
+}
+```
+
+`outcome` is `"matched"` (retaining team keeps the player, signed to `contract`) or `"not_matched"` (player signs with `offering_team` on `contract`). `retaining_team` is not submitted — it's derived from whichever roster currently carries the player's `SLUG` row.
+
+**Validation (hard-fail, not the soft `checks` path):**
+- Player must currently carry an `RFA` (not `UFA`) cap hold for the upcoming season.
+- `offering_team` must differ from the retaining team.
+- `contract.salaries` must cover at least 2 years (§ 3.15's "at least 2 guaranteed years" — this only checks year count, not that each year is actually guaranteed).
+
+**Mutates:**
+- `player-bios.json` → same as `sign`, applied to whichever team the outcome resolves to
+- `{team}-roster.csv` → same as `sign` (old team's roster row cleared automatically if `not_matched`)
+- Stored record gets `"teams": [offering_team, retaining_team]` (same convention as `trade`) for `GET /api/transactions?team=`, and each bio's `contracts` history entry gets `signing_method: "offer_sheet_matched"` or `"offer_sheet_not_matched"` so it's distinguishable from an ordinary re-sign.
+
+**Not yet built:** rescission (§ 3.10/§ 3.15) — if the offering team renounced other cap holds to afford the offer and the retaining team matches, the rulebook lets them restore those renouncements. No `rescind_renounce` transaction type exists yet; do it by hand.
 
 ---
 

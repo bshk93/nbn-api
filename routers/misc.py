@@ -52,6 +52,7 @@ class CapLevel(BaseModel):
     bae_amount: int = 0
     room_amount: int = 0
     eaps: int = 0          # Estimated Average Player Salary — cap-hold threshold (§ 3.10)
+    min_salary_scale: dict[str, int] = {}  # keyed "0".."9","10+" — years of experience (§ 2.1a, § 3.12)
 
 
 @router.get("/api/cap-levels")
