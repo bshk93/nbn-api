@@ -1,10 +1,22 @@
 # Draft-pick conveyance model (design spec)
 
-**Status: design only — not built.** The live system still runs on the flat
-`draft-picks.csv` / `PICKS_HEADERS` model (`routers/constants.py`,
-`routers/roster_picks.py`, `routers/draft.py`). Nothing in this document exists
-in code yet. This is the reference to build from, and the acceptance test the
-build must pass.
+**Status: LIVE since 2026-07-19.** This document was written as the up-front
+design spec (below), then the model described here was actually built and cut
+over to production the same day and in the days after — but this file was
+never updated to say so, which made it actively misleading (caught 2026-07-23).
+Ground truth for "is this live right now": `PICKS_READ_SOURCE=conveyance` in
+`nbn-api/.env` (currently set) makes `GET /api/picks` / `GET /api/picks/{team}`
+serve from this model, not the flat CSV; `PICKS_OWNERSHIP_ENFORCE` (default,
+i.e. unset) makes trade validation authoritative against it too. If either
+env var is ever unset, treat this doc's "live" claim as needing re-verification
+against the code, not assumed. The sections below (2 onward) are still an
+accurate description of the shipped model's shapes — they were the spec the
+build was checked against — but this doc is **not actively maintained** as
+day-to-day work continues (new legacy picks resolved, new node types added,
+etc.); it was last substantively true as prose on 2026-07-19. For what's
+actually changed since, `git log -- picks_conveyance/` is more current than
+either this file or `docs/picks-migration-worksheet.md` (also last updated
+2026-07-19, same staleness problem).
 
 Companion notes live in the working memory as `project-picks-conveyance-model`
 and `project-pick-owner-oversimplification`.
