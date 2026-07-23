@@ -19,7 +19,10 @@ either this file or `docs/picks-migration-worksheet.md` (also last updated
 2026-07-19, same staleness problem).
 
 Companion notes live in the working memory as `project-picks-conveyance-model`
-and `project-pick-owner-oversimplification`.
+and `project-pick-owner-oversimplification`. See also
+`docs/picks-conveyance-hardening.md` (2026-07-23) — a family of overwrite/
+collision bugs in the ladder and swap-group mechanics, found by testing fixes
+against the real production registry rather than only synthetic data.
 
 ---
 
