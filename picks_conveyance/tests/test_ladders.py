@@ -124,9 +124,77 @@ def test_ladder_defers_to_existing_protected_node():
     check("no fallback once the real pick conveys", (2031, 1, "OKC") in r3, False)
 
 
+def test_ladder_fallback_conflicts_with_existing_structure():
+    """docs/picks-conveyance-hardening.md item B: the `authoritative` defer
+    that protects a ladder STEP's own key (see
+    test_ladder_defers_to_existing_protected_node above) was never applied to
+    the FALLBACK assignment -- a ladder whose protection never lifts would
+    silently overwrite a fallback-target pick's own, independently-resolved
+    `protected`/`swap`/`binary` outcome with no error. Reproduced against a
+    pick shaped like this before the fix (resolved to the ladder's `to` team
+    instead of its own correct answer); must now raise instead of silently
+    picking a winner."""
+    protected_node = {
+        "type": "protected", "id": "px",
+        "on": {"year": 2030, "round": 1, "orig": "AAA"},
+        "bands": [{"min": 1, "max": 5, "to": "AAA"},
+                  {"min": 6, "max": 60, "to": "ZZZ"}],
+    }
+    store = {
+        "picks": [
+            {"year": 2030, "round": 1, "orig": "AAA", "conveyance": protected_node},
+            {"year": 2030, "round": 1, "orig": "BBB", "conveyance": {"type": "settled", "team": "BBB"}},
+        ],
+        "ladders": [
+            {"id": "L1", "from": "BBB", "to": "CCC",
+             "steps": [{"year": 2030, "round": 1, "orig": "BBB", "protect_top": 60}],
+             "fallback": {"type": "fixed_asset",
+                          "picks": [{"year": 2030, "round": 1, "orig": "AAA"}]}},
+        ],
+    }
+    positions = {(2030, 1, "AAA"): 20, (2030, 1, "BBB"): 55}
+    raised = False
+    try:
+        resolver.resolve_all(store, positions)
+    except resolver.ResolutionError:
+        raised = True
+    check("fallback colliding with an authoritative node raises ResolutionError",
+          raised, True)
+
+
+def test_two_ladders_disagree_on_the_same_pick_raises():
+    """docs/picks-conveyance-hardening.md items C/D, resolve-time backstop:
+    nothing at write time (`add_ladder`) currently stops two ladders from
+    governing the same (year, round, orig), and before this fix the resolver
+    would silently pick whichever ladder came last in the list -- no error,
+    no warning. Two ladders here disagree about the same pick at the same
+    real draft position; must now raise."""
+    store = {
+        "picks": [{"year": 2031, "round": 1, "orig": "QQQ",
+                  "conveyance": {"type": "settled", "team": "QQQ"}}],
+        "ladders": [
+            {"id": "L_first", "from": "QQQ", "to": "RRR",
+             "steps": [{"year": 2031, "round": 1, "orig": "QQQ", "protect_top": 10}],
+             "fallback": None},
+            {"id": "L_second", "from": "QQQ", "to": "SSS",
+             "steps": [{"year": 2031, "round": 1, "orig": "QQQ", "protect_top": 60}],
+             "fallback": None},
+        ],
+    }
+    positions = {(2031, 1, "QQQ"): 55}
+    raised = False
+    try:
+        resolver.resolve_all(store, positions)
+    except resolver.ResolutionError:
+        raised = True
+    check("two disagreeing ladders on the same pick raise ResolutionError", raised, True)
+
+
 if __name__ == "__main__":
     for t in (test_sas_was, test_mem_bkn, test_sas_tor_fallback,
-              test_orig_decoupled_from_from, test_ladder_defers_to_existing_protected_node):
+              test_orig_decoupled_from_from, test_ladder_defers_to_existing_protected_node,
+              test_ladder_fallback_conflicts_with_existing_structure,
+              test_two_ladders_disagree_on_the_same_pick_raises):
         print(t.__name__)
         t()
     print()

@@ -242,10 +242,35 @@ def _resolve_ladders(ladders: list, positions: dict, pick_nodes: dict | None = N
     pick — e.g. a third party's independent claim layered on via a separate
     trade — instead of blindly overwriting it. The ladder still uses the real
     `positions` lookup to decide whether its own fallback fires; it just
-    doesn't clobber a more specific existing answer for the step's own key."""
+    doesn't clobber a more specific existing answer for the step's own key.
+
+    This same `authoritative` deferral is applied to the FALLBACK assignment
+    below too (docs/picks-conveyance-hardening.md item B) — it wasn't
+    originally, which let a ladder's fallback silently overwrite a fallback
+    pick's own independently-resolved `protected`/`swap`/`binary` outcome
+    with no error at all. Unlike the step case, there's no sensible "defer"
+    behavior for a fallback collision (two different trades made two
+    different real promises about the same physical pick), so this raises
+    `ResolutionError` instead of picking a winner. A `ResolutionError` is
+    also raised (via `_assign`) if two ladders disagree about the very same
+    step or fallback key within this same call — the resolve-time backstop
+    for docs/picks-conveyance-hardening.md items C/D, independent of
+    whatever write-time guard `add_ladder` may or may not have."""
     pick_nodes = pick_nodes or {}
     out: dict = {}
+
+    def _assign(k, team, ladder_id, what):
+        existing = out.get(k)
+        if existing is not None and existing != team:
+            raise ResolutionError(
+                f"ladder {ladder_id!r} {what} {k}: would resolve to {team!r}, but "
+                f"{k} was already resolved to {existing!r} by another ladder in "
+                f"this same resolution -- two ladders disagree about the same "
+                f"pick and need manual reconciliation")
+        out[k] = team
+
     for L in ladders:
+        lid = L.get("id", "?")
         conveyed = False
         evaluated_all = True
         for step in L["steps"]:
@@ -258,14 +283,22 @@ def _resolve_ladders(ladders: list, positions: dict, pick_nodes: dict | None = N
             authoritative = pick_nodes.get(k, {}).get("type") in ("protected", "swap", "binary")
             if top == 0 or pos > top:
                 if not authoritative:
-                    out[k] = L["to"]       # conveys
+                    _assign(k, L["to"], lid, "step")     # conveys
                 conveyed = True
                 break
             if not authoritative:
-                out[k] = L["from"]         # protected this year; roll forward
+                _assign(k, L["from"], lid, "step")       # protected this year; roll forward
         if not conveyed and evaluated_all:
             fb = L.get("fallback")
             if fb and fb.get("type") == "fixed_asset":
                 for pref in fb["picks"]:
-                    out[key(pref)] = L["to"]
+                    fbk = key(pref)
+                    fb_node_type = pick_nodes.get(fbk, {}).get("type")
+                    if fb_node_type in ("protected", "swap", "binary"):
+                        raise ResolutionError(
+                            f"ladder {lid!r} fallback pick {fbk}: already has its own "
+                            f"{fb_node_type!r} conveyance from an unrelated trade -- "
+                            f"can't convey it to {L['to']!r} as fallback compensation "
+                            f"without manual resolution")
+                    _assign(fbk, L["to"], lid, "fallback")
     return out
