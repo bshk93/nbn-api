@@ -242,6 +242,28 @@ def _all_picks_flat() -> list[dict]:
     return picks
 
 
+def _pick_matches_team(p: dict, team: str) -> bool:
+    """Does `team` have a real claim on this pick? Exact owner, any
+    pipe-joined candidate, or the orig team as a fallback when the owner is
+    still fully undetermined ("?"). ALSO checks `ladder_fallback_of.to` —
+    a pick that's compensation for a DIFFERENT pick's protection ladder
+    never resolving shows an ordinary-looking `owner`/`leaves` (e.g.
+    owner="OKC", leaves=[]) with no hint of the real claimant, who appears
+    only in this sibling field. Missed until 2026-07-23 (found auditing
+    nbn-today's Stepien Rule check against real ladder+fallback data) —
+    every consumer of GET /api/picks/{team} was silently missing a team's
+    real fallback claims, not just the Stepien feature."""
+    owner = p["owner"]
+    if owner == "?":
+        matched = p["orig"] == team          # fallback: serve to orig team
+    else:
+        matched = team in owner.split("|")   # single team or pipe-separated candidates
+    if matched:
+        return True
+    fallback = p.get("ladder_fallback_of")
+    return bool(fallback and fallback.get("to") == team)
+
+
 @router.get("/api/picks")
 def get_all_picks():
     return _all_picks_flat()
@@ -253,12 +275,7 @@ def get_team_picks(team: str):
     if team not in VALID_TEAMS:
         raise HTTPException(status_code=404, detail="Unknown team")
     all_picks = _all_picks_flat()
-    def matches(p):
-        owner = p["owner"]
-        if owner == "?":
-            return p["orig"] == team          # fallback: serve to orig team
-        return team in owner.split("|")       # single team or pipe-separated candidates
-    return [p for p in all_picks if matches(p)]
+    return [p for p in all_picks if _pick_matches_team(p, team)]
 
 
 class PickUpsert(BaseModel):

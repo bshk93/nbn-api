@@ -2173,7 +2173,7 @@ def _trade_flows(details, bios: dict, season: str) -> tuple[dict, dict, dict, di
     return outgoing, incoming, out_players, in_players
 
 
-def _check_stepien_rule(details: TradeIn) -> list[CheckResult]:
+def _check_stepien_rule(details: TradeIn, all_picks: list[dict] | None = None) -> list[CheckResult]:
     """§ 7.2 Stepien Rule: a team must retain the ability to make a
     first-round selection at least once every two draft years — a proposed
     trade is illegal if, after it, a team would have no first-round pick in
@@ -2223,8 +2223,13 @@ def _check_stepien_rule(details: TradeIn) -> list[CheckResult]:
     owner pipe here so that team's real (if contingent) coverage counts;
     left out of retrade simulation below (too indirect to safely mutate
     the same way a normal retrade does — falls to manual review).
+
+    `all_picks` is injectable (defaults to the real `_all_picks_flat()`)
+    so tests can exercise this against synthetic pick data instead of
+    live production picks — see `tests/test_stepien_rule.py`.
     """
-    all_picks = _all_picks_flat()
+    if all_picks is None:
+        all_picks = _all_picks_flat()
     owner_map: dict[tuple[int, str], str] = {}
     group_members: dict[str, list[tuple[int, str]]] = {}
     fallback_keys: set[tuple[int, str]] = set()
