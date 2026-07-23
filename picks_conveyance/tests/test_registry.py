@@ -79,6 +79,65 @@ def main():
         check("appended swap group persists on disk",
               "sg_test_2099" in registry.load_registry()["swap_groups"])
 
+        # 4. docs/picks-conveyance-hardening.md items C/D: add_ladder rejects
+        #    a new ladder that collides (on step OR fallback) with an
+        #    existing one, instead of silently letting both exist for the
+        #    resolver to arbitrarily pick between later.
+        registry.add_ladder({
+            "id": "ladder_test_1", "from": "MIA", "to": "ORL",
+            "steps": [{"year": 2099, "round": 1, "orig": "MIA", "protect_top": 10}],
+            "fallback": {"type": "fixed_asset",
+                        "picks": [{"year": 2100, "round": 2, "orig": "MIA"}]},
+        })
+        check("first ladder persists", any(
+            L["id"] == "ladder_test_1" for L in registry.load_registry()["ladders"]))
+
+        step_collision_raised = False
+        try:
+            registry.add_ladder({
+                "id": "ladder_test_2_step_collision", "from": "MIA", "to": "TOR",
+                # same governed step as ladder_test_1
+                "steps": [{"year": 2099, "round": 1, "orig": "MIA", "protect_top": 20}],
+                "fallback": None,
+            })
+        except registry.LadderConflict:
+            step_collision_raised = True
+        check("add_ladder rejects a step colliding with an existing ladder's step",
+              step_collision_raised)
+
+        fallback_collision_raised = False
+        try:
+            registry.add_ladder({
+                "id": "ladder_test_3_fallback_collision", "from": "DAL", "to": "SAC",
+                "steps": [{"year": 2099, "round": 1, "orig": "DAL", "protect_top": 15}],
+                # same fallback target as ladder_test_1
+                "fallback": {"type": "fixed_asset",
+                            "picks": [{"year": 2100, "round": 2, "orig": "MIA"}]},
+            })
+        except registry.LadderConflict:
+            fallback_collision_raised = True
+        check("add_ladder rejects a fallback colliding with an existing ladder's fallback",
+              fallback_collision_raised)
+
+        check("rejected ladders were never persisted (only ladder_test_1 present)",
+              [L["id"] for L in registry.load_registry()["ladders"]
+               if L["id"].startswith("ladder_test_")] == ["ladder_test_1"])
+
+        whole_registry_collision_raised = False
+        try:
+            registry._check_ladder_collisions([
+                {"id": "x1", "from": "GSW", "to": "SAC",
+                 "steps": [{"year": 2099, "round": 2, "orig": "GSW", "protect_top": 40}],
+                 "fallback": None},
+                {"id": "x2", "from": "GSW", "to": "LAC",
+                 "steps": [{"year": 2099, "round": 2, "orig": "GSW", "protect_top": 50}],
+                 "fallback": None},
+            ])
+        except registry.LadderConflict:
+            whole_registry_collision_raised = True
+        check("_validate_registry's whole-registry sweep also catches a pairwise collision",
+              whole_registry_collision_raised)
+
     finally:
         registry.REGISTRY_FILE = orig_registry
         tmp_registry.unlink(missing_ok=True)

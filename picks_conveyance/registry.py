@@ -29,6 +29,15 @@ class RetradeBlocked(Exception):
     """Raised when a re-trade targets a legacy (frozen-from-re-trade) pick."""
 
 
+class LadderConflict(Exception):
+    """Raised when a ladder's steps or fallback picks collide with another
+    ladder's steps or fallback picks — docs/picks-conveyance-hardening.md
+    items C/D. Before this check existed, nothing stopped two ladders from
+    governing (or naming as fallback compensation) the same
+    (year, round, orig); the resolver would silently pick whichever ladder
+    happened to be last in the registry's list, with no error."""
+
+
 class AmbiguousLeaf(Exception):
     """Raised when `handle_retrade` is called with no `leaf_id` and the team
     occupies more than one distinct leaf position within a pick's structure,
@@ -103,6 +112,52 @@ def _validate_registry(reg: dict) -> None:
         model.validate_swap_group(group)
     for cid, nodes in reg["binary_chains"].items():
         model.validate_binary_chain(nodes)
+    for ladder in reg.get("ladders", []):
+        model.validate_ladder(ladder)
+    _check_ladder_collisions(reg.get("ladders", []))
+
+
+def _ladder_keys(ladder: dict) -> set[tuple]:
+    """Every (year, round, orig) this ladder governs or names as fallback
+    compensation — the full set of picks a NEW ladder must not collide with.
+    Mirrors the key computation resolver._resolve_ladders uses for both."""
+    keys = set()
+    for step in ladder.get("steps", []):
+        keys.add((step["year"], step["round"], step.get("orig") or ladder["from"]))
+    fb = ladder.get("fallback") or {}
+    for pref in fb.get("picks", []):
+        keys.add((pref["year"], pref["round"], pref["orig"]))
+    return keys
+
+
+def _check_ladder_collisions(ladders: list[dict], new: dict | None = None) -> None:
+    """Raise LadderConflict if `new` (when given) collides with any ladder in
+    `ladders`, or — when `new` is omitted — if any two ladders in `ladders`
+    collide with each other (the whole-registry sweep `_validate_registry`
+    runs). A collision is any shared (year, round, orig) between either
+    ladder's steps or fallback picks: a pick can only be one ladder's step or
+    one ladder's fallback target at a time."""
+    if new is not None:
+        new_keys = _ladder_keys(new)
+        for existing in ladders:
+            shared = new_keys & _ladder_keys(existing)
+            if shared:
+                raise LadderConflict(
+                    f"new ladder {new.get('id', '?')!r} collides with existing "
+                    f"ladder {existing.get('id', '?')!r} on {sorted(shared)} — a "
+                    f"pick can only be governed by one ladder's step or named as "
+                    f"one ladder's fallback at a time; needs manual reconciliation")
+        return
+    for i, a in enumerate(ladders):
+        a_keys = _ladder_keys(a)
+        for b in ladders[i + 1:]:
+            shared = a_keys & _ladder_keys(b)
+            if shared:
+                raise LadderConflict(
+                    f"ladder {a.get('id', '?')!r} collides with ladder "
+                    f"{b.get('id', '?')!r} on {sorted(shared)} — a pick can only "
+                    f"be governed by one ladder's step or named as one ladder's "
+                    f"fallback at a time; needs manual reconciliation")
 
 
 def add_protected(pick_key: tuple, on: dict, bands: list[dict],
@@ -187,11 +242,18 @@ def subdivide_protected_band(pick_key: tuple, from_team: str, to_team: str,
 def add_ladder(ladder: dict) -> None:
     """Register a new protection ladder (called by the write path when a
     trade sets a ladder-style protect_top + fixed-asset fallback). Validated
-    before it reaches disk, same posture as add_protected/add_swap_group."""
+    before it reaches disk, same posture as add_protected/add_swap_group.
+
+    Also checked against every existing ladder for a step/fallback collision
+    (docs/picks-conveyance-hardening.md items C/D) — raises LadderConflict
+    rather than silently letting two ladders both claim the same pick, which
+    the resolver could previously only catch by accident (whichever ladder
+    happened to be last in the list quietly won)."""
     from . import model
     model.validate_ladder(ladder)
     with _lock:
         reg = load_registry()
+        _check_ladder_collisions(reg["ladders"], new=ladder)
         reg["ladders"].append(ladder)
         save_registry(reg)
 
