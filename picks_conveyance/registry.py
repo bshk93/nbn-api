@@ -490,7 +490,21 @@ def _retrade_ladders(reg: dict, pick_key: tuple, from_team: str, to_team: str,
     A ladder with multiple steps (a manually-curated multi-year chain, not
     the single-step shape `register_ladder` writes) still shares one
     `from`/`to` for the whole ladder by design (spec §2.5) — matching any
-    one step updates the whole ladder, consistent with that."""
+    one step updates the whole ladder, consistent with that.
+
+    Pins the matched step's `orig` explicitly the first time it's touched.
+    Every curated seed ladder (the 5 pre-existing ones as of 2026-07-23:
+    sas_was, mem_bkn, sas_tor, ...) was written with `step["orig"]` omitted,
+    relying on the `step.get("orig") or ladder["from"]` fallback — safe only
+    because `from` had never been mutated before this function existed. The
+    instant a retrade changes `from` below, that same fallback would start
+    computing a DIFFERENT (year, round, orig) key for every subsequent call
+    — silently detaching the ladder from the real pick it governs, and
+    breaking `resolver._resolve_ladders`'s identical fallback the same way
+    at real draft time. Verified against a sandbox copy of the live
+    registry: a second retrade of the same real pick was silently dropped
+    (`changed=False`) before this pin was added. `register_ladder`-created
+    ladders already set `orig` explicitly and are unaffected."""
     changed = False
     for ladder in reg.get("ladders", []):
         if ladder.get("from") != from_team:
@@ -498,6 +512,8 @@ def _retrade_ladders(reg: dict, pick_key: tuple, from_team: str, to_team: str,
         for step in ladder.get("steps", []):
             step_key = (step["year"], step["round"], step.get("orig") or ladder["from"])
             if step_key == pick_key:
+                if not step.get("orig"):
+                    step["orig"] = pick_key[2]
                 ladder["from"] = to_team
                 if txn_entry:
                     ladder.setdefault("txn_ids", []).append(txn_entry)

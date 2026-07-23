@@ -130,6 +130,27 @@ def main():
         check("ladder retrade: from still UTA after the non-matching call",
               ladder_after2["from"] == "UTA")
 
+        # a SECOND real retrade of the same pick, chained after the first.
+        # ladder_t1's step never carried an explicit `orig` (mirrors every
+        # curated seed ladder) -- the fallback (step.get("orig") or
+        # ladder["from"]) that resolver._resolve_ladders also uses only
+        # stayed correct here because the first retrade above pins `orig`
+        # explicitly onto the step. Without that pin, this second hop's
+        # step_key computation would use the NEW `from` (UTA) instead of
+        # the pick's real, immutable orig (MEM), fail to match, and this
+        # retrade would be silently dropped -- caught by testing against a
+        # sandboxed copy of the real production registry before this pin
+        # was added.
+        node = {"type": "settled", "team": "UTA"}
+        changed = registry.handle_retrade((2099, 1, "MEM"), "UTA", "GSW", node)
+        check("ladder retrade: second hop on the same pick reports changed", changed is True)
+        ladder_after3 = next(L for L in registry.load_registry()["ladders"]
+                             if L["id"] == "ladder_t1")
+        check("ladder retrade: from updated to GSW on the second hop",
+              ladder_after3["from"] == "GSW")
+        check("ladder retrade: step's orig pinned to the pick's real orig (MEM)",
+              ladder_after3["steps"][0].get("orig") == "MEM")
+
         # legacy: blocked
         node = {"type": "legacy", "reason": "test", "owner": "DET"}
         blocked = False
