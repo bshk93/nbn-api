@@ -138,6 +138,45 @@ def main():
         check("_validate_registry's whole-registry sweep also catches a pairwise collision",
               whole_registry_collision_raised)
 
+        # 5. docs/picks-conveyance-hardening.md item F: a pick claimed by more
+        # than one of protected/swap_groups/binary_chains must be caught by
+        # _validate_registry -- apply_registry's set_node applies these
+        # unconditionally in a fixed order (protected, swap_groups,
+        # binary_chains, legacy), so an undetected cross-container collision
+        # would otherwise silently resolve to whichever container is
+        # processed last, with no error.
+        cross_container_reg = registry._empty()
+        cross_container_reg["protected"]["2099|1|ZZZ"] = {
+            "on": {"year": 2099, "round": 1, "orig": "ZZZ"},
+            "bands": [{"min": 1, "max": 5, "to": "ZZZ"}, {"min": 6, "max": 60, "to": "YYY"}],
+        }
+        cross_container_reg["swap_groups"]["sg_conflict_test"] = {
+            "members": [{"year": 2099, "round": 1, "orig": "ZZZ"},
+                       {"year": 2099, "round": 1, "orig": "XXX"}],
+            "priority": ["XXX", "ZZZ"],
+        }
+        cross_container_raised = False
+        try:
+            registry._validate_registry(cross_container_reg)
+        except registry.RegistryConflict:
+            cross_container_raised = True
+        check("a pick claimed by both protected and a swap group raises RegistryConflict",
+              cross_container_raised)
+
+        clean_reg = registry._empty()
+        clean_reg["protected"]["2099|1|ZZZ"] = cross_container_reg["protected"]["2099|1|ZZZ"]
+        clean_reg["swap_groups"]["sg_ok"] = {
+            "members": [{"year": 2099, "round": 1, "orig": "WWW"},
+                       {"year": 2099, "round": 1, "orig": "VVV"}],
+            "priority": ["WWW", "VVV"],
+        }
+        no_conflict = True
+        try:
+            registry._validate_registry(clean_reg)
+        except registry.RegistryConflict:
+            no_conflict = False
+        check("non-overlapping protected + swap_groups pass cleanly", no_conflict)
+
     finally:
         registry.REGISTRY_FILE = orig_registry
         tmp_registry.unlink(missing_ok=True)

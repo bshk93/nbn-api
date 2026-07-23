@@ -126,6 +126,55 @@ def _validate_registry(reg: dict) -> None:
     for ladder in reg.get("ladders", []):
         model.validate_ladder(ladder)
     _check_ladder_collisions(reg.get("ladders", []))
+    _check_structural_exclusivity(reg)
+
+
+class RegistryConflict(Exception):
+    """Raised when the same pick is claimed by more than one of
+    protected/swap_groups/binary_chains — docs/picks-conveyance-hardening.md
+    item F. Deliberately does NOT include ladders (a ladder step correctly
+    co-exists with one of these three via the resolver's `authoritative`
+    defer — see resolver._resolve_ladders and
+    test_ladders.test_ladder_defers_to_existing_protected_node — so overlap
+    there is a supported, intentional shape, not a bug) or legacy (the
+    human-override mechanism, deliberately allowed to supersede anything).
+    protected/swap_groups/binary_chains have no such defer logic between each
+    other: apply_registry's set_node applies each unconditionally in a fixed
+    order (protected, then swap_groups, then binary_chains, then legacy
+    last), so if the same pick ever ended up in two of the first three, the
+    one processed later would silently win with zero indication anything
+    was wrong. This is purely a detector, not a producer — E/register_swap
+    and register_protection's existing-structure guards each only check
+    their OWN container, not each other, so a cross-type collision (e.g. a
+    protection trade landing on a pick that's already a swap-group member)
+    isn't caught anywhere else."""
+
+
+def _structural_claims(reg: dict) -> dict[tuple, list[str]]:
+    """Every pick key claimed by protected/swap_groups/binary_chains, mapped
+    to which container(s) claim it — for `_check_structural_exclusivity`."""
+    claims: dict[tuple, list[str]] = {}
+    for ks in reg.get("protected", {}):
+        claims.setdefault(_kparse(ks), []).append("protected")
+    for gid, g in reg.get("swap_groups", {}).items():
+        for m in g.get("members", []):
+            if isinstance(m, dict) and "orig" in m:
+                claims.setdefault((m["year"], m["round"], m["orig"]), []).append(
+                    f"swap_groups[{gid}]")
+    for cid, members in reg.get("chain_members", {}).items():
+        for ks in members:
+            claims.setdefault(_kparse(ks), []).append(f"binary_chains[{cid}]")
+    return claims
+
+
+def _check_structural_exclusivity(reg: dict) -> None:
+    for k, containers in _structural_claims(reg).items():
+        if len(containers) > 1:
+            raise RegistryConflict(
+                f"{k} is claimed by more than one registry container: "
+                f"{containers} — apply_registry applies these unconditionally "
+                f"in a fixed order, so whichever is processed last would "
+                f"silently win with no error; needs manual reconciliation")
 
 
 def _ladder_keys(ladder: dict) -> set[tuple]:
