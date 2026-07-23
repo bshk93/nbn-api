@@ -2193,13 +2193,40 @@ def _check_stepien_rule(details: TradeIn) -> list[CheckResult]:
     ownership count would be guessing at a still-contingent outcome (see
     picks_conveyance's `leaves` model). Those cases fall back to committee
     manual review, same as the rest of § 7.2's badge in the rulebook.
+
+    A pick with a non-null `group_id` shares its conveyance state with every
+    other pick carrying the same `group_id` (a 2+-way swap group or binary
+    chain projects the SAME shared priority list / chain node onto each
+    member pick's own row — see `registry.handle_retrade` in
+    picks_conveyance, which mutates that one shared structure regardless of
+    which member pick named the trade). So retrading one member conveys the
+    team's single shared claim, not an independent share per row — every
+    row in the group must be updated together, or a team with two picks in
+    a shared swap group would wrongly look like it has two independent
+    claims it can trade away one at a time while "keeping the other."
     """
     all_picks = _all_picks_flat()
     owner_map: dict[tuple[int, str], str] = {}
+    group_members: dict[str, list[tuple[int, str]]] = {}
     for p in all_picks:
         if p.get("round") != 1 or p.get("player"):
             continue
-        owner_map[(p["year"], p["orig"].upper())] = p.get("owner") or "?"
+        key = (p["year"], p["orig"].upper())
+        owner_map[key] = p.get("owner") or "?"
+        gid = p.get("group_id")
+        if gid:
+            group_members.setdefault(gid, []).append(key)
+    key_to_group = {key: gid for gid, keys in group_members.items() for key in keys}
+
+    def _replace_owner(owner: str, from_team: str, to_team: str) -> str:
+        if owner == "?" or from_team not in owner.split("|"):
+            return owner
+        teams = [to_team if t == from_team else t for t in owner.split("|")]
+        deduped = []
+        for t in teams:
+            if t not in deduped:
+                deduped.append(t)
+        return "|".join(deduped)
 
     affected_teams: set[str] = set()
     for xfer in details.transfers:
@@ -2213,7 +2240,13 @@ def _check_stepien_rule(details: TradeIn) -> list[CheckResult]:
             if asset.swap_with or asset.protection is not None or asset.ladder_protect_top is not None:
                 continue
             key = (asset.year, (asset.orig or "").upper())
-            if key in owner_map:
+            if key not in owner_map:
+                continue
+            gid = key_to_group.get(key)
+            if gid:
+                for member_key in group_members[gid]:
+                    owner_map[member_key] = _replace_owner(owner_map[member_key], from_t, to_t)
+            else:
                 owner_map[key] = to_t
 
     if not affected_teams or not owner_map:
