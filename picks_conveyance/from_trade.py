@@ -110,10 +110,31 @@ def register_swap(pick_key: tuple, to_team: str, swap_with: str,
     gets the worse. Returns True if a counterpart pick was found and
     registered, False if not (caller falls back to flat passthrough, same as
     before this feature existed — never silently drops data). `txn_id`/
-    `txn_date`, when given, are stamped at the group level."""
+    `txn_date`, when given, are stamped at the group level.
+
+    Raises `registry.SwapConflict` if either pick already belongs to an
+    existing swap group (docs/picks-conveyance-hardening.md item E) — unlike
+    `register_protection`, which checks `get_protected_spec` first and
+    subdivides existing structure instead of overwriting it,
+    `add_swap_group` had no such guard: a second `swap_with` on an
+    already-structured pick would recompute the SAME deterministic `gid` and
+    silently replace the group wholesale, discarding any re-trades already
+    applied to it and every prior `txn_id`. There's no safe "subdivide"
+    equivalent for a swap the way there is for a protected band, so this
+    refuses instead — the caller already fails open around this (see
+    `routers/transactions.py`'s `_register_trade_swap`), so raising here
+    just means the flat trade still completes but no (wrong) structure gets
+    written, same as any other conveyance registration failure."""
     counterpart = _find_counterpart(pick_key, swap_with, picks_snapshot)
     if counterpart is None:
         return False
+    existing_gid = registry.find_swap_group_for(pick_key) or registry.find_swap_group_for(counterpart)
+    if existing_gid is not None:
+        raise registry.SwapConflict(
+            f"{pick_key} or its counterpart {counterpart} is already a member "
+            f"of swap group {existing_gid!r} — use a plain re-trade (no "
+            f"swap_with) to convey an existing swap claim instead of "
+            f"registering a new one over it")
     year, rnd, orig = pick_key
     members = [{"year": year, "round": rnd, "orig": orig},
                {"year": counterpart[0], "round": counterpart[1], "orig": counterpart[2]}]

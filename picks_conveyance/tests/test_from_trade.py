@@ -80,6 +80,42 @@ def main():
         check("no counterpart -> returns False (falls back to flat passthrough)",
               found2 is False)
 
+        # 3b. docs/picks-conveyance-hardening.md item E: re-registering a
+        # swap over a pick that's ALREADY a member of a group (the MIN/HOU
+        # group test 2 just created) must raise SwapConflict, not silently
+        # overwrite it under the same deterministic gid -- discarding the
+        # existing priority list and txn_ids with no warning.
+        conflict_raised = False
+        try:
+            from_trade.register_swap((2099, 1, "MIN"), to_team="BOS",
+                                     swap_with="NOP", picks_snapshot=[
+                {"YEAR": "2099", "ROUND": "1", "ORIG": "MIN", "OWNER": "BOS"},
+                {"YEAR": "2099", "ROUND": "1", "ORIG": "NOP", "OWNER": "NOP"},
+            ])
+        except registry.SwapConflict:
+            conflict_raised = True
+        check("re-registering swap on an already-grouped pick raises SwapConflict",
+              conflict_raised)
+        reg_after = registry.load_registry()
+        check("the existing swap group is untouched after the rejected attempt",
+              reg_after["swap_groups"][gid]["priority"] == ["HOU", "IND"])
+        check("no stray new group was created by the rejected attempt",
+              len(reg_after["swap_groups"]) == 1)
+
+        # also raises when the COUNTERPART (not pick_key itself) is the one
+        # already grouped
+        conflict_raised2 = False
+        try:
+            from_trade.register_swap((2099, 1, "SAC"), to_team="POR",
+                                     swap_with="HOU", picks_snapshot=[
+                {"YEAR": "2099", "ROUND": "1", "ORIG": "SAC", "OWNER": "POR"},
+                {"YEAR": "2099", "ROUND": "1", "ORIG": "HOU", "OWNER": "HOU"},
+            ])
+        except registry.SwapConflict:
+            conflict_raised2 = True
+        check("collision via the counterpart pick also raises SwapConflict",
+              conflict_raised2)
+
         # 4. register_protection on a pick that ALREADY has real structure
         # (a prior, unrelated trade's claim) must subdivide the band the new
         # from_team actually holds, not overwrite the whole node — otherwise

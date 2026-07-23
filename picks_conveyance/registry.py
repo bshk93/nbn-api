@@ -29,6 +29,17 @@ class RetradeBlocked(Exception):
     """Raised when a re-trade targets a legacy (frozen-from-re-trade) pick."""
 
 
+class SwapConflict(Exception):
+    """Raised when a new swap-group registration would collide with a pick
+    that's already a member of an existing swap group —
+    docs/picks-conveyance-hardening.md item E. Before this check existed,
+    `from_trade.register_swap` had no analog of `register_protection`'s
+    existing-structure check (`get_protected_spec`); a second `swap_with` on
+    an already-swap-structured pick would silently overwrite the group
+    (fresh priority list, prior txn_ids discarded) under the same
+    deterministically-derived group id."""
+
+
 class LadderConflict(Exception):
     """Raised when a ladder's steps or fallback picks collide with another
     ladder's steps or fallback picks — docs/picks-conveyance-hardening.md
@@ -256,6 +267,24 @@ def add_ladder(ladder: dict) -> None:
         _check_ladder_collisions(reg["ladders"], new=ladder)
         reg["ladders"].append(ladder)
         save_registry(reg)
+
+
+def find_swap_group_for(pick_key: tuple) -> str | None:
+    """The group id of the swap group `pick_key` is a plain (fixed pick-ref)
+    member of, or None if it isn't in any. Read-only lookup, mirrors
+    `get_protected_spec`'s role for protection — lets a caller
+    (`from_trade.register_swap`) tell a brand-new swap apart from one that
+    would collide with an already-established group, the same distinction
+    `register_protection` already makes via `get_protected_spec`. Only
+    matches fixed pick-ref members (a dynamic output-ref member has no
+    identity of its own to compare against a plain pick_key)."""
+    reg = load_registry()
+    for gid, group in reg.get("swap_groups", {}).items():
+        for m in group.get("members", []):
+            if (isinstance(m, dict) and "orig" in m
+                    and (m.get("year"), m.get("round"), m.get("orig")) == pick_key):
+                return gid
+    return None
 
 
 def add_swap_group(group_id: str, members: list[dict], priority: list,
