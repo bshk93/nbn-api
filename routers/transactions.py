@@ -2204,15 +2204,42 @@ def _check_stepien_rule(details: TradeIn) -> list[CheckResult]:
     row in the group must be updated together, or a team with two picks in
     a shared swap group would wrongly look like it has two independent
     claims it can trade away one at a time while "keeping the other."
+
+    A multi-band `protected` pick (no `group_id` — bands aren't a shared
+    structure the way swap groups are) can still list several real,
+    INDEPENDENT candidates in its pipe-joined `owner` (e.g. a 3-band pick
+    with bands going to 3 different teams). Each band is its own claim —
+    `registry.handle_retrade` mutates only the specific band the trading
+    team occupies, leaving the others untouched — so a plain retrade must
+    replace just that one team within the pipe string, never overwrite the
+    whole entry down to a single team (which would silently delete every
+    other band-holder's real claim).
+
+    A pick with `ladder_fallback_of` set carries a real but easy-to-miss
+    claim: its own `owner`/`leaves` look like a plain settled pick, but a
+    DIFFERENT pick's `ladder.fallback` names this one as compensation if
+    that ladder's protection never lifts — the claimant only appears in
+    `ladder_fallback_of.to` on THIS pick, nowhere else. Folded into the
+    owner pipe here so that team's real (if contingent) coverage counts;
+    left out of retrade simulation below (too indirect to safely mutate
+    the same way a normal retrade does — falls to manual review).
     """
     all_picks = _all_picks_flat()
     owner_map: dict[tuple[int, str], str] = {}
     group_members: dict[str, list[tuple[int, str]]] = {}
+    fallback_keys: set[tuple[int, str]] = set()
     for p in all_picks:
         if p.get("round") != 1 or p.get("player"):
             continue
         key = (p["year"], p["orig"].upper())
-        owner_map[key] = p.get("owner") or "?"
+        owner = p.get("owner") or "?"
+        fallback = p.get("ladder_fallback_of")
+        if fallback and fallback.get("to"):
+            fallback_keys.add(key)
+            fb_team = fallback["to"]
+            owner = fb_team if owner == "?" else (
+                owner if fb_team in owner.split("|") else f"{owner}|{fb_team}")
+        owner_map[key] = owner
         gid = p.get("group_id")
         if gid:
             group_members.setdefault(gid, []).append(key)
@@ -2240,14 +2267,11 @@ def _check_stepien_rule(details: TradeIn) -> list[CheckResult]:
             if asset.swap_with or asset.protection is not None or asset.ladder_protect_top is not None:
                 continue
             key = (asset.year, (asset.orig or "").upper())
-            if key not in owner_map:
+            if key not in owner_map or key in fallback_keys:
                 continue
             gid = key_to_group.get(key)
-            if gid:
-                for member_key in group_members[gid]:
-                    owner_map[member_key] = _replace_owner(owner_map[member_key], from_t, to_t)
-            else:
-                owner_map[key] = to_t
+            for member_key in (group_members[gid] if gid else [key]):
+                owner_map[member_key] = _replace_owner(owner_map[member_key], from_t, to_t)
 
     if not affected_teams or not owner_map:
         return []
