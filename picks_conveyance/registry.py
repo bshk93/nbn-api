@@ -333,17 +333,22 @@ def handle_retrade(pick_key: tuple, from_team: str, to_team: str, node: dict,
     this, a re-traded leaf would keep showing only its original creating
     trade forever, silently wrong the moment it moves again.
 
+    Also propagates to any protection ladder governing this exact pick (see
+    `_retrade_ladders`) — a ladder lives outside the pick's own conveyance
+    node, so the node-type dispatch below never touches it on its own; a
+    `settled` pick with no other structure can still change here if a
+    ladder points at it.
+
     Returns True if the registry was changed, False if there was nothing to
-    update (a `settled` pick, or a leaf_id that matched nothing). Raises
-    RetradeBlocked for `legacy` (frozen from re-trade by design). Raises
-    AmbiguousLeaf per the fallback case above, or ValueError for a
-    malformed/mismatched leaf_id. Re-validates the mutated structure
-    (incl. the binary-chain cycle check) before persisting."""
+    update (a plain `settled` pick with no governing ladder, or a leaf_id
+    that matched nothing). Raises RetradeBlocked for `legacy` (frozen from
+    re-trade by design). Raises AmbiguousLeaf per the fallback case above,
+    or ValueError for a malformed/mismatched leaf_id. Re-validates the
+    mutated structure (incl. the binary-chain cycle check) before
+    persisting."""
     from . import model
 
     t = node.get("type")
-    if t == "settled":
-        return False
     if t == "legacy":
         raise RetradeBlocked(
             f"{pick_key} is a legacy pick (frozen from re-trade until "
@@ -398,12 +403,8 @@ def handle_retrade(pick_key: tuple, from_team: str, to_team: str, node: dict,
                     changed = True
                     model.validate_binary_chain(chain_nodes)
 
-            if changed:
-                save_registry(reg)
-            return changed
-
         # --- no leaf_id given: auto-detect (fine when unambiguous) ---
-        if t == "protected":
+        elif t == "protected":
             spec = reg["protected"].get(_kstr(pick_key))
             if spec:
                 matches = [b for b in spec["bands"] if b.get("to") == from_team]
@@ -452,9 +453,57 @@ def handle_retrade(pick_key: tuple, from_team: str, to_team: str, node: dict,
                 changed = True
                 model.validate_binary_chain(chain_nodes)
 
+        if _retrade_ladders(reg, pick_key, from_team, to_team, txn_entry):
+            changed = True
+
         if changed:
             save_registry(reg)
         return changed
+
+
+def _retrade_ladders(reg: dict, pick_key: tuple, from_team: str, to_team: str,
+                     txn_entry: dict | None) -> bool:
+    """Propagate a re-trade to any protection ladder governing this exact
+    pick. `add_ladder`/`from_trade.register_ladder` store a ladder as a
+    container OUTSIDE the pick's own `conveyance` node — the governed pick
+    itself is typically left a plain `settled` node — so the node-type
+    dispatch in `handle_retrade` above never sees it. Without this, a
+    re-trade of a ladder-governed pick to a new team left the ladder's
+    `from` pointing at the team that no longer holds it, which isn't just a
+    stale display field: `resolver._resolve_ladders` credits `from` as the
+    keeper whenever the pick stays protected, so a stale `from` would
+    resolve the pick to the WRONG team at real draft time (the exact class
+    of bug — an intermediate leg of a chain silently lost — this whole
+    conveyance model exists to fix for every other node type).
+
+    Matches by step identity (year, round, orig — the same tuple
+    `resolver._resolve_ladders` keys off via `step.get("orig") or
+    ladder["from"]`), not node type, so this fires whether the governed
+    pick is a plain settled pick (the common case — `register_ladder` is
+    only ever called alongside a plain, un-contingent pick trade) or one
+    that separately also carries its own protected/swap/binary structure
+    from an unrelated trade. Only rewrites `from`: a ladder's `to` (the
+    fallback beneficiary) isn't reachable as a leaf on this pick at all
+    today (see `ownership.list_leaves` — no `ladder` case), so there's
+    nothing for a retrade of THIS pick to convey on that side.
+
+    A ladder with multiple steps (a manually-curated multi-year chain, not
+    the single-step shape `register_ladder` writes) still shares one
+    `from`/`to` for the whole ladder by design (spec §2.5) — matching any
+    one step updates the whole ladder, consistent with that."""
+    changed = False
+    for ladder in reg.get("ladders", []):
+        if ladder.get("from") != from_team:
+            continue
+        for step in ladder.get("steps", []):
+            step_key = (step["year"], step["round"], step.get("orig") or ladder["from"])
+            if step_key == pick_key:
+                ladder["from"] = to_team
+                if txn_entry:
+                    ladder.setdefault("txn_ids", []).append(txn_entry)
+                changed = True
+                break
+    return changed
 
 
 def apply_registry(store: dict) -> dict:

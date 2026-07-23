@@ -1,5 +1,6 @@
 """Re-trade handling tests: swap/protected/binary structures update in place,
-settled is a no-op, legacy is blocked.
+a plain settled pick is a no-op unless a ladder governs it (in which case
+the ladder's `from` updates), legacy is blocked.
 
     venv/bin/python -m picks_conveyance.tests.test_retrade
 """
@@ -91,6 +92,43 @@ def main():
         node = {"type": "settled", "team": "ATL"}
         changed = registry.handle_retrade((2099, 1, "ATL"), "ATL", "BOS", node)
         check("settled retrade: no-op (False)", changed is False)
+
+        # settled + governing ladder: the pick's own node is plain settled
+        # (the common shape register_ladder leaves it in), but a ladder
+        # container elsewhere in the registry names this exact (year, round,
+        # orig) as its governed step — re-trading the pick must update the
+        # ladder's `from`, not silently leave it stale (the bug this fix
+        # closes: resolver._resolve_ladders would otherwise credit the OLD
+        # team as keeper at real draft time).
+        registry.add_ladder({
+            "id": "ladder_t1", "from": "MEM", "to": "IND",
+            "steps": [{"year": 2099, "round": 1, "orig": "MEM", "protect_top": 10}],
+            "fallback": {"type": "fixed_asset",
+                        "picks": [{"year": 2100, "round": 2, "orig": "MEM"}]},
+            "txn_ids": [{"id": "orig_trade", "date": "2026-01-01"}],
+        })
+        node = {"type": "settled", "team": "MEM"}
+        changed = registry.handle_retrade((2099, 1, "MEM"), "MEM", "UTA", node,
+                                          txn_id="retrade_4", txn_date="2026-07-19")
+        check("ladder retrade: settled pick reports changed", changed is True)
+        ladder_after = next(L for L in registry.load_registry()["ladders"]
+                            if L["id"] == "ladder_t1")
+        check("ladder retrade: from updated to UTA", ladder_after["from"] == "UTA")
+        check("ladder retrade: to untouched", ladder_after["to"] == "IND")
+        check("ladder retrade: txn_id appended, original preserved",
+              ladder_after["txn_ids"] == [{"id": "orig_trade", "date": "2026-01-01"},
+                                          {"id": "retrade_4", "date": "2026-07-19"}])
+
+        # a later, unrelated re-trade of the SAME pick by a team that isn't
+        # the ladder's current `from` must not touch the ladder.
+        node = {"type": "settled", "team": "UTA"}
+        changed = registry.handle_retrade((2099, 1, "MEM"), "GSW", "POR", node)
+        check("ladder retrade: no-op when from_team doesn't match ladder's from",
+              changed is False)
+        ladder_after2 = next(L for L in registry.load_registry()["ladders"]
+                             if L["id"] == "ladder_t1")
+        check("ladder retrade: from still UTA after the non-matching call",
+              ladder_after2["from"] == "UTA")
 
         # legacy: blocked
         node = {"type": "legacy", "reason": "test", "owner": "DET"}

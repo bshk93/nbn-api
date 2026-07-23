@@ -1301,6 +1301,20 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
                         status_code=422,
                         detail=f"Pick {asset.year} R{asset.round} {asset.orig} is owned by {pick_row['OWNER']}, not {xfer.from_team}",
                     )
+                # Once a pick has been used to draft a player it's historical
+                # record, not a live asset — nothing upstream (ownership,
+                # frozen, legacy/leaf checks) inspects PLAYER, so without this
+                # a trade could "convey" an already-drafted pick: it'd pass
+                # every other check (a drafted pick still resolves to a
+                # `settled` node some team technically "owns") and write a
+                # transaction for an asset that no longer exists to trade.
+                drafted_player = (pick_row.get("PLAYER") or "").strip()
+                if drafted_player:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Pick {asset.year} R{asset.round} {asset.orig} was already used "
+                               f"to draft {drafted_player} and can no longer be traded",
+                    )
                 if pick_row.get("FROZEN", "").strip().upper() == "TRUE":
                     reason = pick_row.get("FROZEN_REASON", "").strip()
                     detail = f"Pick {asset.year} R{asset.round} {asset.orig} is frozen and cannot be traded"
