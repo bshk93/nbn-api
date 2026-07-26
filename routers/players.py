@@ -108,6 +108,7 @@ class PlayerBio(BaseModel):
     guarantee_schedule: dict[str, list[dict]] = {}
     contracts: list[dict] = []
     jersey_number: Optional[str] = None
+    secondary_pos: Optional[str] = None
     retired: bool = False
     notes: str = ""
 
@@ -116,8 +117,9 @@ class PlayerCreate(PlayerBio):
     slug: str
 
 
-class JerseyUpdate(BaseModel):
+class TeamSettingsUpdate(BaseModel):
     jersey_number: Optional[str] = None
+    secondary_pos: Optional[str] = None
 
 
 class OvrEntry(BaseModel):
@@ -175,6 +177,8 @@ def create_player(body: PlayerCreate, info: dict = Depends(require_any_role("ros
     invalid_pos = [p for p in body.pos if p not in VALID_POSITIONS]
     if invalid_pos:
         raise HTTPException(status_code=422, detail=f"Invalid positions: {invalid_pos}")
+    if body.secondary_pos and body.secondary_pos not in body.pos:
+        raise HTTPException(status_code=422, detail=f"secondary_pos must be one of the player's eligible positions {body.pos}: got {body.secondary_pos}")
     bios = load_player_bios()
     if slug in bios:
         raise HTTPException(status_code=409, detail="Player already exists")
@@ -194,6 +198,13 @@ def update_player(slug: str, body: PlayerBio, info: dict = Depends(require_any_r
     bios = load_player_bios()
     existed = slug in bios
     old_bio = dict(bios.get(slug, {}))
+
+    # secondary_pos must be one of the player's eligible positions (bio.pos) —
+    # use the pos this request is setting if it explicitly sets one, else fall
+    # back to the player's existing pos on file.
+    effective_pos = body.pos if 'pos' in body.model_fields_set else old_bio.get('pos', [])
+    if body.secondary_pos and body.secondary_pos not in effective_pos:
+        raise HTTPException(status_code=422, detail=f"secondary_pos must be one of the player's eligible positions {effective_pos}: got {body.secondary_pos}")
     if has_role(info, "curator") and not has_role(info, "rosters") and not has_role(info, "admin"):
         existing = bios.get(slug, {})
         update_data = body.model_dump()
@@ -216,29 +227,34 @@ def update_player(slug: str, body: PlayerBio, info: dict = Depends(require_any_r
     return {"ok": True}
 
 
-@router.put("/api/players/{slug}/jersey")
-def update_jersey(slug: str, body: JerseyUpdate, info: dict = Depends(get_token_info)):
+@router.put("/api/players/{slug}/team-settings")
+def update_team_settings(slug: str, body: TeamSettingsUpdate, info: dict = Depends(get_token_info)):
     bios = load_player_bios()
     if slug not in bios:
         raise HTTPException(status_code=404, detail="Player not found")
 
-    is_admin   = has_role(info, "admin")
-    is_rosters = has_role(info, "rosters")
+    # Deliberately narrower than most roster writes: only the player's own
+    # team role may set these, never admin/rosters/bod — these are the team's
+    # own cosmetic identity choices (jersey number, chosen secondary position),
+    # not league-administered roster data.
     team_roles = {r.upper() for r in info.get("roles", []) if r.upper() in VALID_TEAMS}
-
-    if not is_admin and not is_rosters:
-        if not team_roles:
-            raise HTTPException(status_code=403, detail="Insufficient permissions")
-        team_map = _build_team_map()
-        player_team = team_map.get(slug)
-        if not player_team or player_team not in team_roles:
-            raise HTTPException(status_code=403, detail="Player is not on your roster")
+    if not team_roles:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    team_map = _build_team_map()
+    player_team = team_map.get(slug)
+    if not player_team or player_team not in team_roles:
+        raise HTTPException(status_code=403, detail="Player is not on your roster")
 
     if body.jersey_number is not None and not re.fullmatch(r'\d{1,2}', body.jersey_number):
         raise HTTPException(status_code=422, detail="jersey_number must be 1–2 digits")
+    eligible_pos = bios[slug].get("pos", [])
+    if body.secondary_pos and body.secondary_pos not in eligible_pos:
+        raise HTTPException(status_code=422, detail=f"secondary_pos must be one of this player's eligible positions {eligible_pos}: got {body.secondary_pos}")
+
     bios[slug]["jersey_number"] = body.jersey_number
+    bios[slug]["secondary_pos"] = body.secondary_pos
     save_player_bios(bios)
-    log_write(info, f"PUT players/{slug}/jersey — {body.jersey_number}")
+    log_write(info, f"PUT players/{slug}/team-settings — jersey={body.jersey_number} secondary_pos={body.secondary_pos}")
     return {"ok": True}
 
 

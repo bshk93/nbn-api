@@ -326,6 +326,10 @@ class OptionDetails(BaseModel):
     cap_hold_type: str = "UFA"
     cap_hold_amount: Optional[str] = None
     bird_tier: Optional[str] = None  # QVFA, EQVFA, Non-QVFA — only used on decline
+    # Only used on the historical=true backfill path (see _create_historical_option)
+    # — the live path (_apply_option) always derives team itself from the current
+    # roster map and ignores this field.
+    team: Optional[str] = None
 
 
 class GuaranteeDetails(BaseModel):
@@ -1784,22 +1788,18 @@ _MLE_EXCEPTION_LABELS = {
 }
 
 
-def _check_bae_absorption(
+def _check_bae_eligibility(
     team: str,
-    incoming: int,
     team_salary_ex_holds_before: int,
     cl: dict,
     team_state: Optional[dict],
     season: str,
-) -> CheckResult:
-    """BAE trade absorption (§ 4.2a, extended to include the BAE alongside
-    NTMLE/TMLE/Room Exception). Unlike those three, the BAE isn't a running
-    dollar balance — it's a once-per-season boolean (`bae_used`), so it can't
-    share `_check_exception_absorption`'s amount-key/`mle_used` bookkeeping;
-    eligibility mirrors free-agent BAE use instead (§ 3.5): below the First
-    Apron, not already used this season, not used in the immediately prior
-    season (`_bae_available`), and not already used alongside cap space or the
-    Room Exception this same season."""
+) -> Optional[CheckResult]:
+    """Shared BAE eligibility gate (§ 3.5), used by both the free-agent
+    signing path and the trade-absorption path: below the First Apron, not
+    already used this season, not used in the immediately prior season
+    (`_bae_available`), and not already used alongside cap space or the Room
+    Exception this same season. Returns None when eligible."""
     check_name = f"salary_matching_{team.lower()}"
     apron1 = cl.get("apron1")
     ts = get_season_state(team_state or {}, team, season)
@@ -1827,6 +1827,24 @@ def _check_bae_absorption(
             check=check_name, passed=False, level="error",
             message=f"{team} used the Bi-Annual Exception last season — unavailable in consecutive years (§ 3.5).",
         )
+    return None
+
+
+def _check_bae_absorption(
+    team: str,
+    incoming: int,
+    team_salary_ex_holds_before: int,
+    cl: dict,
+    team_state: Optional[dict],
+    season: str,
+) -> CheckResult:
+    """BAE trade absorption (§ 4.2a, extended to include the BAE alongside
+    NTMLE/TMLE/Room Exception). Unlike those three, the BAE isn't a running
+    dollar balance — it's a once-per-season boolean (`bae_used`), so it can't
+    share `_check_exception_absorption`'s amount-key/`mle_used` bookkeeping."""
+    check_name = f"salary_matching_{team.lower()}"
+    if (r := _check_bae_eligibility(team, team_salary_ex_holds_before, cl, team_state, season)):
+        return r
 
     total = cl.get("bae_amount", 0) or 0
     if incoming > total:
@@ -2084,6 +2102,12 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
     r = _universal_hard_cap_check(team, projected_ex_holds, season, ctx["cap_levels"])
     if r:
         checks.append(r)
+
+    if details.signing_method == "bae":
+        cl = ctx["cap_levels"].get(season, {})
+        r = _check_bae_eligibility(team, current_ex_holds, cl, ctx["team_state"], season)
+        if r:
+            checks.append(r)
 
     if details.contract.type != "two-way":
         count = _count_standard_roster(team)
@@ -2806,6 +2830,13 @@ def _validate_convert_twoway(details: ConvertTwoWayDetails, ctx: dict) -> list[C
         if r:
             checks.append(r)
 
+    if team and details.signing_method == "bae":
+        cl = ctx["cap_levels"].get(season, {})
+        ex_holds_now = _compute_team_salary_ex_holds(team, bios, season)
+        r = _check_bae_eligibility(team, ex_holds_now, cl, ctx["team_state"], season)
+        if r:
+            checks.append(r)
+
     if team:
         count = _count_standard_roster(team)
         if count >= ROSTER_MAX:
@@ -2896,7 +2927,12 @@ def _create_historical_option(details: OptionDetails, body: TransactionIn, info:
     bios = load_player_bios()
     if not details.player or details.player not in bios:
         raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
-    return _append_historical("option", details.model_dump(), body, info)
+    stored_details = details.model_dump()
+    if details.team:
+        if details.team.upper() not in VALID_TEAMS:
+            raise HTTPException(status_code=422, detail=f"Unknown team: {details.team!r}")
+        stored_details["team"] = details.team.upper()
+    return _append_historical("option", stored_details, body, info)
 
 
 # ── Transaction routes ────────────────────────────────────────────────────────
