@@ -1585,6 +1585,33 @@ def _min_salary_scale_tier(years_exp: int) -> str:
     return "10+" if years_exp >= 10 else str(max(0, years_exp))
 
 
+def _max_salary_pct(years_exp: int) -> float:
+    """§ 3.11 tier: max Year 1 salary as a fraction of that season's Salary Cap,
+    by years of NBA experience. Unlike the minimum scale, this is a clean
+    percentage of the cap rather than its own negotiated table, so it needs
+    no separate per-season entry in cap-levels.json."""
+    if years_exp >= 10:
+        return 0.35
+    if years_exp >= 7:
+        return 0.30
+    return 0.25
+
+
+def _max_salary(bio: dict, season: str, cap_levels: dict) -> Optional[int]:
+    """§ 3.11: the player's maximum Year 1 salary for `season`, derived from
+    the season's cap and the player's real NBA draft_year (same experience
+    proxy as _one_year_min_cap_hit). Returns None if experience or the
+    season's cap can't be determined (undrafted player, cap not configured
+    yet) — callers should treat that as "can't check," not "no cap applies."
+    """
+    draft_year = bio.get("draft_year")
+    cap = (cap_levels.get(season, {}) or {}).get("cap")
+    if not draft_year or not cap:
+        return None
+    years_exp = _season_start(season) + 2000 - int(draft_year)
+    return int(cap * _max_salary_pct(years_exp))
+
+
 def _one_year_min_cap_hit(bio: dict, season: str, cap_levels: dict) -> Optional[int]:
     """§ 3.12: a 1-year minimum contract's cap hit is capped at the 2-year
     veteran minimum, regardless of the player's actual NBA experience tier —
@@ -2131,6 +2158,10 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
     if r:
         checks.append(r)
 
+    r = _check_max_salary(details, bios, season, ctx["cap_levels"])
+    if r:
+        checks.append(r)
+
     return checks
 
 
@@ -2166,6 +2197,38 @@ def _check_minimum_contract_cap_hit(details: SignDetails, bios: dict, season: st
         message=(f"Submitted salary (${submitted:,}) doesn't match the § 3.12 1-yr minimum cap hit "
                  f"of ${expected:,} (2-year veteran minimum) inferred from this player's real NBA "
                  f"draft year — double check before submitting."),
+    )
+
+
+def _check_max_salary(details: SignDetails, bios: dict, season: str,
+                       cap_levels: dict) -> Optional[CheckResult]:
+    """§ 3.11: a signed player's current-season salary shouldn't exceed their
+    experience-tier maximum (25/30/35% of that season's Salary Cap). Skipped
+    for two-way contracts (no cap salary) and undrafted players (no
+    draft_year experience proxy). Advisory only — § 3.11 is manual review,
+    not system-enforced, and years of NBA experience is inferred from
+    draft_year, not independently verified.
+    """
+    if details.contract.type == "two-way":
+        return None
+    salaries = details.contract.salaries or {}
+    if season not in salaries:
+        return None
+    expected = _max_salary(bios.get(details.player, {}), season, cap_levels)
+    if expected is None:
+        return None
+    submitted = _parse_dollar(salaries[season])
+    if submitted <= expected:
+        return CheckResult(
+            check="max_salary", passed=True,
+            message=f"Year 1 salary (${submitted:,}) is within the § 3.11 max of ${expected:,}.",
+        )
+    return CheckResult(
+        check="max_salary",
+        passed=False,
+        level="warning",
+        message=(f"Submitted Year 1 salary (${submitted:,}) exceeds the § 3.11 max of ${expected:,} "
+                 f"inferred from this player's real NBA draft year — double check before submitting."),
     )
 
 
