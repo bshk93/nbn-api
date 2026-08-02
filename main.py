@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import auth, players, roster_picks, transactions, boxscores, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, discord, trade_finder, picks_preview, suggestions
+from routers import auth, players, roster_picks, transactions, boxscores, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, discord, trade_finder, picks_preview, suggestions, google_sheets
 from routers.picks_scheduler import start_picks_horizon_scheduler
 
 logging.basicConfig(
@@ -52,3 +52,4 @@ app.include_router(news.router)
 app.include_router(discord.router)
 app.include_router(trade_finder.router)
 app.include_router(suggestions.router)
+app.include_router(google_sheets.router)   # POST /api/trade-sheet — publish a workbook to Drive

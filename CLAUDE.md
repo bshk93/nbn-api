@@ -116,6 +116,33 @@ process.
   - `/help` — ephemeral embed listing every command, grouped. Hand-maintained in
     `_HELP_GROUPS`; update it when adding/removing a command.
 
+## Google Sheets export (`POST /api/trade-sheet`)
+
+`routers/google_sheets.py`. Takes an `.xlsx` upload (multipart: `file`, `name`),
+uploads it to Google Drive with `mimeType: application/vnd.google-apps.spreadsheet`
+so Drive converts it to a native Sheet, shares it `anyone: reader`, and returns
+`{id, url}`. Used by the Trade Simulator's "Create Google Sheet" button — the
+browser builds the workbook (`nbn-today/trade-sim/xlsx.js`) and posts it here.
+
+Requires a valid member token (`get_token_info` — any role). It is a write into
+a real Google account, so it is deliberately not public.
+
+**Credential.** One long-lived refresh token for a single Google account, in
+`$NBS_DATA_DIR/google-oauth.json` (mode 0600):
+`{client_id, client_secret, refresh_token, folder_id}`. Held server-side on
+purpose — that is what lets GMs export with no OAuth consent screen. Scope is
+`drive.file`, i.e. per-file: the credential can only see files it created
+itself, never the rest of that Drive. That also keeps it off Google's
+sensitive-scope list, so no app verification is needed.
+
+Set it up once with `authorize_google.py` (its docstring has the Cloud Console
+steps). Without the file the endpoint returns 503 with an explanatory message
+and the front end falls back to a plain `.xlsx` download. If Google starts
+returning 502 "credential was revoked", re-run the same script.
+
+Access tokens are cached in-process until ~60s before expiry; there is no
+persistent token store beyond the refresh token.
+
 ## Docs discipline
 
 Keep `CLAUDE.md` and `docs/` in sync with every code change. If a change affects an endpoint, a data field, a transaction type, or any behavior described in the docs, update the relevant doc in the same commit.

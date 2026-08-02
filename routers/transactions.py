@@ -3672,6 +3672,42 @@ def _trade_fact_sheet(details, ctx: dict) -> dict:
         hard_cap_limit = (cl_season.get("apron1") if hard_cap_level == "first_apron"
                            else cl_season.get("apron2") if hard_cap_level == "second_apron"
                            else None)
+
+        # Salary-matching headroom, computed with the same tier branch
+        # _check_salary_matching uses (§ 4.2 tiers below the First Apron, the
+        # flat outgoing + $250K limit at/above it) so an exported trade sheet
+        # can show "Max Incoming" without a second copy of the rule.
+        apron1_lvl = cl_season.get("apron1")
+        apron2_lvl = cl_season.get("apron2")
+        if apron1_lvl is None:
+            max_incoming = None
+        elif current_ex_holds >= apron1_lvl:
+            max_incoming = out + 250_000
+        else:
+            max_incoming = _salary_match_limit(out)
+
+        # The largest single outgoing salary — what this team could send without
+        # aggregating. If the incoming total needs more than that one leg
+        # supports, the deal is only possible by combining salaries (§ 4.4).
+        leg_salaries = [
+            _parse_dollar((bios.get(s, {}).get("salaries") or {}).get(season, ""))
+            for s in out_players.get(team, [])
+        ]
+        unaggregated = max(leg_salaries) if leg_salaries else 0
+        if apron1_lvl is None:
+            unaggregated_max_incoming = None
+            needs_aggregation = False
+        else:
+            unaggregated_max_incoming = (unaggregated + 250_000
+                                          if current_ex_holds >= apron1_lvl
+                                          else _salary_match_limit(unaggregated))
+            needs_aggregation = len(leg_salaries) >= 2 and inc > unaggregated_max_incoming
+
+        projected_ex_holds = current_ex_holds - out + inc + charge
+        apron_after = ("second_apron" if apron2_lvl is not None and projected_ex_holds >= apron2_lvl
+                       else "first_apron" if apron1_lvl is not None and projected_ex_holds >= apron1_lvl
+                       else None)
+
         teams[team] = {
             "team": team,
             "current_salary": current,
@@ -3682,7 +3718,7 @@ def _trade_fact_sheet(details, ctx: dict) -> dict:
             # displayed "New salary" / apron-room figures match exactly what
             # _validate_trade judged — no parallel, divergent cap math.
             "projected_salary": current - out + inc + charge,
-            "projected_salary_ex_holds": current_ex_holds - out + inc + charge,
+            "projected_salary_ex_holds": projected_ex_holds,
             "players_out": out_players.get(team, []),
             "players_in": in_players.get(team, []),
             "standard_count_before": before,
@@ -3691,6 +3727,11 @@ def _trade_fact_sheet(details, ctx: dict) -> dict:
             "empty_roster_charge": charge,
             "hard_cap_level": hard_cap_level,
             "hard_cap_limit": hard_cap_limit,
+            "max_incoming": max_incoming,
+            "unaggregated_outgoing": unaggregated,
+            "unaggregated_max_incoming": unaggregated_max_incoming,
+            "needs_aggregation": needs_aggregation,
+            "apron_after": apron_after,
         }
 
     return {
