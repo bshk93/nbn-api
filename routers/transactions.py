@@ -3,7 +3,8 @@ import logging
 import os
 import re
 import secrets
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -599,8 +600,15 @@ def _retained_history(bio: dict, cur_season: str):
     )
 
 
-def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[str, dict]:
-    """Removes player from roster, converts guaranteed salary to dead cap. Returns (team, dead_cap)."""
+def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[str, dict, str]:
+    """Removes player from roster, converts guaranteed salary to dead cap.
+    Returns (team, dead_cap, terminated_salary).
+
+    `terminated_salary` is the release-season salary the terminated contract
+    carried — captured here because it is the figure § 1.4 Row D compares
+    against the NTMLE when the player later signs elsewhere. Dead cap is not a
+    usable substitute: a non-guaranteed contract can terminate with a large
+    salary and leave no dead cap at all."""
     bios = load_player_bios()
     if details.player not in bios:
         raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
@@ -613,6 +621,7 @@ def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[
     cur_season = _season_for_date(txn_date)
 
     bio = bios[details.player]
+    terminated_salary = str((bio.get("salaries") or {}).get(cur_season, "") or "")
     holds_map = bio.get("cap_holds") or {}
     guaranteed = bio.get("guaranteed", {})
     guarantee_dates = bio.get("guarantee_dates", {})
@@ -706,7 +715,7 @@ def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[
 
     _scrub_trading_block({team: {details.player}}, bios)
     log_write(info, f"TXN release — {details.player} from {team}")
-    return team, dead_cap
+    return team, dead_cap, terminated_salary
 
 
 def _season_after(season: str) -> str:
@@ -1096,6 +1105,11 @@ def _apply_sign(details: SignDetails, txn_date: str, info: dict, txn_id: Optiona
     write_csv(path, headers, rows)
 
     bio = bios[details.player]
+    # Captured before the new contract overwrites it: after a release the bio
+    # keeps the terminated season's salary, so this is the § 1.4 Row D figure
+    # for any release logged before `terminated_salary` was stored on the
+    # transaction itself.
+    prior_season_salary = str((bio.get("salaries") or {}).get(cur_season, "") or "")
     past, past_gtd, past_gtd_dates, past_gtd_sched = _retained_history(bio, cur_season)
     bio["salaries"] = {**past, **details.contract.salaries}
     bio["cap_holds"] = details.contract.cap_holds
@@ -1162,6 +1176,30 @@ def _apply_sign(details: SignDetails, txn_date: str, info: dict, txn_id: Optiona
                 _maybe_set_hard_cap(ts, "first_apron", f"BAE signing: {details.player}")
 
             state[team][cur] = ts
+            save_team_state(state)
+
+    # ── § 1.4 Row D: signing a player bought out above the NTMLE ─────────────
+    # Fires regardless of how the signing was funded, so it sits outside the
+    # signing_method block above — a minimum-salary deal for a player whose
+    # terminated contract paid more than the NTMLE triggers the lock just the
+    # same. § 1.5.2 separately bars an already-first-apron team from making
+    # this signing at all; that gate lives in _validate_sign.
+    _cap_levels_sign = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
+    buyout_salary = _buyout_salary_above_ntmle(
+        details.player, txn_date, cur_season, _cap_levels_sign, prior_season_salary,
+    )
+    if buyout_salary:
+        with _state_lock:
+            state = load_team_state()
+            if team not in state:
+                state[team] = {}
+            ts = state[team].get(cur_season, dict(DEFAULT_SEASON_STATE))
+            _maybe_set_hard_cap(
+                ts, "first_apron",
+                f"Mid-season buyout signing above NTMLE: {details.player} "
+                f"(terminated contract ${buyout_salary:,}, § 1.4 Row D)",
+            )
+            state[team][cur_season] = ts
             save_team_state(state)
 
     log_write(info, f"TXN sign — {details.player} → {team} [{details.signing_method or 'cap_space'}]")
@@ -1455,7 +1493,14 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
             out = outgoing_sal.get(team, 0)
             if inc <= out + 250_000:
                 continue
-            if _compute_team_salary_ex_holds(team, _validation_bios, cur_season) < apron1:
+            # Rosters were already written above, so this figure is post-trade;
+            # § 4.3 keys on where the team stood *before* it ("a team currently
+            # below the First Apron"). Back the trade out to recover that.
+            # Without this, the team the rule most targets — one that starts
+            # below the apron and vaults over it by taking on salary — reads as
+            # already-above and escapes the contagion lock entirely.
+            post = _compute_team_salary_ex_holds(team, _validation_bios, cur_season)
+            if post + out - inc < apron1:
                 apron1_contagion_teams.append(team)
 
     if apron1_contagion_teams:
@@ -1542,6 +1587,56 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
                 _maybe_set_hard_cap(ts, "first_apron", reason)
                 state[team][cur_season] = ts
             save_team_state(state)
+
+    # ── § 4.1a: bank a Trade Exception for salary sent out and not matched ───
+    # Follows the real CBA, where a TPE is a mechanism *for over-the-cap teams*.
+    # A team with cap room absorbs the difference into that room instead (the
+    # cap-room absorption path in _check_salary_matching), and sending salary
+    # away simply gives it more room — banking an exception on top would let
+    # the same space be spent twice. Cap position is measured exactly the way
+    # cap-room absorption measures it: full team salary including FA holds,
+    # against the plain Salary Cap. Rosters were already written above, so this
+    # figure is the post-trade position, which is the one § 4.1a asks about.
+    cap = _cap_levels.get(cur_season, {}).get("cap")
+    if cap is not None:
+        absorbed_teams = {t.upper() for t in (details.exceptions or {})} | {t.upper() for t in (details.tpe_usage or {})}
+        banked: list[tuple[str, int]] = []
+        for team in sorted(set(outgoing_sal) | set(incoming_sal)):
+            out = outgoing_sal.get(team, 0)
+            inc = incoming_sal.get(team, 0)
+            # Cheap gate first so the roster/bio scan only runs for teams that
+            # could actually bank something.
+            if out <= inc or team in absorbed_teams:
+                continue
+            amount = _tpe_bankable(
+                out, inc,
+                _compute_team_salary(team, _validation_bios, cur_season),
+                cap, used_exception=False,
+            )
+            if amount:
+                banked.append((team, amount))
+        if banked:
+            try:
+                acquired_dt = datetime.strptime(txn_date, "%Y-%m-%d")
+            except ValueError:
+                acquired_dt = datetime.now(timezone.utc)
+            expires = (acquired_dt + timedelta(days=365)).strftime("%Y-%m-%d")
+            with _trade_exc_lock:
+                tpe_data = load_trade_exceptions()
+                for team, amount in banked:
+                    tpe_data.setdefault(team, []).append({
+                        "id": uuid.uuid4().hex[:12],
+                        "amount": amount,
+                        "remaining": amount,
+                        "acquired_date": txn_date,
+                        "expires_date": expires,
+                        "note": (f"Auto-banked from trade {txn_id}" if txn_id
+                                 else f"Auto-banked from trade ({txn_date})"),
+                        "txn_id": txn_id,
+                    })
+                save_trade_exceptions(tpe_data)
+            log_write(info, "TXN trade — banked TPE: "
+                            + ", ".join(f"{t} ${a:,}" for t, a in banked))
 
     teams = sorted({xfer.from_team for xfer in details.transfers} | {xfer.to_team for xfer in details.transfers})
     log_write(info, f"TXN trade — {' / '.join(teams)}: {len(seen_players)} players, {len(seen_picks)} picks")
@@ -1815,6 +1910,79 @@ _MLE_EXCEPTION_LABELS = {
 }
 
 
+def _tpe_bankable(
+    outgoing: int,
+    incoming: int,
+    team_salary_after: int,
+    cap: Optional[int],
+    used_exception: bool,
+) -> Optional[int]:
+    """§ 4.1a: the Trade Exception this team banks out of a trade, or None.
+
+    Three independent gates, all of which must pass:
+      * it sent out more salary than it took back (there is a difference);
+      * it did not absorb incoming salary through an exception or another TPE
+        in this same trade (can't absorb via one and bank another);
+      * it is over the Salary Cap after the trade — a team under the Cap
+        absorbs the difference into cap room instead (§ 4.2), and handing it an
+        exception on top would let the same space be spent twice.
+
+    `team_salary_after` is the full post-trade team salary *including* cap
+    holds, matching how cap-room absorption measures room."""
+    if cap is None or used_exception:
+        return None
+    if outgoing <= incoming:
+        return None
+    if team_salary_after <= cap:
+        return None
+    return outgoing - incoming
+
+
+def _buyout_salary_above_ntmle(
+    slug: str,
+    txn_date: str,
+    season: str,
+    cap_levels: dict,
+    prior_salary: str = "",
+) -> Optional[int]:
+    """§ 1.4 Row D / § 1.5.2: did this player reach free agency by having a
+    contract terminated in the same season as this signing, carrying a salary
+    above the full NTMLE amount? Returns that salary when it qualifies, else
+    None.
+
+    "Same Regular Season" is approximated by the league-year season clock
+    (`_season_for_date`) — the only season boundary this API models, and the
+    same one every other hard-cap trigger keys on. A release and a signing
+    landing in the same league year therefore qualify even if one of them is
+    technically in the offseason. Erring toward the league year is the safe
+    direction: the rule exists to stop teams from scooping up a bought-out
+    high-salary player, and that concern doesn't evaporate on the last day of
+    the regular season.
+
+    `prior_salary` is the player's release-season salary as it stood *before*
+    the new contract overwrote it — needed for releases logged before
+    `terminated_salary` was recorded on the transaction (added alongside this
+    check), where the stored record has no salary figure of its own."""
+    ntmle = (cap_levels.get(season) or {}).get("ntmle_amount")
+    if not ntmle:
+        return None
+    for txn in _load_transactions():
+        if txn.get("type") not in ("release", "void_player"):
+            continue
+        d = txn.get("details") or {}
+        if d.get("player") != slug:
+            continue
+        rel_date = txn.get("date") or ""
+        if not rel_date or rel_date > txn_date:
+            continue
+        if _season_for_date(rel_date) != season:
+            continue
+        salary = _parse_dollar(d.get("terminated_salary") or "") or _parse_dollar(prior_salary or "")
+        if salary > ntmle:
+            return salary
+    return None
+
+
 def _check_bae_eligibility(
     team: str,
     team_salary_ex_holds_before: int,
@@ -1853,6 +2021,115 @@ def _check_bae_eligibility(
         return CheckResult(
             check=check_name, passed=False, level="error",
             message=f"{team} used the Bi-Annual Exception last season — unavailable in consecutive years (§ 3.5).",
+        )
+    return None
+
+
+def _check_signing_method_funding(
+    team: str,
+    method: Optional[str],
+    new_sal: int,
+    team_salary_before: int,
+    team_salary_ex_holds_before: int,
+    season: str,
+    cap_levels: dict,
+    team_state: Optional[dict],
+    unrenounced_holds: int = 0,
+) -> Optional[CheckResult]:
+    """§ 3.1–§ 3.6: the declared `signing_method` must actually be available.
+
+    Before this gate, `signing_method` was pure self-declaration — nothing
+    compared it against real cap room or the remaining exception balance, so a
+    `cap_space` signing by a team tens of millions over the cap passed clean.
+    That mattered beyond the one bad record: `_apply_sign` stamps
+    `mle_type = "room"` off any cap-space signing, so one wrong declaration
+    silently downgraded the team's exception for every later signing that
+    season (OKC declared Embiid's 2026-07-20 re-signing as cap space while
+    ~$220M over the cap; Hachimura was then charged $11,000,000 against the
+    $9,366,000 Room Exception instead of the $15,044,000 NTMLE).
+
+    `cap_space` is measured against the **with-holds** Team Salary — an
+    unrenounced hold occupies room until cleared (§ 3.10) — while the § 3.3
+    apron test uses the ex-holds figure, matching `_check_bae_eligibility`.
+    `bird_rights`, `minimum`, `bae` and `sign_and_trade` are out of scope here:
+    Bird Rights carry no amount ceiling of their own, and the other three have
+    dedicated checks.
+    """
+    if method not in ("cap_space", "mle", "ntmle", "tmle", "room_exception"):
+        return None
+
+    cl = cap_levels.get(season, {})
+    check_name = f"signing_method_{team.lower()}"
+    ts = get_season_state(team_state or {}, team, season)
+
+    if method == "cap_space":
+        cap = cl.get("cap")
+        if cap is None:
+            return None
+        room = cap - team_salary_before
+        if new_sal > room:
+            message = (
+                f"{team} cannot sign for ${new_sal:,} with cap space — Team Salary of "
+                f"${team_salary_before:,} (cap holds included) leaves "
+                f"{'$' + format(room, ',') if room > 0 else 'no'} room under the "
+                f"${cap:,} Salary Cap. Use Bird Rights or an exception (§ 3.1)."
+            )
+            # Don't just say "no room" when unentered renounces are the likely
+            # cause — a hold occupies room only until it's cleared (§ 3.10), and
+            # clearing enough of these would fund the signing outright.
+            if unrenounced_holds > 0:
+                would_clear = " — enough on its own to fund this signing" if \
+                    room + unrenounced_holds >= new_sal else ""
+                message += (
+                    f" Note: {team} still carries ${unrenounced_holds:,} in unrenounced "
+                    f"free-agent holds{would_clear}. If those free agents have already been "
+                    f"renounced, enter the renounce transactions first (§ 3.10)."
+                )
+            return CheckResult(check=check_name, passed=False, level="error", message=message)
+        return None
+
+    # Exception-funded. A generic "mle" resolves against whatever bucket the
+    # team is already locked into this season, exactly as _apply_sign does —
+    # so validation and application can't disagree about which one was used.
+    resolved = method
+    if resolved == "mle":
+        resolved = ts.get("mle_type") or "ntmle"
+    if resolved == "room":          # mle_type stores the short form
+        resolved = "room_exception"
+
+    meta = {
+        "ntmle":          ("ntmle_amount", "Non-Taxpayer MLE"),
+        "tmle":           ("tmle_amount",  "Taxpayer MLE"),
+        "room_exception": ("room_amount",  "Room Exception"),
+    }.get(resolved)
+    if meta is None:
+        return None
+    amount_key, label = meta
+
+    # § 3.3: the NTMLE is unavailable at or above the First Apron.
+    if resolved == "ntmle":
+        apron1 = cl.get("apron1")
+        if apron1 is not None and team_salary_ex_holds_before >= apron1:
+            return CheckResult(
+                check=check_name, passed=False, level="error",
+                message=(
+                    f"{team} may not use the Non-Taxpayer MLE — Team Salary "
+                    f"(${team_salary_ex_holds_before:,}) is at/above the First Apron "
+                    f"(${apron1:,}). The Taxpayer MLE applies instead (§ 3.3)."
+                ),
+            )
+
+    amount = cl.get(amount_key)
+    if amount is None:
+        return None
+    remaining = amount - (ts.get("mle_used") or 0)
+    if new_sal > remaining:
+        return CheckResult(
+            check=check_name, passed=False, level="error",
+            message=(
+                f"{team} cannot sign for ${new_sal:,} using the {label} — only "
+                f"${remaining:,} of the ${amount:,} {label} remains this season (§ 3.2)."
+            ),
         )
     return None
 
@@ -2047,9 +2324,10 @@ def _check_salary_matching(
     # ── Cap-room absorption ─────────────────────────────────────────────────
     # A team below the Salary Cap can absorb an incoming player using its own
     # cap room instead of matching salary — this is evaluated live, off the
-    # team's actual room at the moment of the trade. NBN has no persistent
-    # Traded Player Exceptions (§ 4.1), so this isn't banked for later use;
-    # it only has to hold for this trade, using this trade's own numbers.
+    # team's actual room at the moment of the trade. Being under the cap is
+    # also exactly why such a team banks no Trade Exception when it sends out
+    # more than it takes back (§ 4.1a): the room already absorbs the
+    # difference, so this path and a banked TPE are mutually exclusive.
     cap = cl.get("cap")
     if cap is not None and team_salary_before < cap:
         projected = team_salary_before - outgoing + incoming
@@ -2135,6 +2413,52 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
         r = _check_bae_eligibility(team, current_ex_holds, cl, ctx["team_state"], season)
         if r:
             checks.append(r)
+
+    # § 3.1–§ 3.6: the declared funding method must actually be available.
+    # Cap room is measured with holds included (§ 3.10), net of the signee's own
+    # hold — the contract replaces that hold rather than stacking on it.
+    current_with_holds = _compute_team_salary(team, bios, season)
+    # Free-agent holds still on the books for *other* players. Both salary
+    # figures include dead cap, so the difference is exactly the UFA/RFA holds.
+    # The league sheet routinely runs ahead of this ledger, so a team that has
+    # really renounced its way to cap room can read as capped-out here — say so
+    # instead of only reporting no room (DET/Gordon 2026-07-26: five renounces
+    # applied on the sheet, never entered, made a legal cap-space signing look
+    # like it had no funding method at all).
+    other_holds = (current_with_holds - current_ex_holds) - (existing_hold if is_fa_hold else 0)
+    r = _check_signing_method_funding(
+        team, details.signing_method, new_sal,
+        current_with_holds - existing_hold,
+        current_ex_holds, season, ctx["cap_levels"], ctx["team_state"],
+        unrenounced_holds=other_holds,
+    )
+    if r:
+        checks.append(r)
+
+    # ── § 1.5.2: no mid-season buyout signings above the NTMLE ───────────────
+    # Only bars teams already at or above the First Apron. Below it the signing
+    # is legal and instead triggers the Row D hard cap, applied in _apply_sign.
+    # Validation runs before the bio is rewritten, so the player's stored
+    # season salary is still the terminated contract's figure.
+    apron1_sign = ctx["cap_levels"].get(season, {}).get("apron1")
+    if apron1_sign is not None and current_ex_holds >= apron1_sign:
+        buyout_salary = _buyout_salary_above_ntmle(
+            details.player, ctx.get("txn_date") or "9999-12-31", season, ctx["cap_levels"],
+            str((bios.get(details.player, {}).get("salaries") or {}).get(season, "") or ""),
+        )
+        if buyout_salary:
+            ntmle_amt = ctx["cap_levels"].get(season, {}).get("ntmle_amount", 0)
+            checks.append(CheckResult(
+                check=f"buyout_signing_{team.lower()}",
+                passed=False,
+                level="error",
+                message=(
+                    f"{team} is at/above the First Apron (${current_ex_holds:,} ≥ "
+                    f"${apron1_sign:,}) and may not sign a player waived this season whose "
+                    f"terminated contract paid ${buyout_salary:,}, above the full NTMLE of "
+                    f"${ntmle_amt:,} (§ 1.5.2)."
+                ),
+            ))
 
     if details.contract.type != "two-way":
         count = _count_standard_roster(team)
@@ -3046,6 +3370,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
         "team_state":  load_team_state(),
         "cap_levels":  json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {},
         "cur_season":  _season_for_date(body.date),
+        "txn_date":    body.date,
         "trade_exceptions": load_trade_exceptions(),
     }
     checks = _run_validation(body.type, parsed_details, _val_ctx)
@@ -3076,10 +3401,11 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             stored_details = details.model_dump()
             stored_details["team"] = team
         elif body.type == "release":
-            team, dead_cap = _apply_release(details, body.date, info)
+            team, dead_cap, terminated_salary = _apply_release(details, body.date, info)
             stored_details = details.model_dump()
             stored_details["team"] = team
             stored_details["dead_cap"] = dead_cap
+            stored_details["terminated_salary"] = terminated_salary
         elif body.type == "renounce":
             team = _apply_renounce(details, body.date, info)
             stored_details = details.model_dump()
@@ -3269,6 +3595,7 @@ def validate_trade(body: TradeValidateInput):
         "team_state": load_team_state(),
         "cap_levels": json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {},
         "cur_season": _current_league_year(),
+        "txn_date":   datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         "trade_exceptions": load_trade_exceptions(),
     }
     checks = _validate_trade(body, ctx)

@@ -529,9 +529,11 @@ def put_team_state(
 
 # ── Trade Exceptions (TPE) ──────────────────────────────────────────────────
 # Rulebook § 4.1a. Not itself a tradeable asset — belongs to the team that
-# banked it. Creation/consumption is manual for now (entered from the league's
-# roster/cap spreadsheet); nothing here computes a TPE from a trade
-# transaction or lets the trade builder draw one down.
+# banked it. Both ends are automated in transactions.py: _apply_trade banks a
+# new exception when an over-the-cap team sends out more salary than it takes
+# back, and draws down the balance when one is used via `tpe_usage`. The
+# endpoints below remain for manual entry and correction (the 4 original
+# entries were ported by hand from the league's roster/cap spreadsheet).
 
 def load_trade_exceptions() -> dict:
     return _load_json(TRADE_EXCEPTIONS_FILE, {})

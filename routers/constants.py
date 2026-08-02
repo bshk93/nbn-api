@@ -55,6 +55,7 @@ DRAFT_SNAPSHOT_FILE = DATA_DIR / "draft-snapshot.json"
 DRAFT_LIVE_PICKS_FILE = DATA_DIR / "draft-live-picks.csv"
 # Member draft-pick grades: { "<year>": { "<slug>": { "<member>": "A" } } }
 DRAFT_GRADES_FILE = DATA_DIR / "draft-grades.json"
+SUGGESTIONS_FILE = DATA_DIR / "suggestions.json"
 JOIN_SUBMISSIONS_FILE = DATA_DIR / "join-submissions.json"
 JOIN_BLACKLIST_FILE   = DATA_DIR / "join-blacklist.json"
 MEMBER_SEEN_FILE      = DATA_DIR / "member-seen.json"
