@@ -11,6 +11,8 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
+from .league_time import league_today, league_today_str
+
 from .constants import DATA_DIR, PLAYER_BIOS_FILE, logger
 from .storage import _load_json, _save_json, log_write
 from .auth import get_token_info, require_admin, load_members
@@ -77,15 +79,14 @@ def _compute_age(dob_str: str) -> Optional[int]:
         return None
     try:
         dob = date.fromisoformat(dob_str)
-        today = date.today()
+        today = league_today()
         return today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
     except ValueError:
         return None
 
 
 def _today_et() -> str:
-    from zoneinfo import ZoneInfo
-    return datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    return league_today_str()
 
 
 def _safe_int(v) -> int:

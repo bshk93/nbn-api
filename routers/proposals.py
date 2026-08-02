@@ -7,6 +7,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
+from .league_time import league_today_str
 from .constants import (
     PROPOSALS_FILE, CONSTITUTION_FILE, VALID_ROLES, VALID_TEAMS,
 )
@@ -515,7 +516,7 @@ def put_constitution(body: ConstitutionUpdate, info: dict = Depends(require_role
         new_version = data.get("version", 0) + 1
         entry = {
             "version": new_version,
-            "date": datetime.utcnow().strftime("%Y-%m-%d"),
+            "date": league_today_str(),
             "author": info["name"],
             "summary": body.summary.strip(),
         }

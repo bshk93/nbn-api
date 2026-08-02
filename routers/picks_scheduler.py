@@ -17,6 +17,7 @@ import asyncio
 import logging
 from datetime import datetime
 
+from .league_time import LEAGUE_TZ, league_now
 from .roster_picks import ensure_picks_horizon
 from .storage import _current_league_year, _league_rollovers, _season_start_date, _season_shift
 
@@ -42,8 +43,12 @@ async def _loop():
         except Exception:
             logger.exception("picks horizon: check failed")
 
-        target = _next_rollover_boundary()
-        wait_seconds = max((target - datetime.utcnow()).total_seconds(), 1)
+        # _season_start_date returns a naive *civil* midnight. Comparing it to
+        # utcnow() treated that as UTC midnight, so the horizon rolled over at
+        # 8pm ET the evening before the league year actually started. Anchor it
+        # to league time instead.
+        target = _next_rollover_boundary().replace(tzinfo=LEAGUE_TZ)
+        wait_seconds = max((target - league_now()).total_seconds(), 1)
 
         _reschedule_event = asyncio.Event()
         try:

@@ -6,6 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from .league_time import league_today
 from .constants import DATA_DIR, CAP_LEVELS_FILE, VALID_TEAMS
 from .storage import read_csv, _parse_dollar, _current_league_year
 from .players import load_player_bios, load_ovr
@@ -67,7 +68,7 @@ def _age(dob: str, today: Optional[date] = None) -> Optional[int]:
         y, m, d = (int(x) for x in dob.split("-"))
     except ValueError:
         return None
-    t = today or date.today()
+    t = today or league_today()
     years = t.year - y
     if (t.month, t.day) < (m, d):
         years -= 1
