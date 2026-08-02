@@ -425,6 +425,18 @@ class TradeIn(BaseModel):
     # separate field (tpe_usage, below) since it needs to name a specific
     # banked exception, not just a type.
     exceptions: dict[str, Optional[str]] = {}
+    # Team abbr -> the specific incoming player slugs that team's exception is
+    # absorbing (§ 4.2a: "a team uses exactly one of the four for a given
+    # incoming player"). The named players are funded by the exception; every
+    # other incoming player still has to satisfy ordinary salary matching
+    # against outgoing salary. This is what makes a hybrid trade expressible —
+    # e.g. two players matched against an outgoing contract while a third is
+    # absorbed into the MLE.
+    #
+    # Omit (or leave a team out) to keep the original all-or-nothing behavior,
+    # where the exception is tested against that team's entire incoming total.
+    # Every slug must actually be incoming to that team in this trade.
+    exception_players: dict[str, list[str]] = {}
     # Team abbr -> Trade Exception id (see GET /api/trade-exceptions/{team})
     # used to absorb that team's incoming salary (§ 4.1a). Mutually exclusive
     # with `exceptions[team]` for the same team, and with any outgoing salary
@@ -461,6 +473,7 @@ class TradeValidateInput(BaseModel):
     sign_and_trade_players: list[str] = []
     sign_and_trade_signings: list[SignDetails] = []
     exceptions: dict[str, Optional[str]] = {}
+    exception_players: dict[str, list[str]] = {}
     tpe_usage: dict[str, str] = {}
 
 
@@ -1516,7 +1529,7 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
 
     if details.exceptions or details.tpe_usage:
         cur_season = _season_for_date(txn_date)
-        _, incoming, _, _ = _trade_flows(details, bios, cur_season)
+        _, incoming, _, in_players = _trade_flows(details, bios, cur_season)
 
         if details.exceptions:
             with _state_lock:
@@ -1526,6 +1539,14 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
                         continue
                     team = team.upper()
                     inc = incoming.get(team, 0)
+                    if inc <= 0:
+                        continue
+                    # Bill the exception only for what it actually absorbed —
+                    # with exception_players set that's those players alone, not
+                    # the team's whole incoming total (§ 4.2a). Same helper the
+                    # validator used, so the checked amount is the billed amount.
+                    inc, _matched, _err = _exception_absorption_split(
+                        details, team, inc, in_players, bios, cur_season)
                     if inc <= 0:
                         continue
                     if team not in state:
@@ -1539,7 +1560,12 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
                         _maybe_set_hard_cap(ts, "first_apron", f"BAE trade absorption ({txn_date})")
                     else:
                         ts["mle_used"] = ts.get("mle_used", 0) + inc
-                        ts["mle_type"] = exc_type
+                        # team_state stores the short form "room" — that's what
+                        # _apply_sign writes and what PUT /api/team-state will
+                        # accept (it rejects "room_exception" outright). Storing
+                        # the raw payload key here left an unreadable value that
+                        # every `== "room"` comparison then missed.
+                        ts["mle_type"] = "room" if exc_type == "room_exception" else exc_type
                         if exc_type == "ntmle":
                             _maybe_set_hard_cap(ts, "first_apron", f"NTMLE trade absorption ({txn_date})")
                         elif exc_type == "tmle":
@@ -2215,6 +2241,50 @@ def _check_tpe_absorption(
     )
 
 
+def _exception_absorption_split(
+    details,
+    team: str,
+    incoming_total: int,
+    in_players: dict,
+    bios: dict,
+    season: str,
+) -> tuple[int, int, Optional[str]]:
+    """How a team's incoming salary divides between its exception and ordinary
+    salary matching.
+
+    § 4.2a is per-player — "a team uses exactly one of the four for a given
+    incoming player" — so a trade can legitimately match some incoming players
+    against outgoing salary while funding another out of an exception. When
+    `exception_players[team]` names slugs, only those are absorbed and the rest
+    still has to match. When it doesn't, the whole incoming total is treated as
+    absorbed, which is the original all-or-nothing behavior.
+
+    Returns (absorbed, matched, error). `error` is a message when the named
+    slugs don't correspond to players this team is actually receiving — the
+    caller turns that into a failed check rather than silently mis-splitting.
+
+    Shared by the validator and _apply_trade so the amount that gets checked is
+    always the amount that gets billed to the exception's balance.
+    """
+    slugs = [s for s in (getattr(details, "exception_players", None) or {}).get(team, []) if s]
+    if not slugs:
+        return incoming_total, 0, None
+
+    received = in_players.get(team, [])
+    unknown = [s for s in slugs if s not in received]
+    if unknown:
+        return 0, 0, (
+            f"{team}: exception_players names {', '.join(sorted(unknown))}, "
+            f"which {'is' if len(unknown) == 1 else 'are'} not incoming to {team} in this trade."
+        )
+
+    absorbed = sum(
+        _parse_dollar((bios.get(s, {}).get("salaries") or {}).get(season, ""))
+        for s in set(slugs)
+    )
+    return absorbed, max(incoming_total - absorbed, 0), None
+
+
 def _check_exception_absorption(
     team: str,
     incoming: int,
@@ -2261,9 +2331,25 @@ def _check_exception_absorption(
         threshold_msg = f"the Second Apron (${apron2:,}) — § 1.6, § 3.4" if apron2 is not None else "the Second Apron"
         salary_shown = team_salary_ex_holds_before
     else:  # room_exception
+        # § 3.2: unlike the NTMLE/TMLE — whose § 1.5/§ 1.6 apron bars are
+        # *standing restrictions*, live at the moment of every transaction —
+        # the Room Exception assignment is locked on July 1: "A team assigned
+        # the Room Exception cannot move out of it during that year, even if
+        # they later exceed the cap." So a team that holds it keeps it all
+        # year, and re-testing current Team Salary here was wrong. The locked
+        # assignment is what team_state's mle_type records.
+        # "room" is the canonical short form, but accept the long key too so a
+        # record written before that was normalized still reads correctly.
+        assigned = get_season_state(team_state or {}, team, season).get("mle_type")
         room_ceiling = (cap - ntmle_amount) if cap is not None else None
-        eligible = room_ceiling is not None and team_salary_before < room_ceiling
-        threshold_msg = (f"the Cap minus the full NTMLE amount (${room_ceiling:,}) — § 3.2"
+        if assigned in ("room", "room_exception"):
+            eligible = True
+        else:
+            # No assignment on record — fall back to the July-1 zone test
+            # against current salary, the best inference available.
+            eligible = room_ceiling is not None and team_salary_before < room_ceiling
+        threshold_msg = (f"the Cap minus the full NTMLE amount (${room_ceiling:,}) as of July 1, and "
+                          f"holds no recorded Room Exception assignment — § 3.2"
                           if room_ceiling is not None else "the Room Exception eligibility line")
         salary_shown = team_salary_before
 
@@ -2924,13 +3010,39 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
                 checks.append(_check_tpe_absorption(team, inc, out, tpe_id,
                                                     ctx.get("trade_exceptions", {}), season))
             else:
-                sm = _check_salary_matching(team, match_out, inc, current, ctx["cap_levels"], season,
-                                             exception_type=exc_type, team_state=ctx.get("team_state"),
-                                             team_salary_ex_holds_before=current_ex_holds)
-                checks.append(sm or CheckResult(
-                    check=f"salary_matching_{team.lower()}", passed=True,
-                    message=f"{team}: incoming ${inc:,} matches outgoing ${match_out:,} (§ 4.2/4.3).",
-                ))
+                sm = None
+                absorbed, matched_inc, split_err = _exception_absorption_split(
+                    details, team, inc, in_players, bios, season)
+                if split_err:
+                    checks.append(CheckResult(
+                        check=f"salary_matching_{team.lower()}", passed=False,
+                        level="error", message=split_err,
+                    ))
+                elif exc_type and matched_inc > 0:
+                    # Hybrid (§ 4.2a): the named players are funded by the
+                    # exception, the remainder still has to match on its own.
+                    # Reported as two checks so it's visible which rule each
+                    # half of the trade cleared.
+                    checks.append(_check_exception_absorption(
+                        team, absorbed, exc_type, current, current_ex_holds,
+                        ctx["cap_levels"].get(season, {}), ctx.get("team_state"), season))
+                    sm = _check_salary_matching(team, match_out, matched_inc, current,
+                                                 ctx["cap_levels"], season,
+                                                 exception_type=None, team_state=ctx.get("team_state"),
+                                                 team_salary_ex_holds_before=current_ex_holds)
+                    checks.append(sm or CheckResult(
+                        check=f"salary_matching_{team.lower()}", passed=True,
+                        message=(f"{team}: remaining incoming ${matched_inc:,} matches outgoing "
+                                 f"${match_out:,} (§ 4.2/4.3); ${absorbed:,} absorbed separately."),
+                    ))
+                else:
+                    sm = _check_salary_matching(team, match_out, inc, current, ctx["cap_levels"], season,
+                                                 exception_type=exc_type, team_state=ctx.get("team_state"),
+                                                 team_salary_ex_holds_before=current_ex_holds)
+                    checks.append(sm or CheckResult(
+                        check=f"salary_matching_{team.lower()}", passed=True,
+                        message=f"{team}: incoming ${inc:,} matches outgoing ${match_out:,} (§ 4.2/4.3).",
+                    ))
 
                 # § 4.3 contagion (below First Apron, any trade — not just
                 # aggregation): legal under § 4.2 tiered matching, but still
@@ -2939,7 +3051,7 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
                 # warning below, one apron tier up and without the 2+-leg
                 # requirement. Doesn't apply when an exception funded the
                 # acquisition — that path has its own dedicated trigger.
-                if not exc_type and (sm is None or sm.passed):
+                if not exc_type and not split_err and (sm is None or sm.passed):
                     apron1 = ctx["cap_levels"].get(season, {}).get("apron1")
                     if apron1 is not None and current_ex_holds < apron1 and inc > match_out + 250_000:
                         over = inc - match_out - 250_000
