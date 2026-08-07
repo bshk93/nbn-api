@@ -219,7 +219,7 @@ def google_oauth_callback(code: str = "", state: str = "", error: str = ""):
     _access_token = None                        # drop any token from a previous credential
     logger.info("Google OAuth authorized — credential written")
 
-    return _page("Connected", "The Trade Simulator can now create Google Sheets. "
+    return _page("Connected", "The Transaction Simulator can now create Google Sheets. "
                               "You can close this tab.", True)
 
 

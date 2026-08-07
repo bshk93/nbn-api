@@ -121,8 +121,8 @@ process.
 `routers/google_sheets.py`. Takes an `.xlsx` upload (multipart: `file`, `name`),
 uploads it to Google Drive with `mimeType: application/vnd.google-apps.spreadsheet`
 so Drive converts it to a native Sheet, shares it `anyone: reader`, and returns
-`{id, url}`. Used by the Trade Simulator's "Create Google Sheet" button — the
-browser builds the workbook (`nbn-today/trade-sim/xlsx.js`) and posts it here.
+`{id, url}`. Used by the Transaction Simulator's "Create Google Sheet" button (trade mode) — the
+browser builds the workbook (`nbn-today/transaction-sim/xlsx.js`) and posts it here.
 
 Requires a valid member token (`get_token_info` — any role). It is a write into
 a real Google account, so it is deliberately not public.

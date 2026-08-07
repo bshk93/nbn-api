@@ -504,10 +504,16 @@ class TradeValidateInput(BaseModel):
     tpe_usage: dict[str, str] = {}
 
 
-class TradeValidationResult(BaseModel):
+class TransactionValidationResult(BaseModel):
+    """Shape returned by every `/api/validate/*` endpoint: the verdict, the
+    full check list (passes included), and a type-specific financial snapshot."""
     legal: bool
     checks: list[CheckResult]
     fact_sheet: dict
+
+
+# Pre-simulator name, kept so existing callers/tests importing it still work.
+TradeValidationResult = TransactionValidationResult
 
 
 # ── Apply helpers ─────────────────────────────────────────────────────────────
@@ -2434,6 +2440,31 @@ def _check_bae_eligibility(
     return None
 
 
+def _resolve_mle_bucket(method: Optional[str], ts: dict) -> Optional[tuple[str, str, str]]:
+    """Which exception bucket an exception-funded `signing_method` actually
+    draws on, as ``(resolved_method, cap_levels_amount_key, display_label)``.
+
+    A generic "mle" resolves against whatever bucket the team is already locked
+    into this season (`mle_type`), defaulting to the NTMLE. Returns None for
+    methods that aren't a running dollar balance (cap space, Bird Rights,
+    minimum, BAE, sign-and-trade) — those have dedicated checks.
+
+    Shared by `_check_signing_method_funding` and the simulator's fact sheet so
+    the balance shown is the balance the validator charged against.
+    """
+    resolved = method
+    if resolved == "mle":
+        resolved = ts.get("mle_type") or "ntmle"
+    if resolved == "room":          # mle_type stores the short form
+        resolved = "room_exception"
+    meta = {
+        "ntmle":          ("ntmle_amount", "Non-Taxpayer MLE"),
+        "tmle":           ("tmle_amount",  "Taxpayer MLE"),
+        "room_exception": ("room_amount",  "Room Exception"),
+    }.get(resolved)
+    return (resolved, meta[0], meta[1]) if meta else None
+
+
 def _check_signing_method_funding(
     team: str,
     method: Optional[str],
@@ -2511,20 +2542,10 @@ def _check_signing_method_funding(
     # Exception-funded. A generic "mle" resolves against whatever bucket the
     # team is already locked into this season, exactly as _apply_sign does —
     # so validation and application can't disagree about which one was used.
-    resolved = method
-    if resolved == "mle":
-        resolved = ts.get("mle_type") or "ntmle"
-    if resolved == "room":          # mle_type stores the short form
-        resolved = "room_exception"
-
-    meta = {
-        "ntmle":          ("ntmle_amount", "Non-Taxpayer MLE"),
-        "tmle":           ("tmle_amount",  "Taxpayer MLE"),
-        "room_exception": ("room_amount",  "Room Exception"),
-    }.get(resolved)
-    if meta is None:
+    bucket = _resolve_mle_bucket(method, ts)
+    if bucket is None:
         return None
-    amount_key, label = meta
+    resolved, amount_key, label = bucket
 
     # § 3.3: the NTMLE is unavailable at or above the First Apron.
     if resolved == "ntmle":
@@ -2885,26 +2906,40 @@ def _check_salary_matching(
 
 # ── Per-type validators ───────────────────────────────────────────────────────
 
+def _signee_existing_hold(team: str, player: str, bios: dict, season: str) -> tuple[int, bool]:
+    """The signee's own cap hold already on `team`'s books, as
+    ``(amount, is_fa_hold)``.
+
+    If the signee already sits on this team's own roster as a cap hold (e.g. a
+    Bird-rights re-signing), that hold's figure is still counted in the team's
+    ex-holds salary unless it's a pure UFA/RFA hold (already excluded) — so
+    callers back it out to avoid double-counting hold + new contract (rulebook
+    § 3.10: the hold is replaced, not stacked, by the signed contract's Year 1
+    figure).
+
+    Shared by `_validate_sign`, `_validate_offer_sheet` and the simulator's
+    fact sheet so all three back out the same figure.
+    """
+    roster_path = DATA_DIR / f"{team.lower()}-roster.csv"
+    if not roster_path.exists():
+        return 0, False
+    _, roster_rows = read_csv(roster_path)
+    if not any(r.get("SLUG", "").strip() == player for r in roster_rows):
+        return 0, False
+    bio = bios.get(player, {})
+    return (
+        _parse_dollar((bio.get("salaries") or {}).get(season, "")),
+        (bio.get("cap_holds") or {}).get(season) in _FA_HOLD_TYPES,
+    )
+
+
 def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
     checks = []
     bios = ctx["bios"]; season = ctx["cur_season"]
     team = details.team.upper()
 
     current_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
-    # If the signee already sits on this team's own roster as a cap hold (e.g.
-    # a Bird-rights re-signing), that hold's figure is still counted in
-    # `current_ex_holds` unless it's a pure UFA/RFA hold (already excluded) —
-    # so back it out here to avoid double-counting hold + new contract
-    # (rulebook § 3.10: the hold is replaced, not stacked, by the signed
-    # contract's Year 1 figure).
-    existing_hold = 0
-    is_fa_hold = False
-    roster_path = DATA_DIR / f"{team.lower()}-roster.csv"
-    if roster_path.exists():
-        _, roster_rows = read_csv(roster_path)
-        if any(r.get("SLUG", "").strip() == details.player for r in roster_rows):
-            existing_hold = _parse_dollar((bios.get(details.player, {}).get("salaries") or {}).get(season, ""))
-            is_fa_hold = (bios.get(details.player, {}).get("cap_holds") or {}).get(season) in _FA_HOLD_TYPES
+    existing_hold, is_fa_hold = _signee_existing_hold(team, details.player, bios, season)
     new_sal = _parse_dollar(details.contract.salaries.get(season, ""))
     projected_ex_holds = current_ex_holds - (0 if is_fa_hold else existing_hold) + new_sal
     # Both the apron-triggered hard cap and the league-wide Hard Cap (§ 1.3)
@@ -3074,6 +3109,27 @@ def _validate_renounce(details: RenounceDetails, ctx: dict) -> list[CheckResult]
     return []
 
 
+def _offer_sheet_signing_team(details: OfferSheetDetails) -> Optional[tuple[str, str]]:
+    """Which team actually ends up signing the player on an offer sheet, as
+    ``(signing_team, retaining_team)`` — the retaining team on a match, the
+    offering team otherwise (§ 3.15). Returns None when the outcome or the
+    player's current team can't be resolved, in which case there is nothing
+    meaningful to validate or report.
+
+    Shared by `_validate_offer_sheet` and the simulator's fact sheet so both
+    describe the same team.
+    """
+    if details.outcome not in ("matched", "not_matched"):
+        return None
+    retaining_team = _build_team_map().get(details.player)
+    if not retaining_team:
+        return None
+    team = retaining_team if details.outcome == "matched" else details.offering_team.upper()
+    if team not in VALID_TEAMS:
+        return None
+    return team, retaining_team
+
+
 def _validate_offer_sheet(details: OfferSheetDetails, ctx: dict) -> list[CheckResult]:
     """Mirrors _validate_sign's hard-cap and signing-method funding checks,
     resolved against whichever team the outcome actually signs the player to
@@ -3087,26 +3143,15 @@ def _validate_offer_sheet(details: OfferSheetDetails, ctx: dict) -> list[CheckRe
     checks: list[CheckResult] = []
     bios = ctx["bios"]; season = ctx["cur_season"]
 
-    team_map = _build_team_map()
-    retaining_team = team_map.get(details.player)
-    if not retaining_team or details.outcome not in ("matched", "not_matched"):
+    resolved = _offer_sheet_signing_team(details)
+    if resolved is None:
         # The hard-fail checks in _apply_offer_sheet cover these; nothing
         # useful to validate here without a resolvable signing team.
         return checks
-    offering_team = details.offering_team.upper()
-    team = retaining_team if details.outcome == "matched" else offering_team
-    if team not in VALID_TEAMS:
-        return checks
+    team, _retaining = resolved
 
     current_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
-    existing_hold = 0
-    is_fa_hold = False
-    roster_path = DATA_DIR / f"{team.lower()}-roster.csv"
-    if roster_path.exists():
-        _, roster_rows = read_csv(roster_path)
-        if any(r.get("SLUG", "").strip() == details.player for r in roster_rows):
-            existing_hold = _parse_dollar((bios.get(details.player, {}).get("salaries") or {}).get(season, ""))
-            is_fa_hold = (bios.get(details.player, {}).get("cap_holds") or {}).get(season) in _FA_HOLD_TYPES
+    existing_hold, is_fa_hold = _signee_existing_hold(team, details.player, bios, season)
     new_sal = _parse_dollar(details.contract.salaries.get(season, ""))
     projected_ex_holds = current_ex_holds - (0 if is_fa_hold else existing_hold) + new_sal
 
@@ -4233,9 +4278,12 @@ def _trade_fact_sheet(details, ctx: dict) -> dict:
     }
 
 
-@router.post("/api/validate/trade")
-def validate_trade(body: TradeValidateInput):
-    ctx = {
+def _validation_ctx() -> dict:
+    """The read-only context every `/api/validate/*` endpoint hands its
+    validator. Identical in shape to what the submit path builds, so the
+    simulator judges against exactly the same live data — but nothing here
+    opens a write path or takes the API lock."""
+    return {
         "bios":       load_player_bios(),
         "team_state": load_team_state(),
         "cap_levels": json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {},
@@ -4243,12 +4291,182 @@ def validate_trade(body: TradeValidateInput):
         "txn_date":   datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         "trade_exceptions": load_trade_exceptions(),
     }
-    checks = _validate_trade(body, ctx)
-    # Warnings (e.g. a single-leg trade) don't make a deal illegal — only errors do,
-    # matching the submit path where warnings are force-through-able.
-    legal = not any(not c.passed and c.level == "error" for c in checks)
-    return TradeValidationResult(
-        legal=legal,
+
+
+def _validation_result(checks: list[CheckResult], fact_sheet: dict) -> TransactionValidationResult:
+    # Warnings (e.g. a single-leg trade, an advisory § 3.11 max) don't make a
+    # transaction illegal — only errors do, matching the submit path where
+    # warnings are force-through-able.
+    return TransactionValidationResult(
+        legal=not any(not c.passed and c.level == "error" for c in checks),
         checks=checks,
-        fact_sheet=_trade_fact_sheet(body, ctx),
+        fact_sheet=fact_sheet,
     )
+
+
+def _require_validatable(team: str, player: str, ctx: dict) -> None:
+    """Reject input the validators would silently sail through.
+
+    A validator handed an unknown team reads its salary as $0 and every check
+    passes vacuously — the simulator would print a confident "LEGAL" for a
+    transaction it never actually evaluated. A wrong verdict is worse than an
+    error, so these fail loudly instead of scoring.
+    """
+    if team.upper() not in VALID_TEAMS:
+        raise HTTPException(400, f"Unknown team '{team}'.")
+    if player not in ctx["bios"]:
+        raise HTTPException(400, f"Unknown player '{player}'.")
+
+
+def _signing_fact_sheet(team: str, player: str, contract, ctx: dict, *,
+                        signing_method: Optional[str],
+                        bird_rights_type: Optional[str] = None,
+                        adds_roster_spot: bool = True) -> dict:
+    """Financial snapshot for a signing, rendered by the simulator alongside
+    the checks. Every figure here is produced by the same helpers
+    `_validate_sign` uses (`_signee_existing_hold`, `_resolve_mle_bucket`,
+    `_compute_team_salary*`), so the sheet can't show a team room the
+    validator didn't credit it with.
+    """
+    bios = ctx["bios"]; season = ctx["cur_season"]
+    cl = ctx["cap_levels"].get(season, {})
+
+    current = _compute_team_salary(team, bios, season)
+    current_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
+    existing_hold, is_fa_hold = _signee_existing_hold(team, player, bios, season)
+    new_sal = _parse_dollar((contract.salaries or {}).get(season, ""))
+
+    projected_ex_holds = current_ex_holds - (0 if is_fa_hold else existing_hold) + new_sal
+    # What the § 3.1 cap-room test actually measures against: Team Salary with
+    # holds included (§ 3.10), net of the signee's own hold.
+    salary_before_net = current - existing_hold
+    cap = cl.get("cap")
+    cap_room = (cap - salary_before_net) if cap is not None else None
+    # Free-agent holds still on the books for *other* players — the figure the
+    # funding check cites when it explains that renouncing would create room.
+    other_holds = (current - current_ex_holds) - (existing_hold if is_fa_hold else 0)
+
+    ts = get_season_state(ctx["team_state"], team, season)
+    hard_cap_level = ts.get("hard_cap")
+    hard_cap_limit = (cl.get("apron1") if hard_cap_level == "first_apron"
+                      else cl.get("apron2") if hard_cap_level == "second_apron"
+                      else None)
+    apron1, apron2 = cl.get("apron1"), cl.get("apron2")
+
+    def _apron_at(salary: int) -> Optional[str]:
+        if apron2 is not None and salary >= apron2:
+            return "second_apron"
+        if apron1 is not None and salary >= apron1:
+            return "first_apron"
+        return None
+
+    # Remaining balance in whichever exception bucket this method draws on.
+    exception = None
+    bucket = _resolve_mle_bucket(signing_method, ts)
+    if bucket:
+        _resolved, amount_key, label = bucket
+        amount = cl.get(amount_key)
+        if amount is not None:
+            used = ts.get("mle_used") or 0
+            exception = {
+                "label": label, "amount": amount,
+                "used": used, "remaining": amount - used,
+            }
+
+    before = _count_standard_roster(team)
+    is_standard = (contract.type != "two-way")
+    after = before + (1 if (is_standard and adds_roster_spot) else 0)
+
+    return {
+        "season": season,
+        "cap_levels": cl,
+        "team": team,
+        "player": player,
+        "player_name": (bios.get(player, {}) or {}).get("name", player),
+        "signing_method": signing_method,
+        "bird_rights_type": bird_rights_type,
+        "contract_type": contract.type,
+        "salaries": dict(contract.salaries or {}),
+        "new_salary": new_sal,
+        "current_salary": current,
+        "current_salary_ex_holds": current_ex_holds,
+        "existing_hold": existing_hold,
+        "existing_hold_is_fa": is_fa_hold,
+        "unrenounced_other_holds": other_holds,
+        "salary_before_net_of_hold": salary_before_net,
+        "projected_salary_ex_holds": projected_ex_holds,
+        "cap_room": cap_room,
+        "hard_cap_level": hard_cap_level,
+        "hard_cap_limit": hard_cap_limit,
+        "apron_before": _apron_at(current_ex_holds),
+        "apron_after": _apron_at(projected_ex_holds),
+        "exception": exception,
+        "standard_count_before": before,
+        "standard_count_after": after,
+    }
+
+
+@router.post("/api/validate/trade")
+def validate_trade(body: TradeValidateInput):
+    ctx = _validation_ctx()
+    return _validation_result(_validate_trade(body, ctx), _trade_fact_sheet(body, ctx))
+
+
+@router.post("/api/validate/sign")
+def validate_sign(body: SignDetails):
+    """Non-mutating § 3.1–§ 3.13 check of a free-agent signing, for the
+    transaction simulator. Shares `_validate_sign` with `POST
+    /api/transactions`, so a "legal" verdict here is what the office accepts —
+    but this endpoint never writes: no roster, bio, team-state or ledger
+    change, and no auth, exactly like `/api/validate/trade`."""
+    ctx = _validation_ctx()
+    _require_validatable(body.team, body.player, ctx)
+    fact_sheet = _signing_fact_sheet(
+        body.team.upper(), body.player, body.contract, ctx,
+        signing_method=body.signing_method,
+        bird_rights_type=body.bird_rights_type,
+    )
+    return _validation_result(_validate_sign(body, ctx), fact_sheet)
+
+
+@router.post("/api/validate/offer_sheet")
+def validate_offer_sheet(body: OfferSheetDetails):
+    """Non-mutating check of an RFA offer sheet (§ 3.15). Resolved against
+    whichever team the outcome actually signs the player to — the retaining
+    team on a match, the offering team otherwise. Non-mutating on the same
+    terms as `/api/validate/sign`."""
+    ctx = _validation_ctx()
+    _require_validatable(body.offering_team, body.player, ctx)
+    resolved = _offer_sheet_signing_team(body)
+    if resolved is None:
+        # No resolvable signing team. _validate_offer_sheet returns no checks
+        # here (the submit path hard-fails it instead), so reporting the usual
+        # verdict would read as "legal" off zero checks — say plainly that
+        # nothing could be evaluated.
+        reason = (
+            "Can't tell which team would end up signing this player: the outcome must be "
+            "'matched' or 'not_matched', and the player must currently sit on a team's roster."
+        )
+        return TransactionValidationResult(
+            legal=False,
+            checks=[CheckResult(check="offer_sheet_resolvable", passed=False,
+                                level="error", message=reason)],
+            fact_sheet={"unresolved": True, "reason": reason},
+        )
+    team, retaining_team = resolved
+    fact_sheet = _signing_fact_sheet(
+        team, body.player, body.contract, ctx,
+        signing_method=body.signing_method,
+        bird_rights_type=body.bird_rights_type,
+        # A match keeps the player on a roster spot they already occupy; only a
+        # non-match adds a new standard-contract body (mirrors the roster_size
+        # branch in _validate_offer_sheet).
+        adds_roster_spot=(body.outcome == "not_matched"),
+    )
+    fact_sheet.update({
+        "outcome": body.outcome,
+        "offering_team": body.offering_team.upper(),
+        "retaining_team": retaining_team,
+        "signing_team_role": "retaining (matched)" if body.outcome == "matched" else "offering (not matched)",
+    })
+    return _validation_result(_validate_offer_sheet(body, ctx), fact_sheet)

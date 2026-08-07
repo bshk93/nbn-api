@@ -138,7 +138,7 @@ def _team_financial_summary(team: str, current: int, current_ex_holds: int, cap_
 def trade_finder_search(body: TradeFinderRequest):
     """Search every other team's roster for legal 2-team return packages for the
     given outgoing players. All legality is decided by the same _validate_trade
-    used by real trade submission and the trade-sim simulator — this endpoint
+    used by real trade submission and the transaction simulator — this endpoint
     only adds cheap pre-filtering (reusing _check_salary_matching, not a second
     copy of it) so the combinatorial search stays fast, then confirms every
     surviving candidate through the real validator before returning it.
