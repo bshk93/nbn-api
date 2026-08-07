@@ -561,7 +561,7 @@ def _apply_option(details: OptionDetails, info: dict) -> Optional[str]:
             prev_salary = prev_entries[-1][1] if prev_entries else None
             if prev_salary:
                 cap_levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
-                tier = details.bird_tier or _derive_bird_tier(bio, team, details.year)
+                tier = details.bird_tier or _derive_bird_tier(bio, team, details.year, details.player)
                 min_amt = _rookie_min_salary(details.year, cap_levels) or None
                 max_amt = _max_salary(bio, details.year, cap_levels)
                 amount, note = _compute_fa_hold_amount(
@@ -1031,6 +1031,7 @@ def _apply_convert_twoway(details: ConvertTwoWayDetails, txn_date: str, info: di
     hold_notes = _autofill_fa_hold_amounts(
         bio, team, details.contract.cap_holds, details.contract.salaries, hold_cap_levels,
         bird_rights_type=details.bird_rights_type, eaps_assumption=details.eaps_assumption,
+        slug=details.player,
     )
     if hold_notes:
         bio["cap_hold_notes"] = {**bio.get("cap_hold_notes", {}), **hold_notes}
@@ -1139,6 +1140,7 @@ def _apply_sign_pick(details: SignPickDetails, txn_date: str, info: dict, txn_id
     hold_notes = _autofill_fa_hold_amounts(
         bio, team, details.contract.cap_holds, details.contract.salaries, hold_cap_levels,
         bird_rights_type=details.bird_rights_type, eaps_assumption=details.eaps_assumption,
+        slug=details.player,
     )
     if hold_notes:
         bio["cap_hold_notes"] = {**bio.get("cap_hold_notes", {}), **hold_notes}
@@ -1245,6 +1247,7 @@ def _apply_sign(details: SignDetails, txn_date: str, info: dict, txn_id: Optiona
     hold_notes = _autofill_fa_hold_amounts(
         bio, team, details.contract.cap_holds, details.contract.salaries, hold_cap_levels,
         bird_rights_type=details.bird_rights_type, eaps_assumption=details.eaps_assumption,
+        slug=details.player,
     )
     if hold_notes:
         bio["cap_hold_notes"] = {**bio.get("cap_hold_notes", {}), **hold_notes}
@@ -1833,16 +1836,249 @@ def _max_salary(bio: dict, season: str, cap_levels: dict) -> Optional[int]:
 _BIRD_HOLD_PCT = {"EQVFA": 1.3, "Non-QVFA": 1.2}
 
 
-def _derive_bird_tier(bio: dict, team: str, hold_season: str) -> str:
-    """§ 3.8 Bird tier, best-effort from contract history: counts consecutive
-    prior seasons (immediately preceding hold_season) the player's own
-    `contracts` entries show them under contract to `team`. Full Bird (QVFA)
-    at 3+ seasons, Early Bird (EQVFA) at 2, else Non-Bird (Non-QVFA). This is
-    only a default for when the submitter doesn't pass an explicit
-    bird_rights_type/bird_tier — real Bird continuity can have quirks
-    (10-day deals, mid-season signings) the contract log doesn't capture, so
-    an explicit value always wins over this.
+_BIRD_LEDGER_CACHE: dict = {"key": None, "index": {}}
+
+
+def _player_acquisition_index() -> dict[str, list[tuple]]:
+    """Per-player acquisition timeline built from the transaction ledger, as
+    ``{slug: [(date, kind, team), ...]}`` sorted by date, where `kind` is
+    "sign" (starts a new tenure clock), "trade" (carries the clock to a new
+    team) or "release" (breaks it).
+
+    Cached against the ledger file's (mtime, size): the simulator revalidates
+    on a 250ms debounce while the user types, and re-parsing a ~2MB
+    transactions.json per keystroke is pure waste. Any write to the ledger
+    changes mtime and invalidates this on the next read.
     """
+    try:
+        st = TRANSACTIONS_FILE.stat()
+        key = (st.st_mtime, st.st_size)
+    except OSError:
+        key = None
+    if _BIRD_LEDGER_CACHE["key"] == key and key is not None:
+        return _BIRD_LEDGER_CACHE["index"]
+
+    index: dict[str, list[tuple]] = {}
+    for txn in _load_transactions():
+        date = txn.get("date")
+        details = txn.get("details") or {}
+        if not date:
+            continue
+        ttype = txn.get("type")
+        if ttype in ("sign", "sign_pick"):
+            # Historical (backfilled) signings count here. They carry player,
+            # team and date — everything a tenure clock needs — even though
+            # _append_historical deliberately never wrote them into the bio.
+            if details.get("player") and details.get("team"):
+                index.setdefault(details["player"], []).append((date, "sign", details["team"].upper()))
+        elif ttype == "trade":
+            for leg in details.get("transfers") or []:
+                to_team = (leg.get("to_team") or "").upper()
+                for asset in leg.get("assets") or []:
+                    if asset.get("type") == "player" and asset.get("slug") and to_team:
+                        index.setdefault(asset["slug"], []).append((date, "trade", to_team))
+        elif ttype == "release":
+            if details.get("player"):
+                index.setdefault(details["player"], []).append((date, "release", (details.get("team") or "").upper()))
+
+    for events in index.values():
+        events.sort(key=lambda e: e[0])
+    _BIRD_LEDGER_CACHE.update({"key": key, "index": index})
+    return index
+
+
+def _bird_tenure(slug: str, team: str, season: str, bio: dict) -> dict:
+    """§ 3.8 continuous-service tenure with `team` as of `season`, derived from
+    the transaction ledger.
+
+    Returns ``{tier, seasons, basis, evidence, terminal_team}`` where `basis`
+    is "ledger" (an acquisition event was found), "draft" (no event, but the
+    bio names a drafting team and year) or "unknown" (neither).
+
+    Rights accrue from the most recent **free-agent signing** and carry
+    through trades — § 6.2 recognises holding "Bird Rights with the team via
+    trade", matching the real CBA — so a trade moves the clock to the new
+    team rather than restarting it. A release breaks the chain; the next
+    signing starts a fresh one.
+
+    **"unknown" is not Non-QVFA.** A player with no recorded acquisition is
+    usually a long-tenured legacy player, i.e. the most likely QVFA of all;
+    defaulting them to Non-Bird would invert the truth. Callers must treat
+    unknown as "can't say", never as a low tier.
+    """
+    team = team.upper()
+    events = list(_player_acquisition_index().get(slug, []))
+
+    # The draft is an acquisition too, and for a player who has never reached
+    # free agency it's the *only* one — so it seeds the timeline rather than
+    # acting as a separate fallback. Merging it in (instead of consulting it
+    # only when no events exist) is what lets a drafted-then-traded player
+    # resolve to the team that actually holds them now.
+    d_team, d_year = bio.get("draft_team"), bio.get("draft_year")
+    if d_team and d_year:
+        events.append((f"{int(d_year)}-07-01", "draft", str(d_team).upper()))
+    events.sort(key=lambda e: e[0])
+
+    start_season: Optional[str] = None
+    terminal: Optional[str] = None
+    basis = "unknown"
+    evidence = ""
+    for date, kind, ev_team in events:
+        if kind in ("sign", "draft"):
+            if terminal == ev_team and start_season is not None:
+                # Re-signing with your own team CONTINUES the clock. § 3.8 is
+                # explicitly about "a team re-signing their own free agents",
+                # and rights accrue while the player "remains with the same
+                # team" — the disqualifier is "signing as a free agent" with
+                # *someone else*. Treating every signing as a reset would mean
+                # no player could ever use Bird rights twice, which is the
+                # whole mechanism.
+                evidence += f", re-signed with {ev_team} on {date}"
+            else:
+                start_season, terminal = _season_start_of(date), ev_team
+                basis = "ledger" if kind == "sign" else "draft"
+                evidence = (f"signed with {ev_team} on {date}" if kind == "sign"
+                            else f"drafted by {ev_team} in {date[:4]}")
+        elif kind == "trade":
+            if terminal is not None:
+                terminal = ev_team      # clock start unchanged — rights travel (§ 6.2)
+                evidence += f", traded to {ev_team} on {date}"
+            else:
+                # No origin event on file (the player's first signing predates
+                # the ledger). The acquiring team still inherits whatever the
+                # player had accrued, so time since the trade is a *lower
+                # bound* on tenure, never the whole of it. Tracked as its own
+                # basis because a floor can only ever support a warning —
+                # erroring on it would fail a team for tenure we simply can't
+                # see. See _check_bird_rights_declaration.
+                start_season, terminal, basis = _season_start_of(date), ev_team, "trade_floor"
+                evidence = f"acquired by trade on {date}; no earlier record on file"
+        elif kind == "release":
+            start_season, terminal = None, None
+            evidence = f"released on {date}"
+
+    if start_season is None:
+        return {"tier": None, "seasons": None, "basis": "unknown",
+                "evidence": evidence or "no signing, trade or draft record on file",
+                "terminal_team": None}
+
+    if terminal != team:
+        return {"tier": None, "seasons": None, "basis": basis,
+                "evidence": evidence or "no acquisition by this team on record",
+                "terminal_team": terminal}
+
+    seasons = max(0, _season_start(season) - _season_start(start_season))
+    tier = "QVFA" if seasons >= 3 else "EQVFA" if seasons >= 2 else "Non-QVFA"
+    return {"tier": tier, "seasons": seasons, "basis": basis,
+            "evidence": evidence, "terminal_team": terminal}
+
+
+def _season_start_of(date: str) -> str:
+    """The league-year season string a calendar date falls in. The league year
+    turns over on July 1, so anything from July on belongs to YY-(YY+1)."""
+    y, m = int(date[:4]), int(date[5:7])
+    s = y if m >= 7 else y - 1
+    return f"{s % 100:02d}-{(s + 1) % 100:02d}"
+
+
+_BIRD_TIER_RANK = {"Non-QVFA": 0, "EQVFA": 1, "QVFA": 2}
+
+
+def _check_bird_rights_declaration(player: str, team: str, declared: Optional[str],
+                                   season: str, bios: dict,
+                                   method: Optional[str] = None) -> Optional[CheckResult]:
+    """§ 3.8: the declared Bird tier must not claim more tenure than the
+    ledger supports, and a Bird-funded signing must be of the team's *own*
+    free agent.
+
+    Only **over-declaration** is an error, and that asymmetry is deliberate:
+    a gap in the backfilled ledger (a signing that was never entered) can only
+    make derived tenure look *longer*, never shorter — the most recent signing
+    we can see is an older one. So "declared above derived" can't be produced
+    by missing data, which makes it safe to block on even though the ledger is
+    known to be incomplete. Under-declaring is a team giving up rights it may
+    hold; that's their business, not a violation.
+
+    `method` is consulted so that signing_method="bird_rights" is covered even
+    when no tier is declared. That combination previously bypassed validation
+    entirely: `_check_signing_method_funding` returns early for any method
+    outside the cap-space/MLE family, so Bird was an unchecked path to sign
+    over the cap while also unlocking § 3.13's 8% raise ceiling.
+    """
+    bird_funded = (method == "bird_rights")
+    if not declared and not bird_funded:
+        return None
+    check_name = "bird_rights_tenure"
+    t = _bird_tenure(player, team, season, bios.get(player, {}) or {})
+
+    # Bird Rights re-sign a team's OWN free agent (§ 3.8). If the ledger
+    # positively places the player elsewhere, that's not a Bird signing at
+    # all — distinct from merely having no record, handled below.
+    if bird_funded and t["tier"] is None and t["terminal_team"] and t["terminal_team"] != team.upper():
+        return CheckResult(
+            check=check_name, passed=False, level="error",
+            message=(
+                f"{team} cannot use Bird Rights for this player — Bird Rights re-sign a team's own "
+                f"free agent, and the ledger has them with {t['terminal_team']} ({t['evidence']}). "
+                f"Use cap space, an exception, or the minimum (§ 3.8)."
+            ),
+        )
+
+    subject = declared or "Bird Rights funding"
+    if t["tier"] is None:
+        return CheckResult(
+            check=check_name, passed=False, level="warning",
+            message=(
+                f"{subject} is self-declared and couldn't be verified for this player with "
+                f"{team} ({t['evidence']}). § 3.8 tenure is unconfirmed — check it by hand."
+            ),
+        )
+    if declared and _BIRD_TIER_RANK[declared] > _BIRD_TIER_RANK[t["tier"]]:
+        # A trade-floor tenure is a lower bound, so exceeding it isn't proof of
+        # anything — the unseen accrual it inherited could well justify the
+        # declaration. Report the floor and let a human judge.
+        if t["basis"] == "trade_floor":
+            return CheckResult(
+                check=check_name, passed=False, level="warning",
+                message=(
+                    f"{declared} can't be confirmed: {team} has at least {t['seasons']} season(s) "
+                    f"with this player ({t['evidence']}), which alone supports only {t['tier']}. "
+                    f"Tenure inherited through the trade may still justify {declared} — verify by hand."
+                ),
+            )
+        return CheckResult(
+            check=check_name, passed=False, level="error",
+            message=(
+                f"Declared {declared}, but {team} has only {t['seasons']} prior season(s) of "
+                f"continuous service with this player ({t['evidence']}) — that is {t['tier']} "
+                f"under § 3.8. Full Bird (QVFA) needs 3+, Early Bird (EQVFA) needs 2."
+            ),
+        )
+    return CheckResult(
+        check=check_name, passed=True,
+        message=(
+            f"{subject} is consistent with {t['seasons']} prior season(s) of continuous service "
+            f"with {team} ({t['evidence']})."
+        ),
+    )
+
+
+def _derive_bird_tier(bio: dict, team: str, hold_season: str, slug: Optional[str] = None) -> str:
+    """§ 3.8 Bird tier, best-effort, as a default for when the submitter
+    doesn't pass an explicit bird_rights_type/bird_tier. An explicit value
+    always wins over this.
+
+    Prefers the transaction ledger (`_bird_tenure`) when `slug` is known,
+    since that sees backfilled history and trade continuity. Falls back to
+    scanning the bio's own `contracts` entries — which only the apply path
+    ever appends to, and which is empty for ~95% of players — so this is
+    strictly more informed than the old bio-only scan, never less.
+    """
+    if slug:
+        t = _bird_tenure(slug, team, hold_season, bio)
+        if t["tier"]:
+            return t["tier"]
+
     season_team: dict[str, str] = {}
     for c in bio.get("contracts") or []:
         c_team = c.get("team")
@@ -1920,6 +2156,7 @@ def _autofill_fa_hold_amounts(
     cap_levels: dict,
     bird_rights_type: Optional[str] = None,
     eaps_assumption: Optional[str] = None,
+    slug: Optional[str] = None,
 ) -> dict:
     """Fills in a dollar figure in bio['salaries'] for any UFA/RFA season in
     `cap_holds` that `explicit_salaries` (the just-submitted contract's own
@@ -1937,7 +2174,7 @@ def _autofill_fa_hold_amounts(
         prev_salary = salaries.get(_season_shift(season, -1))
         if not prev_salary:
             continue  # nothing to base a hold on — e.g. incomplete backfilled history
-        tier = bird_rights_type or _derive_bird_tier(bio, team, season)
+        tier = bird_rights_type or _derive_bird_tier(bio, team, season, slug)
         min_amt = _rookie_min_salary(season, cap_levels) or None
         max_amt = _max_salary(bio, season, cap_levels)
         amount, note = _compute_fa_hold_amount(
@@ -3018,6 +3255,14 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
                 ),
             ))
 
+    # § 3.8. Runs before the raise check below, because declaring a Bird tier
+    # is what unlocks the 8% raise ceiling — an unsupported declaration buys
+    # both the funding path and the looser ladder.
+    r = _check_bird_rights_declaration(details.player, team, details.bird_rights_type, season, bios,
+                                       method=details.signing_method)
+    if r:
+        checks.append(r)
+
     bird_pct = details.bird_rights_type in ("QVFA", "EQVFA")
     r = _check_contract_raises(details.contract, bird_pct=bird_pct, cur_season=season)
     if r:
@@ -3170,6 +3415,11 @@ def _validate_offer_sheet(details: OfferSheetDetails, ctx: dict) -> list[CheckRe
         current_ex_holds, season, ctx["cap_levels"], ctx["team_state"],
         unrenounced_holds=other_holds, bios=bios,
     )
+    if r:
+        checks.append(r)
+
+    r = _check_bird_rights_declaration(details.player, team, details.bird_rights_type, season, bios,
+                                       method=details.signing_method)
     if r:
         checks.append(r)
 

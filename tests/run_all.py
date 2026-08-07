@@ -7,7 +7,8 @@ import sys
 
 MODULES = ["test_stepien_rule", "test_picks_matching", "test_tpe_and_hardcap",
            "test_signing_method_funding", "test_exception_absorption_split",
-           "test_fa_hold_calc", "test_room_exception_july1"]
+           "test_fa_hold_calc", "test_room_exception_july1",
+           "test_bird_rights_tenure"]
 
 
 def main():
