@@ -115,6 +115,30 @@ def main():
     check("no records at all -> unknown, not Non-QVFA",
           tenure([], "BOS")["tier"] is None)
 
+    # Committee-confirmed 2026-08-07: an extension does NOT reset Bird tenure.
+    # The player never reaches free agency, so service accrues uninterrupted.
+    # Pinned by building the index from a ledger that contains an extension:
+    # if someone ever adds "extension" to _player_acquisition_index as an
+    # acquisition event, every extended player's clock resets and their tier
+    # silently downgrades. See docs/extensions.md.
+    orig_load = T._load_transactions
+    T._load_transactions = lambda: [
+        {"type": "sign",      "date": "2022-08-01", "details": {"player": "p", "team": "BOS"}},
+        {"type": "extension", "date": "2025-09-01", "details": {"player": "p", "team": "BOS"}},
+        {"type": "option",    "date": "2025-10-01", "details": {"player": "p", "team": "BOS"}},
+    ]
+    try:
+        T._BIRD_LEDGER_CACHE.update({"key": None, "index": {}})
+        events = T._player_acquisition_index().get("p", [])
+        check("an extension is not recorded as an acquisition event",
+              all(kind != "extension" for _d, kind, _t in events))
+        check("...so tenure still runs from the original signing (QVFA)",
+              T._bird_tenure("p", "BOS", SEASON, {})["tier"] == "QVFA")
+        check("neither is an option exercise", len(events) == 1)
+    finally:
+        T._load_transactions = orig_load
+        T._BIRD_LEDGER_CACHE.update({"key": None, "index": {}})
+
     print("\ndeclaration checks")
     bios = {"p": {}}
 

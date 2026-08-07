@@ -1880,6 +1880,13 @@ def _player_acquisition_index() -> dict[str, list[tuple]]:
         elif ttype == "release":
             if details.get("player"):
                 index.setdefault(details["player"], []).append((date, "release", (details.get("team") or "").upper()))
+        # `extension` is deliberately NOT an acquisition event. An extension
+        # adds years to a live contract; the player never reaches free agency,
+        # so § 3.8 tenure keeps accruing uninterrupted. Committee-confirmed
+        # 2026-08-07. Adding it here "for completeness" would reset the Bird
+        # clock on every extended player and silently downgrade their tier —
+        # see docs/extensions.md. Same reasoning for `option`, `guarantee`
+        # and `convert_twoway`: none of them break continuous service.
 
     for events in index.values():
         events.sort(key=lambda e: e[0])

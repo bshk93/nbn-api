@@ -196,14 +196,18 @@ These are real, and two of them gate correctness rather than polish:
 2. Is "final fully guaranteed year" the §4 rule-2 convention? Ratify or replace.
 3. When does 140%-of-EAPS apply instead of 140%-of-prior-salary? "Whichever
    applies" is not implementable as written.
-4. Does an extension reset § 3.8 Bird tenure? Almost certainly not — it is not
-   a new free-agent signing — but `_bird_tenure` treats ledger `sign` events as
-   clock starts, so `extension` must be explicitly excluded or added as a
-   continuing event. **Getting this wrong silently corrupts Bird tiers.**
+4. ~~Does an extension reset § 3.8 Bird tenure?~~ **DECIDED 2026-08-07: no.**
+   An extension adds years to a live contract; the player never reaches free
+   agency, so service accrues uninterrupted. Locked into the code — the
+   exclusion is documented at the `release` branch of
+   `_player_acquisition_index` and pinned by `tests/test_bird_rights_tenure.py`
+   ("an extension is not recorded as an acquisition event"), because adding it
+   there later "for completeness" would reset every extended player's clock and
+   silently downgrade their tier.
 5. Do extensions count against the § 4.5 trade limit or any roster rule? Assumed
    no.
-6. Extend-and-trade (§ 8(e)(2)) is referenced by § 3.9 but § 8 does not exist in
-   the rulebook. Either write it or drop the reference.
+6. Extend-and-trade (§ 8(e)(2)) is referenced by § 3.9 but there is no § 8 —
+   the rulebook has Articles I–VII only. Either write it or drop the reference.
 
 ## 10. Phasing
 
