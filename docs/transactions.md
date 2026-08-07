@@ -46,6 +46,8 @@ Adds player to a team roster and sets their contract.
 
 **Validation:** player must not already be on any roster. Exception: a player currently held only as a UFA/RFA cap hold on another team (their contract has lapsed, they haven't been renounced) can be signed elsewhere directly — the old team's hold and roster row are cleared automatically, no separate renounce needed.
 
+**Auto-computed trailing cap hold (§ 3.10):** if `contract.cap_holds` names a season as `UFA`/`RFA` but `contract.salaries` didn't already price that season, the dollar figure is computed automatically from the last real contract year's salary × the Bird-rights percentage (150%/190% Full Bird, 130% Early Bird, 120% Non-Bird), clamped to that player's min/max salary for the hold season, and written into `player-bios.json`'s `salaries`. Bird tier comes from `bird_rights_type` if given, else is derived from how many consecutive prior seasons the player's own `contracts` history shows them with this team (3+ = Full Bird/QVFA, 2 = Early Bird/EQVFA, else Non-Bird). A Full Bird hold additionally needs to know whether the prior salary is above or below that season's EAPS — if EAPS isn't on file yet for that season, pass `eaps_assumption: "above"` or `"below"` or the request 422s; the resulting figure is recorded as a placeholder in `player-bios.json`'s `cap_hold_notes[season]` pending real EAPS. Not yet implemented: the rookie-scale-final-year (250%/300%) and coming-off-a-minimum-contract carve-outs in § 3.10 — both still need an explicit dollar figure in `contract.salaries` for now. Same logic applies to `offer_sheet` (via its internal `sign` call), `convert_twoway`, and `sign_pick`, all of which also accept `bird_rights_type`/`eaps_assumption`.
+
 ---
 
 ### `offer_sheet` — RFA offer sheet (§ 3.15)
@@ -64,21 +66,24 @@ Records **and immediately applies** a team extending an offer sheet to another t
     "salaries": { "26-27": "$8,000,000", "27-28": "$8,500,000" },
     "cap_holds": {}
   },
-  "outcome": "matched"
+  "outcome": "matched",
+  "signing_method": "ntmle",
+  "bird_rights_type": null
 }
 ```
 
 `outcome` is `"matched"` (retaining team keeps the player, signed to `contract`) or `"not_matched"` (player signs with `offering_team` on `contract`). `retaining_team` is not submitted — it's derived from whichever roster currently carries the player's `SLUG` row.
 
-**Validation (hard-fail, not the soft `checks` path):**
-- Player must currently carry an `RFA` (not `UFA`) cap hold for the upcoming season.
-- `offering_team` must differ from the retaining team.
-- `contract.salaries` must cover at least 2 years (§ 3.15's "at least 2 guaranteed years" — this only checks year count, not that each year is actually guaranteed).
+`signing_method` / `bird_rights_type` (both optional) declare what actually funds the contract for whichever team ends up signing the player — same vocabulary as `sign`'s fields (`cap_space`, `minimum`, `bird_rights`, `mle`, `ntmle`, `tmle`, `room_exception`, `bae`). They're threaded straight into the internal signing call, so a declared exception gets the same `mle_used`/hard-cap bookkeeping and § 1.5/§ 1.6 funding-availability check a plain `sign` gets. Omit them if the offer is simply cap-space funded (or funding isn't being tracked for this entry) — no bookkeeping side effect fires either way, matching the pre-existing behavior.
+
+**Validation:**
+- Hard-fail (not the soft `checks` path): player must currently carry an `RFA` (not `UFA`) cap hold for the upcoming season; `offering_team` must differ from the retaining team; `contract.salaries` must cover at least 2 years (§ 3.15's "at least 2 guaranteed years" — this only checks year count, not that each year is actually guaranteed).
+- Soft `checks` path (forceable): the same hard-cap projection and signing-method funding-availability checks `sign` runs (§ 1.5/§ 1.6 apron eligibility, remaining exception balance, league Hard Cap), plus a roster-size check on `not_matched` (a match doesn't add a body — the player's already on that roster). Resolved against whichever team the outcome actually signs the player to. Everything else about § 3.15 legality (good-faith fit, Gilbert Arenas eligibility for a 2-years-of-service RFA, etc.) is still manual review.
 
 **Mutates:**
 - `player-bios.json` → same as `sign`, applied to whichever team the outcome resolves to
 - `{team}-roster.csv` → same as `sign` (old team's roster row cleared automatically if `not_matched`)
-- Stored record gets `"teams": [offering_team, retaining_team]` (same convention as `trade`) for `GET /api/transactions?team=`, and each bio's `contracts` history entry gets `signing_method: "offer_sheet_matched"` or `"offer_sheet_not_matched"` so it's distinguishable from an ordinary re-sign.
+- Stored record gets `"teams": [offering_team, retaining_team]` (same convention as `trade`) for `GET /api/transactions?team=`. Each bio's `contracts` history entry gets the real `signing_method` (or `null`) — same as an ordinary `sign` — plus `offer_sheet_outcome: "matched"|"not_matched"`, which is what now marks the entry as having come from an offer sheet rather than an ordinary re-sign (previously that was encoded as a fake `signing_method: "offer_sheet_matched"`/`"offer_sheet_not_matched"` sentinel, which meant the real funding mechanism could never be recorded at all).
 
 **Not yet built:** rescission (§ 3.10/§ 3.15) — if the offering team renounced other cap holds to afford the offer and the retaining team matches, the rulebook lets them restore those renouncements. No `rescind_renounce` transaction type exists yet; do it by hand.
 
@@ -125,13 +130,13 @@ Accept or decline a player/team option.
 }
 ```
 
-`cap_hold_type` and `cap_hold_amount` are only used when `decision = "decline"`.
+`cap_hold_type`, `cap_hold_amount`, `bird_tier`, and `eaps_assumption` are only used when `decision = "decline"`. `cap_hold_amount` is optional — if omitted, it's auto-computed the same § 3.10 way `sign` does (see above), using the last remaining salary and `bird_tier` (or a tenure-derived default if `bird_tier` isn't given either). Pass `cap_hold_amount` explicitly to override the computed figure.
 
 **Mutates (`accept`):**
 - `player-bios.json` → removes the option year from `cap_holds` (converts `PLAYER_OPT`/`TEAM_OPT` entry to no hold)
 
 **Mutates (`decline`):**
-- `player-bios.json` → replaces option year's `cap_holds` entry with `cap_hold_type` (e.g. `UFA`); sets `salaries[year]` to `cap_hold_amount`
+- `player-bios.json` → replaces option year's `cap_holds` entry with `cap_hold_type` (e.g. `UFA`); sets `salaries[year]` to `cap_hold_amount` (given or auto-computed)
 
 ---
 

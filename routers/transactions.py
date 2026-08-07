@@ -15,7 +15,7 @@ from .constants import (
     _txn_lock, _deadcap_lock, _state_lock, _picks_lock, _trade_exc_lock,
     ROSTER_MAX, ROSTER_OFFSEASON_MAX, ROSTER_MIN, ROSTER_CHARGE_MIN, SALARY_MATCH_TIER1_CAP, SALARY_MATCH_TIER2_CAP,
 )
-from .storage import read_csv, write_csv, _load_json, log_write, _parse_dollar, _season_start, _season_for_date, _current_league_year
+from .storage import read_csv, write_csv, _load_json, log_write, _parse_dollar, _season_start, _season_shift, _season_for_date, _current_league_year
 from .auth import require_role
 from .players import load_player_bios, save_player_bios, _build_team_map, _scrub_trading_block
 from .roster_picks import (
@@ -288,6 +288,12 @@ class SignDetails(BaseModel):
     contract: ContractIn
     signing_method: Optional[str] = None
     bird_rights_type: Optional[str] = None
+    # § 3.10: only consulted when the contract's cap_holds imply a trailing
+    # UFA/RFA hold whose season needs a Full Bird (QVFA) EAPS comparison and
+    # that season has no real EAPS on file yet — see _compute_fa_hold_amount.
+    # "above" or "below" (the previous salary, relative to EAPS). Ignored
+    # otherwise.
+    eaps_assumption: Optional[str] = None
 
 
 class PickIn(BaseModel):
@@ -325,8 +331,11 @@ class OptionDetails(BaseModel):
     option_type: str    # "PLAYER_OPT" or "TEAM_OPT"
     year: str           # e.g. "26-27"
     cap_hold_type: str = "UFA"
+    # § 3.10: auto-computed from bird_tier + the last real salary when omitted
+    # — see _compute_fa_hold_amount. Pass explicitly only to override.
     cap_hold_amount: Optional[str] = None
     bird_tier: Optional[str] = None  # QVFA, EQVFA, Non-QVFA — only used on decline
+    eaps_assumption: Optional[str] = None  # "above" or "below" — see SignDetails
     # Only used on the historical=true backfill path (see _create_historical_option)
     # — the live path (_apply_option) always derives team itself from the current
     # roster map and ignores this field.
@@ -359,6 +368,17 @@ class OfferSheetDetails(BaseModel):
     offering_team: str
     contract: ContractIn
     outcome: str  # "matched" or "not_matched"
+    # What actually funds the contract for whichever team ends up signing the
+    # player (§ 3.1-3.6 methods; same vocabulary as SignDetails.signing_method).
+    # Threaded straight into the internal _apply_sign call so NTMLE/TMLE/BAE
+    # usage on an offer sheet gets the same mle_used/hard-cap bookkeeping and
+    # § 1.5/§ 1.6 funding-availability validation a plain `sign` gets — before
+    # this field existed, an offer sheet had no way to record its funding
+    # mechanism at all, so e.g. a Second-Apron team using the NTMLE to sign
+    # one went untracked and unvalidated.
+    signing_method: Optional[str] = None
+    bird_rights_type: Optional[str] = None
+    eaps_assumption: Optional[str] = None  # "above" or "below" — see SignDetails
 
 
 class VoidPlayerDetails(BaseModel):
@@ -376,12 +396,16 @@ class ConvertTwoWayDetails(BaseModel):
     player: str
     contract: ContractIn
     signing_method: Optional[str] = None
+    bird_rights_type: Optional[str] = None
+    eaps_assumption: Optional[str] = None  # "above" or "below" — see SignDetails
 
 
 class SignPickDetails(BaseModel):
     # Signs a player whose draft rights a team holds to their first contract.
     player: str
     contract: ContractIn
+    bird_rights_type: Optional[str] = None
+    eaps_assumption: Optional[str] = None  # "above" or "below" — see SignDetails
 
 
 class TradeAsset(BaseModel):
@@ -519,8 +543,26 @@ def _apply_option(details: OptionDetails, info: dict) -> Optional[str]:
         key = _season_start(details.year)
         bio["salaries"] = {yr: amt for yr, amt in bio.get("salaries", {}).items()
                            if _season_start(yr) < key}
-        if details.cap_hold_amount:
-            bio["salaries"][details.year] = details.cap_hold_amount
+        # § 3.10: auto-compute the resulting hold's dollar figure when the
+        # submitter didn't give one explicitly, from the last remaining real
+        # salary and Bird tier (declared bird_tier, else derived from tenure).
+        cap_hold_amount = details.cap_hold_amount
+        if not cap_hold_amount:
+            prev_entries = sorted(bio["salaries"].items(), key=lambda kv: _season_start(kv[0]))
+            prev_salary = prev_entries[-1][1] if prev_entries else None
+            if prev_salary:
+                cap_levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
+                tier = details.bird_tier or _derive_bird_tier(bio, team, details.year)
+                min_amt = _rookie_min_salary(details.year, cap_levels) or None
+                max_amt = _max_salary(bio, details.year, cap_levels)
+                amount, note = _compute_fa_hold_amount(
+                    prev_salary, tier, details.year, cap_levels, details.eaps_assumption, min_amt, max_amt,
+                )
+                cap_hold_amount = f"${amount:,}"
+                if note:
+                    bio["cap_hold_notes"] = {**bio.get("cap_hold_notes", {}), details.year: note}
+        if cap_hold_amount:
+            bio["salaries"][details.year] = cap_hold_amount
         bio["cap_holds"] = {yr: typ for yr, typ in holds.items()
                             if yr != details.year and _season_start(yr) < key}
         bio["cap_holds"][details.year] = details.cap_hold_type
@@ -853,9 +895,23 @@ def _apply_offer_sheet(details: OfferSheetDetails, txn_date: str, info: dict,
         player=details.player,
         team=signing_team,
         contract=details.contract,
-        signing_method="offer_sheet_matched" if details.outcome == "matched" else "offer_sheet_not_matched",
+        signing_method=details.signing_method,
+        bird_rights_type=details.bird_rights_type,
     )
     _apply_sign(sign_details, txn_date, info, txn_id=txn_id)
+
+    # _apply_sign's own contracts[-1].signing_method now carries the real
+    # funding mechanism (or None), so it can drive mle_used/hard-cap the same
+    # way a plain sign does. That means it no longer doubles as "this came
+    # from an offer sheet" the way the old "offer_sheet_matched"/
+    # "offer_sheet_not_matched" sentinel did — tag that fact separately so
+    # contract history stays distinguishable from an ordinary re-sign.
+    bios_after = load_player_bios()
+    contracts = bios_after.get(details.player, {}).get("contracts") or []
+    if contracts:
+        contracts[-1]["offer_sheet_outcome"] = details.outcome
+        bios_after[details.player]["contracts"] = contracts
+        save_player_bios(bios_after)
 
     log_write(info, (f"TXN offer_sheet — {offering_team} offered {details.player} "
                       f"({retaining_team} RFA); outcome={details.outcome} — signed by {signing_team}"))
@@ -962,6 +1018,14 @@ def _apply_convert_twoway(details: ConvertTwoWayDetails, txn_date: str, info: di
         "txn_id": txn_id,
     }]
 
+    hold_cap_levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
+    hold_notes = _autofill_fa_hold_amounts(
+        bio, team, details.contract.cap_holds, details.contract.salaries, hold_cap_levels,
+        bird_rights_type=details.bird_rights_type, eaps_assumption=details.eaps_assumption,
+    )
+    if hold_notes:
+        bio["cap_hold_notes"] = {**bio.get("cap_hold_notes", {}), **hold_notes}
+
     save_player_bios(bios)
 
     roster_path = DATA_DIR / f"{team.lower()}-roster.csv"
@@ -1058,6 +1122,18 @@ def _apply_sign_pick(details: SignPickDetails, txn_date: str, info: dict, txn_id
         "txn_id": txn_id,
     }]
 
+    # Only fires if this rookie-scale contract's cap_holds jumps straight to a
+    # UFA/RFA hold rather than the usual TEAM_OPT chain (§ 7.1-7.3) — the
+    # final-rookie-year 250%/300% carve-out (§ 3.10) isn't implemented here,
+    # so that case still needs a manually-entered cap_hold_amount via `option`.
+    hold_cap_levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
+    hold_notes = _autofill_fa_hold_amounts(
+        bio, team, details.contract.cap_holds, details.contract.salaries, hold_cap_levels,
+        bird_rights_type=details.bird_rights_type, eaps_assumption=details.eaps_assumption,
+    )
+    if hold_notes:
+        bio["cap_hold_notes"] = {**bio.get("cap_hold_notes", {}), **hold_notes}
+
     save_player_bios(bios)
 
     roster_path = DATA_DIR / f"{team.lower()}-roster.csv"
@@ -1151,6 +1227,18 @@ def _apply_sign(details: SignDetails, txn_date: str, info: dict, txn_id: Optiona
         "cap_holds": details.contract.cap_holds,
         "txn_id": txn_id,
     }]
+
+    # § 3.10: price any trailing UFA/RFA hold this contract implies (the
+    # season right after it ends) that the submitter didn't already give a
+    # real salary figure for. Runs after the contracts append above so Bird
+    # tier can be derived from this contract's own years, not just prior ones.
+    hold_cap_levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
+    hold_notes = _autofill_fa_hold_amounts(
+        bio, team, details.contract.cap_holds, details.contract.salaries, hold_cap_levels,
+        bird_rights_type=details.bird_rights_type, eaps_assumption=details.eaps_assumption,
+    )
+    if hold_notes:
+        bio["cap_hold_notes"] = {**bio.get("cap_hold_notes", {}), **hold_notes}
 
     save_player_bios(bios)
 
@@ -1731,6 +1819,126 @@ def _max_salary(bio: dict, season: str, cap_levels: dict) -> Optional[int]:
         return None
     years_exp = _season_start(season) + 2000 - int(draft_year)
     return int(cap * _max_salary_pct(years_exp))
+
+
+_BIRD_HOLD_PCT = {"EQVFA": 1.3, "Non-QVFA": 1.2}
+
+
+def _derive_bird_tier(bio: dict, team: str, hold_season: str) -> str:
+    """§ 3.8 Bird tier, best-effort from contract history: counts consecutive
+    prior seasons (immediately preceding hold_season) the player's own
+    `contracts` entries show them under contract to `team`. Full Bird (QVFA)
+    at 3+ seasons, Early Bird (EQVFA) at 2, else Non-Bird (Non-QVFA). This is
+    only a default for when the submitter doesn't pass an explicit
+    bird_rights_type/bird_tier — real Bird continuity can have quirks
+    (10-day deals, mid-season signings) the contract log doesn't capture, so
+    an explicit value always wins over this.
+    """
+    season_team: dict[str, str] = {}
+    for c in bio.get("contracts") or []:
+        c_team = c.get("team")
+        for yr in (c.get("salaries") or {}).keys():
+            season_team[yr] = c_team
+    tenure = 0
+    yr = hold_season
+    while True:
+        yr = _season_shift(yr, -1)
+        if season_team.get(yr) == team:
+            tenure += 1
+        else:
+            break
+    if tenure >= 3:
+        return "QVFA"
+    if tenure >= 2:
+        return "EQVFA"
+    return "Non-QVFA"
+
+
+def _compute_fa_hold_amount(
+    prev_salary: str,
+    bird_tier: str,
+    hold_season: str,
+    cap_levels: dict,
+    eaps_assumption: Optional[str] = None,
+    min_amt: Optional[int] = None,
+    max_amt: Optional[int] = None,
+) -> tuple[int, Optional[str]]:
+    """§ 3.10 veteran free-agent hold: `bird_tier`'s percentage of
+    `prev_salary` (the last real salary before the hold season), clamped to
+    [min_amt, max_amt]. Returns (amount, note) — note is set only when the
+    figure rests on an eaps_assumption rather than a real cap number, so
+    callers can flag the result as a placeholder pending real EAPS data.
+
+    Doesn't implement the rookie-scale-final-year (250%/300%) or
+    coming-off-a-minimum-contract carve-outs in § 3.10 — both still need a
+    manually-entered cap_hold_amount.
+    """
+    prev = _parse_dollar(prev_salary)
+    note = None
+    if bird_tier == "QVFA":
+        eaps = (cap_levels.get(hold_season, {}) or {}).get("eaps") or None
+        if eaps:
+            pct = 1.5 if prev > eaps else 1.9
+        else:
+            if eaps_assumption not in ("above", "below"):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Full Bird (QVFA) hold for {hold_season} needs to know whether the "
+                        f"previous salary (${prev:,}) is above or below that season's EAPS to "
+                        f"pick 150% vs 190% (§ 3.10), and {hold_season} has no EAPS on file yet. "
+                        f'Pass eaps_assumption: "above" or "below" to compute a placeholder.'
+                    ),
+                )
+            pct = 1.5 if eaps_assumption == "above" else 1.9
+            note = (f"placeholder — {hold_season} EAPS not yet set; assumed previous salary is "
+                    f"{eaps_assumption} EAPS ({int(pct * 100)}% of ${prev:,})")
+    else:
+        pct = _BIRD_HOLD_PCT.get(bird_tier, 1.2)
+    amount = round(prev * pct)
+    if max_amt:
+        amount = min(amount, max_amt)
+    if min_amt:
+        amount = max(amount, min_amt)
+    return amount, note
+
+
+def _autofill_fa_hold_amounts(
+    bio: dict,
+    team: str,
+    cap_holds: dict,
+    explicit_salaries: dict,
+    cap_levels: dict,
+    bird_rights_type: Optional[str] = None,
+    eaps_assumption: Optional[str] = None,
+) -> dict:
+    """Fills in a dollar figure in bio['salaries'] for any UFA/RFA season in
+    `cap_holds` that `explicit_salaries` (the just-submitted contract's own
+    salaries dict) didn't already price — the trailing free-agent hold a
+    contract rolls into once it ends (§ 3.10). Mutates bio['salaries'] in
+    place. Returns {season: note} for any season whose figure rests on an
+    eaps_assumption placeholder, for the caller to mirror into
+    bio['cap_hold_notes'].
+    """
+    notes = {}
+    salaries = bio.get("salaries") or {}
+    for season, hold_type in (cap_holds or {}).items():
+        if hold_type not in ("UFA", "RFA") or season in explicit_salaries:
+            continue
+        prev_salary = salaries.get(_season_shift(season, -1))
+        if not prev_salary:
+            continue  # nothing to base a hold on — e.g. incomplete backfilled history
+        tier = bird_rights_type or _derive_bird_tier(bio, team, season)
+        min_amt = _rookie_min_salary(season, cap_levels) or None
+        max_amt = _max_salary(bio, season, cap_levels)
+        amount, note = _compute_fa_hold_amount(
+            prev_salary, tier, season, cap_levels, eaps_assumption, min_amt, max_amt,
+        )
+        salaries[season] = f"${amount:,}"
+        if note:
+            notes[season] = note
+    bio["salaries"] = salaries
+    return notes
 
 
 def _one_year_min_cap_hit(bio: dict, season: str, cap_levels: dict) -> Optional[int]:
@@ -2651,7 +2859,75 @@ def _validate_renounce(details: RenounceDetails, ctx: dict) -> list[CheckResult]
 
 
 def _validate_offer_sheet(details: OfferSheetDetails, ctx: dict) -> list[CheckResult]:
-    return []
+    """Mirrors _validate_sign's hard-cap and signing-method funding checks,
+    resolved against whichever team the outcome actually signs the player to
+    — the retaining team on a match, the offering team otherwise. Everything
+    else about § 3.15 legality (good-faith fit, Gilbert Arenas eligibility,
+    etc.) stays manual review per the rulebook; this only covers what a plain
+    `sign` would already catch, so a declared `signing_method` can't silently
+    skip the funding-availability gate just because it arrived via an offer
+    sheet instead of a direct signing.
+    """
+    checks: list[CheckResult] = []
+    bios = ctx["bios"]; season = ctx["cur_season"]
+
+    team_map = _build_team_map()
+    retaining_team = team_map.get(details.player)
+    if not retaining_team or details.outcome not in ("matched", "not_matched"):
+        # The hard-fail checks in _apply_offer_sheet cover these; nothing
+        # useful to validate here without a resolvable signing team.
+        return checks
+    offering_team = details.offering_team.upper()
+    team = retaining_team if details.outcome == "matched" else offering_team
+    if team not in VALID_TEAMS:
+        return checks
+
+    current_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
+    existing_hold = 0
+    is_fa_hold = False
+    roster_path = DATA_DIR / f"{team.lower()}-roster.csv"
+    if roster_path.exists():
+        _, roster_rows = read_csv(roster_path)
+        if any(r.get("SLUG", "").strip() == details.player for r in roster_rows):
+            existing_hold = _parse_dollar((bios.get(details.player, {}).get("salaries") or {}).get(season, ""))
+            is_fa_hold = (bios.get(details.player, {}).get("cap_holds") or {}).get(season) in _FA_HOLD_TYPES
+    new_sal = _parse_dollar(details.contract.salaries.get(season, ""))
+    projected_ex_holds = current_ex_holds - (0 if is_fa_hold else existing_hold) + new_sal
+
+    r = _hard_cap_check(team, projected_ex_holds, season, ctx["team_state"], ctx["cap_levels"])
+    if r:
+        checks.append(r)
+    r = _universal_hard_cap_check(team, projected_ex_holds, season, ctx["cap_levels"])
+    if r:
+        checks.append(r)
+
+    current_with_holds = _compute_team_salary(team, bios, season)
+    other_holds = (current_with_holds - current_ex_holds) - (existing_hold if is_fa_hold else 0)
+    r = _check_signing_method_funding(
+        team, details.signing_method, new_sal,
+        current_with_holds - existing_hold,
+        current_ex_holds, season, ctx["cap_levels"], ctx["team_state"],
+        unrenounced_holds=other_holds,
+    )
+    if r:
+        checks.append(r)
+
+    if details.contract.type != "two-way" and details.outcome == "not_matched":
+        # A match keeps the player on a roster spot they already occupy; only
+        # a non-match actually adds a new standard-contract body to `team`.
+        count = _count_standard_roster(team)
+        if count >= ROSTER_MAX:
+            checks.append(CheckResult(
+                check="roster_size",
+                passed=False,
+                level="error",
+                message=(
+                    f"{team} already has {count} standard players (max {ROSTER_MAX}); "
+                    f"release a player before this offer sheet can be signed."
+                ),
+            ))
+
+    return checks
 
 
 def _validate_guarantee(details: GuaranteeDetails, ctx: dict) -> list[CheckResult]:
