@@ -115,19 +115,50 @@ The data to compute that is largely absent (checked 2026-08-07):
 So for ~98% of players there is no explicit guarantee record. Proposed rule,
 in precedence order:
 
-1. If `guaranteed` has entries, the last season with a full guarantee (i.e.
+0. Discard seasons whose `cap_holds` entry is `UFA` or `RFA` outright. Those
+   are not contract years at all — they are the trailing free-agent hold, and
+   they *do* carry a salary figure (auto-filled by
+   `_autofill_fa_hold_amounts`), so a naive "last salaried season" scan picks
+   the hold and lands a year late. This step is easy to omit; an earlier draft
+   of this spec did.
+1. If `guaranteed` has entries, the last season with a **full** guarantee (i.e.
    `guaranteed[season] == salaries[season]`) is the final guaranteed year.
-2. Otherwise, treat every salaried season as guaranteed **except** seasons whose
-   `cap_holds` entry is `NON_GTD`, `PLAYER_OPT`, or `TEAM_OPT`. The last
-   remaining season is the final guaranteed year.
+2. Otherwise, treat every remaining salaried season as guaranteed **except**
+   those whose `cap_holds` entry is `NON_GTD`, `PLAYER_OPT`, or `TEAM_OPT`.
+   The last remaining season is the final guaranteed year.
 3. The extension's first season must be exactly `_season_shift(that, +1)`.
 
-Rule 2 is the one that will actually fire. It is a *convention*, not a reading
-of the rulebook — get it ratified (§9) rather than letting it become de facto
-law by shipping. Mismatch between the submitted first season and the computed
-one should be an **error** with both seasons named, since silently accepting it
-would put money in the wrong league year and corrupt every downstream cap
-figure.
+Rule 2 is the one that will actually fire, and it is a *convention* rather than
+a reading of the rulebook — ratify it (§9) instead of letting it become de
+facto law by shipping. Mismatch between the submitted first season and the
+computed one should be an **error** naming both seasons: silently accepting it
+puts money in the wrong league year and corrupts every downstream cap figure.
+
+**Four things this convention does not handle.** None block Phase 1, but each
+is a real limit, and the last one needs a decision:
+
+- **Partial guarantees are invisible to it.** A season can be $15M with only
+  $5M guaranteed — precisely what `guaranteed` / `guarantee_schedule` exist to
+  record (18 and 21 bios respectively). Rule 2 treats such a year as fully
+  guaranteed and so starts the extension a year late. Rule 1 covers this
+  wherever the data exists; rule 2 cannot.
+- **It has no time dimension.** `guarantee_dates` is "the date after which that
+  season's salary becomes fully guaranteed, cleared once the date passes", so
+  guarantee status *changes over the season*. The convention is timeless and
+  would give different answers either side of such a date. Latent rather than
+  live — `guarantee_dates` is empty for every player today — but it should be
+  settled as "evaluated as of the extension's announced date" before that
+  changes.
+- **It cannot distinguish "never guaranteed" from "not recorded".** Both look
+  like an absent key. With `guaranteed` populated for 18 of 1018 bios, nearly
+  every answer rests on that ambiguity.
+- **Option years are a judgment, not a fact.** Is a player-option year "fully
+  guaranteed"? If the player exercises it, they are paid in full. Rule 2
+  excludes option years, so an extension on a deal ending in a player option
+  starts *before* that option year — and would then collide with the option
+  salary if exercised. The alternative (count option years as guaranteed) risks
+  starting a year late when it is declined. **This is the substantive open
+  question inside Q2**, not the convention itself.
 
 ## 5. Validation checks
 
@@ -192,8 +223,21 @@ These are real, and two of them gate correctness rather than polish:
 
 ## 9. Open questions for the committee
 
-1. Rule 2 vs § 6.3 disagree on which contracts are extendable (§2 above).
-2. Is "final fully guaranteed year" the §4 rule-2 convention? Ratify or replace.
+1. **Likely a non-issue — confirm the reading.** § 6.3 is titled "Submission
+   Windows & Process", and every bullet under its three headings is window,
+   channel, resubmission and proposal count: it sets **no term restrictions**,
+   so "Veteran Extension" is a scheduling bucket, not a stricter kind of
+   extension. Read that way the sections reconcile — § 6.2 rule 2 is the hard
+   eligibility test, and § 6.3's buckets map onto it: Rookie Scale ("4th and
+   final year") and Veteran-expiring are both final years, leaving
+   Veteran-non-expiring to mean exactly "Year 4 of a 5-year contract", the only
+   non-final year § 6.2 permits. § 6.3's looser gloss ("a multi-year deal not
+   in their final year") is then just imprecise wording. Worth confirming,
+   because the alternative reading makes most of the league extendable rather
+   than roughly a dozen players; implement § 6.2 rule 2 either way.
+2. Is "final fully guaranteed year" the §4 rule-2 convention? Ratify or replace
+   — and settle the option-year sub-question in §4, which the convention alone
+   does not answer.
 3. When does 140%-of-EAPS apply instead of 140%-of-prior-salary? "Whichever
    applies" is not implementable as written.
 4. ~~Does an extension reset § 3.8 Bird tenure?~~ **DECIDED 2026-08-07: no.**
@@ -204,10 +248,16 @@ These are real, and two of them gate correctness rather than polish:
    ("an extension is not recorded as an acquisition event"), because adding it
    there later "for completeness" would reset every extended player's clock and
    silently downgrade their tier.
-5. Do extensions count against the § 4.5 trade limit or any roster rule? Assumed
-   no.
-6. Extend-and-trade (§ 8(e)(2)) is referenced by § 3.9 but there is no § 8 —
-   the rulebook has Articles I–VII only. Either write it or drop the reference.
+5. ~~Do extensions count against the § 4.5 trade limit or any roster rule?~~
+   **DECIDED 2026-08-07: no.** An extension consumes nothing — not a trade-limit
+   slot, not a roster spot. `_validate_extension` must therefore not run any
+   roster-count check, which is one of the things the signing path would have
+   wrongly imported.
+6. ~~Extend-and-trade cites § 8(e)(2), which does not exist.~~ **RESOLVED
+   2026-08-07:** dangling citation removed from the § 3.9 table; the 5% figure
+   stands. Defining the extend-and-trade mechanism itself is now a BACKLOG
+   item — `ExtensionDetails.kind` already reserves `"extend_and_trade"` as the
+   value selecting that ceiling.
 
 ## 10. Phasing
 
