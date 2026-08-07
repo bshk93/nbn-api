@@ -20,6 +20,7 @@ from datetime import datetime
 from .league_time import LEAGUE_TZ, league_now
 from .roster_picks import ensure_picks_horizon
 from .storage import _current_league_year, _league_rollovers, _season_start_date, _season_shift
+from .transactions import snapshot_room_zone_baseline
 
 logger = logging.getLogger("nbn-api")
 
@@ -42,6 +43,14 @@ async def _loop():
                 logger.info("picks horizon: created draft year(s) %s", created)
         except Exception:
             logger.exception("picks horizon: check failed")
+
+        try:
+            snapshotted = snapshot_room_zone_baseline(_current_league_year())
+            if snapshotted:
+                logger.info("room zone baseline: snapshotted %s for %s",
+                            snapshotted, _current_league_year())
+        except Exception:
+            logger.exception("room zone baseline: snapshot failed")
 
         # _season_start_date returns a naive *civil* midnight. Comparing it to
         # utcnow() treated that as UTC midnight, so the horizon rolled over at

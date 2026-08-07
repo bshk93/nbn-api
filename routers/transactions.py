@@ -11,11 +11,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from .constants import (
-    DATA_DIR, CAP_LEVELS_FILE, TRANSACTIONS_FILE, VALID_TEAMS,
+    DATA_DIR, CAP_LEVELS_FILE, TRANSACTIONS_FILE, VALID_TEAMS, ROOM_ZONE_BASELINE_FILE,
     _txn_lock, _deadcap_lock, _state_lock, _picks_lock, _trade_exc_lock,
     ROSTER_MAX, ROSTER_OFFSEASON_MAX, ROSTER_MIN, ROSTER_CHARGE_MIN, SALARY_MATCH_TIER1_CAP, SALARY_MATCH_TIER2_CAP,
 )
-from .storage import read_csv, write_csv, _load_json, log_write, _parse_dollar, _season_start, _season_shift, _season_for_date, _current_league_year
+from .storage import (
+    read_csv, write_csv, _load_json, log_write, _parse_dollar, _season_start, _season_shift,
+    _season_for_date, _current_league_year, _league_rollovers, _season_start_date,
+)
 from .auth import require_role
 from .players import load_player_bios, save_player_bios, _build_team_map, _scrub_trading_block
 from .roster_picks import (
@@ -2037,6 +2040,178 @@ def _compute_team_salary_ex_holds(team: str, bios: dict, season: str) -> int:
     return total
 
 
+def load_room_zone_baseline() -> dict:
+    return _load_json(ROOM_ZONE_BASELINE_FILE, {})
+
+
+def save_room_zone_baseline(data: dict):
+    ROOM_ZONE_BASELINE_FILE.write_text(json.dumps(data, indent=2))
+
+
+def snapshot_room_zone_baseline(season: str, within_days: int = 7) -> list[str]:
+    """§ 3.2: record every team's real Team Salary at the moment `season`'s
+    league year actually begins, so Room Exception zone eligibility never has
+    to guess or reconstruct after the fact — it just reads what was true on
+    the day, the same way `_check_exception_absorption`'s `mle_type` lock
+    already avoids re-testing once a team has actually used an exception.
+
+    Idempotent per team/season: a team already recorded for `season` is left
+    untouched, so calling this repeatedly (every pass of the scheduler loop
+    in `picks_scheduler.py` — on every service start and at every rollover
+    boundary) is free once it's done its job.
+
+    Deliberately narrow: only snapshots within `within_days` of the season's
+    actual rollover date. That bounds the damage from a service outage
+    spanning the exact rollover moment (still caught within a few days of
+    the real date) without ever back-dating a season that's genuinely been
+    running for weeks — doing that would silently reintroduce a live-salary
+    figure mislabeled as "July 1," exactly the bug this replaces. A season
+    outside that window with no snapshot (26-27, as of this writing — it had
+    already been running for five weeks when this was built) falls back to
+    `_team_salary_as_of_league_year_start`'s after-the-fact reconstruction,
+    kept around specifically as a bridge for seasons this snapshot missed.
+    """
+    rollover = _season_start_date(season, _league_rollovers())
+    age_days = (datetime.now(timezone.utc).replace(tzinfo=None) - rollover).days
+    if age_days < 0 or age_days > within_days:
+        return []
+    bios = load_player_bios()
+    data = load_room_zone_baseline()
+    season_data = data.setdefault(season, {})
+    snapshotted = []
+    for team in sorted(VALID_TEAMS):
+        if team in season_data:
+            continue
+        season_data[team] = {
+            "with_holds": _compute_team_salary(team, bios, season),
+            "ex_holds": _compute_team_salary_ex_holds(team, bios, season),
+            "snapshotted_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        snapshotted.append(team)
+    if snapshotted:
+        save_room_zone_baseline(data)
+    return snapshotted
+
+
+_ZONE_RECON_HANDLED_TYPES = {"trade", "sign", "sign_pick"}
+_ZONE_RECON_UNHANDLED_TYPES = {"release", "option", "void_player", "renounce", "convert_twoway", "offer_sheet"}
+
+
+def _team_salary_as_of_league_year_start(
+    team: str, season: str, bios: dict
+) -> tuple[Optional[int], Optional[int], Optional[str]]:
+    """Bridge for a season whose rollover `snapshot_room_zone_baseline` never
+    caught (it didn't exist yet, or the service was down past its freshness
+    window) — reconstructs Team Salary (with-holds, ex-holds) as it stood at
+    the start of `season`'s league year by starting from the CURRENT computed
+    totals and reversing every transaction touching `team` dated after that
+    rollover (honoring any BOD override in league-state.json, not just the
+    plain July 1 default). `_room_exception_july1_eligible` only calls this
+    when no real snapshot is on file — prefer that snapshot wherever one
+    exists; this is strictly a fallback, not the primary mechanism.
+
+    Only reverses `trade`, `sign`, and `sign_pick` — the types whose salary
+    effect is fully recoverable from the log entry itself. A trade doesn't
+    change a player's contract figure, so that player's *current* season
+    salary is safe to use for it, unless the same player shows up in more than
+    one salary-moving transaction in the reversal window — then a plain
+    current-bio lookup can't tell which figure applied at which moment, and
+    this abstains rather than guess. It also abstains outright if the team's
+    post-rollover history includes a `release`, `option` decision,
+    `void_player`, `renounce`, `convert_twoway`, or `offer_sheet` — none of
+    those carry enough in the transaction log to reverse confidently (a
+    release's real dead-cap split, an option's pre-decision state, a
+    renounced hold's original amount aren't recoverable from the entry alone).
+
+    Returns `(with_holds, ex_holds, None)` on success, or `(None, None, reason)`
+    if it had to abstain — callers should fall back to their own prior
+    behavior in that case, not treat an abstention as a real answer.
+    """
+    rollover = _season_start_date(season, _league_rollovers())
+    rollover_str = rollover.strftime("%Y-%m-%d")
+
+    with_holds = _compute_team_salary(team, bios, season)
+    ex_holds = _compute_team_salary_ex_holds(team, bios, season)
+
+    touched: dict[str, int] = {}
+    for t in _load_transactions():
+        if t.get("date", "") <= rollover_str:
+            continue
+        ttype = t.get("type")
+        d = t.get("details", {}) or {}
+
+        if ttype == "trade":
+            if team not in (d.get("teams") or []):
+                continue
+            for xfer in d.get("transfers", []):
+                if xfer.get("from_team") != team and xfer.get("to_team") != team:
+                    continue
+                sign = -1 if xfer.get("from_team") == team else 1
+                for asset in xfer.get("assets", []):
+                    if asset.get("type") != "player":
+                        continue
+                    slug = asset.get("slug")
+                    touched[slug] = touched.get(slug, 0) + 1
+                    sal = _parse_dollar((bios.get(slug, {}).get("salaries") or {}).get(season, ""))
+                    with_holds -= sign * sal
+                    ex_holds -= sign * sal
+            continue
+
+        if ttype in ("sign", "sign_pick"):
+            if d.get("team") != team:
+                continue
+            slug = d.get("player")
+            touched[slug] = touched.get(slug, 0) + 1
+            new_sal = _parse_dollar((d.get("contract", {}).get("salaries") or {}).get(season, ""))
+            with_holds -= new_sal
+            ex_holds -= new_sal
+            continue
+
+        if d.get("team") == team or team in (d.get("teams") or []) or d.get("offering_team") == team:
+            if ttype in _ZONE_RECON_UNHANDLED_TYPES:
+                return None, None, (
+                    f"{team}: a {ttype!r} transaction since {rollover_str} ({t.get('id')}) "
+                    "can't be reversed confidently"
+                )
+
+    dupes = sorted(s for s, c in touched.items() if c > 1)
+    if dupes:
+        return None, None, (
+            f"{team}: {', '.join(dupes)} moved more than once since {rollover_str} — "
+            "can't reconstruct a reliable July-1 salary"
+        )
+
+    return with_holds, ex_holds, None
+
+
+def _room_exception_july1_eligible(
+    team: str, season: str, bios: dict, cap_levels: dict
+) -> Optional[bool]:
+    """§ 3.2: was `team` more than the full NTMLE amount below the Cap as of
+    `season`'s league-year start — the real July-1 test the Room Exception
+    zone assignment is supposed to run. Prefers the real recorded snapshot
+    (`snapshot_room_zone_baseline`) when one exists; only falls back to
+    after-the-fact reconstruction for a season the snapshot never caught.
+    Returns None (couldn't determine) rather than guessing when neither
+    source has an answer — callers should fall back to their prior behavior.
+    """
+    cl = cap_levels.get(season, {})
+    cap = cl.get("cap")
+    if cap is None:
+        return None
+    room_ceiling = cap - (cl.get("ntmle_amount", 0) or 0)
+
+    baseline = load_room_zone_baseline().get(season, {}).get(team)
+    if baseline is not None:
+        return baseline["with_holds"] < room_ceiling
+
+    with_holds, _ex_holds, warning = _team_salary_as_of_league_year_start(team, season, bios)
+    if warning:
+        logger.info("Room Exception July-1 reconstruction abstained: %s", warning)
+        return None
+    return with_holds < room_ceiling
+
+
 def _hard_cap_check(team: str, projected: int, season: str,
                     team_state: dict, cap_levels: dict) -> Optional[CheckResult]:
     ts  = get_season_state(team_state, team, season)
@@ -2269,6 +2444,7 @@ def _check_signing_method_funding(
     cap_levels: dict,
     team_state: Optional[dict],
     unrenounced_holds: int = 0,
+    bios: Optional[dict] = None,
 ) -> Optional[CheckResult]:
     """§ 3.1–§ 3.6: the declared `signing_method` must actually be available.
 
@@ -2288,6 +2464,16 @@ def _check_signing_method_funding(
     `bird_rights`, `minimum`, `bae` and `sign_and_trade` are out of scope here:
     Bird Rights carry no amount ceiling of their own, and the other three have
     dedicated checks.
+
+    `bios` (optional) gates a further § 3.2 check: the Room Exception is
+    unavailable unless Team Salary was more than the full NTMLE amount below
+    the Cap as of the league year's start (unlike NTMLE/TMLE's § 1.5/§ 1.6
+    apron bars, which stay live all season and are checked below regardless
+    of `bios` — see `_check_exception_absorption` for why those two are
+    deliberately not locked the same way). Only the real validation path
+    (`_validate_sign`) passes `bios`; callers that construct scalars directly
+    (this module's own test suite) skip that gate entirely, exactly as before
+    it existed.
     """
     if method not in ("cap_space", "mle", "ntmle", "tmle", "room_exception"):
         return None
@@ -2350,6 +2536,22 @@ def _check_signing_method_funding(
                     f"{team} may not use the Non-Taxpayer MLE — Team Salary "
                     f"(${team_salary_ex_holds_before:,}) is at/above the First Apron "
                     f"(${apron1:,}). The Taxpayer MLE applies instead (§ 3.3)."
+                ),
+            )
+
+    # § 3.2: the Room Exception zone is locked once assigned, but a team that
+    # hasn't used any exception yet this season (`mle_type` unset) still has
+    # to actually clear the July-1 line before it counts as assigned.
+    if resolved == "room_exception" and ts.get("mle_type") not in ("room", "room_exception") and bios is not None:
+        eligible = _room_exception_july1_eligible(team, season, bios, cap_levels)
+        if eligible is False:
+            room_ceiling = (cl.get("cap") or 0) - (cl.get("ntmle_amount") or 0)
+            return CheckResult(
+                check=check_name, passed=False, level="error",
+                message=(
+                    f"{team} may not use the Room Exception — Team Salary was not more than "
+                    f"the full NTMLE amount below the Cap (${room_ceiling:,}) as of the start "
+                    f"of the league year (§ 3.2)."
                 ),
             )
 
@@ -2502,6 +2704,7 @@ def _check_exception_absorption(
     cl: dict,
     team_state: Optional[dict],
     season: str,
+    bios: Optional[dict] = None,
 ) -> CheckResult:
     """A team may absorb incoming trade salary using its remaining season MLE
     balance in lieu of matching outgoing salary — incoming salary must not
@@ -2514,6 +2717,12 @@ def _check_exception_absorption(
     — pure free-agent cap holds (UFA/RFA) don't count toward apron level. Room
     Exception eligibility is Cap-based, not apron-based, so it still uses the
     full `team_salary_before` (with holds).
+
+    `bios` (optional): when the Room Exception has no recorded assignment yet,
+    lets the fallback use a real reconstructed July-1 Team Salary instead of
+    the live current figure. Only the real validation path (`_validate_trade`)
+    passes it; this module's own test suite constructs scalars directly and
+    exercises the live-figure fallback exactly as before `bios` existed.
     """
     check_name = f"salary_matching_{team.lower()}"
     if exception_type == "bae":
@@ -2553,9 +2762,15 @@ def _check_exception_absorption(
         if assigned in ("room", "room_exception"):
             eligible = True
         else:
-            # No assignment on record — fall back to the July-1 zone test
-            # against current salary, the best inference available.
-            eligible = room_ceiling is not None and team_salary_before < room_ceiling
+            # No assignment on record. Prefer a real reconstructed July-1
+            # figure when bios is available (the production path); otherwise
+            # fall back to the live-salary approximation this used before
+            # reconstruction existed.
+            july1 = _room_exception_july1_eligible(team, season, bios, cl) if bios is not None else None
+            if july1 is not None:
+                eligible = july1
+            else:
+                eligible = room_ceiling is not None and team_salary_before < room_ceiling
         threshold_msg = (f"the Cap minus the full NTMLE amount (${room_ceiling:,}) as of July 1, and "
                           f"holds no recorded Room Exception assignment — § 3.2"
                           if room_ceiling is not None else "the Room Exception eligibility line")
@@ -2600,13 +2815,14 @@ def _check_salary_matching(
     exception_type: Optional[str] = None,
     team_state: Optional[dict] = None,
     team_salary_ex_holds_before: Optional[int] = None,
+    bios: Optional[dict] = None,
 ) -> Optional[CheckResult]:
     cl = cap_levels.get(season, {})
     ex_holds = team_salary_ex_holds_before if team_salary_ex_holds_before is not None else team_salary_before
 
     if exception_type:
         return _check_exception_absorption(team, incoming, exception_type, team_salary_before,
-                                            ex_holds, cl, team_state, season)
+                                            ex_holds, cl, team_state, season, bios=bios)
 
     if incoming <= outgoing:
         return None
@@ -2724,7 +2940,7 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
         team, details.signing_method, new_sal,
         current_with_holds - existing_hold,
         current_ex_holds, season, ctx["cap_levels"], ctx["team_state"],
-        unrenounced_holds=other_holds,
+        unrenounced_holds=other_holds, bios=bios,
     )
     if r:
         checks.append(r)
@@ -2907,7 +3123,7 @@ def _validate_offer_sheet(details: OfferSheetDetails, ctx: dict) -> list[CheckRe
         team, details.signing_method, new_sal,
         current_with_holds - existing_hold,
         current_ex_holds, season, ctx["cap_levels"], ctx["team_state"],
-        unrenounced_holds=other_holds,
+        unrenounced_holds=other_holds, bios=bios,
     )
     if r:
         checks.append(r)
@@ -3301,7 +3517,7 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
                     # half of the trade cleared.
                     checks.append(_check_exception_absorption(
                         team, absorbed, exc_type, current, current_ex_holds,
-                        ctx["cap_levels"].get(season, {}), ctx.get("team_state"), season))
+                        ctx["cap_levels"].get(season, {}), ctx.get("team_state"), season, bios=bios))
                     sm = _check_salary_matching(team, match_out, matched_inc, current,
                                                  ctx["cap_levels"], season,
                                                  exception_type=None, team_state=ctx.get("team_state"),
@@ -3314,7 +3530,7 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
                 else:
                     sm = _check_salary_matching(team, match_out, inc, current, ctx["cap_levels"], season,
                                                  exception_type=exc_type, team_state=ctx.get("team_state"),
-                                                 team_salary_ex_holds_before=current_ex_holds)
+                                                 team_salary_ex_holds_before=current_ex_holds, bios=bios)
                     checks.append(sm or CheckResult(
                         check=f"salary_matching_{team.lower()}", passed=True,
                         message=f"{team}: incoming ${inc:,} matches outgoing ${match_out:,} (§ 4.2/4.3).",
