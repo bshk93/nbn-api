@@ -3268,6 +3268,15 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
     if r:
         checks.append(r)
 
+    r = _check_signing_eligibility(details.player, team, season, bios)
+    if r:
+        checks.append(r)
+
+    r = _check_minimum_salary(details.contract, details.player, bios, season, ctx["cap_levels"],
+                              txn_date=ctx.get("txn_date"))
+    if r:
+        checks.append(r)
+
     r = _check_minimum_contract_cap_hit(details, bios, season, ctx["cap_levels"])
     if r:
         checks.append(r)
@@ -3277,6 +3286,133 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
         checks.append(r)
 
     return checks
+
+
+def _check_signing_eligibility(player: str, team: str, season: str,
+                               bios: dict) -> Optional[CheckResult]:
+    """Who can be signed at all: not retired, and not already under contract
+    to somebody else.
+
+    A player carrying a UFA/RFA cap hold is a free agent whose rights their
+    team holds (§ 3.10), so re-signing them is exactly what a `sign` is for —
+    only a real, non-hold contract elsewhere blocks it.
+    """
+    bio = bios.get(player) or {}
+    if bio.get("retired"):
+        return CheckResult(
+            check="signing_eligibility", passed=False, level="error",
+            message=f"{bio.get('name') or player} is retired and cannot be signed.",
+        )
+    holder = _build_team_map().get(player)
+    if holder and holder.upper() != team.upper():
+        hold = (bio.get("cap_holds") or {}).get(season)
+        if hold not in _FA_HOLD_TYPES:
+            return CheckResult(
+                check="signing_eligibility", passed=False, level="error",
+                message=(
+                    f"{bio.get('name') or player} is under contract to {holder} and is not a free "
+                    f"agent — acquire them by trade, or wait for the contract to expire (§ 3.1)."
+                ),
+            )
+    return None
+
+
+def _min_salary_floor(season: str, cap_levels: dict) -> int:
+    """The 0-years tier for `season`, falling back to the latest configured
+    season when that one has no scale yet. Minimum scales only ever rise, so
+    an older season's figure is a conservative floor for a later one — it can
+    under-flag, never produce a false positive."""
+    scale = (cap_levels.get(season, {}) or {}).get("min_salary_scale") or {}
+    if scale.get("0"):
+        return scale["0"]
+    for yr in sorted(cap_levels, key=_season_start, reverse=True):
+        if _season_start(yr) <= _season_start(season):
+            amt = ((cap_levels.get(yr) or {}).get("min_salary_scale") or {}).get("0")
+            if amt:
+                return amt
+    return 0
+
+
+def _check_minimum_salary(contract, player: str, bios: dict, season: str,
+                          cap_levels: dict, txn_date: Optional[str] = None) -> Optional[CheckResult]:
+    """§ 3.12: no contract year may pay below that season's minimum salary.
+
+    Proration is the wrinkle. The league prorates in-season minimum signings
+    (practice, not yet written into the rulebook — see BACKLOG), so a Year 1
+    figure below the full-season minimum can be perfectly legal if the deal
+    was signed after the season started. That excuse applies to **Year 1
+    only**: every later year of the contract is a full season, so the floor is
+    hard there regardless.
+
+    Hence the split:
+      * Year 1, signed in-season   -> below floor is a *warning* (likely prorated)
+      * Year 1, signed in the offseason, or any later year -> *error*
+      * between the league floor and the player's own experience tier ->
+        warning, since experience is inferred from `draft_year` rather than
+        verified (same treatment § 3.11 gives it)
+
+    Two-way contracts are exempt: they don't pay on the standard scale.
+    """
+    if contract.type == "two-way":
+        return None
+    check_name = "minimum_salary"
+    # The league year starts July 1; games start in the autumn. A signing in
+    # Jul-Sep therefore precedes the season and cannot be prorated. Deliberately
+    # a coarse rule — proration isn't in the rulebook yet, so there is no
+    # authoritative season-start date to key off.
+    in_season = bool(txn_date) and int(txn_date[5:7]) not in (7, 8, 9)
+
+    for yr, raw in sorted((contract.salaries or {}).items()):
+        floor = _min_salary_floor(yr, cap_levels)
+        if not floor:
+            continue        # no scale configured at or before this season
+        amount = _parse_dollar(raw)
+        if amount < floor:
+            prorateable = (yr == season and in_season)
+            if prorateable:
+                return CheckResult(
+                    check=check_name, passed=False, level="warning",
+                    message=(
+                        f"{yr} salary of ${amount:,} is below the ${floor:,} full-season minimum "
+                        f"(§ 3.12). That is legal only if it is a prorated in-season signing — "
+                        f"confirm the proration is right, since the system can't verify it."
+                    ),
+                )
+            when = ("signed before the season started, so no proration applies"
+                    if yr == season else "a full contract year, which is never prorated")
+            return CheckResult(
+                check=check_name, passed=False, level="error",
+                message=(
+                    f"{yr} salary of ${amount:,} is below the {yr} minimum salary of "
+                    f"${floor:,} (§ 3.12) — {when}."
+                ),
+            )
+        tier_floor = _min_salary_for(bios.get(player) or {}, yr, cap_levels)
+        if tier_floor and amount < tier_floor:
+            return CheckResult(
+                check=check_name, passed=False, level="warning",
+                message=(
+                    f"{yr} salary of ${amount:,} is below this player's ${tier_floor:,} "
+                    f"minimum for their experience tier (§ 3.12), though above the league "
+                    f"floor of ${floor:,}. Experience is inferred from their real NBA draft "
+                    f"year — double check before submitting."
+                ),
+            )
+    return CheckResult(
+        check=check_name, passed=True,
+        message="Every contract year meets the § 3.12 minimum salary.",
+    )
+
+
+def _min_salary_for(bio: dict, season: str, cap_levels: dict) -> Optional[int]:
+    """That season's minimum for this player's experience tier, or None when
+    experience can't be established (undrafted, or scale not configured)."""
+    scale = (cap_levels.get(season, {}) or {}).get("min_salary_scale") or {}
+    draft_year = bio.get("draft_year")
+    if not scale or not draft_year:
+        return None
+    years_exp = _season_start(season) + 2000 - int(draft_year)
+    return scale.get(_min_salary_scale_tier(years_exp)) or None
 
 
 def _check_minimum_contract_cap_hit(details: SignDetails, bios: dict, season: str,
@@ -3420,6 +3556,26 @@ def _validate_offer_sheet(details: OfferSheetDetails, ctx: dict) -> list[CheckRe
 
     r = _check_bird_rights_declaration(details.player, team, details.bird_rights_type, season, bios,
                                        method=details.signing_method)
+    if r:
+        checks.append(r)
+
+    # § 3.15: an offer sheet is a restricted-free-agency instrument. A player
+    # who isn't an RFA can't receive one at all — they're either under contract
+    # (acquire by trade) or unrestricted (sign them outright, no match right).
+    hold = ((bios.get(details.player) or {}).get("cap_holds") or {}).get(season)
+    if hold != "RFA":
+        checks.append(CheckResult(
+            check="offer_sheet_rfa", passed=False, level="error",
+            message=(
+                f"{(bios.get(details.player) or {}).get('name') or details.player} is not a "
+                f"Restricted Free Agent for {season} "
+                f"({'no cap hold on file' if not hold else 'cap hold is ' + hold}) — only an RFA "
+                f"can receive an offer sheet (§ 3.15)."
+            ),
+        ))
+
+    r = _check_minimum_salary(details.contract, details.player, bios, season, ctx["cap_levels"],
+                              txn_date=ctx.get("txn_date"))
     if r:
         checks.append(r)
 
