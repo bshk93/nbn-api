@@ -57,6 +57,10 @@ DRAFT_LIVE_PICKS_FILE = DATA_DIR / "draft-live-picks.csv"
 # Member draft-pick grades: { "<year>": { "<slug>": { "<member>": "A" } } }
 DRAFT_GRADES_FILE = DATA_DIR / "draft-grades.json"
 SUGGESTIONS_FILE = DATA_DIR / "suggestions.json"
+# PDC free agency — see nbn-today/docs/pdc-free-agency-spec.md § 4.
+FA_STATE_FILE   = DATA_DIR / "fa-state.json"    # mode, rounds, per-player status + sub-committees
+FA_OFFERS_FILE  = DATA_DIR / "fa-offers.json"   # the offers themselves
+FA_BALLOTS_FILE = DATA_DIR / "fa-ballots.json"  # {player: {round_id: {ballots, final}}}
 JOIN_SUBMISSIONS_FILE = DATA_DIR / "join-submissions.json"
 JOIN_BLACKLIST_FILE   = DATA_DIR / "join-blacklist.json"
 MEMBER_SEEN_FILE      = DATA_DIR / "member-seen.json"
