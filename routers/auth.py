@@ -2,16 +2,17 @@ import io
 import re
 import secrets
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, UploadFile
+from fastapi import (APIRouter, Cookie, Depends, File, Header, HTTPException,
+                     Request, Response, UploadFile)
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from .constants import (
     MEMBERS_FILE, VALID_ROLES, VALID_TEAMS, ROLE_IMPLIES,
-    MEMBER_SEEN_FILE, AVATARS_DIR,
+    MEMBER_SEEN_FILE, AVATARS_DIR, SESSIONS_FILE,
 )
 from .storage import _load_json, _save_json, log_write
 
@@ -70,8 +71,121 @@ def _resolve_token(authorization: Optional[str]) -> Optional[dict]:
     return None
 
 
-def get_token_info(authorization: Optional[str] = Header(None)) -> dict:
+# ── Browser sessions ─────────────────────────────────────────────────────────
+# `localStorage` is per-origin, so a member signed in on nbn.today is a stranger
+# on pdc.nbn.today — the reason news.nbn.today was retired back into a path
+# instead of solving it. A cookie scoped to `.nbn.today` is sent to every
+# subdomain, so signing in once anywhere covers all of them.
+#
+# What is stored in the cookie is an opaque random id, never the member's token:
+# the token would then be readable by anything that could read the cookie and
+# could not be revoked short of rotating it, whereas a session row can simply be
+# deleted (see `_drop_sessions_for`, called on rotate/revoke/delete).
+#
+# Spec: nbn-today/docs/pdc-free-agency-spec.md § 3.3.
+
+SESSION_COOKIE = "nbn_session"
+# Companion, deliberately non-secret marker. The real cookie is HttpOnly and so
+# unreadable by page JS, which would otherwise have no way to tell whether it
+# already has a session and would mint a fresh row on every page load.
+SESSION_MARKER_COOKIE = "nbn_session_live"
+SESSION_COOKIE_DOMAIN = ".nbn.today"
+SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
+
+_sessions_lock = threading.Lock()
+
+
+def _cookie_accepted(path: str) -> bool:
+    """Cookie auth is what makes CSRF possible at all, so the cookie is honoured
+    on a deliberately narrow allowlist rather than API-wide. `SameSite=Lax`
+    already blocks cross-site writes, but the real roster/transaction write paths
+    (`PUT /api/roster/{team}`, `POST /api/transactions`, `POST /api/self/renounce`)
+    keep requiring the `Authorization` header, so their blast radius is zero.
+
+    Widening this later is a one-line change; narrowing it after the fact would
+    not be. `POST /api/auth/session` is deliberately *not* on the list — minting
+    takes the real token, so a session can never renew itself past its expiry.
+    """
+    return path == "/api/auth/me" or path.startswith("/api/fa/")
+
+
+def _load_sessions() -> dict:
+    return _load_json(SESSIONS_FILE, {})
+
+
+def _save_sessions(sessions: dict):
+    _save_json(SESSIONS_FILE, sessions)
+
+
+def _reap_expired(sessions: dict, now_iso: str) -> bool:
+    """Drop expired rows in place; True if anything went. Expiry is evaluated on
+    read rather than by a scheduler — a cron that dies would leave sessions valid
+    forever, and the comparison is free."""
+    dead = [sid for sid, s in sessions.items() if (s.get("expires_at") or "") <= now_iso]
+    for sid in dead:
+        del sessions[sid]
+    return bool(dead)
+
+
+def _resolve_session(session_id: Optional[str]) -> Optional[dict]:
+    """Map a session id to the same `{name, roles}` shape `_resolve_token` returns.
+
+    Roles are read live from members.json rather than copied onto the session, so
+    a role grant or revocation takes effect on the next request instead of at the
+    session's 30-day expiry. A member deleted meanwhile resolves to nothing.
+    """
+    if not session_id:
+        return None
+    now = datetime.now(timezone.utc).isoformat()
+    with _sessions_lock:
+        sessions = _load_sessions()
+        if _reap_expired(sessions, now):
+            _save_sessions(sessions)
+        row = sessions.get(session_id)
+    if not row:
+        return None
+    member = load_members().get(row.get("member", ""))
+    if member is None:
+        return None
+    return {"name": row["member"], "roles": member.get("roles", [])}
+
+
+def _drop_sessions_for(name: str) -> int:
+    """Invalidate every browser session belonging to a member. Called wherever a
+    member's token stops being theirs — this is what makes the cookie revocable,
+    which a raw-token cookie could not have offered."""
+    with _sessions_lock:
+        sessions = _load_sessions()
+        dead = [sid for sid, s in sessions.items() if s.get("member") == name]
+        for sid in dead:
+            del sessions[sid]
+        if dead:
+            _save_sessions(sessions)
+    return len(dead)
+
+
+def _set_session_cookies(response: Response, session_id: str):
+    common = dict(domain=SESSION_COOKIE_DOMAIN, path="/", secure=True,
+                  samesite="lax", max_age=SESSION_TTL_SECONDS)
+    response.set_cookie(SESSION_COOKIE, session_id, httponly=True, **common)
+    response.set_cookie(SESSION_MARKER_COOKIE, "1", httponly=False, **common)
+
+
+def _clear_session_cookies(response: Response):
+    for name in (SESSION_COOKIE, SESSION_MARKER_COOKIE):
+        response.delete_cookie(name, domain=SESSION_COOKIE_DOMAIN, path="/")
+
+
+def get_token_info(request: Request,
+                   authorization: Optional[str] = Header(None),
+                   nbn_session: Optional[str] = Cookie(None)) -> dict:
     if not authorization or not authorization.startswith("Bearer "):
+        # Only reachable where the header path would have 401'd anyway, and only
+        # on the `_cookie_accepted` allowlist.
+        if _cookie_accepted(request.url.path):
+            info = _resolve_session(nbn_session)
+            if info is not None:
+                return info
         raise HTTPException(status_code=401, detail="Missing Authorization header")
     info = _resolve_token(authorization)
     if info is None:
@@ -216,7 +330,8 @@ def post_member_signal(body: MemberSignal, info: dict = Depends(get_token_info))
 
 
 @router.get("/api/auth/me")
-def get_me(authorization: Optional[str] = Header(None)):
+def get_me(authorization: Optional[str] = Header(None),
+           nbn_session: Optional[str] = Cookie(None)):
     """Returns the current token's member name, roles, and the teams they
     currently own. Always 200 — empty if no/invalid token.
 
@@ -224,8 +339,12 @@ def get_me(authorization: Optional[str] = Header(None)):
     on, so the UI can't offer an owner-only action the server would then refuse
     (or hide one it would have allowed). It is not itself a permission — every
     write re-checks server-side.
+
+    Accepts the `.nbn.today` session cookie as well as the header, so a page on a
+    subdomain with no `localStorage` token can still tell who it is talking to.
+    The header wins where both are present.
     """
-    info = _resolve_token(authorization)
+    info = _resolve_token(authorization) or _resolve_session(nbn_session)
     if not info:
         return {"name": None, "roles": [], "owner_of": []}
     return {
@@ -233,6 +352,55 @@ def get_me(authorization: Optional[str] = Header(None)):
         "roles": info["roles"],
         "owner_of": sorted(t for t in VALID_TEAMS if is_team_owner(info, t)),
     }
+
+
+# ── Browser session endpoints ─────────────────────────────────────────────────
+
+@router.post("/api/auth/session")
+def create_session(request: Request, response: Response,
+                   info: dict = Depends(get_token_info)):
+    """Mint a `.nbn.today` session cookie for the bearer token presented.
+
+    Bearer-authenticated on purpose (`/api/auth/session` is off the
+    `_cookie_accepted` allowlist): a session can never mint its successor, so
+    thirty days is a real ceiling rather than a rolling one.
+    """
+    session_id = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(seconds=SESSION_TTL_SECONDS)
+    with _sessions_lock:
+        sessions = _load_sessions()
+        _reap_expired(sessions, now.isoformat())
+        sessions[session_id] = {
+            "member": info["name"],
+            "created_at": now.isoformat(),
+            "expires_at": expires.isoformat(),
+            # Forensic only — never checked on resolve. A UA string changes on
+            # every browser update, so enforcing it would sign people out for
+            # no security gain.
+            "ua_hint": (request.headers.get("user-agent") or "")[:120],
+        }
+        _save_sessions(sessions)
+    _set_session_cookies(response, session_id)
+    log_write(info, "POST auth/session — minted browser session")
+    return {"name": info["name"], "roles": info.get("roles", []),
+            "expires_at": expires.isoformat()}
+
+
+@router.post("/api/auth/session/logout")
+def end_session(response: Response, nbn_session: Optional[str] = Cookie(None)):
+    """Delete the session row and clear both cookies. Deliberately unauthenticated
+    — it only ever destroys the caller's own cookie, and requiring auth would make
+    an already-dead session impossible to clear."""
+    dropped = False
+    if nbn_session:
+        with _sessions_lock:
+            sessions = _load_sessions()
+            if sessions.pop(nbn_session, None) is not None:
+                _save_sessions(sessions)
+                dropped = True
+    _clear_session_cookies(response)
+    return {"ok": True, "dropped": dropped}
 
 
 # ── Token management (compatibility shims) ────────────────────────────────────
@@ -295,7 +463,8 @@ def delete_token(token: str, info: dict = Depends(require_admin)):
         raise HTTPException(status_code=404, detail="Token not found")
     members[target].pop("token", None)
     save_members(members)
-    log_write(info, f"DELETE tokens — revoked token for {target!r}")
+    dropped = _drop_sessions_for(target)
+    log_write(info, f"DELETE tokens — revoked token for {target!r} ({dropped} sessions dropped)")
     return {"ok": True}
 
 
@@ -516,7 +685,10 @@ def rotate_member_token(name: str, info: dict = Depends(require_admin)):
     new_token = secrets.token_hex(32)
     members[name]["token"] = new_token
     save_members(members)
-    log_write(info, f"POST members/{name}/rotate-token")
+    # Rotation exists to cut off whoever had the old token; a surviving session
+    # cookie would leave them signed in for another 30 days.
+    dropped = _drop_sessions_for(name)
+    log_write(info, f"POST members/{name}/rotate-token ({dropped} sessions dropped)")
     return {"name": name, "token": new_token}
 
 
@@ -527,5 +699,6 @@ def delete_member(name: str, info: dict = Depends(require_admin)):
         raise HTTPException(status_code=404, detail=f"Member '{name}' not found")
     del members[name]
     save_members(members)
-    log_write(info, f"DELETE members — removed {name!r}")
+    dropped = _drop_sessions_for(name)
+    log_write(info, f"DELETE members — removed {name!r} ({dropped} sessions dropped)")
     return {"ok": True}

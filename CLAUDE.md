@@ -33,6 +33,39 @@ curl -X POST https://nbn.today/api/tokens \
   -d '{"name": "Name", "roles": ["rosters"]}'
 ```
 
+### Browser sessions (the `.nbn.today` cookie)
+
+The token lives in `localStorage`, which is per-origin — so a member signed in on
+`nbn.today` is a stranger on `pdc.nbn.today`. `POST /api/auth/session` (bearer-auth)
+mints an **opaque** session id into `sessions.json` and returns it as
+`nbn_session=…; Domain=.nbn.today; Secure; HttpOnly; SameSite=Lax; Max-Age=30d`,
+which every subdomain then sends automatically. `token-badge.js` calls it on load.
+
+The member's token never enters the cookie, which is what makes a session
+*revocable*: `_drop_sessions_for` runs on `rotate-token`, `DELETE /api/tokens/{token}`,
+and `DELETE /api/members/{name}`. Roles are read live from members.json on every
+resolve rather than frozen onto the session, so a grant or revocation lands on the
+next request. Expiry is evaluated on read (reaping as it goes) — no scheduler.
+
+**The cookie is honoured on a narrow allowlist and nothing else** (`_cookie_accepted`):
+`GET /api/auth/me` and `/api/fa/*`. Cookie auth is what makes CSRF possible at all,
+so `PUT /api/roster/{team}`, `POST /api/transactions`, `POST /api/self/renounce` and
+every other write keep requiring the header — their blast radius is zero. Widening
+it is a one-line change; narrowing it after the fact would not be. `POST /api/auth/session`
+is itself off the list, so a session cannot mint its successor and 30 days is a real
+ceiling. The allowlist lives in `get_token_info`, which reads `request.url.path`, so
+`require_role` / `require_any_role` / `require_admin` inherit it with no per-endpoint
+opt-in. A *bad* `Authorization` header still 403s — only the missing-header branch
+falls through to the cookie, so a stale token fails loudly instead of quietly
+succeeding as whoever the cookie belongs to.
+
+The server also sets a second, valueless `nbn_session_live` marker cookie that is
+*not* HttpOnly. It carries no secret; it exists only so page JS can tell it already
+has a session, since the real cookie is unreadable and every page load would
+otherwise mint another row. `POST /api/auth/session/logout` deletes the row and
+clears both; it is deliberately unauthenticated, since it only ever destroys the
+caller's own cookie. `tests/test_auth_session.py` pins all of the above.
+
 ## Data model reference
 
 → **[docs/data-model.md](docs/data-model.md)** — player-bios.json fields, CSV formats, all JSON files

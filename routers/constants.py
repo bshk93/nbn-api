@@ -61,6 +61,10 @@ SUGGESTIONS_FILE = DATA_DIR / "suggestions.json"
 FA_STATE_FILE   = DATA_DIR / "fa-state.json"    # mode, rounds, per-player status + sub-committees
 FA_OFFERS_FILE  = DATA_DIR / "fa-offers.json"   # the offers themselves
 FA_BALLOTS_FILE = DATA_DIR / "fa-ballots.json"  # {player: {round_id: {ballots, final}}}
+# Opaque browser sessions ({id: {member, created_at, expires_at, ua_hint}}) — the
+# cookie that makes a member signed in across *.nbn.today without a second paste
+# of their token. See auth.py and the spec's § 3.3.
+SESSIONS_FILE   = DATA_DIR / "sessions.json"
 JOIN_SUBMISSIONS_FILE = DATA_DIR / "join-submissions.json"
 JOIN_BLACKLIST_FILE   = DATA_DIR / "join-blacklist.json"
 MEMBER_SEEN_FILE      = DATA_DIR / "member-seen.json"
