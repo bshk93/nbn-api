@@ -423,6 +423,83 @@ def put_trading_block(
     return {"ok": True}
 
 
+class TradingBlockPlayerIn(BaseModel):
+    notes: str = ""
+
+
+def _require_block_write(info: dict, team: str) -> str:
+    team = team.upper()
+    if team not in VALID_TEAMS:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    if not has_role(info, team.lower()) and not has_role(info, "admin"):
+        raise HTTPException(status_code=403, detail=f"'{team.lower()}' role required")
+    return team
+
+
+def _block_player_name(slug: str, team: str) -> str:
+    """The trading block stores display names ("Stephen Curry"), not slugs — so
+    these endpoints translate, and verify the player is actually on the team's
+    roster while they're at it. Without that check a team could park an opposing
+    player on their own block."""
+    from .players import load_player_bios, _display_name
+    bios = load_player_bios()
+    if slug not in bios:
+        raise HTTPException(status_code=404, detail=f"Unknown player '{slug}'")
+    path = DATA_DIR / f"{team.lower()}-roster.csv"
+    _, rows = read_csv(path) if path.exists() else ([], [])
+    if not any(r.get("SLUG", "").strip() == slug for r in rows):
+        raise HTTPException(status_code=422, detail=f"'{slug}' is not on {team}'s roster")
+    name = _display_name(bios[slug].get("name", ""))
+    if not name:
+        raise HTTPException(status_code=422, detail=f"'{slug}' has no usable display name")
+    return name
+
+
+@router.put("/api/trading-block/{team}/player/{slug}")
+def put_trading_block_player(
+    team: str, slug: str, body: TradingBlockPlayerIn,
+    info: dict = Depends(get_token_info),
+):
+    """Add (or re-note) one player on a team's block, without rewriting the rest.
+
+    The whole-block `PUT` above is a last-write-wins replace — fine for the
+    /tradeblock editor, which owns the entire form, but wrong for a one-click add
+    from the roster page, where a stale read would silently wipe whatever else
+    the team had listed. Same permission as the whole-block PUT.
+    """
+    team = _require_block_write(info, team)
+    name = _block_player_name(slug, team)
+    data = load_trading_block()
+    block = _normalize_team_block(data.get(team, []))
+    entry = next((e for e in block["players"] if e.get("player") == name), None)
+    if entry:
+        entry["notes"] = body.notes
+    else:
+        block["players"].append({"player": name, "notes": body.notes})
+    data[team] = block
+    save_trading_block(data)
+    log_write(info, f"PUT trading-block/{team}/player — {name}")
+    return {"ok": True, "player": name, "on_block": True}
+
+
+@router.delete("/api/trading-block/{team}/player/{slug}")
+def delete_trading_block_player(team: str, slug: str, info: dict = Depends(get_token_info)):
+    """Remove one player from a team's block, leaving the rest untouched."""
+    team = _require_block_write(info, team)
+    from .players import load_player_bios, _display_name
+    bios = load_player_bios()
+    if slug not in bios:
+        raise HTTPException(status_code=404, detail=f"Unknown player '{slug}'")
+    name = _display_name(bios[slug].get("name", ""))
+    data = load_trading_block()
+    block = _normalize_team_block(data.get(team, []))
+    block["players"] = [e for e in block["players"] if e.get("player") != name]
+    data[team] = block
+    save_trading_block(data)
+    log_write(info, f"DELETE trading-block/{team}/player — {name}")
+    return {"ok": True, "player": name, "on_block": False}
+
+
 # ── Team State ────────────────────────────────────────────────────────────────
 
 DEFAULT_SEASON_STATE: dict = {

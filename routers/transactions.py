@@ -19,7 +19,8 @@ from .storage import (
     read_csv, write_csv, _load_json, log_write, _parse_dollar, _season_start, _season_shift,
     _season_for_date, _current_league_year, _league_rollovers, _season_start_date,
 )
-from .auth import require_role
+from .auth import require_role, get_token_info, is_team_owner
+from .discord_notify import notify_transaction
 from .players import load_player_bios, save_player_bios, _build_team_map, _scrub_trading_block
 from .roster_picks import (
     load_picks, save_picks, _all_picks_flat,
@@ -366,11 +367,24 @@ class RenounceDetails(BaseModel):
     player: str
 
 
+class RescindRenounceDetails(BaseModel):
+    txn_id: str   # the renounce being undone; its stored snapshot is the restore source
+
+
 class OfferSheetDetails(BaseModel):
+    """An offer sheet being *extended* (§ 3.15). Deliberately carries no
+    `outcome`: extending the offer and the incumbent's decision to match are two
+    separate acts by two different teams, and collapsing them into one record
+    attributed the incumbent's decision to whoever typed the transaction.
+    The outcome now lives on `offer_sheet_decision`.
+
+    Legacy ledger entries from the combined era still carry `outcome` in their
+    stored details. Those are read as raw dicts, never through this model, and
+    `_open_offer_sheets` treats the presence of `outcome` as "already resolved".
+    """
     player: str
     offering_team: str
     contract: ContractIn
-    outcome: str  # "matched" or "not_matched"
     # What actually funds the contract for whichever team ends up signing the
     # player (§ 3.1-3.6 methods; same vocabulary as SignDetails.signing_method).
     # Threaded straight into the internal _apply_sign call so NTMLE/TMLE/BAE
@@ -382,6 +396,11 @@ class OfferSheetDetails(BaseModel):
     signing_method: Optional[str] = None
     bird_rights_type: Optional[str] = None
     eaps_assumption: Optional[str] = None  # "above" or "below" — see SignDetails
+
+
+class OfferSheetDecisionDetails(BaseModel):
+    offer_id: str    # the `offer_sheet` transaction being resolved
+    outcome: str     # "matched" (incumbent keeps) or "not_matched" (player leaves)
 
 
 class VoidPlayerDetails(BaseModel):
@@ -788,24 +807,32 @@ def _season_after(season: str) -> str:
     return f"{(int(a) + 1) % 100:02d}-{(int(b) + 1) % 100:02d}"
 
 
-def _apply_renounce(details: RenounceDetails, txn_date: str, info: dict) -> str:
-    """Renounce a free-agent hold: remove the player from the roster and clear the
-    cap hold, turning them into an unsigned free agent. Unlike a release, no dead cap
-    is created — a renounced free agent is owed nothing. Earnings history is preserved.
-    Returns the player's former team."""
-    bios = load_player_bios()
-    if details.player not in bios:
-        raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
+def _renounce_eligibility(player: str, bios: dict, cur_season: str) -> dict:
+    """Whether `player` is a renounceable free-agent hold, as
+    ``{ok, team, cutoff, hold_type, reason}``.
 
-    team_map = _build_team_map()
-    team = team_map.get(details.player)
+    The single § 3.10 eligibility test, shared by `_apply_renounce` (which
+    hard-fails on it), `_validate_renounce` (which reports it as a check) and
+    the fact sheet. Keeping one copy is what stops the simulator or the roster
+    page from offering a renounce the apply path would then reject — the same
+    reason the signing validators share `_signee_existing_hold`.
+
+    `cutoff` is the earliest UFA/RFA hold season: everything from there on is
+    hold bookkeeping rather than real pay, so it's what the apply path trims to.
+    """
+    out = {"ok": False, "team": None, "cutoff": None, "hold_type": None, "reason": ""}
+    if player not in bios:
+        out["reason"] = f"Unknown player slug: {player!r}"
+        return out
+
+    team = _build_team_map().get(player)
     if not team:
-        raise HTTPException(status_code=422, detail=f"Player {details.player!r} is not on any roster")
+        out["reason"] = f"Player {player!r} is not on any roster"
+        return out
+    out["team"] = team
 
-    cur_season = _season_for_date(txn_date)
     next_season = _season_after(cur_season)
-    bio = bios[details.player]
-    holds = bio.get("cap_holds") or {}
+    holds = (bios[player].get("cap_holds") or {})
 
     # Must be a clean free-agent hold for the current FA period: the player's
     # earliest cap hold is a UFA/RFA for the upcoming season (their contract has
@@ -813,19 +840,51 @@ def _apply_renounce(details: RenounceDetails, txn_date: str, info: dict) -> str:
     fa_years = sorted(y for y, t in holds.items() if t in ("UFA", "RFA"))
     earliest_hold = min(holds) if holds else None
     if not fa_years or earliest_hold not in fa_years or fa_years[0] > next_season:
-        raise HTTPException(
-            status_code=422,
-            detail=(f"Player {details.player!r} is not a free-agent hold for {next_season}. "
-                    "Renounce only applies to UFA/RFA holds — decline any option, or "
-                    "use Release to waive a player under contract."),
+        out["reason"] = (
+            f"Player {player!r} is not a free-agent hold for {next_season}. "
+            "Renounce only applies to UFA/RFA holds — decline any option, or "
+            "use Release to waive a player under contract."
         )
+        return out
+
+    out.update(ok=True, cutoff=fa_years[0], hold_type=holds[fa_years[0]])
+    return out
+
+
+# Bio fields a renounce trims, and therefore exactly what a rescind restores.
+_RENOUNCE_SNAPSHOT_FIELDS = (
+    "salaries", "guaranteed", "guarantee_dates", "guarantee_schedule", "cap_holds", "type",
+)
+
+
+def _apply_renounce(details: RenounceDetails, txn_date: str, info: dict) -> tuple[str, dict]:
+    """Renounce a free-agent hold: remove the player from the roster and clear the
+    cap hold, turning them into an unsigned free agent. Unlike a release, no dead cap
+    is created — a renounced free agent is owed nothing. Earnings history is preserved.
+
+    Returns ``(team, snapshot)`` — the player's former team, and the pre-renounce
+    values of every field this trims. The snapshot is stored on the transaction so
+    `rescind_renounce` can put the player back exactly as they were; a renounce
+    otherwise destroys contract state with nothing to reconstruct it from.
+    """
+    bios = load_player_bios()
+    elig = _renounce_eligibility(details.player, bios, _season_for_date(txn_date))
+    if not elig["ok"]:
+        raise HTTPException(status_code=422, detail=elig["reason"])
+    team = elig["team"]
+
+    cur_season = _season_for_date(txn_date)
+    next_season = _season_after(cur_season)
+    bio = bios[details.player]
+    holds = bio.get("cap_holds") or {}
+    snapshot = {f: json.loads(json.dumps(bio.get(f))) for f in _RENOUNCE_SNAPSHOT_FIELDS if f in bio}
 
     # Preserve earnings; drop the hold salary and the renounced cap hold(s).
     # The `salaries` entry for the hold season itself (and any season after) is
     # never real pay — it's just the cap-hold number — so the cutoff is the
     # earliest FA hold, not cur_season (which would wrongly keep a hold-season
     # entry that happens to equal the current in-progress season).
-    cutoff = fa_years[0]
+    cutoff = elig["cutoff"]
     keep = lambda s: s < cutoff
     bio["salaries"] = {k: v for k, v in bio.get("salaries", {}).items() if keep(k)}
     bio["guaranteed"] = {k: v for k, v in bio.get("guaranteed", {}).items() if keep(k)}
@@ -843,7 +902,87 @@ def _apply_renounce(details: RenounceDetails, txn_date: str, info: dict) -> str:
 
     _scrub_trading_block({team: {details.player}}, bios)
     log_write(info, f"TXN renounce — {details.player} from {team}")
-    return team
+    return team, snapshot
+
+
+def _apply_rescind_renounce(details: "RescindRenounceDetails", txn_date: str, info: dict) -> tuple[str, str]:
+    """Restore a renounced free agent to the team that renounced them, from the
+    snapshot the renounce recorded. Returns ``(team, player)``.
+
+    Two distinct uses, one mechanism:
+      * § 3.10 rescission — a team renounced holds to fund an RFA offer sheet and
+        the retaining team matched, so the space was never actually spent.
+      * Administrative undo of a mistaken renounce (the case owner self-serve
+        makes reachable).
+
+    The § 3.10 (a)/(b) cap restrictions are enforced in `_validate_rescind_renounce`
+    rather than here, so a genuine correction can still be forced through by the
+    office when the restriction isn't the point.
+    """
+    txns = _load_transactions()
+    src = next((t for t in txns if t.get("id") == details.txn_id), None)
+    if src is None:
+        raise HTTPException(status_code=422, detail=f"No transaction with id {details.txn_id!r}")
+    if src.get("type") != "renounce":
+        raise HTTPException(
+            status_code=422,
+            detail=f"Transaction {details.txn_id!r} is a {src.get('type')!r}, not a renounce",
+        )
+    snapshot = (src.get("details") or {}).get("_snapshot")
+    if not snapshot:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"Renounce {details.txn_id!r} predates snapshotting and can't be rescinded "
+                    "automatically — restore the bio by hand."),
+        )
+    if (src.get("details") or {}).get("_rescinded"):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Renounce {details.txn_id!r} has already been rescinded.",
+        )
+
+    player = src["details"]["player"]
+    team = (src["details"].get("team") or "").upper()
+    if team not in VALID_TEAMS:
+        raise HTTPException(status_code=422, detail=f"Renounce {details.txn_id!r} has no usable team")
+
+    bios = load_player_bios()
+    if player not in bios:
+        raise HTTPException(status_code=422, detail=f"Unknown player slug: {player!r}")
+
+    # Restoring a player who has since signed somewhere would duplicate them onto
+    # two rosters and overwrite a real contract with a stale hold.
+    current_team = _build_team_map().get(player)
+    if current_team:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"{player!r} is already on {current_team}'s roster — a renounce can only be "
+                    "rescinded while the player is still unsigned."),
+        )
+
+    bio = bios[player]
+    for field in _RENOUNCE_SNAPSHOT_FIELDS:
+        if field in snapshot:
+            bio[field] = json.loads(json.dumps(snapshot[field]))
+        else:
+            bio.pop(field, None)
+    save_player_bios(bios)
+
+    path = DATA_DIR / f"{team.lower()}-roster.csv"
+    headers, rows = read_csv(path)
+    if not any(r.get("SLUG", "").strip() == player for r in rows):
+        rows.append({h: (player if h == "SLUG" else "") for h in headers})
+        write_csv(path, headers, rows)
+
+    # Mark the source renounce as spent, so it can't be rescinded twice (the
+    # second restore would re-add a roster row and overwrite whatever contract
+    # state the player has picked up since). The transactions page reads this
+    # to drop the undo button.
+    src["details"]["_rescinded"] = True
+    TRANSACTIONS_FILE.write_text(json.dumps(txns, indent=2))
+
+    log_write(info, f"TXN rescind_renounce — {player} restored to {team} (undoes {details.txn_id})")
+    return team, player
 
 
 def _apply_offer_sheet(details: OfferSheetDetails, txn_date: str, info: dict,
@@ -878,15 +1017,12 @@ def _apply_offer_sheet(details: OfferSheetDetails, txn_date: str, info: dict,
         raise HTTPException(status_code=422, detail="offering_team cannot be the player's own team")
 
     cur_season = _season_for_date(txn_date)
-    next_season = _season_after(cur_season)
-    holds = bios[details.player].get("cap_holds") or {}
-    rfa_years = sorted(y for y, t in holds.items() if t == "RFA")
-    earliest_hold = min(holds) if holds else None
-    if not rfa_years or earliest_hold not in rfa_years or rfa_years[0] > next_season:
+    rfa_ok, rfa_why = _rfa_eligibility(details.player, bios, cur_season)
+    if not rfa_ok:
         raise HTTPException(
             status_code=422,
-            detail=(f"Player {details.player!r} is not an RFA hold for {next_season} — "
-                    "offer sheets only apply to restricted free agents."),
+            detail=(f"Player {details.player!r} is not a restricted free agent ({rfa_why}) — "
+                    "offer sheets only apply to RFAs (§ 3.15)."),
         )
 
     # § 3.15: offer must be for at least 2 guaranteed years. `salaries` year
@@ -896,35 +1032,95 @@ def _apply_offer_sheet(details: OfferSheetDetails, txn_date: str, info: dict,
     if len(details.contract.salaries) < 2:
         raise HTTPException(status_code=422, detail="Offer sheet must cover at least 2 guaranteed years (§ 3.15)")
 
+    # Only one live offer per player: § 3.15 gives the incumbent 48 hours to
+    # match *an* offer, and two open sheets would make "match" ambiguous while
+    # double-charging nobody's books in particular.
+    existing = next((o for o in _open_offer_sheets() if o["player"] == details.player), None)
+    if existing:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"{details.player!r} already has an open offer sheet from "
+                    f"{existing['offering_team']} ({existing['date']}). Resolve it first."),
+        )
+
+    log_write(info, (f"TXN offer_sheet — {offering_team} offered {details.player} "
+                      f"({retaining_team} RFA); pending {retaining_team}'s decision"))
+    return offering_team, retaining_team
+
+
+def _apply_offer_sheet_decision(details: "OfferSheetDecisionDetails", txn_date: str,
+                                 info: dict, txn_id: Optional[str] = None) -> dict:
+    """Resolve an open offer sheet (§ 3.15) — the incumbent either matches and
+    keeps the player, or passes and the player signs with the offering team.
+
+    This is the step that actually signs anybody. Splitting it back out from the
+    combined transaction reintroduces the failure that forced the merge in the
+    first place — an offer recorded with no follow-up used to leave the player on
+    nothing but their old RFA hold, silently and with no error (it bit Dyson
+    Daniels' matched sheet in production). What makes it safe this time is that a
+    bare offer is no longer indistinguishable from a finished one:
+    `_open_offer_sheets` can enumerate every unresolved offer, the offering team
+    is charged a cap hold the whole time it's open, and the UI surfaces it past
+    its deadline. Pending is now a state the system knows it's in.
+    """
+    offer = next((o for o in _open_offer_sheets() if o["id"] == details.offer_id), None)
+    if offer is None:
+        # Distinguish "never existed" from "already resolved" — they need
+        # different fixes and the submitter can't tell them apart otherwise.
+        prior = next((t for t in _load_transactions() if t.get("id") == details.offer_id), None)
+        if prior is None:
+            raise HTTPException(status_code=422, detail=f"No offer sheet with id {details.offer_id!r}")
+        if prior.get("type") != "offer_sheet":
+            raise HTTPException(
+                status_code=422,
+                detail=f"Transaction {details.offer_id!r} is a {prior.get('type')!r}, not an offer sheet")
+        raise HTTPException(status_code=422, detail=f"Offer sheet {details.offer_id!r} is already resolved")
+
     if details.outcome not in ("matched", "not_matched"):
         raise HTTPException(status_code=422, detail="outcome must be 'matched' or 'not_matched'")
 
+    offering_team, retaining_team = offer["offering_team"], offer["retaining_team"]
     signing_team = retaining_team if details.outcome == "matched" else offering_team
-    sign_details = SignDetails(
-        player=details.player,
-        team=signing_team,
-        contract=details.contract,
-        signing_method=details.signing_method,
-        bird_rights_type=details.bird_rights_type,
-    )
-    _apply_sign(sign_details, txn_date, info, txn_id=txn_id)
 
-    # _apply_sign's own contracts[-1].signing_method now carries the real
-    # funding mechanism (or None), so it can drive mle_used/hard-cap the same
-    # way a plain sign does. That means it no longer doubles as "this came
-    # from an offer sheet" the way the old "offer_sheet_matched"/
-    # "offer_sheet_not_matched" sentinel did — tag that fact separately so
-    # contract history stays distinguishable from an ordinary re-sign.
+    contract = ContractIn(**offer["contract"]) if isinstance(offer["contract"], dict) else offer["contract"]
+    _apply_sign(
+        SignDetails(
+            player=offer["player"],
+            team=signing_team,
+            contract=contract,
+            signing_method=offer.get("signing_method"),
+            bird_rights_type=offer.get("bird_rights_type"),
+        ),
+        txn_date, info, txn_id=txn_id,
+    )
+
+    # _apply_sign's own contracts[-1].signing_method carries the real funding
+    # mechanism (or None), so it drives mle_used/hard-cap the same way a plain
+    # sign does. That means it doesn't also encode "this came from an offer
+    # sheet" — tag that separately so contract history stays distinguishable
+    # from an ordinary re-sign.
     bios_after = load_player_bios()
-    contracts = bios_after.get(details.player, {}).get("contracts") or []
+    contracts = bios_after.get(offer["player"], {}).get("contracts") or []
     if contracts:
         contracts[-1]["offer_sheet_outcome"] = details.outcome
-        bios_after[details.player]["contracts"] = contracts
+        contracts[-1]["offer_sheet_id"] = details.offer_id
+        bios_after[offer["player"]]["contracts"] = contracts
         save_player_bios(bios_after)
 
-    log_write(info, (f"TXN offer_sheet — {offering_team} offered {details.player} "
-                      f"({retaining_team} RFA); outcome={details.outcome} — signed by {signing_team}"))
-    return offering_team, retaining_team
+    log_write(info, (f"TXN offer_sheet_decision — {retaining_team} "
+                      f"{'matched' if details.outcome == 'matched' else 'passed on'} "
+                      f"{offering_team}'s offer for {offer['player']}; signed by {signing_team}"))
+    return {
+        "player": offer["player"],
+        "teams": [offering_team, retaining_team],
+        "offering_team": offering_team,
+        "retaining_team": retaining_team,
+        "signing_team": signing_team,
+        "outcome": details.outcome,
+        "offer_id": details.offer_id,
+        "offer_date": offer["date"],
+        "contract": offer["contract"],
+    }
 
 
 def _apply_void_player(details: VoidPlayerDetails, txn_date: str, info: dict) -> str:
@@ -1836,7 +2032,144 @@ def _max_salary(bio: dict, season: str, cap_levels: dict) -> Optional[int]:
 _BIRD_HOLD_PCT = {"EQVFA": 1.3, "Non-QVFA": 1.2}
 
 
+def _rfa_eligibility(player: str, bios: dict, cur_season: str) -> tuple[bool, str]:
+    """Whether `player` is a restricted free agent who can receive an offer sheet
+    (§ 3.15), as ``(ok, reason)``.
+
+    One rule, shared by `_apply_offer_sheet` and `_validate_offer_sheet`, which
+    used to test different things: the apply path asked whether the player's
+    *earliest* cap hold was an RFA no later than the upcoming season, while the
+    validator asked about `cap_holds[current_season]`.
+
+    The current-season test is the correct one, because an offer sheet is only
+    worth extending if it can actually be executed — and `_apply_sign` refuses a
+    cross-team signing unless the player carries a UFA/RFA hold **for the current
+    season** (anything else means they're still under contract). An "earliest
+    hold" reading accepts a player whose deal runs through this season and whose
+    RFA year is still ahead of them; the offer would validate, sit on the books
+    holding real cap room, and then fail at the decision with "already on ATL".
+    """
+    holds = ((bios.get(player) or {}).get("cap_holds") or {})
+    if not holds:
+        return False, "no cap hold on file"
+    current = holds.get(cur_season)
+    if current == "RFA":
+        return True, ""
+    if current:
+        return False, f"cap hold for {cur_season} is {current}, not RFA"
+    upcoming = sorted(y for y, t in holds.items() if t == "RFA" and y > cur_season)
+    if upcoming:
+        return False, (f"still under contract for {cur_season}; becomes an RFA in "
+                       f"{upcoming[0]}, so an offer sheet has to wait for that league year")
+    return False, f"no cap hold for {cur_season}"
+
+
+def _offer_sheet_outcome_team(details: dict) -> Optional[str]:
+    """Which team ends up with the player, from a resolved offer sheet's details.
+
+    `teams` is stored ``[offering, retaining]``. A match leaves the player with
+    the retaining (incumbent) team; an unmatched offer sends them to the offering
+    team. Works on both the legacy combined entry and the split decision, since
+    both carry `outcome` plus the same team fields.
+    """
+    outcome = details.get("outcome")
+    if outcome not in ("matched", "not_matched"):
+        return None
+    teams = [t.upper() for t in (details.get("teams") or []) if t]
+    offering = (details.get("offering_team") or (teams[0] if teams else "")).upper()
+    retaining = (details.get("retaining_team") or "").upper() or \
+        next((t for t in teams if t != offering), "")
+    team = retaining if outcome == "matched" else offering
+    return team if team in VALID_TEAMS else None
+
+
 _BIRD_LEDGER_CACHE: dict = {"key": None, "index": {}}
+_OPEN_OFFERS_CACHE: dict = {"key": None, "offers": []}
+
+
+def _open_offer_sheets() -> list[dict]:
+    """Offer sheets that have been extended but not yet resolved, newest first.
+
+    Derived from the ledger rather than kept in its own file. A separate store
+    would be a second source of truth that can drift out of step with the
+    transactions it describes — and "is this offer still open?" is answerable
+    exactly, by whether a matching `offer_sheet_decision` exists.
+
+    Each entry is ``{id, date, deadline, player, offering_team, retaining_team,
+    contract, hold, submitted_by, description}``. Cached against the ledger's
+    (mtime, size) like `_player_acquisition_index`, since cap math consults this
+    on every team-salary computation.
+
+    A legacy combined `offer_sheet` (one that carries its own `outcome`) was
+    applied at submission and is never open.
+    """
+    try:
+        st = TRANSACTIONS_FILE.stat()
+        key = (st.st_mtime, st.st_size)
+    except OSError:
+        key = None
+    if _OPEN_OFFERS_CACHE["key"] == key and key is not None:
+        return _OPEN_OFFERS_CACHE["offers"]
+
+    decided: set[str] = set()
+    offers: list[dict] = []
+    for txn in _load_transactions():
+        d = txn.get("details") or {}
+        if txn.get("type") == "offer_sheet_decision":
+            if d.get("offer_id"):
+                decided.add(d["offer_id"])
+        elif txn.get("type") == "offer_sheet" and not d.get("outcome"):
+            offering = (d.get("offering_team") or "").upper()
+            offers.append({
+                "id": txn.get("id"),
+                "date": txn.get("date"),
+                "deadline": _offer_deadline(txn.get("date")),
+                "player": d.get("player"),
+                "offering_team": offering,
+                "retaining_team": (d.get("retaining_team") or "").upper(),
+                "contract": d.get("contract") or {},
+                "hold": _offer_hold_amount(d.get("contract") or {}),
+                "signing_method": d.get("signing_method"),
+                "bird_rights_type": d.get("bird_rights_type"),
+                "submitted_by": txn.get("created_by"),
+                "description": txn.get("description") or "",
+            })
+
+    open_offers = [o for o in offers if o["id"] not in decided]
+    open_offers.sort(key=lambda o: o["date"] or "", reverse=True)
+    _OPEN_OFFERS_CACHE.update({"key": key, "offers": open_offers})
+    return open_offers
+
+
+def _offer_deadline(date_str: Optional[str]) -> Optional[str]:
+    """§ 3.15 gives the retaining team 48 hours to match. Recorded and displayed,
+    but never acted on automatically — an offer past its deadline nags rather
+    than resolving itself, because silently moving a real player on a timer is
+    worse than a late decision."""
+    if not date_str:
+        return None
+    try:
+        return (datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=2)).strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def _offer_hold_amount(contract: dict) -> int:
+    """§ 3.15's "cap hold equal to the offer sheet value" — read as the offer's
+    **Year 1** salary.
+
+    A cap hold is a single-season charge against a single season's cap, so the
+    total across all years can't be the figure meant: a 4yr/$200M offer would
+    otherwise put a $200M hold on a $165M cap. Year 1 is also what every other
+    hold in the system charges, and what the contract's Year 1 would cost if the
+    offer converts.
+    """
+    salaries = (contract or {}).get("salaries") or {}
+    years = sorted(y for y in salaries if _YEAR_RE_TXN.match(y))
+    return _parse_dollar(salaries[years[0]]) if years else 0
+
+
+_YEAR_RE_TXN = re.compile(r"^\d{2}-\d{2}$")
 
 
 def _player_acquisition_index() -> dict[str, list[tuple]]:
@@ -1859,7 +2192,14 @@ def _player_acquisition_index() -> dict[str, list[tuple]]:
         return _BIRD_LEDGER_CACHE["index"]
 
     index: dict[str, list[tuple]] = {}
-    for txn in _load_transactions():
+    ledger = _load_transactions()
+    # Offers indexed first so a decision can be resolved through its `offer_id`
+    # rather than trusting the copies stored beside it.
+    offers_by_id = {
+        t["id"]: (t.get("details") or {})
+        for t in ledger if t.get("type") == "offer_sheet" and t.get("id")
+    }
+    for txn in ledger:
         date = txn.get("date")
         details = txn.get("details") or {}
         if not date:
@@ -1880,6 +2220,34 @@ def _player_acquisition_index() -> dict[str, list[tuple]]:
         elif ttype == "release":
             if details.get("player"):
                 index.setdefault(details["player"], []).append((date, "release", (details.get("team") or "").upper()))
+        elif ttype in ("offer_sheet", "offer_sheet_decision"):
+            # A RESOLVED offer sheet is a signing, and § 3.8 has to see it. It
+            # didn't until 2026-08-08, which silently stranded every player who
+            # changed teams this way: Mark Williams read as terminal_team=MIN
+            # (the team he left) with no rights on record for TOR, the team he
+            # actually signed with on an unmatched offer. Only `not_matched`
+            # moves a player, which is why the bug hid behind two matched sheets
+            # that resolved correctly for unrelated reasons.
+            #
+            # A split decision is resolved through its `offer_id` rather than the
+            # player/team copies stored alongside it — the offer is the record of
+            # who was involved, and reading a denormalized copy is how these
+            # things silently go stale (see the roster CSV's old OVR column).
+            # A legacy combined entry carries `outcome` on itself; a bare offer
+            # has none and is still pending, so it conveys nobody.
+            src = details
+            if ttype == "offer_sheet_decision" and details.get("offer_id"):
+                src = {**(offers_by_id.get(details["offer_id"]) or {}),
+                       "outcome": details.get("outcome")}
+            player = src.get("player")
+            if src.get("outcome") and player:
+                signing_team = _offer_sheet_outcome_team(src)
+                if signing_team:
+                    # Matched: the incumbent re-signs their own free agent, which
+                    # continues the clock (_bird_tenure treats a re-sign with the
+                    # same terminal team as continuous). Not matched: a signing
+                    # with a different team, which resets it. Both are "sign".
+                    index.setdefault(player, []).append((date, "sign", signing_team))
         # `extension` is deliberately NOT an acquisition event. An extension
         # adds years to a live contract; the player never reaches free agency,
         # so § 3.8 tenure keeps accruing uninterrupted. Committee-confirmed
@@ -2239,8 +2607,30 @@ def _empty_roster_charge(standard_count_after: int, season: str, cap_levels: dic
     return deficiency, deficiency * _rookie_min_salary(season, cap_levels)
 
 
+def _pending_offer_hold(team: str, season: str) -> int:
+    """§ 3.15: "The offering team has a cap hold equal to the offer sheet value
+    placed on their books until the matching period concludes."
+
+    Sum of open offer-sheet holds this team is carrying. Zero unless the team has
+    an offer out, so it costs nothing for the other 29 — but it is what stops a
+    team floating several offer sheets it could never collectively fund.
+
+    Counted against the plain Cap only, exactly like the UFA/RFA holds it sits
+    beside: § 3.10 excludes cap holds from Hard Cap and apron comparisons because
+    a hold is a placeholder for a contract that doesn't exist yet, and a pending
+    offer is the same species. It becomes real salary in both figures the moment
+    the offer converts.
+    """
+    if season != _current_league_year():
+        # The hold exists now, against the current league year's books. Applying
+        # it to a future season would charge a team twice for one offer.
+        return 0
+    return sum(o["hold"] for o in _open_offer_sheets() if o["offering_team"] == team.upper())
+
+
 def _compute_team_salary(team: str, bios: dict, season: str) -> int:
-    """Sum all active salary + dead cap for a team in a given season."""
+    """Sum all active salary + dead cap for a team in a given season, plus any
+    § 3.15 hold from an offer sheet this team currently has outstanding."""
     total = 0
     path = DATA_DIR / f"{team.lower()}-roster.csv"
     if path.exists():
@@ -2254,7 +2644,7 @@ def _compute_team_salary(team: str, bios: dict, season: str) -> int:
         _, dc_rows = read_csv(dc_path)
         for row in dc_rows:
             total += _parse_dollar(row.get(season, ""))
-    return total
+    return total + _pending_offer_hold(team, season)
 
 
 _FA_HOLD_TYPES = {"UFA", "RFA"}
@@ -2344,7 +2734,7 @@ def snapshot_room_zone_baseline(season: str, within_days: int = 7) -> list[str]:
 
 
 _ZONE_RECON_HANDLED_TYPES = {"trade", "sign", "sign_pick"}
-_ZONE_RECON_UNHANDLED_TYPES = {"release", "option", "void_player", "renounce", "convert_twoway", "offer_sheet"}
+_ZONE_RECON_UNHANDLED_TYPES = {"release", "option", "void_player", "renounce", "rescind_renounce", "convert_twoway", "offer_sheet", "offer_sheet_decision"}
 
 
 def _team_salary_as_of_league_year_start(
@@ -3494,39 +3884,234 @@ def _validate_release(details: ReleaseDetails, ctx: dict) -> list[CheckResult]:
 
 
 def _validate_renounce(details: RenounceDetails, ctx: dict) -> list[CheckResult]:
-    return []
+    """§ 3.10 renounce checks.
+
+    Only one is an error — the eligibility test, shared verbatim with
+    `_apply_renounce` via `_renounce_eligibility`. The roster-count consequences
+    are warnings on purpose: neither § 2.1 nor § 2.1a forbids renouncing your way
+    below the minimum, they just charge you for it, so blocking would invent a
+    rule. Surfacing them still matters because the strike and the Empty Roster
+    Charge both land on the team days later, well after the click.
+    """
+    checks: list[CheckResult] = []
+    bios = ctx["bios"]; season = ctx["cur_season"]
+
+    elig = _renounce_eligibility(details.player, bios, season)
+    if not elig["ok"]:
+        checks.append(CheckResult(
+            check="renounce_eligible", passed=False, level="error", message=elig["reason"],
+        ))
+        # Everything below is measured against the team this renounce would hit.
+        # Without one there's nothing to measure, and reporting cheerful passes
+        # off an unevaluatable transaction is the failure mode _require_validatable
+        # exists to prevent.
+        return checks
+
+    team = elig["team"]
+    name = (bios.get(details.player) or {}).get("name") or details.player
+    checks.append(CheckResult(
+        check="renounce_eligible", passed=True,
+        message=(f"{name} is a {elig['hold_type']} cap hold for {elig['cutoff']} — "
+                 f"renounceable under § 3.10."),
+    ))
+
+    after = _count_standard_roster(team) - 1
+    if after < ROSTER_CHARGE_MIN:
+        short = ROSTER_CHARGE_MIN - after
+        per = _rookie_min_salary(season, ctx["cap_levels"])
+        checks.append(CheckResult(
+            check="roster_minimum", passed=False, level="warning",
+            message=(f"This leaves {team} with {after} standard players, below the {ROSTER_CHARGE_MIN}-player "
+                     f"floor — an Empty Roster Charge of ${per:,} per open slot "
+                     f"(${per * short:,} total) applies immediately and counts toward hard cap "
+                     f"and apron comparisons (§ 2.1a)."),
+        ))
+    elif after < ROSTER_MIN:
+        checks.append(CheckResult(
+            check="roster_minimum", passed=False, level="warning",
+            message=(f"This leaves {team} with {after} standard players, below the {ROSTER_MIN}-player "
+                     f"minimum. No dollar charge applies above {ROSTER_CHARGE_MIN}, but every FO member "
+                     f"takes an activity strike if the shortfall lasts a week (§ 2.1)."),
+        ))
+    else:
+        checks.append(CheckResult(
+            check="roster_minimum", passed=True,
+            message=f"{team} is left with {after} standard players, at or above the {ROSTER_MIN}-player minimum.",
+        ))
+
+    # Bird Rights are forfeited outright (§ 3.10) — the § 3.8 clock this player
+    # had accrued with the team is gone, and re-signing them later starts over
+    # at Non-QVFA. That cost is invisible on the cap sheet, so it gets said out
+    # loud rather than left for the owner to remember.
+    bird = _bird_tenure(details.player, team, season, bios.get(details.player) or {})
+    if bird["tier"] in ("QVFA", "EQVFA"):
+        # A trade_floor basis means the derived figure is a lower bound (no
+        # record predates the trade), so the tenure is "at least" this long —
+        # which only strengthens the case that real rights are being given up.
+        span = (f"at least {bird['seasons']}" if bird["basis"] == "trade_floor" else str(bird["seasons"]))
+        checks.append(CheckResult(
+            check="bird_rights_forfeited", passed=False, level="warning",
+            message=(f"{team} forfeits {name}'s {bird['tier']} Bird Rights "
+                     f"({span} seasons of continuous service — {bird['evidence']}). "
+                     f"Re-signing them afterwards would be a Non-QVFA signing needing cap space "
+                     f"or an exception (§ 3.8, § 3.10)."),
+        ))
+    elif bird["basis"] == "unknown":
+        checks.append(CheckResult(
+            check="bird_rights_forfeited", passed=False, level="warning",
+            message=(f"{name} has no acquisition on file, so their § 3.8 tenure can't be derived — "
+                     f"unknown usually means long-tenured, not Non-QVFA. Assume Bird Rights are "
+                     f"being forfeited (§ 3.10)."),
+        ))
+    else:
+        checks.append(CheckResult(
+            check="bird_rights_forfeited", passed=True,
+            message=(f"{name} holds no Bird Rights with {team} to forfeit "
+                     f"({bird['evidence']})."),
+        ))
+
+    return checks
+
+
+def _renounce_fact_sheet(details: RenounceDetails, ctx: dict) -> dict:
+    """What the renounce actually does to the team's books.
+
+    Cap figures come from `_compute_team_salary*` — the same helpers the
+    validators use — so this can't credit a team with room the validator didn't.
+    """
+    bios = ctx["bios"]; season = ctx["cur_season"]
+    elig = _renounce_eligibility(details.player, bios, season)
+    team = elig["team"]
+    bio = bios.get(details.player) or {}
+
+    sheet = {
+        "season": season,
+        "team": team,
+        "player": details.player,
+        "player_name": bio.get("name") or details.player,
+        "eligible": elig["ok"],
+        "reason": elig["reason"],
+        "hold_type": elig["hold_type"],
+        "hold_season": elig["cutoff"],
+    }
+    if not elig["ok"]:
+        return sheet
+
+    cap = (ctx["cap_levels"].get(season) or {}).get("cap")
+    hold = _parse_dollar((bio.get("salaries") or {}).get(elig["cutoff"], ""))
+    before = _compute_team_salary(team, bios, season)
+    before_count = _count_standard_roster(team)
+    bird = _bird_tenure(details.player, team, season, bio)
+
+    sheet.update({
+        "cap_levels": ctx["cap_levels"].get(season) or {},
+        "hold_amount": hold,
+        # Renouncing clears the hold, so team salary *including holds* drops by
+        # exactly the hold figure. The ex-holds figure (what hard cap and apron
+        # compare against, § 1.3) never counted it in the first place — so a
+        # renounce buys cap room and moves the apron picture not at all.
+        "team_salary_before": before,
+        "team_salary_after": before - hold,
+        "team_salary_ex_holds": _compute_team_salary_ex_holds(team, bios, season),
+        "cap_room_before": (cap - before) if cap else None,
+        "cap_room_after": (cap - (before - hold)) if cap else None,
+        "standard_count_before": before_count,
+        "standard_count_after": before_count - 1,
+        "roster_min": ROSTER_MIN,
+        "roster_charge_min": ROSTER_CHARGE_MIN,
+        "bird_tier": bird["tier"],
+        "bird_seasons": bird["seasons"],
+        "bird_basis": bird["basis"],
+        "bird_evidence": bird["evidence"],
+    })
+    return sheet
+
+
+def _validate_rescind_renounce(details: RescindRenounceDetails, ctx: dict) -> list[CheckResult]:
+    """§ 3.10 rescission restrictions: a team may not rescind a renouncement if
+    doing so would move them from under the cap to over it, or — if already over
+    — increase their cap figure further.
+
+    Warnings rather than errors. The restrictions are written for the offer-sheet
+    case, where rescinding hands back space the team only ever borrowed; an
+    administrative undo of a mistaken renounce is a correction, and refusing to
+    let the office restore a player because the restoration costs cap room would
+    leave the books wrong in a different way. The hard structural failures (no
+    such transaction, no snapshot, player already signed elsewhere) are raised by
+    `_apply_rescind_renounce` and are not forceable.
+    """
+    checks: list[CheckResult] = []
+    src = next((t for t in _load_transactions() if t.get("id") == details.txn_id), None)
+    if src is None or src.get("type") != "renounce":
+        # _apply_rescind_renounce hard-fails these; scoring them here would only
+        # produce a verdict on a transaction that doesn't exist.
+        return checks
+
+    snap = (src.get("details") or {}).get("_snapshot") or {}
+    team = (src["details"].get("team") or "").upper()
+    player = src["details"].get("player") or ""
+    if team not in VALID_TEAMS or not snap:
+        return checks
+
+    bios = ctx["bios"]; season = ctx["cur_season"]
+    cap = (ctx["cap_levels"].get(season) or {}).get("cap")
+    restored = _parse_dollar((snap.get("salaries") or {}).get(season, ""))
+    if not cap or not restored:
+        return checks
+
+    before = _compute_team_salary(team, bios, season)
+    after = before + restored
+    name = (bios.get(player) or {}).get("name") or player
+
+    if before <= cap < after:
+        checks.append(CheckResult(
+            check="rescind_cap_restriction", passed=False, level="warning",
+            message=(f"Restoring {name}'s ${restored:,} hold moves {team} from ${before:,} "
+                     f"(under the ${cap:,} cap) to ${after:,} (over it) — § 3.10 bars rescission "
+                     f"that crosses the cap."),
+        ))
+    elif before > cap:
+        checks.append(CheckResult(
+            check="rescind_cap_restriction", passed=False, level="warning",
+            message=(f"{team} is already ${before - cap:,} over the ${cap:,} cap; restoring "
+                     f"{name}'s ${restored:,} hold increases that further — § 3.10 bars rescission "
+                     f"for a team already above the cap."),
+        ))
+    else:
+        checks.append(CheckResult(
+            check="rescind_cap_restriction", passed=True,
+            message=(f"{team} stays under the ${cap:,} cap after restoring {name}'s "
+                     f"${restored:,} hold (${after:,})."),
+        ))
+    return checks
 
 
 def _offer_sheet_signing_team(details: OfferSheetDetails) -> Optional[tuple[str, str]]:
-    """Which team actually ends up signing the player on an offer sheet, as
-    ``(signing_team, retaining_team)`` — the retaining team on a match, the
-    offering team otherwise (§ 3.15). Returns None when the outcome or the
-    player's current team can't be resolved, in which case there is nothing
-    meaningful to validate or report.
+    """``(signing_team, retaining_team)`` for an offer being *extended*.
 
-    Shared by `_validate_offer_sheet` and the simulator's fact sheet so both
-    describe the same team.
+    At offer time the incumbent hasn't decided yet, so the team whose books this
+    has to clear is the **offering** team — they're the one committing the money
+    and carrying the § 3.15 hold. If the incumbent matches, their side is judged
+    separately by `_validate_offer_sheet_decision`.
     """
-    if details.outcome not in ("matched", "not_matched"):
-        return None
     retaining_team = _build_team_map().get(details.player)
     if not retaining_team:
         return None
-    team = retaining_team if details.outcome == "matched" else details.offering_team.upper()
+    team = details.offering_team.upper()
     if team not in VALID_TEAMS:
         return None
     return team, retaining_team
 
 
 def _validate_offer_sheet(details: OfferSheetDetails, ctx: dict) -> list[CheckResult]:
-    """Mirrors _validate_sign's hard-cap and signing-method funding checks,
-    resolved against whichever team the outcome actually signs the player to
-    — the retaining team on a match, the offering team otherwise. Everything
-    else about § 3.15 legality (good-faith fit, Gilbert Arenas eligibility,
-    etc.) stays manual review per the rulebook; this only covers what a plain
-    `sign` would already catch, so a declared `signing_method` can't silently
-    skip the funding-availability gate just because it arrived via an offer
-    sheet instead of a direct signing.
+    """§ 3.15 checks at the moment an offer sheet is *extended*.
+
+    Judged against the offering team: they commit the money and carry the cap
+    hold for as long as the offer is open, whatever the incumbent later decides.
+    Mirrors `_validate_sign`'s hard-cap and funding checks so a declared
+    `signing_method` can't skip the funding gate just because it arrived via an
+    offer sheet. Everything else about § 3.15 legality (good-faith fit, Gilbert
+    Arenas eligibility) stays manual review per the rulebook.
     """
     checks: list[CheckResult] = []
     bios = ctx["bios"]; season = ctx["cur_season"]
@@ -3536,7 +4121,25 @@ def _validate_offer_sheet(details: OfferSheetDetails, ctx: dict) -> list[CheckRe
         # The hard-fail checks in _apply_offer_sheet cover these; nothing
         # useful to validate here without a resolvable signing team.
         return checks
-    team, _retaining = resolved
+    team, retaining = resolved
+
+    if team == retaining:
+        checks.append(CheckResult(
+            check="offer_sheet_own_player", passed=False, level="error",
+            message=(f"{team} already holds this player's RFA rights — a team can't "
+                     f"offer-sheet its own restricted free agent (§ 3.15). Re-sign them instead."),
+        ))
+
+    # One live offer per player: § 3.15 gives the incumbent 48 hours to match
+    # *an* offer, and two open sheets make "match" ambiguous.
+    existing = next((o for o in _open_offer_sheets() if o["player"] == details.player), None)
+    if existing:
+        checks.append(CheckResult(
+            check="offer_sheet_already_open", passed=False, level="error",
+            message=(f"{(bios.get(details.player) or {}).get('name') or details.player} already has an "
+                     f"open offer sheet from {existing['offering_team']} dated {existing['date']} — "
+                     f"resolve that one before extending another."),
+        ))
 
     current_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
     existing_hold, is_fa_hold = _signee_existing_hold(team, details.player, bios, season)
@@ -3569,15 +4172,14 @@ def _validate_offer_sheet(details: OfferSheetDetails, ctx: dict) -> list[CheckRe
     # § 3.15: an offer sheet is a restricted-free-agency instrument. A player
     # who isn't an RFA can't receive one at all — they're either under contract
     # (acquire by trade) or unrestricted (sign them outright, no match right).
-    hold = ((bios.get(details.player) or {}).get("cap_holds") or {}).get(season)
-    if hold != "RFA":
+    rfa_ok, rfa_why = _rfa_eligibility(details.player, bios, season)
+    if not rfa_ok:
         checks.append(CheckResult(
             check="offer_sheet_rfa", passed=False, level="error",
             message=(
                 f"{(bios.get(details.player) or {}).get('name') or details.player} is not a "
-                f"Restricted Free Agent for {season} "
-                f"({'no cap hold on file' if not hold else 'cap hold is ' + hold}) — only an RFA "
-                f"can receive an offer sheet (§ 3.15)."
+                f"Restricted Free Agent ({rfa_why}) — only an RFA can receive an "
+                f"offer sheet (§ 3.15)."
             ),
         ))
 
@@ -3586,9 +4188,10 @@ def _validate_offer_sheet(details: OfferSheetDetails, ctx: dict) -> list[CheckRe
     if r:
         checks.append(r)
 
-    if details.contract.type != "two-way" and details.outcome == "not_matched":
-        # A match keeps the player on a roster spot they already occupy; only
-        # a non-match actually adds a new standard-contract body to `team`.
+    if details.contract.type != "two-way":
+        # If the incumbent passes, this adds a body to the offering team. Judged
+        # now rather than at decision time: a team shouldn't extend an offer it
+        # has no room to honour, and the incumbent's choice can't create room.
         count = _count_standard_roster(team)
         if count >= ROSTER_MAX:
             checks.append(CheckResult(
@@ -3597,10 +4200,68 @@ def _validate_offer_sheet(details: OfferSheetDetails, ctx: dict) -> list[CheckRe
                 level="error",
                 message=(
                     f"{team} already has {count} standard players (max {ROSTER_MAX}); "
-                    f"release a player before this offer sheet can be signed."
+                    f"release a player before extending an offer sheet they'd have to honour."
                 ),
             ))
 
+    return checks
+
+
+def _validate_offer_sheet_decision(details: OfferSheetDecisionDetails, ctx: dict) -> list[CheckResult]:
+    """§ 3.15 checks at the moment an offer sheet is *resolved*.
+
+    The offer itself was already validated against the offering team. What's new
+    here is the incumbent's side: matching is how a team keeps its own free agent
+    and is allowed over the cap, but a **hard cap is still a hard cap** (§ 1.3),
+    so a match that would breach it has to be caught. Nothing checked that before
+    the split, because the combined transaction only ever scored the team that
+    ended up signing — which on a match was the incumbent, but with terms already
+    treated as a fait accompli.
+    """
+    checks: list[CheckResult] = []
+    bios = ctx["bios"]; season = ctx["cur_season"]
+
+    offer = next((o for o in _open_offer_sheets() if o["id"] == details.offer_id), None)
+    if offer is None:
+        # _apply_offer_sheet_decision hard-fails an unknown or already-resolved
+        # offer. Scoring anything here would report a verdict on a transaction
+        # that was never evaluated.
+        return checks
+    if details.outcome not in ("matched", "not_matched"):
+        return checks
+
+    team = offer["retaining_team"] if details.outcome == "matched" else offer["offering_team"]
+    contract = offer["contract"] or {}
+    new_sal = _parse_dollar((contract.get("salaries") or {}).get(season, ""))
+
+    current_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
+    existing_hold, is_fa_hold = _signee_existing_hold(team, offer["player"], bios, season)
+    projected_ex_holds = current_ex_holds - (0 if is_fa_hold else existing_hold) + new_sal
+
+    for check_fn in (
+        lambda: _hard_cap_check(team, projected_ex_holds, season, ctx["team_state"], ctx["cap_levels"]),
+        lambda: _universal_hard_cap_check(team, projected_ex_holds, season, ctx["cap_levels"]),
+    ):
+        r = check_fn()
+        if r:
+            checks.append(r)
+
+    if details.outcome == "not_matched" and (contract.get("type") != "two-way"):
+        count = _count_standard_roster(team)
+        if count >= ROSTER_MAX:
+            checks.append(CheckResult(
+                check="roster_size", passed=False, level="error",
+                message=(f"{team} has {count} standard players (max {ROSTER_MAX}) and would have to "
+                         f"add this player — release someone first."),
+            ))
+
+    if not checks:
+        who = (bios.get(offer["player"]) or {}).get("name") or offer["player"]
+        checks.append(CheckResult(
+            check="offer_sheet_decision", passed=True,
+            message=(f"{team} can absorb {who} at ${new_sal:,} for {season} "
+                     f"({'match' if details.outcome == 'matched' else 'signing the unmatched offer'})."),
+        ))
     return checks
 
 
@@ -4310,12 +4971,14 @@ _VALIDATORS = {
     "sign":           _validate_sign,
     "release":        _validate_release,
     "renounce":       _validate_renounce,
+    "rescind_renounce": _validate_rescind_renounce,
     "trade":          _validate_trade,
     "option":         _validate_option,
     "guarantee":      _validate_guarantee,
     "pick":           _validate_pick,
     "convert_twoway": _validate_convert_twoway,
     "offer_sheet":    _validate_offer_sheet,
+    "offer_sheet_decision": _validate_offer_sheet_decision,
 }
 
 
@@ -4393,7 +5056,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid date; use YYYY-MM-DD")
 
-    if body.type not in ("sign", "pick", "option", "guarantee", "release", "renounce", "trade", "convert_twoway", "sign_pick", "void_player", "set_hard_cap_level", "offer_sheet"):
+    if body.type not in ("sign", "pick", "option", "guarantee", "release", "renounce", "rescind_renounce", "trade", "convert_twoway", "sign_pick", "void_player", "set_hard_cap_level", "offer_sheet", "offer_sheet_decision"):
         raise HTTPException(status_code=422, detail=f"Unsupported transaction type: {body.type!r}")
 
     if body.historical and body.type not in ("trade", "sign", "option"):
@@ -4406,12 +5069,14 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
         "guarantee":      (GuaranteeDetails,      "Invalid guarantee details"),
         "release":        (ReleaseDetails,        "Invalid release details"),
         "renounce":       (RenounceDetails,       "Invalid renounce details"),
+        "rescind_renounce": (RescindRenounceDetails, "Invalid rescind_renounce details"),
         "trade":          (TradeIn,               "Invalid trade details"),
         "convert_twoway": (ConvertTwoWayDetails,  "Invalid convert_twoway details"),
         "sign_pick":      (SignPickDetails,       "Invalid sign_pick details"),
         "void_player":       (VoidPlayerDetails,  "Invalid void_player details"),
         "set_hard_cap_level": (SetHardCapDetails, "Invalid set_hard_cap_level details"),
         "offer_sheet":       (OfferSheetDetails,  "Invalid offer_sheet details"),
+        "offer_sheet_decision": (OfferSheetDecisionDetails, "Invalid offer_sheet_decision details"),
     }
     model_cls, err_prefix = _detail_models[body.type]
     try:
@@ -4469,9 +5134,18 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             stored_details["dead_cap"] = dead_cap
             stored_details["terminated_salary"] = terminated_salary
         elif body.type == "renounce":
-            team = _apply_renounce(details, body.date, info)
+            team, snapshot = _apply_renounce(details, body.date, info)
             stored_details = details.model_dump()
             stored_details["team"] = team
+            # The restore source for rescind_renounce (§ 3.10). Stored at the
+            # moment of the event rather than reconstructed from the ledger
+            # later — a renounce erases the very fields a replay would need.
+            stored_details["_snapshot"] = snapshot
+        elif body.type == "rescind_renounce":
+            team, rescinded_player = _apply_rescind_renounce(details, body.date, info)
+            stored_details = details.model_dump()
+            stored_details["team"] = team
+            stored_details["player"] = rescinded_player
         elif body.type == "trade":
             teams = _apply_trade(details, body.date, info, txn_id=txn_id)
             stored_details = details.model_dump()
@@ -4496,9 +5170,19 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             offering_team, retaining_team = _apply_offer_sheet(details, body.date, info, txn_id=txn_id)
             stored_details = details.model_dump()
             stored_details["teams"] = [offering_team, retaining_team]
+            # Resolved server-side from the roster, not submitted — the incumbent
+            # is a fact about who holds the RFA rights, not a claim the offering
+            # team gets to make. _open_offer_sheets reads it back from here.
+            stored_details["retaining_team"] = retaining_team
+            stored_details["deadline"] = _offer_deadline(body.date)
+        elif body.type == "offer_sheet_decision":
+            resolved = _apply_offer_sheet_decision(details, body.date, info, txn_id=txn_id)
+            stored_details = details.model_dump()
+            stored_details.update(resolved)
 
-        if body.force and failed:
-            stored_details["_forced_checks"] = [c.check for c in failed]
+        forced_checks = [c.check for c in failed] if (body.force and failed) else None
+        if forced_checks:
+            stored_details["_forced_checks"] = forced_checks
 
         txn = {
             "id": txn_id,
@@ -4511,6 +5195,10 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
         }
         _append_transaction(txn)
 
+    # Outside the lock and off the request thread — the roster write and ledger
+    # append are already committed, so a Discord problem must not delay or fail
+    # them. Historical backfills never reach here (they return far above).
+    notify_transaction(txn, forced_checks)
     return txn
 
 
@@ -4843,6 +5531,145 @@ def validate_sign(body: SignDetails):
     return _validation_result(_validate_sign(body, ctx), fact_sheet)
 
 
+@router.get("/api/offer-sheets/open")
+def list_open_offer_sheets(team: Optional[str] = None):
+    """Offer sheets extended but not yet resolved (§ 3.15). Public.
+
+    This endpoint is the guard that makes splitting the offer from the decision
+    safe. Before the split, an offer with no follow-up was indistinguishable from
+    a completed one and simply vanished — the player sat on nothing but their old
+    RFA hold, silently. Every surface that shows a pending offer reads this.
+
+    `overdue` marks an offer past its 48-hour window. Nothing auto-resolves:
+    silently moving a real player on a timer is worse than a late decision, so an
+    expired offer nags until a human settles it.
+    """
+    today = _current_league_year_today()
+    offers = _open_offer_sheets()
+    if team:
+        t = team.upper()
+        offers = [o for o in offers if t in (o["offering_team"], o["retaining_team"])]
+    bios = load_player_bios()
+    return [
+        {**o,
+         "player_name": (bios.get(o["player"]) or {}).get("name") or o["player"],
+         "overdue": bool(o["deadline"] and o["deadline"] < today)}
+        for o in offers
+    ]
+
+
+def _current_league_year_today() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+@router.post("/api/validate/offer_sheet_decision")
+def validate_offer_sheet_decision(body: OfferSheetDecisionDetails):
+    """Non-mutating § 3.15 check of resolving an open offer sheet. Shares its
+    validator with the submit path."""
+    ctx = _validation_ctx()
+    offer = next((o for o in _open_offer_sheets() if o["id"] == body.offer_id), None)
+    if offer is None:
+        raise HTTPException(400, f"No open offer sheet with id '{body.offer_id}'.")
+    return _validation_result(
+        _validate_offer_sheet_decision(body, ctx),
+        {"offer": offer, "outcome": body.outcome,
+         "signing_team": offer["retaining_team"] if body.outcome == "matched" else offer["offering_team"]},
+    )
+
+
+@router.post("/api/validate/renounce")
+def validate_renounce(body: RenounceDetails):
+    """Non-mutating § 3.10 check of a renounce. Shares `_validate_renounce` and
+    `_renounce_eligibility` with `POST /api/transactions`, so the verdict here is
+    what the office accepts — and, more to the point, what the roster page's
+    confirmation dialog shows an owner before they commit. Never writes, no auth,
+    on the same terms as `/api/validate/sign`."""
+    ctx = _validation_ctx()
+    if body.player not in ctx["bios"]:
+        raise HTTPException(400, f"Unknown player '{body.player}'.")
+    return _validation_result(_validate_renounce(body, ctx), _renounce_fact_sheet(body, ctx))
+
+
+class SelfRenounceIn(BaseModel):
+    player: str
+    description: str = ""
+
+
+@router.post("/api/self/renounce")
+def self_renounce(body: SelfRenounceIn, info: dict = Depends(get_token_info)):
+    """Owner-initiated renounce from their own team's roster page (§ 3.10).
+
+    Deliberately narrower than `POST /api/transactions`, which stays on the
+    `rosters` role. Three properties make this safe to expose to owners:
+
+      * **The team is derived, never supplied.** It's resolved from the player's
+        actual roster row, then matched against the caller's owner tenure — a
+        caller cannot name a team to claim authority over.
+      * **No force.** Error-level checks are fatal here, full stop. The whole
+        point of an owner-facing write is that it can't be pushed past a rule.
+      * **Server-stamped date.** No backdating a transaction into a prior league
+        year to dodge a cap position.
+
+    Everything else — validation, application, ledger append, snapshot — goes
+    through the same code the office path uses.
+    """
+    player = body.player
+    bios = load_player_bios()
+    if player not in bios:
+        raise HTTPException(status_code=404, detail=f"Unknown player '{player}'.")
+
+    team = _build_team_map().get(player)
+    if not team:
+        raise HTTPException(status_code=422, detail=f"{player!r} is not on any roster.")
+    if not is_team_owner(info, team):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Only {team}'s owner can renounce {team} players.",
+        )
+
+    txn_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    details = RenounceDetails(player=player)
+    ctx = {
+        "bios":       bios,
+        "team_state": load_team_state(),
+        "cap_levels": json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {},
+        "cur_season": _season_for_date(txn_date),
+        "txn_date":   txn_date,
+        "trade_exceptions": load_trade_exceptions(),
+    }
+    checks = _validate_renounce(details, ctx)
+    if any(not c.passed and c.level == "error" for c in checks):
+        raise HTTPException(status_code=422, detail={
+            "validation": True,
+            "checks": [c.model_dump() for c in checks],
+            "can_force": False,
+        })
+
+    txn_id = secrets.token_hex(8)
+    with _txn_lock:
+        applied_team, snapshot = _apply_renounce(details, txn_date, info)
+        txn = {
+            "id": txn_id,
+            "type": "renounce",
+            "date": txn_date,
+            "created_by": info.get("name", "unknown"),
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "description": body.description or f"{applied_team} renounce",
+            "details": {
+                "player": player,
+                "team": applied_team,
+                "_snapshot": snapshot,
+                # Marks the transaction as owner self-serve rather than
+                # office-entered, so the ledger shows who actually pulled the
+                # trigger even though created_by already names them.
+                "_source": "owner_self_serve",
+            },
+        }
+        _append_transaction(txn)
+    notify_transaction(txn)
+    return {"ok": True, "transaction": txn, "checks": [c.model_dump() for c in checks]}
+
+
 @router.post("/api/validate/offer_sheet")
 def validate_offer_sheet(body: OfferSheetDetails):
     """Non-mutating check of an RFA offer sheet (§ 3.15). Resolved against
@@ -4858,8 +5685,8 @@ def validate_offer_sheet(body: OfferSheetDetails):
         # verdict would read as "legal" off zero checks — say plainly that
         # nothing could be evaluated.
         reason = (
-            "Can't tell which team would end up signing this player: the outcome must be "
-            "'matched' or 'not_matched', and the player must currently sit on a team's roster."
+            "Can't evaluate this offer sheet: the player must currently sit on a team's "
+            "roster as their restricted free agent, and the offering team must be a real team."
         )
         return TransactionValidationResult(
             legal=False,

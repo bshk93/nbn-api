@@ -50,42 +50,91 @@ Adds player to a team roster and sets their contract.
 
 ---
 
-### `offer_sheet` — RFA offer sheet (§ 3.15)
+### `offer_sheet` — Extend an RFA offer sheet (§ 3.15)
 
-Records **and immediately applies** a team extending an offer sheet to another team's restricted free agent. This is one atomic transaction, not two — once `outcome` is known there's no independent decision left, so it directly signs the player (internally calling the same logic as `sign`, above) to `retaining_team` if `matched` or `offering_team` if `not_matched`. Entered after the outcome is known (no live 48-hour match-period clock is modeled — see rulebook § 3.15 for the real-time procedure GMs follow out of band).
-
-> An earlier version of this type only *recorded* the offer and required a separate follow-up `sign` transaction to actually apply the contract. That two-step design shipped a real bug on first use: an offer sheet was submitted with `outcome: "matched"`, the follow-up `sign` was never submitted, and the player's contract silently never updated — nothing in the flow forced or even flagged the second step. `offer_sheet` is now self-contained specifically because of that failure.
+Records an offer being **extended**. Signs nobody: the player stays on the
+incumbent's roster with their RFA hold, and the offering team is charged a cap
+hold until it resolves.
 
 **Details:**
 ```json
 {
   "player": "slug",
   "offering_team": "LAL",
-  "contract": {
-    "type": "player",
-    "salaries": { "26-27": "$8,000,000", "27-28": "$8,500,000" },
-    "cap_holds": {}
-  },
-  "outcome": "matched",
+  "contract": { "type": "player", "salaries": { "26-27": "$8,000,000", "27-28": "$8,500,000" } },
   "signing_method": "ntmle",
   "bird_rights_type": null
 }
 ```
 
-`outcome` is `"matched"` (retaining team keeps the player, signed to `contract`) or `"not_matched"` (player signs with `offering_team` on `contract`). `retaining_team` is not submitted — it's derived from whichever roster currently carries the player's `SLUG` row.
+No `outcome` — that is a separate decision by a different team, and collapsing
+the two attributed the incumbent's choice to whoever typed the transaction.
+`retaining_team` and `deadline` are stamped server-side (the incumbent is a fact
+about who holds the RFA rights, not a claim the offering team gets to make).
 
-`signing_method` / `bird_rights_type` (both optional) declare what actually funds the contract for whichever team ends up signing the player — same vocabulary as `sign`'s fields (`cap_space`, `minimum`, `bird_rights`, `mle`, `ntmle`, `tmle`, `room_exception`, `bae`). They're threaded straight into the internal signing call, so a declared exception gets the same `mle_used`/hard-cap bookkeeping and § 1.5/§ 1.6 funding-availability check a plain `sign` gets. Omit them if the offer is simply cap-space funded (or funding isn't being tracked for this entry) — no bookkeeping side effect fires either way, matching the pre-existing behavior.
+**Validation** — judged against the **offering** team, who commit the money
+whatever the incumbent later decides:
+- Hard-fail: player must carry an `RFA` hold **for the current season**; the
+  offer must cover 2+ years; `offering_team` can't be the player's own team; the
+  player must not already have an open offer.
+- Soft `checks`: hard cap and signing-method funding for the offering team,
+  § 3.12 minimum salary, § 3.8 Bird declaration, and roster space at
+  `ROSTER_MAX` (they must be able to honour the offer if it goes unmatched).
 
-**Validation:**
-- Hard-fail (not the soft `checks` path): player must currently carry an `RFA` (not `UFA`) cap hold for the upcoming season; `offering_team` must differ from the retaining team; `contract.salaries` must cover at least 2 years (§ 3.15's "at least 2 guaranteed years" — this only checks year count, not that each year is actually guaranteed).
-- Soft `checks` path (forceable): the same hard-cap projection and signing-method funding-availability checks `sign` runs (§ 1.5/§ 1.6 apron eligibility, remaining exception balance, league Hard Cap), plus a roster-size check on `not_matched` (a match doesn't add a body — the player's already on that roster). Resolved against whichever team the outcome actually signs the player to. Everything else about § 3.15 legality (good-faith fit, Gilbert Arenas eligibility for a 2-years-of-service RFA, etc.) is still manual review.
+`_rfa_eligibility` is the single eligibility rule, shared with the validator.
+It tests the **current** season deliberately: `_apply_sign` refuses a cross-team
+signing unless the player holds a current-season UFA/RFA hold, so an "earliest
+hold" reading would accept a player still under contract — the offer would
+validate, hold real cap room, then fail at the decision.
 
-**Mutates:**
-- `player-bios.json` → same as `sign`, applied to whichever team the outcome resolves to
-- `{team}-roster.csv` → same as `sign` (old team's roster row cleared automatically if `not_matched`)
-- Stored record gets `"teams": [offering_team, retaining_team]` (same convention as `trade`) for `GET /api/transactions?team=`. Each bio's `contracts` history entry gets the real `signing_method` (or `null`) — same as an ordinary `sign` — plus `offer_sheet_outcome: "matched"|"not_matched"`, which is what now marks the entry as having come from an offer sheet rather than an ordinary re-sign (previously that was encoded as a fake `signing_method: "offer_sheet_matched"`/`"offer_sheet_not_matched"` sentinel, which meant the real funding mechanism could never be recorded at all).
+**Mutates:** nothing but the ledger. The § 3.15 hold is *derived* from the open
+offer by `_pending_offer_hold`, not written anywhere, so it can't be left behind.
 
-**Not yet built:** rescission (§ 3.10/§ 3.15) — if the offering team renounced other cap holds to afford the offer and the retaining team matches, the rulebook lets them restore those renouncements. No `rescind_renounce` transaction type exists yet; do it by hand.
+---
+
+### `offer_sheet_decision` — Match or pass (§ 3.15)
+
+Resolves an open offer. This is the step that signs somebody.
+
+**Details:**
+```json
+{
+  "offer_id": "id of the offer_sheet being answered",
+  "outcome": "matched"
+}
+```
+
+`matched` keeps the player with the incumbent; `not_matched` sends them to the
+offering team. Both sign the player to the *offer's* terms — the contract is
+read from the offer, never resubmitted, so the two can't disagree.
+
+**Validation:** the offer was already scored against the offering team. What's
+new here is the incumbent's side — matching is allowed over the Cap, but a hard
+cap still binds (§ 1.3), and nothing checked that before the split. Hard-fails an
+unknown, already-resolved, or wrong-typed `offer_id`.
+
+**Mutates:** everything `sign` does, applied to the signing team. The stored
+record carries `player`, `teams`, `signing_team`, `outcome` and the offer's
+contract. The bio's contract history entry gets `offer_sheet_outcome` and
+`offer_sheet_id`.
+
+**Open offers:** `GET /api/offer-sheets/open` (public, optional `?team=`) lists
+every unresolved offer with its deadline and `overdue` flag. Derived from the
+ledger — an offer is open exactly when no `offer_sheet_decision` names it — so
+there is no second store to drift.
+
+> **Why the split is safe this time.** An earlier two-step design was merged into
+> one transaction precisely because an offer could be submitted with no follow-up,
+> silently leaving the player on nothing but their old RFA hold (it bit Dyson
+> Daniels' matched sheet in production). The difference now is that pending is a
+> state the system can see and price: `_open_offer_sheets` enumerates them, the
+> offering team pays a cap hold the whole time, and the UI nags past the deadline.
+> Do not reintroduce a path that records an offer without those.
+
+**Legacy entries.** Three combined-era `offer_sheet` records carry their own
+`outcome` and were applied on submission. They are read as already-resolved
+everywhere (`_open_offer_sheets` skips them, `_player_acquisition_index` still
+credits their signing), and are not migrated.
 
 ---
 
@@ -159,6 +208,93 @@ Removes player from their roster and converts guaranteed money to dead cap.
 **Mutates:**
 - `player-bios.json` → sets `dead_cap` (merged with any existing), clears `salaries`/`cap_holds`/`guaranteed`/`guarantee_dates`, sets `type = "dead"`
 - `{team}-roster.csv` → removes the player's row
+
+---
+
+### `renounce` — Renounce a free-agent cap hold (§ 3.10)
+
+Clears a UFA/RFA cap hold, takes the player off the roster and makes them an
+unsigned free agent. No dead cap: a player carrying only a hold is under no
+contract, which is what separates this from `release`.
+
+**Details:**
+```json
+{
+  "player": "slug"
+}
+```
+
+The team is never submitted — it's resolved from whichever roster carries the
+player's `SLUG` row.
+
+**Validation** — `_renounce_eligibility` is the single § 3.10 test, shared by the
+validator, the apply path and `POST /api/validate/renounce`, so the simulator and
+the roster page can't offer a renounce the apply path would reject:
+- **Error (blocks):** the player must be on a roster and their *earliest* cap hold
+  must be a `UFA`/`RFA` no later than the upcoming FA season. A player under
+  contract is released (§ 5.1); one with a live option has it declined (§ 6.1)
+  first. Note this is a test on the earliest hold, not on the current season's —
+  a player finishing a contract sits as a hold for *next* season, and that's the
+  ordinary renounceable case.
+- **Warning (forceable):** resulting standard-roster count against the § 2.1
+  14-player minimum and the § 2.1a 12-player charge floor (priced at the rookie
+  minimum); and the § 3.8 Bird tenure being forfeited. These warn rather than
+  block because the rulebook charges for them rather than forbidding them.
+
+**Mutates:**
+- `player-bios.json` → drops `salaries`/`guaranteed`/`guarantee_dates`/
+  `guarantee_schedule` from the hold season on, clears the renounced `cap_holds`,
+  sets `type = ""`. Prior-season earnings are preserved as career history.
+- `{team}-roster.csv` → removes the player's row
+- The team's trading-block entry is scrubbed
+- Stored record gets `"team"` and `"_snapshot"` — the pre-renounce values of every
+  field above. **The snapshot is the only restore source**; a renounce erases the
+  very state a ledger replay would need, so it's recorded at the event rather than
+  reconstructed later.
+
+**Owner self-serve:** `POST /api/self/renounce` lets a team's *owner* run this
+from their own roster page. Narrower than this endpoint on three counts: the team
+is derived from the player's roster row and matched against the caller's owner
+tenure (never taken from the body), `force` is unavailable so error-level checks
+are fatal, and the date is server-stamped so a transaction can't be backdated into
+a prior league year. Ownership is a tenure *position*, not a role — every FO
+member carries the team role, but a GM or coach fails `auth.is_team_owner`.
+
+---
+
+### `rescind_renounce` — Restore a renounced free agent (§ 3.10)
+
+Undoes a `renounce` from its stored snapshot. Serves both the rulebook case
+(holds renounced to fund an RFA offer sheet the retaining team then matched) and
+plain correction of a mistaken renounce — including one an owner entered from
+their roster page.
+
+**Details:**
+```json
+{
+  "txn_id": "id of the renounce being undone"
+}
+```
+
+**Validation:**
+- **Hard-fail (not forceable):** no such transaction; it isn't a `renounce`; it
+  predates snapshotting; it was already rescinded; or the player has since joined
+  a roster (restoring them would duplicate the player and overwrite a real
+  contract with a stale hold).
+- **Warning (forceable):** § 3.10's restrictions — rescinding may not move the team
+  from under the cap to over it, nor increase the figure of a team already over.
+  Warnings rather than errors because the same mechanism is the correction path,
+  and refusing to restore a player because the restoration costs room would leave
+  the books wrong a different way.
+
+**Mutates:**
+- `player-bios.json` → restores every snapshotted field verbatim
+- `{team}-roster.csv` → re-adds the player's row (appended; roster CSV order is
+  not meaningful)
+- The source renounce gets `"_rescinded": true`, so it can't be undone twice and
+  the Transactions log drops its `undo` button
+
+Not covered: the trading-block entry scrubbed by the renounce isn't restored.
 
 ---
 
