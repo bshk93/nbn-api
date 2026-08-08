@@ -71,7 +71,9 @@ POOL = {
                       "prior_salary": 4_000_000, "rfa": True, "qo_amount": 5_000_000},
 }
 
-MEMBERS = {"facHead": {}, "memberA": {}, "memberB": {}, "phxOwner": {}, "phxGM": {}}
+MEMBERS = {"facHead": {"roles": ["fac_head"]}, "memberA": {"roles": ["fac"]},
+           "memberB": {"roles": ["fac", "phx"]}, "phxOwner": {"roles": ["phx"]},
+           "phxGM": {"roles": ["phx"]}}
 
 HEAD = {"name": "facHead", "roles": ["fac_head"]}
 MEM_A = {"name": "memberA", "roles": ["fac"]}
@@ -407,14 +409,34 @@ check("a later offer does not extend the clock",
 
 past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
 STATE["players"]["curry-stephen"]["ffa"]["deadline"] = past
-before = repr(STATE["players"]["curry-stephen"])
+
+
+def _entry_state():
+    """The player's entry with the announcement marker stripped — everything
+    that decides whether offers are accepted."""
+    e = {k: v for k, v in STATE["players"]["curry-stephen"].items() if k != "ffa"}
+    e["ffa"] = {k: v for k, v in (STATE["players"]["curry-stephen"]["ffa"] or {}).items()
+                if k != "closed_posted"}
+    return repr(e)
+
+
+before = _entry_state()
 accepting, reason = fa._accepts_offers(STATE, "curry-stephen", POOL)
 fa.get_board()
 check("an expired window stops accepting offers", accepting is False and "closed at" in reason)
 # Expiry is a comparison, not a write — which is the point. A scheduler that
-# dies leaves a player silently open forever; `now >= deadline` cannot.
-check("observing expiry mutates nothing",
-      repr(STATE["players"]["curry-stephen"]) == before)
+# dies leaves a player silently open forever; `now >= deadline` cannot. The one
+# thing a read may write is `ffa.closed_posted`, the once-only guard on the
+# § 9.2 announcement (see `_sweep_ffa_expiry`) — and it is deliberately *not*
+# consulted by `_accepts_offers`, so even losing it would re-announce rather
+# than reopen the player.
+check("observing expiry doesn't change whether the player accepts offers",
+      _entry_state() == before)
+check("...it only stamps the once-only announcement guard",
+      "closed_posted" in (STATE["players"]["curry-stephen"]["ffa"] or {}))
+STATE["players"]["curry-stephen"]["ffa"].pop("closed_posted", None)
+check("...and expiry is still derived from the deadline, not from that stamp",
+      fa._accepts_offers(STATE, "curry-stephen", POOL)[0] is False)
 
 late = make_offer  # a *new* offer from another team is refused past the deadline
 OFFERS[:] = [o for o in OFFERS if o["team"] != "BKN"]
@@ -442,6 +464,29 @@ state_view = fa.get_state(MEM_A)
 check("the committee view adds the sub-committee the board withholds",
       state_view["players"]["curry-stephen"]["subcommittee"] == ["memberA"]
       and state_view["players"]["curry-stephen"]["mine"] is True)
+
+# What the dashboard's queue sorts and badges on. `balloted` is the viewer's own
+# ballot and leaks nothing; how many *others* have voted is scoped to that
+# player's sub-committee (§ 4.5), so it is head-only here.
+head_view = fa.get_state(HEAD)
+check("a member sees whether they themselves have balloted",
+      state_view["players"]["curry-stephen"]["balloted"] is False
+      and state_view["players"]["curry-stephen"]["finalized"] is False)
+check("how many ballots are in is head-only on the board view (§ 4.5)",
+      head_view["players"]["curry-stephen"]["ballots_cast"] == 0
+      and "ballots_cast" not in state_view["players"]["curry-stephen"])
+
+# ══ the sub-committee picker (§ 4.6) ══════════════════════════════════════════
+
+print("\nassignment picker")
+rv_head = fa.review_player("curry-stephen", HEAD)
+check("the picker lists fac members — a head is one of their own committee",
+      [a["name"] for a in rv_head["assignable"]] == ["facHead", "memberA", "memberB"])
+check("…and flags a conflicted assignee *before* the head confirms",
+      {a["name"]: a["conflict"] for a in rv_head["assignable"]}
+      == {"facHead": None, "memberA": None, "memberB": "PHX"})
+check("a reviewer who isn't the head gets no picker",
+      fa.review_player("curry-stephen", MEM_A)["assignable"] == [])
 
 print("\n" + ("=" * 40))
 if FAILS:

@@ -66,6 +66,32 @@ otherwise mint another row. `POST /api/auth/session/logout` deletes the row and
 clears both; it is deliberately unauthenticated, since it only ever destroys the
 caller's own cookie. `tests/test_auth_session.py` pins all of the above.
 
+## PDC free agency (`routers/free_agency.py`)
+
+Owner-submitted FA offers reviewed by the Free Agency Committee. The design
+record is `nbn-today/docs/pdc-free-agency-spec.md`; read it before changing
+anything here. Storage is three files under **one** `_fa_lock`: `fa-state.json`
+(mode, rounds, per-player status + sub-committee), `fa-offers.json`,
+`fa-ballots.json`. Roles: `fac`, `fac_head` (implies `fac`), `poext`,
+`poext_head`. The dashboard that renders all of it is `nbn-today/pdc/index.html`.
+
+Two invariants, neither negotiable:
+
+- **`offer` is a verbatim `SignDetails`.** It is what `POST /api/validate/sign`
+  takes and what a future "sign this offer" button would post to
+  `POST /api/transactions`. Pitch and promises live *outside* it. Adding a field
+  `SignDetails` doesn't accept turns a ~30-line follow-up into a rewrite.
+- **Legality has one implementation** — `_validate_sign`, the same call the real
+  submit path runs, never with `force`. Nothing in this module does cap math of
+  its own; every figure comes from `_signing_fact_sheet` and its helpers.
+
+Derived rules live server-side so there is one of each: `revised_since` (a ballot
+cast before an offer was revised), `your_conflict` / `assignable` (§ 4.6 conflicts,
+from `_conflict_team` — a conflict comes from an active *tenure*, not a team role),
+and `balloted` / `ballots_cast` on `GET /api/fa/state` (own ballot always,
+everyone's count head-only). `tests/test_fa_offers.py` and `tests/test_fa_pool.py`
+pin the lot.
+
 ## Data model reference
 
 → **[docs/data-model.md](docs/data-model.md)** — player-bios.json fields, CSV formats, all JSON files

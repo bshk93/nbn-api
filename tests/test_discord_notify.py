@@ -24,6 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import routers.discord_notify as dn  # noqa: E402
+import routers.discord_transport as tp  # noqa: E402
 
 FAILS = []
 
@@ -35,11 +36,12 @@ def check(name, cond, extra=""):
 
 
 # ── Harness ───────────────────────────────────────────────────────────────────
-# Capture at the enqueue boundary: every gate runs before it, and the worker that
-# drains the queue is exercised separately below.
+# Capture at the enqueue boundary — in `discord_transport`, which is where
+# delivery moved when `fa_notify` came to share it. Every gate runs before it,
+# and the worker that drains the queue is exercised separately below.
 SENT = []
-dn._enqueue = lambda embed: SENT.append(embed)
-dn.DISCORD_BOT_TOKEN = "test-token"
+tp._enqueue = lambda msg: SENT.append(msg["payload"]["embeds"][0])
+tp.DISCORD_BOT_TOKEN = "test-token"
 dn.DISCORD_TXN_CHANNEL = "123456789"
 
 BIOS = {
@@ -66,8 +68,8 @@ def txn(**kw):
 
 def reset():
     SENT.clear()
-    dn._recent_sends.clear()
-    dn._suppressed = 0
+    tp._recent_sends.clear()
+    tp._suppressed.clear()
 
 
 # ── Gate 1: backfill never notifies ───────────────────────────────────────────
@@ -117,7 +119,8 @@ for i in range(2000):
     dn.notify_transaction(txn(id=f"f{i}"))
 check(f"2,000 fresh entries are capped at MAX_BURST ({dn.MAX_BURST})",
       len(SENT) == dn.MAX_BURST, f"{len(SENT)} sent")
-check("...and the suppression is recorded for the log", dn._suppressed > 0, dn._suppressed)
+check("...and the suppression is recorded for the log",
+      tp._suppressed.get(dn.DISCORD_TXN_CHANNEL, 0) > 0, tp._suppressed)
 
 
 # ── Sizing against measured league activity ───────────────────────────────────
@@ -149,13 +152,13 @@ check("cap still stops a full-ledger runaway well short",
 print("\nqueue depth — backpressure when something dumps")
 
 reset()
-dn._enqueue = lambda embed: (SENT.append(embed), dn._queue.put(embed))[0]
-for i in range(dn.MAX_QUEUE + 60):
+tp._enqueue = lambda msg: (SENT.append(msg["payload"]["embeds"][0]), tp._queue.put(msg))[0]
+for i in range(tp.MAX_QUEUE + 60):
     dn.notify_transaction(txn(id=f"q{i}"))
-check("a backlog past MAX_QUEUE stops accepting", len(SENT) <= dn.MAX_QUEUE, f"{len(SENT)} accepted")
-while not dn._queue.empty():
-    dn._queue.get_nowait()
-dn._enqueue = lambda embed: SENT.append(embed)
+check("a backlog past MAX_QUEUE stops accepting", len(SENT) <= tp.MAX_QUEUE, f"{len(SENT)} accepted")
+while not tp._queue.empty():
+    tp._queue.get_nowait()
+tp._enqueue = lambda msg: SENT.append(msg["payload"]["embeds"][0])
 
 
 # ── Kill switch ───────────────────────────────────────────────────────────────
@@ -169,10 +172,10 @@ check("no channel configured sends nothing", len(SENT) == 0)
 dn.DISCORD_TXN_CHANNEL = "123456789"
 
 reset()
-dn.DISCORD_BOT_TOKEN = ""
+tp.DISCORD_BOT_TOKEN = ""
 dn.notify_transaction(txn())
 check("no bot token sends nothing", len(SENT) == 0)
-dn.DISCORD_BOT_TOKEN = "test-token"
+tp.DISCORD_BOT_TOKEN = "test-token"
 
 
 # ── Embed content ─────────────────────────────────────────────────────────────
@@ -385,7 +388,7 @@ class FakeResponse:
 
 
 slept = []
-dn.time = type("T", (), {
+tp.time = type("T", (), {
     "sleep": staticmethod(lambda s: slept.append(s)),
     "time": staticmethod(time_mod.time),
 })()
@@ -401,17 +404,18 @@ def fake_post_ratelimit(url, headers=None, json=None, timeout=None):
     return FakeResponse(200)
 
 
-dn.httpx = type("H", (), {"post": staticmethod(fake_post_ratelimit)})()
+tp.httpx = type("H", (), {"post": staticmethod(fake_post_ratelimit)})()
 slept.clear()
-ok_delivered = dn._post({"title": "x"})
+MSG = {"channel": "123456789", "payload": {"embeds": [{"title": "x"}]}}
+ok_delivered = tp._post(MSG)
 check("a rate-limited message is eventually delivered", ok_delivered is True)
 check("...after retrying", posts["n"] == 3, f"{posts['n']} attempts")
 check("...honouring Discord's retry_after", any(abs(s - 1.0) < 0.01 for s in slept), slept)
 
 posts["n"] = 0
-dn.httpx = type("H", (), {"post": staticmethod(
+tp.httpx = type("H", (), {"post": staticmethod(
     lambda url, headers=None, json=None, timeout=None: FakeResponse(403, text="Missing Access"))})()
-res = dn._post({"title": "x"})
+res = tp._post(MSG)
 check("a permissions error fails fast without retrying", res is False)
 
 posts["n"] = 0
@@ -422,16 +426,16 @@ def fake_post_5xx(url, headers=None, json=None, timeout=None):
     return FakeResponse(503)
 
 
-dn.httpx = type("H", (), {"post": staticmethod(fake_post_5xx)})()
-res = dn._post({"title": "x"})
-check("a persistent 5xx gives up after MAX_RETRIES", res is False and posts["n"] == dn.MAX_RETRIES,
+tp.httpx = type("H", (), {"post": staticmethod(fake_post_5xx)})()
+res = tp._post(MSG)
+check("a persistent 5xx gives up after MAX_RETRIES", res is False and posts["n"] == tp.MAX_RETRIES,
       f"{posts['n']} attempts")
 
 check("pacing stays inside Discord's ~5-per-5s channel limit",
-      dn.SEND_INTERVAL >= 1.0, f"{dn.SEND_INTERVAL}s")
+      tp.SEND_INTERVAL >= 1.0, f"{tp.SEND_INTERVAL}s")
 check("...while still draining a draft day in a couple of minutes",
-      DRAFT_DAY_EXPECTED * dn.SEND_INTERVAL <= 180,
-      f"{DRAFT_DAY_EXPECTED * dn.SEND_INTERVAL:.0f}s for {DRAFT_DAY_EXPECTED}")
+      DRAFT_DAY_EXPECTED * tp.SEND_INTERVAL <= 180,
+      f"{DRAFT_DAY_EXPECTED * tp.SEND_INTERVAL:.0f}s for {DRAFT_DAY_EXPECTED}")
 
 
 print()

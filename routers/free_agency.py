@@ -27,6 +27,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from . import fa_notify
 from .auth import (get_token_info, has_role, is_team_owner, load_members,
                    require_any_role, require_role)
 from .constants import (CAP_LEVELS_FILE, FA_BALLOTS_FILE, FA_OFFERS_FILE,
@@ -286,6 +287,46 @@ def _round_id_for(state: dict, slug: str) -> Optional[str]:
     return _player_entry(state, slug).get("round_id")
 
 
+def _sweep_ffa_expiry(state: Optional[dict] = None) -> None:
+    """Emit the § 9.2 "window closed" post for any clock that has run out.
+
+    Expiry is computed, not scheduled (§ 4.1), so there is no job to hang the
+    announcement off — it is emitted by whichever request first *observes* the
+    deadline has passed. Called from the read endpoints, which is what the
+    dashboards and the public FA page hit; the write paths already refuse an
+    expired player through `_accepts_offers`, so they need this for nothing but
+    timeliness.
+
+    `closed_posted` on the player's `ffa` object is the once-only guard, and it
+    is stamped under the lock *before* anything is sent: two simultaneous
+    requests observing the same expiry must produce one post, not two. A clock
+    that expired long ago is still stamped here (so it can never surface later)
+    but not announced — see `fa_notify.notify_ffa_closed`.
+    """
+    state = state if state is not None else _load_state()
+    if state.get("mode") != "ffa":
+        return
+    due = [slug for slug, entry in (state.get("players") or {}).items()
+           if (entry.get("ffa") or {}).get("deadline")
+           and not entry["ffa"].get("closed_posted") and _ffa_expired(entry)]
+    if not due:
+        return
+    posted = []
+    with _fa_lock:
+        fresh = _load_state()
+        for slug in due:
+            entry = fresh["players"].get(slug) or {}
+            ffa = entry.get("ffa") or {}
+            if not ffa.get("deadline") or ffa.get("closed_posted") or not _ffa_expired(entry):
+                continue
+            ffa["closed_posted"] = _now()
+            posted.append((slug, dict(ffa)))
+        if posted:
+            _save_state(fresh)
+    for slug, ffa in posted:
+        fa_notify.notify_ffa_closed(slug, ffa)
+
+
 # ── offers ────────────────────────────────────────────────────────────────────
 
 def _is_live(offer: dict) -> bool:
@@ -452,6 +493,7 @@ def get_board():
     carries no contract detail, no offering team, and no offer count: the fact
     that a team is bidding is committee information."""
     state = _load_state()
+    _sweep_ffa_expiry(state)
     pool = _live_pool()
     players = {}
     for slug in pool:
@@ -472,20 +514,36 @@ def get_board():
 @router.get("/api/fa/state")
 def get_state(info: dict = Depends(require_any_role("fac", "poext"))):
     """The committee's view: everything on the board plus the sub-committee
-    assignments, which the public board withholds."""
+    assignments, which the public board withholds.
+
+    The dashboard's queue sorts by urgency and marks what still needs the
+    viewer's attention, so each player also carries `balloted` — *the viewer's
+    own* ballot, which leaks nothing — and `finalized`. The count of who else
+    has voted is committee information scoped to that player's sub-committee
+    (§ 4.5), so it is head-only here; an assigned member reads it from
+    `GET /api/fa/players/{slug}/ballots`, which enforces that scope.
+    """
     state = _load_state()
+    _sweep_ffa_expiry(state)
     offers = _load_offers()
+    ballots = _load_ballots()
+    head = _is_head(info)
     counts: dict[str, int] = {}
     for o in offers:
         if _is_live(o) and o["status"] != "draft":
             counts[o["player"]] = counts.get(o["player"], 0) + 1
     players = {}
     for slug, entry in state["players"].items():
+        node = (ballots.get(slug) or {}).get(entry.get("round_id") or "") or {}
+        cast = node.get("ballots") or {}
         players[slug] = {
             **entry,
             "ffa_expired": _ffa_expired(entry),
             "offer_count": counts.get(slug, 0),
             "mine": info["name"] in (entry.get("subcommittee") or []),
+            "balloted": info["name"] in cast,
+            "finalized": bool(node.get("final")),
+            **({"ballots_cast": len(cast)} if head else {}),
         }
     return {"mode": state["mode"], "rounds": state["rounds"], "players": players}
 
@@ -502,6 +560,9 @@ def set_mode(body: ModeIn, info: dict = Depends(require_role("fac_head"))):
             {"at": _now(), "by": info["name"], "action": "mode", "from": prev, "to": body.mode})
         _save_state(state)
     log_write(info, f"PUT fa/mode — {prev} → {body.mode}")
+    # Announced outside the lock, after the write is committed — Discord being
+    # down must never delay or fail a board change (§ 9).
+    fa_notify.notify_mode_change(prev, body.mode, info["name"])
     return {"mode": body.mode, "previous": prev}
 
 
@@ -529,6 +590,7 @@ def open_round(body: RoundIn, info: dict = Depends(require_role("fac_head"))):
         state["rounds"].append(rnd)
         _save_state(state)
     log_write(info, f"POST fa/rounds — {rnd['id']}")
+    fa_notify.notify_round_opened(rnd, info["name"])
     return rnd
 
 
@@ -757,11 +819,21 @@ def submit_offer(offer_id: str, info: dict = Depends(get_token_info)):
             raise HTTPException(422, {"detail": "Offer fails a rule check", "checks": failing,
                                       "validation": validation})
 
+        # The version being answered, frozen back at the remand (§ 4.3a) — this
+        # is what the announcement diffs against, and it has to be captured
+        # before the increment or it names the wrong version.
+        prev_version = None
         if resubmit:
+            prev_version = next(
+                (v for v in offer["versions"] if v["version"] == offer["version"]), None)
             offer["version"] += 1
 
+        started_clock = None
         if state["mode"] == "ffa":
+            had_clock = bool(_player_entry(state, offer["player"]).get("ffa"))
             _start_ffa_clock(state, offer["player"], offer["id"], info["name"])
+            if not had_clock:
+                started_clock = _player_entry(state, offer["player"]).get("ffa")
         offer["round_id"] = _round_id_for(state, offer["player"])
         offer["status"] = "submitted"
         offer["submitted_by"] = info["name"]
@@ -777,6 +849,11 @@ def submit_offer(offer_id: str, info: dict = Depends(get_token_info)):
         _save_offers(offers)
         _save_state(state)
     log_write(info, f"POST fa/offers/{offer_id}/submit — v{offer['version']}")
+    # Both announcements happen outside the lock, after the offer and the state
+    # are on disk. The offer comes first: the clock exists *because* of it.
+    fa_notify.notify_offer_submitted(offer, prev_version)
+    if started_clock:
+        fa_notify.notify_ffa_started(offer["player"], started_clock)
     return offer
 
 
@@ -821,13 +898,14 @@ def remand_offer(offer_id: str, body: RemandIn, info: dict = Depends(get_token_i
                 "submitted_at": offer.get("submitted_at"),
                 "submitted_by": offer.get("submitted_by"),
             })
-        offer["remands"].append({
+        entry = {
             "at": _now(), "by": info["name"], "note": note,
             "from_version": offer["version"],
             # "Send that rival's offer back" is exactly where the incentive
             # bites, so a conflicted remand is flagged like a conflicted ballot.
             "conflict": _conflict_team(info["name"], offer["player"], offers),
-        })
+        }
+        offer["remands"].append(entry)
         # Additive, not a queue of round-trips: a second member remanding the
         # same offer appends another note and changes nothing else, so the team
         # answers every outstanding ask in one resubmission.
@@ -839,6 +917,7 @@ def remand_offer(offer_id: str, body: RemandIn, info: dict = Depends(get_token_i
         offers[idx] = offer
         _save_offers(offers)
     log_write(info, f"POST fa/offers/{offer_id}/remand")
+    fa_notify.notify_offer_remanded(offer, entry)
     return offer
 
 
@@ -889,6 +968,7 @@ def review_player(slug: str, info: dict = Depends(get_token_info)):
     """
     state = _load_state()
     _require_reviewer(info, state, slug)
+    _sweep_ffa_expiry(state)
     pool = _live_pool()
     if slug not in pool:
         raise HTTPException(404, f"'{slug}' is not in the free-agent pool")
@@ -919,7 +999,25 @@ def review_player(slug: str, info: dict = Depends(get_token_info)):
         "offers": rendered,
         "commitments": {t: _team_commitment(t, slug, offers, ctx) for t in teams},
         "ballot_options": _ballot_options(slug, live, pool),
+        "assignable": _assignable(slug, offers) if _is_head(info) else [],
     }
+
+
+def _assignable(slug: str, offers: list[dict]) -> list[dict]:
+    """The sub-committee picker's roster, with conflicts already resolved.
+
+    § 4.6 wants a conflicted assignee flagged *before* the head confirms, and
+    `PUT /api/fa/players/{slug}` only reports conflicts after the fact. The rule
+    itself stays where it was — this is the same `_conflict_team` the ballot and
+    the remand stamp — so the picker can't come to a different answer about who
+    is conflicted than the record does.
+    """
+    return [
+        {"name": name, "team": _member_current_team(name),
+         "conflict": _conflict_team(name, slug, offers)}
+        for name, m in sorted(load_members().items())
+        if has_role({"roles": m.get("roles") or []}, "fac")
+    ]
 
 
 def _ballot_options(slug: str, live: list[dict], pool: dict) -> list[dict]:
@@ -958,6 +1056,7 @@ def _ballot_node(ballots: dict, slug: str, round_id: str, create: bool = False) 
 def get_ballots(slug: str, info: dict = Depends(get_token_info)):
     state = _load_state()
     _require_reviewer(info, state, slug)
+    _sweep_ffa_expiry(state)
     round_id = _round_id_for(state, slug)
     if not round_id:
         raise HTTPException(422, "This player hasn't been opened in a round yet")
@@ -982,6 +1081,13 @@ def get_ballots(slug: str, info: dict = Depends(get_token_info)):
     return {
         "player": slug, "round_id": round_id,
         "subcommittee": assigned,
+        # The viewer's own conflict, resolved by the same `_conflict_team` that
+        # stamps it onto a cast ballot — so the banner a member sees before they
+        # vote and the flag the head sees afterwards can never disagree. Derived
+        # here rather than guessed client-side from role names: a conflict comes
+        # from an active *tenure*, which the browser has no business reasoning
+        # about.
+        "your_conflict": _conflict_team(info["name"], slug, _load_offers()),
         # In-progress ballots are visible inside the sub-committee by design
         # (§ 4.5) — `updated_at` is what lets a member tell a considered ballot
         # from one cast a minute ago in response to theirs.
@@ -1092,6 +1198,7 @@ def finalize_player(slug: str, info: dict = Depends(require_role("fac_head"))):
         _save_ballots(ballots)
         _save_state(state)
     log_write(info, f"POST fa/players/{slug}/finalize")
+    fa_notify.notify_player_finalized(slug, node["final"], live)
     return node["final"]
 
 

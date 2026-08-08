@@ -13,6 +13,12 @@ Uses the same `DISCORD_BOT_TOKEN` and channel-post endpoint as
 with it unset the whole module is a no-op, so this is safe to deploy before the
 channel exists.
 
+Delivery — pacing, retry, the queue-depth backstop and the burst cap — lives in
+`discord_transport`, shared with `fa_notify` so the two feeds can't each pace
+themselves correctly and still collectively exceed Discord's rate limit. What
+stays here is policy: what a transaction announcement says, and how big a burst
+this particular channel should tolerate.
+
 Everything here is best-effort and off the request thread. A transaction is a
 real roster write that has already been committed by the time we post — Discord
 being down, slow, or misconfigured must never fail it, delay it, or roll it back.
@@ -21,20 +27,15 @@ from __future__ import annotations
 
 import logging
 import os
-import queue
 import re
-import threading
-import time
 from datetime import datetime, timezone
 from typing import Optional
 
-import httpx
-
+from . import discord_transport as transport
 from .players import load_player_bios, _display_name
 
 logger = logging.getLogger(__name__)
 
-DISCORD_BOT_TOKEN   = os.environ.get("DISCORD_BOT_TOKEN", "")
 DISCORD_TXN_CHANNEL = os.environ.get("DISCORD_TXN_CHANNEL", "").strip()
 
 SITE = "https://nbn.today"
@@ -379,82 +380,6 @@ def build_embed(txn: dict, forced_checks: Optional[list[str]] = None) -> dict:
     }
 
 
-# ── Delivery ──────────────────────────────────────────────────────────────────
-# One background worker draining a queue, rather than a thread per message.
-# Discord rate-limits channel messages at roughly 5 per 5 seconds; firing a draft
-# day's 30 pick signings concurrently would 429 most of them, and a dropped
-# announcement is worse than a late one. The worker paces sends and honours the
-# `retry_after` Discord hands back, so a burst is *delayed*, never lost.
-SEND_INTERVAL   = 1.25   # seconds between sends — ~4 per 5s, inside the limit
-MAX_RETRIES     = 5      # per message, for 429s and transient 5xx
-
-_queue: "queue.Queue[dict]" = queue.Queue()
-_worker_started = False
-_worker_lock = threading.Lock()
-
-
-def _post(embed: dict) -> bool:
-    """POST one embed. Returns True when delivered. Retries a rate-limit or a
-    transient server error rather than dropping the message."""
-    for attempt in range(MAX_RETRIES):
-        try:
-            r = httpx.post(
-                f"https://discord.com/api/v10/channels/{DISCORD_TXN_CHANNEL}/messages",
-                headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"},
-                json={"embeds": [embed]},
-                timeout=10,
-            )
-            if r.status_code < 300:
-                return True
-            if r.status_code == 429:
-                # Discord tells us exactly how long to wait; respect it.
-                try:
-                    wait = float(r.json().get("retry_after", 1.0))
-                except Exception:
-                    wait = 1.0
-                logger.info("Discord rate-limited, retrying in %.2fs", wait)
-                time.sleep(min(wait, 30) + 0.25)
-                continue
-            if 500 <= r.status_code < 600:
-                time.sleep(1.5 * (attempt + 1))
-                continue
-            # 4xx that isn't a rate limit is a real misconfiguration (bad channel
-            # id, bot not in the guild, missing Send Messages) — retrying won't
-            # help and would just repeat the log line.
-            logger.warning("Discord transaction notify failed: %s %s", r.status_code, r.text[:300])
-            return False
-        except Exception as exc:
-            logger.warning("Discord transaction notify errored (attempt %d): %s", attempt + 1, exc)
-            time.sleep(1.5 * (attempt + 1))
-    logger.warning("Discord transaction notify gave up after %d attempts", MAX_RETRIES)
-    return False
-
-
-def _worker() -> None:
-    last = 0.0
-    while True:
-        embed = _queue.get()
-        try:
-            gap = time.time() - last
-            if gap < SEND_INTERVAL:
-                time.sleep(SEND_INTERVAL - gap)
-            _post(embed)
-            last = time.time()
-        except Exception as exc:      # a worker death would silently end all notifications
-            logger.warning("Discord notify worker error: %s", exc)
-        finally:
-            _queue.task_done()
-
-
-def _enqueue(embed: dict) -> None:
-    global _worker_started
-    with _worker_lock:
-        if not _worker_started:
-            threading.Thread(target=_worker, daemon=True, name="discord-notify").start()
-            _worker_started = True
-    _queue.put(embed)
-
-
 # ── Anti-flood guards ─────────────────────────────────────────────────────────
 # Three independent gates, because "don't dump the backlog into the channel" is a
 # hard requirement and one convention-based check is not a guarantee. Any single
@@ -466,9 +391,10 @@ def _enqueue(embed: dict) -> None:
 #   2. Freshness — a transaction whose `created_at` is older than
 #      MAX_AGE_SECONDS is never announced. This is what makes replaying old
 #      entries structurally silent, whatever the caller intended.
-#   3. Burst cap — at most MAX_BURST messages per BURST_WINDOW seconds, process
-#      wide. A runaway loop posts MAX_BURST times and then goes quiet with one
-#      log line, instead of emptying 2,000 rows into the channel.
+#   3. Burst cap — at most MAX_BURST messages per BURST_WINDOW seconds on this
+#      channel. A runaway loop posts MAX_BURST times and then goes quiet with one
+#      log line, instead of emptying 2,000 rows into the channel. Enforced by
+#      `discord_transport`, sized here.
 #
 # Sizing gate 3 is a real trade-off, so it's set against measured activity rather
 # than a guess. Ledger history: busiest single day 52 live transactions
@@ -479,33 +405,6 @@ def _enqueue(embed: dict) -> None:
 MAX_AGE_SECONDS = 300          # 5 min; a live submit posts within milliseconds
 MAX_BURST       = 250          # ~5x the busiest real day, ~13x the tightest real burst
 BURST_WINDOW    = 900          # seconds
-MAX_QUEUE       = 400          # pending backlog that means something is dumping
-
-_burst_lock = threading.Lock()
-_recent_sends: list[float] = []
-_suppressed = 0
-
-
-def _burst_ok() -> bool:
-    global _suppressed
-    now = time.time()
-    with _burst_lock:
-        _recent_sends[:] = [t for t in _recent_sends if now - t < BURST_WINDOW]
-        if len(_recent_sends) >= MAX_BURST:
-            _suppressed += 1
-            if _suppressed == 1 or _suppressed % 50 == 0:
-                logger.warning(
-                    "Discord transaction notify suppressed: %d messages in %ds exceeds "
-                    "the burst cap of %d (%d suppressed so far). This usually means a bulk "
-                    "import is calling notify_transaction; it should not.",
-                    len(_recent_sends), BURST_WINDOW, MAX_BURST, _suppressed,
-                )
-            return False
-        if _suppressed:
-            logger.info("Discord transaction notify resumed after %d suppressed", _suppressed)
-            _suppressed = 0
-        _recent_sends.append(now)
-        return True
 
 
 def _is_fresh(txn: dict) -> bool:
@@ -529,24 +428,15 @@ def notify_transaction(txn: dict, forced_checks: Optional[list[str]] = None) -> 
     ledger entry, and a notification problem must not surface as a failed
     transaction.
     """
-    if not DISCORD_TXN_CHANNEL or not DISCORD_BOT_TOKEN:
+    if not transport.configured(DISCORD_TXN_CHANNEL):
         return
     if (txn.get("details") or {}).get("historical"):
         return
     if not _is_fresh(txn):
         logger.info("Discord notify skipped for %s — not a fresh submission", txn.get("id"))
         return
-    if _queue.qsize() >= MAX_QUEUE:
-        logger.warning(
-            "Discord notify queue at %d pending — dropping. Something is bulk-calling "
-            "notify_transaction; it should not.", _queue.qsize(),
-        )
-        return
-    if not _burst_ok():
-        return
-    try:
-        embed = build_embed(txn, forced_checks)
-    except Exception as exc:
-        logger.warning("Discord transaction embed failed to build: %s", exc)
-        return
-    _enqueue(embed)
+    # Built lazily, so a suppressed burst doesn't reload every player bio per
+    # refused message.
+    transport.send(DISCORD_TXN_CHANNEL,
+                   lambda: {"embeds": [build_embed(txn, forced_checks)]},
+                   max_burst=MAX_BURST, burst_window=BURST_WINDOW)
