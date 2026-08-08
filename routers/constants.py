@@ -81,11 +81,24 @@ VALID_TEAMS = {
     "OKC", "ORL", "PHI", "PHX", "POR", "SAC", "SAS", "TOR", "UTA", "WAS",
 }
 
-VALID_ROLES = {"admin", "rosters", "bod", "curator", "stats", "bookie"} | {t.lower() for t in VALID_TEAMS}
+VALID_ROLES = {
+    "admin", "rosters", "bod", "curator", "stats", "bookie",
+    # Player Development Committee — see nbn-today/docs/pdc-free-agency-spec.md.
+    # `fac`/`fac_head` gate free-agency review on pdc.nbn.today; `poext`/
+    # `poext_head` are the player-option/extension committee's equivalents,
+    # reserved now so membership can be granted before that side is built.
+    "fac", "fac_head", "poext", "poext_head",
+} | {t.lower() for t in VALID_TEAMS}
 
 # Roles that are implicitly granted by holding another role
 ROLE_IMPLIES: dict[str, set[str]] = {
     "bod": {"rosters", "curator"},
+    # A committee head is also a member of their own committee, and of no other.
+    # `bod` deliberately does NOT imply `fac` — sub-committee membership is a
+    # specific per-player assignment, and a board-wide implication would put
+    # every board member on every ballot roster.
+    "fac_head": {"fac"},
+    "poext_head": {"poext"},
 }
 
 CURATOR_FIELDS = {
