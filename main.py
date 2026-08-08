@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import auth, players, roster_picks, transactions, boxscores, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, discord, trade_finder, picks_preview, suggestions, google_sheets
+from routers import auth, players, roster_picks, transactions, boxscores, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, discord, trade_finder, picks_preview, suggestions, google_sheets, free_agency
 from routers.picks_scheduler import start_picks_horizon_scheduler
 
 logging.basicConfig(
@@ -53,3 +53,4 @@ app.include_router(discord.router)
 app.include_router(trade_finder.router)
 app.include_router(suggestions.router)
 app.include_router(google_sheets.router)   # POST /api/trade-sheet — publish a workbook to Drive
+app.include_router(free_agency.router)     # GET /api/fa/pool — PDC free-agency Phase 1 (nbn-today/docs/pdc-free-agency-spec.md)
