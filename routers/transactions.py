@@ -1791,8 +1791,13 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
     # even though the trade is perfectly legal under standard § 4.2 tiered
     # matching. Skips teams whose incoming salary used an exception (NTMLE/
     # TMLE/BAE/TPE) — those already carry their own dedicated hard-cap trigger
-    # above and shouldn't double up on a plain-trade reason string.
+    # above and shouldn't double up on a plain-trade reason string — and skips
+    # teams whose incoming salary was genuinely absorbed via cap room (§ 4.2):
+    # a plain cap-space acquisition never touches the apron in real NBA rules
+    # either, so it gets the same carve-out as the named exceptions rather
+    # than being treated as "ordinary matching that happened to clear."
     apron1 = _cap_levels.get(cur_season, {}).get("apron1")
+    cap = _cap_levels.get(cur_season, {}).get("cap")
     apron1_contagion_teams = []
     if apron1 is not None:
         exception_teams = {t.upper() for t in (details.exceptions or {})} | {t.upper() for t in (details.tpe_usage or {})}
@@ -1810,6 +1815,10 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
             # already-above and escapes the contagion lock entirely.
             post = _compute_team_salary_ex_holds(team, _validation_bios, cur_season)
             if post + out - inc < apron1:
+                post_with_holds = _compute_team_salary(team, _validation_bios, cur_season)
+                before_with_holds = post_with_holds + out - inc
+                if _cap_room_absorbed(before_with_holds, out, inc, cap):
+                    continue
                 apron1_contagion_teams.append(team)
 
     if apron1_contagion_teams:
@@ -3460,6 +3469,20 @@ def _check_exception_absorption(
     )
 
 
+def _cap_room_absorbed(team_salary_before: int, outgoing: int, incoming: int, cap: Optional[int]) -> bool:
+    """§ 4.2 cap-room absorption: true when `incoming` can be covered purely by
+    the team's own room under the Salary Cap, with no salary match required.
+
+    Shared by `_check_salary_matching` and the § 4.3/§ 4.3 contagion checks —
+    a trade genuinely funded this way carries no apron consequence, matching
+    real NBA behavior: a cap-room acquisition never touches the apron, only
+    the named exceptions (NTMLE/TMLE/BAE) and over-the-cap tiered matching do.
+    """
+    if cap is None or team_salary_before >= cap:
+        return False
+    return team_salary_before - outgoing + incoming <= cap
+
+
 def _check_salary_matching(
     team: str,
     outgoing: int,
@@ -3494,18 +3517,17 @@ def _check_salary_matching(
     # more than it takes back (§ 4.1a): the room already absorbs the
     # difference, so this path and a banked TPE are mutually exclusive.
     cap = cl.get("cap")
-    if cap is not None and team_salary_before < cap:
+    if _cap_room_absorbed(team_salary_before, outgoing, incoming, cap):
         projected = team_salary_before - outgoing + incoming
-        if projected <= cap:
-            return CheckResult(
-                check=f"salary_matching_{team.lower()}",
-                passed=True,
-                message=(
-                    f"{team} is below the Cap (${team_salary_before:,} < ${cap:,}) and stays "
-                    f"at/below it after the trade (${projected:,}) — absorbed via cap room, "
-                    "no salary match required."
-                ),
-            )
+        return CheckResult(
+            check=f"salary_matching_{team.lower()}",
+            passed=True,
+            message=(
+                f"{team} is below the Cap (${team_salary_before:,} < ${cap:,}) and stays "
+                f"at/below it after the trade (${projected:,}) — absorbed via cap room, "
+                "no salary match required."
+            ),
+        )
 
     if ex_holds >= apron1:
         limit = outgoing + 250_000
@@ -4661,10 +4683,16 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
                 # season once submitted. Mirrors the § 4.4 aggregation
                 # warning below, one apron tier up and without the 2+-leg
                 # requirement. Doesn't apply when an exception funded the
-                # acquisition — that path has its own dedicated trigger.
+                # acquisition — that path has its own dedicated trigger — nor
+                # when the incoming salary was genuinely absorbed via cap room
+                # (§ 4.2): real NBA cap-room acquisitions never touch the
+                # apron either, so a clean room-based trade gets the same
+                # carve-out as the named exceptions.
                 if not exc_type and not split_err and (sm is None or sm.passed):
                     apron1 = ctx["cap_levels"].get(season, {}).get("apron1")
-                    if apron1 is not None and current_ex_holds < apron1 and inc > match_out + 250_000:
+                    cap = ctx["cap_levels"].get(season, {}).get("cap")
+                    if (apron1 is not None and current_ex_holds < apron1 and inc > match_out + 250_000
+                            and not _cap_room_absorbed(current, match_out, inc, cap)):
                         over = inc - match_out - 250_000
                         checks.append(CheckResult(
                             check=f"apron1_contagion_{team.lower()}", passed=False, level="warning",
