@@ -499,8 +499,11 @@ def get_board():
     for slug in pool:
         entry = _player_entry(state, slug)
         accepting, reason = _accepts_offers(state, slug, pool)
-        if not (accepting or entry):
-            continue
+        # Every pool player is listed, including the ones taking no offers.
+        # `reason` is the exact copy § 8.1 puts in the team's disabled ⋯-menu
+        # entry, so omitting the closed players would force /free-agency to
+        # reinvent those strings client-side and the two would drift. The pool
+        # itself is already public, so listing it with a status leaks nothing.
         players[slug] = {
             "status": entry.get("status", "closed"),
             "round_id": entry.get("round_id"),
@@ -923,7 +926,7 @@ def remand_offer(offer_id: str, body: RemandIn, info: dict = Depends(get_token_i
 
 # ── review ────────────────────────────────────────────────────────────────────
 
-def _team_commitment(team: str, slug: str, offers: list[dict], ctx: dict) -> dict:
+def _team_commitment(team: str, offers: list[dict], ctx: dict) -> dict:
     """§ 5.3. A pending FA offer holds no cap room — unlike a § 3.15 offer sheet,
     it is a pitch, not an executed instrument. Nothing therefore stops a team
     submitting five max offers it could fund once, so the exposure is disclosed
@@ -953,8 +956,34 @@ def _team_commitment(team: str, slug: str, offers: list[dict], ctx: dict) -> dic
         "live_offers": len(live),
         "committed_year1": committed,
         "room": room,
-        "overcommitted": bool(room is not None and committed > room),
+        # Overcommitted means *bidding* more than you can fund. A team with
+        # nothing out is not overcommitted no matter how far over the cap it
+        # sits — `committed > room` alone flagged every over-cap team with zero
+        # offers, which on the team's own form (§ 8.1) reads as a false alarm on
+        # a page that hasn't been used yet. Negative room floors at zero: a team
+        # with no room that bids anything at all is exposed by that amount.
+        "overcommitted": bool(committed > 0 and room is not None and committed > max(room, 0)),
     }
+
+
+@router.get("/api/fa/commitment/{team}")
+def get_commitment(team: str, info: dict = Depends(get_token_info)):
+    """§ 5.3, team side — what this team has already bid against what it can fund.
+
+    The same `_team_commitment` the review page renders for the committee, served
+    to the team drafting the offer, so the figure the owner sees on their own
+    form and the figure the FAC sees are one computation. A second one here
+    would be the disclosure disagreeing with itself.
+
+    Team-role gated rather than owner-gated: a GM drafting the offer needs the
+    exposure in front of them, and this is the team's own position, not another
+    team's.
+    """
+    team = team.upper()
+    if team not in VALID_TEAMS:
+        raise HTTPException(400, f"Unknown team '{team}'")
+    _require_team_role(info, team)
+    return _team_commitment(team, _load_offers(), _validation_ctx())
 
 
 @router.get("/api/fa/players/{slug}/review")
@@ -997,7 +1026,7 @@ def review_player(slug: str, info: dict = Depends(get_token_info)):
         "pool": pool[slug],
         "state": {**entry, "ffa_expired": _ffa_expired(entry)},
         "offers": rendered,
-        "commitments": {t: _team_commitment(t, slug, offers, ctx) for t in teams},
+        "commitments": {t: _team_commitment(t, offers, ctx) for t in teams},
         "ballot_options": _ballot_options(slug, live, pool),
         "assignable": _assignable(slug, offers) if _is_head(info) else [],
     }

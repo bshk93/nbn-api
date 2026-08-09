@@ -280,6 +280,26 @@ check("per-team exposure is disclosed rather than blocked (§ 5.3, D6)",
       and rv["commitments"]["PHX"]["room"] == 35_000_000
       and rv["commitments"]["PHX"]["overcommitted"] is True)
 
+# The team's own form shows the same exposure the committee is shown (§ 8.1.5).
+# Same helper, same numbers — a second computation here would be the disclosure
+# disagreeing with itself.
+check("the team side reads the identical figure off the identical helper",
+      fa.get_commitment("phx", PHX_GM) == rv["commitments"]["PHX"])
+# Overcommitted means bidding more than you can fund. A team with nothing out is
+# never overcommitted, however far over the cap it sits — otherwise the team's
+# own form (§ 8.1) opens shouting at a team that hasn't bid on anybody.
+_salary = fa._compute_team_salary
+fa._compute_team_salary = lambda team, bios, season: 300_000_000   # deep over the cap
+check("a team over the cap with nothing out is not overcommitted",
+      fa._team_commitment("LAL", OFFERS, fa._validation_ctx())["overcommitted"] is False)
+check("…but it is the moment it bids anything at all",
+      fa._team_commitment("PHX", OFFERS, fa._validation_ctx())["overcommitted"] is True)
+fa._compute_team_salary = _salary
+raises("another team's exposure isn't readable", 403,
+       lambda: fa.get_commitment("PHX", BKN_OWNER))
+raises("unknown team rejected rather than scored as $0", 400,
+       lambda: fa.get_commitment("ZZZ", PHX_GM))
+
 LEGAL["legal"] = False
 rv_illegal = fa.review_player("curry-stephen", MEM_A)
 check("an offer that went illegal after submission is badged, not hidden (§ 4.3 #2)",
@@ -459,6 +479,16 @@ check("but it does carry the FFA deadline the league needs to act on",
       board["players"]["curry-stephen"]["ffa_deadline"] == past)
 check("and says why a player isn't accepting",
       board["players"]["curry-stephen"]["accepting"] is False)
+# Phase 7's ⋯ menu renders `reason` verbatim as its disabled copy. Listing only
+# the accepting players would make /free-agency reinvent those strings, and the
+# two explanations would drift.
+check("every pool player is listed, taking offers or not",
+      set(board["players"]) == set(POOL))
+check("…a closed one carrying the reason the team's menu shows",
+      "24-hour" in board["players"]["curry-stephen"]["reason"])
+check("…and an open one carrying none",
+      board["players"]["young-rfa"]["accepting"] is True
+      and board["players"]["young-rfa"]["reason"] is None)
 
 state_view = fa.get_state(MEM_A)
 check("the committee view adds the sub-committee the board withholds",
