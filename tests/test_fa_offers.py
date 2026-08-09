@@ -69,6 +69,11 @@ POOL = {
                       "prior_salary": 50_000_000, "rfa": False, "qo_amount": None},
     "young-rfa":     {"class_year": "26-27", "hold_type": "RFA",
                       "prior_salary": 4_000_000, "rfa": True, "qo_amount": 5_000_000},
+    # Under contract for two more years. `_fa_pool` spans future league years by
+    # design — /free-agency's year chips are built from it — so most of the real
+    # pool looks like this: 361 of 570 entries on the day this was added.
+    "future-ufa":    {"class_year": "28-29", "hold_type": "UFA",
+                      "prior_salary": 20_000_000, "rfa": False, "qo_amount": None},
 }
 
 MEMBERS = {"facHead": {"roles": ["fac_head"]}, "memberA": {"roles": ["fac"]},
@@ -93,6 +98,7 @@ fa._save_offers = lambda o: None
 fa._load_ballots = lambda: BALLOTS
 fa._save_ballots = lambda b: None
 fa._live_pool = lambda: POOL
+fa._current_league_year = lambda: "26-27"
 fa.load_members = lambda: MEMBERS
 fa.log_write = lambda info, msg: None
 fa._member_current_team = lambda name, members=None: CURRENT_TEAM.get(name)
@@ -408,6 +414,20 @@ OFFERS[:] = [o for o in OFFERS if o["player"] != "curry-stephen"]
 
 check("in FFA every pool player is offerable regardless of status",
       fa._accepts_offers(STATE, "curry-stephen", POOL)[0] is True)
+
+# The pool spans future league years — it is what /free-agency's year chips are
+# built from — so "every player in the pool" would otherwise offer a contract to
+# someone under contract for two more seasons. This is the one place the bug
+# bites hardest, because FFA has no per-player gate to catch it.
+ok, why = fa._accepts_offers(STATE, "future-ufa", POOL)
+check("…but not one who hasn't reached free agency yet", ok is False)
+check("…and the refusal says when he does", "28-29" in why)
+raises("no offer on a player still under contract, even in FFA", 422,
+       lambda: make_offer(PHX_OWNER, player="future-ufa"))
+raises("and the head can't open him for offers either", 422,
+       lambda: fa.set_player_state("future-ufa", fa.PlayerStateIn(status="open"), HEAD))
+check("an unresolved hold from an older class is still a free agent",
+      fa._is_current_fa({"class_year": "25-26"}, "26-27") is True)
 
 f1 = make_offer(PHX_OWNER)
 check("a draft does not start the clock",

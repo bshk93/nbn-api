@@ -230,14 +230,39 @@ def _player_entry(state: dict, slug: str) -> dict:
     return state["players"].get(slug) or {}
 
 
-def _accepts_offers(state: dict, slug: str, pool: dict) -> tuple[bool, str]:
+def _is_current_fa(entry: dict, season: str) -> bool:
+    """Whether this pool entry is a free agent *this* league year.
+
+    `_fa_pool` returns every player with an actionable cap hold on file, keyed by
+    the earliest year that hold lands — so it spans future league years by
+    design: it is what `/free-agency`'s year chips are built from, and 26-27's
+    tab sitting beside 29-30's is the point of that page.
+
+    It is *not* the set of players who can be signed. Most of the pool is under
+    contract; only the earliest class has actually reached free agency. `<=`
+    rather than `==` because a hold that was never resolved leaves a player in an
+    older class while they are still, plainly, a free agent.
+    """
+    return (entry.get("class_year") or "") <= season
+
+
+def _accepts_offers(state: dict, slug: str, pool: dict,
+                    season: Optional[str] = None) -> tuple[bool, str]:
     """Whether `slug` accepts a *new* offer right now, and the reason if not.
 
     The reason strings are the ones § 8.1 shows in the disabled ⋯-menu entry, so
-    the API and the eventual UI can't drift into explaining this differently.
+    the API and the UI can't drift into explaining this differently.
     """
     if slug not in pool:
         return False, "This player isn't a free agent."
+    # Checked before the mode, because it is a fact about the player rather than
+    # about the board, and it is the more useful of the two things to be told.
+    # Without it, FFA mode ("every player in the pool is offerable") would offer
+    # a contract to someone under contract for three more years.
+    season = season if season is not None else _current_league_year()
+    if not _is_current_fa(pool[slug], season):
+        return False, (f"This player doesn't reach free agency until "
+                       f"{pool[slug].get('class_year')} — he's under contract for {season}.")
     mode = state["mode"]
     if mode == "closed":
         return False, "Free agency is closed."
@@ -603,6 +628,14 @@ def set_player_state(slug: str, body: PlayerStateIn,
     pool = _live_pool()
     if slug not in pool:
         raise HTTPException(400, f"'{slug}' is not in the free-agent pool")
+    season = _current_league_year()
+    if not _is_current_fa(pool[slug], season):
+        # The head can't open a player who hasn't reached free agency either.
+        # `_accepts_offers` would refuse every offer on them anyway, so opening
+        # one only produces a player sitting on the board that no team can bid
+        # on — and a sub-committee with nothing to review.
+        raise HTTPException(422, f"'{slug}' doesn't reach free agency until "
+                                 f"{pool[slug].get('class_year')} — the current league year is {season}")
     with _fa_lock:
         state = _load_state()
         offers = _load_offers()
