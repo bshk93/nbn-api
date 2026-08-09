@@ -81,6 +81,29 @@ def _qo_amount(bio: dict, class_year: str, prior_salary: int, cap_levels: dict) 
     return max(candidates) if candidates else None
 
 
+def _is_current_fa(entry: dict, season: str) -> bool:
+    """Whether this pool entry is a free agent *this* league year.
+
+    `_fa_pool` returns every player with an actionable cap hold on file, keyed by
+    the earliest year that hold lands — so it spans future league years by
+    design: it is what `/free-agency`'s year chips are built from, and 26-27's
+    tab sitting beside 29-30's is the point of that page.
+
+    It is *not* the set of players who can be signed. Most of the pool is under
+    contract; only the earliest class has actually reached free agency. `<=`
+    rather than `==` because a hold that was never resolved leaves a player in an
+    older class while they are still, plainly, a free agent.
+
+    RENOUNCED and UNSIGNED are current whatever their class year says. They have
+    no cap hold at all — that is what put them in those buckets — so they are
+    signable right now, and their `class_year` is only the bucket `_fa_pool`
+    filed them under (the pool's earliest class), not a date they are waiting on.
+    """
+    if entry.get("hold_type") in ("RENOUNCED", "UNSIGNED"):
+        return True
+    return (entry.get("class_year") or "") <= season
+
+
 def _fa_pool(bios: dict, team_map: dict, season: str, cap_levels: Optional[dict] = None) -> dict:
     """The free-agent pool: `{slug: {class_year, hold_type, prior_salary, rfa, qo_amount}}`.
 
@@ -137,6 +160,13 @@ def _fa_pool(bios: dict, team_map: dict, season: str, cap_levels: Optional[dict]
             "class_year": target_year, "hold_type": "UNSIGNED",
             "prior_salary": 0, "rfa": False, "qo_amount": None,
         }
+
+    # Stamped here so no caller has to re-derive it. Every picker and menu that
+    # asks "who can actually be signed" reads this one field, computed by the
+    # same helper `_accepts_offers` gates on — the § 6.3 rule, applied to the
+    # rule that most needed it.
+    for entry in pool.values():
+        entry["current"] = _is_current_fa(entry, season)
 
     return pool
 
@@ -228,22 +258,6 @@ def _ffa_expired(entry: dict, now: Optional[datetime] = None) -> bool:
 
 def _player_entry(state: dict, slug: str) -> dict:
     return state["players"].get(slug) or {}
-
-
-def _is_current_fa(entry: dict, season: str) -> bool:
-    """Whether this pool entry is a free agent *this* league year.
-
-    `_fa_pool` returns every player with an actionable cap hold on file, keyed by
-    the earliest year that hold lands — so it spans future league years by
-    design: it is what `/free-agency`'s year chips are built from, and 26-27's
-    tab sitting beside 29-30's is the point of that page.
-
-    It is *not* the set of players who can be signed. Most of the pool is under
-    contract; only the earliest class has actually reached free agency. `<=`
-    rather than `==` because a hold that was never resolved leaves a player in an
-    older class while they are still, plainly, a free agent.
-    """
-    return (entry.get("class_year") or "") <= season
 
 
 def _accepts_offers(state: dict, slug: str, pool: dict,

@@ -121,6 +121,39 @@ def main():
           pool["renounced-guy"]["class_year"] == "26-27"
           and pool["unsigned-guy"]["class_year"] == "26-27")
 
+    # The pool spans future league years by design — /free-agency's year chips
+    # are built from it — so it answers "who has a hold on file", never "who can
+    # be signed today". `current` is that second question, stamped once here so
+    # no picker or menu re-derives it (§ 4.1).
+    print("\n`current`: who has actually reached free agency")
+    for slug, entry in pool.items():
+        expect = entry["hold_type"] in ("RENOUNCED", "UNSIGNED") or entry["class_year"] <= "26-27"
+        if entry["current"] is not expect:
+            check(f"{slug}: current flag matches class year", False)
+    check("every entry carries the flag", all("current" in e for e in pool.values()))
+    check("a hold landing in a later league year is not current",
+          all(e["current"] is False for e in pool.values()
+              if e["class_year"] > "26-27" and e["hold_type"] not in ("RENOUNCED", "UNSIGNED")))
+    check("renounced is current — no cap hold at all, signable now",
+          pool["renounced-guy"]["current"] is True)
+    check("unsigned likewise", pool["unsigned-guy"]["current"] is True)
+
+    # Renounced/unsigned are filed under the pool's earliest class year, which is
+    # a bucket rather than a date they are waiting on. If every real hold landed
+    # in a future year, a class-year test alone would call them "not yet free
+    # agents" — which inverts the truth for the one group that has no hold.
+    future_only = {
+        "future-hold": {"type": "player", "cap_holds": {"29-30": "UFA"},
+                        "salaries": {"29-30": "$5,000,000"}},
+        "renounced-now": {"type": "", "cap_holds": {}, "salaries": {"25-26": "$2,000,000"}},
+    }
+    pool3 = _fa_pool(future_only, {}, "26-27", CAP_LEVELS)
+    check("a renounced player stays current even when bucketed to a future year",
+          pool3["renounced-now"]["class_year"] == "29-30"
+          and pool3["renounced-now"]["current"] is True)
+    check("…while the future hold beside him is not",
+          pool3["future-hold"]["current"] is False)
+
     print("\nFallback bucket year when no actionable holds exist at all")
     only_renounced = {
         "solo-renounced": {"type": "", "cap_holds": {}, "salaries": {"25-26": "$1,000,000"}},
