@@ -113,9 +113,19 @@ def _contract_parts(contract: dict) -> tuple[list[tuple[str, str, Optional[str]]
 def _contract_str(contract: dict) -> str:
     """Headline shape: guaranteed years, then option/non-guaranteed runs, then
     total — "2+1 PO · $25.0M"."""
-    deal, _ = _contract_parts(contract)
+    deal, trailing = _contract_parts(contract)
     if not deal:
-        return "Two-Way" if (contract or {}).get("type") == "two-way" else ""
+        if (contract or {}).get("type") == "two-way":
+            return "Two-Way"
+        if trailing:
+            # Nothing but a cap hold. A signing always has real years so this is
+            # rare here, but the roster page's summarizeContract renders it and
+            # a blank line reads as "no contract found" rather than "hold only".
+            _y, kind, amt = trailing
+            val = _dollars(amt)
+            # Placeholder holds carry a nominal $1 — worth hiding, not showing.
+            return f"{kind} hold · ${val / 1e6:.1f}M" if val >= 1000 else f"{kind} hold"
+        return ""
 
     base = 0
     while base < len(deal) and not deal[base][2]:

@@ -5762,10 +5762,19 @@ def self_renounce(body: SelfRenounceIn, info: dict = Depends(get_token_info)):
 
 @router.post("/api/validate/offer_sheet")
 def validate_offer_sheet(body: OfferSheetDetails):
-    """Non-mutating check of an RFA offer sheet (§ 3.15). Resolved against
-    whichever team the outcome actually signs the player to — the retaining
-    team on a match, the offering team otherwise. Non-mutating on the same
-    terms as `/api/validate/sign`."""
+    """Non-mutating check of an RFA offer sheet being *extended* (§ 3.15).
+
+    Judged against the **offering** team, matching `_validate_offer_sheet`:
+    at offer time the incumbent hasn't decided, and the offering team is the
+    one committing the money and carrying the pending hold. The incumbent's
+    side is judged separately by `/api/validate/offer_sheet_decision`.
+
+    This endpoint used to read `body.outcome`, left over from the era when an
+    offer and its decision were one transaction. `OfferSheetDetails` dropped
+    that field in the split, so every call raised AttributeError and returned
+    500 — the simulator's offer-sheet mode included. Non-mutating on the same
+    terms as `/api/validate/sign`.
+    """
     ctx = _validation_ctx()
     _require_validatable(body.offering_team, body.player, ctx)
     resolved = _offer_sheet_signing_team(body)
@@ -5790,15 +5799,15 @@ def validate_offer_sheet(body: OfferSheetDetails):
         signing_method=body.signing_method,
         bird_rights_type=body.bird_rights_type,
         eaps_assumption=body.eaps_assumption,
-        # A match keeps the player on a roster spot they already occupy; only a
-        # non-match adds a new standard-contract body (mirrors the roster_size
-        # branch in _validate_offer_sheet).
-        adds_roster_spot=(body.outcome == "not_matched"),
+        # Mirrors the roster_size branch in _validate_offer_sheet, which counts
+        # the body unconditionally: a team shouldn't extend an offer it has no
+        # room to honour, and the incumbent's choice can't create room. The
+        # fact sheet has to agree with the validator, not second-guess it.
+        adds_roster_spot=True,
     )
     fact_sheet.update({
-        "outcome": body.outcome,
         "offering_team": body.offering_team.upper(),
         "retaining_team": retaining_team,
-        "signing_team_role": "retaining (matched)" if body.outcome == "matched" else "offering (not matched)",
+        "signing_team_role": "offering — pending the incumbent's decision",
     })
     return _validation_result(_validate_offer_sheet(body, ctx), fact_sheet)
