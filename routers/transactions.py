@@ -5500,6 +5500,27 @@ def _require_validatable(team: str, player: str, ctx: dict) -> None:
         raise HTTPException(400, f"Unknown player '{player}'.")
 
 
+def _require_trade_validatable(body: "TradeValidateInput", ctx: dict) -> None:
+    """The same guard for a trade, which has many teams and many players
+    instead of one of each.
+
+    `/api/validate/trade` had no guard at all, so an unknown team was scored
+    rather than refused: it reported "ZZZ: projected salary $13,738,093 within
+    hard-cap limits" and "ZZZ: -1 standard players after trade (max 15)" —
+    both *passing* — off a roster count that had gone negative. Every check
+    that team touches passes vacuously, so a trade whose salaries happened to
+    match would have come back a confident LEGAL for a transaction involving a
+    team that does not exist.
+    """
+    for tr in body.transfers:
+        for team in (tr.from_team, tr.to_team):
+            if (team or "").upper() not in VALID_TEAMS:
+                raise HTTPException(400, f"Unknown team '{team}'.")
+        for asset in tr.assets:
+            if asset.type == "player" and asset.slug not in ctx["bios"]:
+                raise HTTPException(400, f"Unknown player '{asset.slug}'.")
+
+
 def _signing_fact_sheet(team: str, player: str, contract, ctx: dict, *,
                         signing_method: Optional[str],
                         bird_rights_type: Optional[str] = None,
@@ -5600,6 +5621,7 @@ def _signing_fact_sheet(team: str, player: str, contract, ctx: dict, *,
 @router.post("/api/validate/trade")
 def validate_trade(body: TradeValidateInput):
     ctx = _validation_ctx()
+    _require_trade_validatable(body, ctx)
     return _validation_result(_validate_trade(body, ctx), _trade_fact_sheet(body, ctx))
 
 
