@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi import HTTPException  # noqa: E402
 from routers.transactions import (  # noqa: E402
     _compute_fa_hold_amount, _derive_bird_tier, _autofill_fa_hold_amounts,
+    _preview_fa_hold,
 )
 
 FAILS = []
@@ -117,6 +118,45 @@ def main():
     check("29-30 auto-filled to $24,822,600", bio["salaries"].get("29-30") == "$24,822,600")
     check("28-29 (PLAYER_OPT, already priced) left untouched", bio["salaries"]["28-29"] == "$16,548,400")
     check("29-30 noted as a placeholder", "29-30" in notes)
+
+    print("\n_preview_fa_hold — the same figure, before anything is applied")
+
+    class _C:
+        def __init__(self, salaries, cap_holds, type_="player"):
+            self.salaries, self.cap_holds, self.type = salaries, cap_holds, type_
+
+    base_bio = {
+        "salaries": {"25-26": "$14,000,000"},
+        "contracts": [{"team": "TOR", "salaries": {"23-24": "$1", "24-25": "$1", "25-26": "$1"}}],
+    }
+    contract = _C({"26-27": "$15,044,000", "27-28": "$15,796,200", "28-29": "$16,548,400"},
+                  {"28-29": "PLAYER_OPT", "29-30": "UFA"})
+    h = _preview_fa_hold(base_bio, "TOR", contract, CAP_LEVELS,
+                         bird_rights_type="QVFA", eaps_assumption="above")
+    check("prices the trailing hold to the same $24,822,600", h["amount"] == 24822600)
+    check("names the hold's season and type", (h["season"], h["type"]) == ("29-30", "UFA"))
+    check("bases it on the deal's own final year", h["prior_salary"] == 16548400)
+    # The whole point of the preview: it must not write anything, because the
+    # simulator and the offer form call it on every keystroke.
+    check("leaves the bio untouched", base_bio["salaries"] == {"25-26": "$14,000,000"})
+
+    h2 = _preview_fa_hold(base_bio, "TOR", contract, CAP_LEVELS, bird_rights_type="QVFA")
+    check("no EAPS assumption reports needs_eaps instead of raising",
+          h2["needs_eaps"] is True and h2["amount"] is None)
+
+    check("no trailing hold -> None",
+          _preview_fa_hold(base_bio, "TOR", _C({"26-27": "$5,000,000"}, {}), CAP_LEVELS) is None)
+
+    # A hold the submitter priced by hand is theirs to keep — same carve-out
+    # _autofill_fa_hold_amounts makes for an explicitly-salaried hold season.
+    check("an explicitly priced hold season isn't second-guessed",
+          _preview_fa_hold(base_bio, "TOR",
+                           _C({"26-27": "$5,000,000", "27-28": "$9,000,000"}, {"27-28": "UFA"}),
+                           CAP_LEVELS) is None)
+
+    no_history = _preview_fa_hold({}, "TOR", _C({}, {"27-28": "UFA"}), CAP_LEVELS)
+    check("nothing to price off -> explains itself, doesn't raise",
+          no_history["amount"] is None and no_history["note"])
 
     print("\n" + ("=" * 40))
     if FAILS:

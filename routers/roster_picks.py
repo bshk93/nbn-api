@@ -529,6 +529,8 @@ def get_season_state(state: dict, team: str, season: str) -> dict:
 
 
 def _bae_available(state: dict, team: str, cur_season: str) -> bool:
+    if state.get(team, {}).get(cur_season, {}).get("bae_used", False):
+        return False
     seasons = sorted(state.get(team, {}).keys())
     prior = [s for s in seasons if s < cur_season]
     if not prior:

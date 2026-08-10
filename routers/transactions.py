@@ -1999,6 +1999,33 @@ def _count_standard_roster(team: str) -> int:
     )
 
 
+def _roster_size_check(team: str, after: int, verb: str) -> "CheckResult | None":
+    """§ 2.1 roster-size ceiling, in the same offseason-aware shape the trade
+    validator uses (`_validate_trade`'s "Roster size" block): ≤15 passes,
+    16-20 is a warning (legal, but flagged to trim before the season), and
+    only >20 is a hard block. Signing-side validators (`_validate_sign`,
+    `_validate_offer_sheet`, `_validate_offer_sheet_decision`,
+    `_validate_convert_twoway`) used to hard-block at 15 unconditionally,
+    which meant a team sitting at exactly the in-season limit couldn't even
+    make an offseason FA offer — inconsistent with what a trade adding the
+    same body would allow.
+    """
+    if after > ROSTER_OFFSEASON_MAX:
+        return CheckResult(
+            check="roster_size", passed=False, level="error",
+            message=(f"{team} would carry {after} standard players, over the "
+                     f"{ROSTER_OFFSEASON_MAX}-player offseason maximum — release a player before {verb}."),
+        )
+    if after > ROSTER_MAX:
+        return CheckResult(
+            check="roster_size", passed=False, level="warning",
+            message=(f"{team} would carry {after} standard players — over the {ROSTER_MAX}-man "
+                     f"regular-season limit (offseason ceiling {ROSTER_OFFSEASON_MAX}); trim to "
+                     f"{ROSTER_MAX} before the season."),
+        )
+    return None
+
+
 def _rookie_min_salary(season: str, cap_levels: dict) -> int:
     """The 0-years-experience tier of that season's minimum salary scale
     (§ 1.7) — the figure an Empty Roster Charge (§ 2.1a) uses per open slot."""
@@ -2569,6 +2596,58 @@ def _autofill_fa_hold_amounts(
             notes[season] = note
     bio["salaries"] = salaries
     return notes
+
+
+def _preview_fa_hold(
+    bio: dict,
+    team: str,
+    contract,
+    cap_levels: dict,
+    bird_rights_type: Optional[str] = None,
+    eaps_assumption: Optional[str] = None,
+    slug: Optional[str] = None,
+) -> Optional[dict]:
+    """Price the § 3.10 trailing free-agent hold a *proposed* contract rolls
+    into, without applying anything — so a team building a deal can watch the
+    figure move instead of being told the office will work it out later.
+
+    Runs `_autofill_fa_hold_amounts` against a throwaway copy of the bio with
+    the proposed salaries merged in, so the previewed number comes from the
+    exact code path that will write it at signing time rather than a parallel
+    reimplementation. Returns None when the contract carries no trailing hold.
+
+    Never raises: `_compute_fa_hold_amount` 422s on a Full Bird hold whose
+    season has no EAPS on file and no assumption supplied, which is a normal
+    intermediate state in a form that revalidates on every keystroke. That
+    becomes `needs_eaps`, not a failed request.
+    """
+    explicit = contract.salaries or {}
+    holds = {s: t for s, t in (contract.cap_holds or {}).items()
+             if t in ("UFA", "RFA") and s not in explicit}
+    if not holds:
+        return None
+    season = sorted(holds)[0]
+    tier = bird_rights_type or _derive_bird_tier(bio, team, season, slug)
+    out = {"season": season, "type": holds[season], "bird_tier": tier,
+           "amount": None, "needs_eaps": False, "note": None}
+
+    probe = {**bio, "salaries": {**(bio.get("salaries") or {}), **explicit}}
+    out["prior_salary"] = _parse_dollar(probe["salaries"].get(_season_shift(season, -1), "")) or None
+    if not out["prior_salary"]:
+        out["note"] = (f"no {_season_shift(season, -1)} salary on file to base the hold on "
+                       "— the office will price it by hand")
+        return out
+    try:
+        notes = _autofill_fa_hold_amounts(
+            probe, team, {season: holds[season]}, explicit, cap_levels,
+            bird_rights_type=bird_rights_type, eaps_assumption=eaps_assumption, slug=slug,
+        )
+    except HTTPException:
+        out["needs_eaps"] = True
+        return out
+    out["amount"] = _parse_dollar(probe["salaries"].get(season, "")) or None
+    out["note"] = notes.get(season)
+    return out
 
 
 def _one_year_min_cap_hit(bio: dict, season: str, cap_levels: dict) -> Optional[int]:
@@ -3662,17 +3741,9 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
             ))
 
     if details.contract.type != "two-way":
-        count = _count_standard_roster(team)
-        if count >= ROSTER_MAX:
-            checks.append(CheckResult(
-                check="roster_size",
-                passed=False,
-                level="error",
-                message=(
-                    f"{team} already has {count} standard players (max {ROSTER_MAX}); "
-                    f"release a player before signing."
-                ),
-            ))
+        r = _roster_size_check(team, _count_standard_roster(team) + 1, "signing")
+        if r:
+            checks.append(r)
 
     # § 3.8. Runs before the raise check below, because declaring a Bird tier
     # is what unlocks the 8% raise ceiling — an unsupported declaration buys
@@ -4214,17 +4285,10 @@ def _validate_offer_sheet(details: OfferSheetDetails, ctx: dict) -> list[CheckRe
         # If the incumbent passes, this adds a body to the offering team. Judged
         # now rather than at decision time: a team shouldn't extend an offer it
         # has no room to honour, and the incumbent's choice can't create room.
-        count = _count_standard_roster(team)
-        if count >= ROSTER_MAX:
-            checks.append(CheckResult(
-                check="roster_size",
-                passed=False,
-                level="error",
-                message=(
-                    f"{team} already has {count} standard players (max {ROSTER_MAX}); "
-                    f"release a player before extending an offer sheet they'd have to honour."
-                ),
-            ))
+        r = _roster_size_check(team, _count_standard_roster(team) + 1,
+                               "extending an offer sheet they'd have to honour")
+        if r:
+            checks.append(r)
 
     return checks
 
@@ -4269,13 +4333,9 @@ def _validate_offer_sheet_decision(details: OfferSheetDecisionDetails, ctx: dict
             checks.append(r)
 
     if details.outcome == "not_matched" and (contract.get("type") != "two-way"):
-        count = _count_standard_roster(team)
-        if count >= ROSTER_MAX:
-            checks.append(CheckResult(
-                check="roster_size", passed=False, level="error",
-                message=(f"{team} has {count} standard players (max {ROSTER_MAX}) and would have to "
-                         f"add this player — release someone first."),
-            ))
+        r = _roster_size_check(team, _count_standard_roster(team) + 1, "adding this player")
+        if r:
+            checks.append(r)
 
     if not checks:
         who = (bios.get(offer["player"]) or {}).get("name") or offer["player"]
@@ -4976,17 +5036,10 @@ def _validate_convert_twoway(details: ConvertTwoWayDetails, ctx: dict) -> list[C
             checks.append(r)
 
     if team:
-        count = _count_standard_roster(team)
-        if count >= ROSTER_MAX:
-            checks.append(CheckResult(
-                check="roster_size",
-                passed=False,
-                level="error",
-                message=(
-                    f"{team} already has {count} standard players (max {ROSTER_MAX}); "
-                    f"release a player before converting this two-way contract."
-                ),
-            ))
+        r = _roster_size_check(team, _count_standard_roster(team) + 1,
+                               "converting this two-way contract")
+        if r:
+            checks.append(r)
 
     r = _check_contract_raises(details.contract, bird_pct=False, cur_season=season)
     if r:
@@ -5450,6 +5503,7 @@ def _require_validatable(team: str, player: str, ctx: dict) -> None:
 def _signing_fact_sheet(team: str, player: str, contract, ctx: dict, *,
                         signing_method: Optional[str],
                         bird_rights_type: Optional[str] = None,
+                        eaps_assumption: Optional[str] = None,
                         adds_roster_spot: bool = True) -> dict:
     """Financial snapshot for a signing, rendered by the simulator alongside
     the checks. Every figure here is produced by the same helpers
@@ -5506,6 +5560,12 @@ def _signing_fact_sheet(team: str, player: str, contract, ctx: dict, *,
     is_standard = (contract.type != "two-way")
     after = before + (1 if (is_standard and adds_roster_spot) else 0)
 
+    trailing_hold = _preview_fa_hold(
+        bios.get(player) or {}, team, contract, ctx["cap_levels"],
+        bird_rights_type=bird_rights_type, eaps_assumption=eaps_assumption,
+        slug=player,
+    )
+
     return {
         "season": season,
         "cap_levels": cl,
@@ -5517,6 +5577,7 @@ def _signing_fact_sheet(team: str, player: str, contract, ctx: dict, *,
         "contract_type": contract.type,
         "salaries": dict(contract.salaries or {}),
         "cap_holds": dict(contract.cap_holds or {}),
+        "trailing_hold": trailing_hold,
         "new_salary": new_sal,
         "current_salary": current,
         "current_salary_ex_holds": current_ex_holds,
@@ -5555,6 +5616,7 @@ def validate_sign(body: SignDetails):
         body.team.upper(), body.player, body.contract, ctx,
         signing_method=body.signing_method,
         bird_rights_type=body.bird_rights_type,
+        eaps_assumption=body.eaps_assumption,
     )
     return _validation_result(_validate_sign(body, ctx), fact_sheet)
 
@@ -5727,6 +5789,7 @@ def validate_offer_sheet(body: OfferSheetDetails):
         team, body.player, body.contract, ctx,
         signing_method=body.signing_method,
         bird_rights_type=body.bird_rights_type,
+        eaps_assumption=body.eaps_assumption,
         # A match keeps the player on a roster spot they already occupy; only a
         # non-match adds a new standard-contract body (mirrors the roster_size
         # branch in _validate_offer_sheet).

@@ -414,6 +414,7 @@ def _run_validation(offer: dict, ctx: dict) -> dict:
         details.team.upper(), details.player, details.contract, ctx,
         signing_method=details.signing_method,
         bird_rights_type=details.bird_rights_type,
+        eaps_assumption=details.eaps_assumption,
     )
     return {
         "legal": not any(not c["passed"] and c["level"] == "error" for c in checks),
