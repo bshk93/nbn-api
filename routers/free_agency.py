@@ -28,7 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from . import fa_notify
-from .auth import (get_token_info, has_role, is_team_owner, load_members,
+from .auth import (get_token_info, has_role, load_members,
                    require_any_role, require_role)
 from .constants import (CAP_LEVELS_FILE, FA_BALLOTS_FILE, FA_OFFERS_FILE,
                         FA_STATE_FILE, VALID_TEAMS)
@@ -187,9 +187,21 @@ def _live_pool() -> dict:
 VALID_MODES = {"closed", "rounds", "ffa"}
 PLAYER_STATUSES = {"open", "held", "closed"}
 LIVE_STATUSES = {"draft", "submitted", "returned"}
+# § 4.3b. Deliberately *not* in LIVE_STATUSES: a voided offer leaves play through
+# `_is_live`, so every gate that already reads it — the one-live-offer rule, the
+# team's exposure, ballot options, conflicts, the review list — drops it without
+# a second rule to keep in step. Only `submitted`/`returned` can be voided; a
+# draft is the team's own scratch pad and the committee never sees it.
+VOIDABLE_STATUSES = {"submitted", "returned"}
 PROMISE_ROLES = {"face", "starter", "role_player", "veteran", "none"}
 
+# § 4.1. The window's length is the head's to set (`PUT /api/fa/ffa-window`);
+# this is only the default a board starts with. The bounds are not decoration:
+# 0 would expire every clock the instant it started, and a window longer than a
+# week stops being a clock.
 FFA_WINDOW_HOURS = 24
+FFA_WINDOW_MIN_HOURS = 1
+FFA_WINDOW_MAX_HOURS = 168
 BALLOT_TOTAL = 1000
 QO = "QO"                    # § 4.4 synthetic ballot option, RFAs only
 NO_SIGNING = "NO_SIGNING"    # § 4.4 synthetic ballot option, always offered
@@ -215,6 +227,7 @@ def _load_state() -> dict:
     st = _load_json(FA_STATE_FILE, {})
     st.setdefault("seq", 0)          # monotonic offer numbers; never max(existing)
     st.setdefault("mode", "closed")
+    st.setdefault("ffa_window_hours", FFA_WINDOW_HOURS)
     st.setdefault("rounds", [])
     st.setdefault("players", {})
     return st
@@ -246,6 +259,44 @@ def _save_ballots(ballots: dict):
 # silently open forever; a comparison against `deadline` cannot. Nothing here
 # resolves an outcome either — expiry closes a submission window and hands the
 # player to the committee, exactly as the § 3.15 offer-sheet deadline does.
+#
+# The *length* of the window is the head's setting, but it is read in exactly one
+# place — `_start_ffa_clock`, which stamps a deadline — and nowhere else. That is
+# the load-bearing part of making it settable: a running clock keeps the deadline
+# it was stamped with, so changing the setting can never move a deadline teams
+# are already bidding against, and shortening it can never retroactively close a
+# window that is still open. Every reader below goes to the stamp, never to the
+# setting; keep it that way.
+
+def _ffa_window_hours(state: dict) -> float:
+    hours = state.get("ffa_window_hours")
+    return float(hours) if isinstance(hours, (int, float)) and hours > 0 else float(FFA_WINDOW_HOURS)
+
+
+def ffa_window_label(ffa: Optional[dict]) -> str:
+    """"24-hour" — describing the window *this player's clock actually got*,
+    derived from its own stamp rather than the current setting.
+
+    Every string the league reads about a clock is built from this, so a window
+    that started before the head changed the setting still describes itself
+    correctly. Returns **""** when the length is unrecoverable, since a wrong
+    number is worse than none — callers drop the adjective and say "the window",
+    which is true whatever it ran for.
+    """
+    ffa = ffa or {}
+    hours = ffa.get("window_hours")
+    if not isinstance(hours, (int, float)) or hours <= 0:
+        # Pre-dates the stamp, or the deadline was moved by hand. Fall back to
+        # the span, which is what the window ran either way.
+        started, deadline = _parse_ts(ffa.get("started_at")), _parse_ts(ffa.get("deadline"))
+        if not started or not deadline:
+            return ""
+        hours = (deadline - started).total_seconds() / 3600
+    if hours <= 0:
+        return ""
+    shown = int(hours) if abs(hours - round(hours)) < 0.05 else round(hours, 1)
+    return f"{shown}-hour"
+
 
 def _ffa_deadline(entry: dict) -> Optional[datetime]:
     return _parse_ts((entry.get("ffa") or {}).get("deadline"))
@@ -286,10 +337,14 @@ def _accepts_offers(state: dict, slug: str, pool: dict,
             return False, "This player isn't open for offers in this round."
         return True, ""
     # FFA: every player in the pool is offerable regardless of `status` — the
-    # 24-hour clock is the only gate, and it's the only clock this system enforces.
+    # clock is the only gate, and it's the only clock this system enforces. Its
+    # length is named from the player's own stamp, so the refusal describes the
+    # window this team was actually bidding into.
     if _ffa_expired(entry):
         deadline = _ffa_deadline(entry)
-        return False, f"The 24-hour FFA window on this player closed at {deadline.isoformat()}."
+        lbl = ffa_window_label(entry.get("ffa"))
+        return False, (f"The {lbl + ' ' if lbl else ''}FFA window on this player "
+                       f"closed at {deadline.isoformat()}.")
     return True, ""
 
 
@@ -307,9 +362,16 @@ def _start_ffa_clock(state: dict, slug: str, offer_id: str, actor: str):
     if entry.get("ffa"):
         return
     started = datetime.now(timezone.utc)
+    # The one read of the head's setting. Stamped here — both as the deadline and
+    # as the length itself — and never consulted again, which is what keeps a
+    # later change off this player's clock. `window_hours` is recorded rather
+    # than re-derived from the two timestamps so that the window a player got
+    # stays legible even if his deadline is ever adjusted by hand.
+    hours = _ffa_window_hours(state)
     entry["ffa"] = {
         "started_at": started.isoformat(),
-        "deadline": (started + timedelta(hours=FFA_WINDOW_HOURS)).isoformat(),
+        "deadline": (started + timedelta(hours=hours)).isoformat(),
+        "window_hours": hours,
         "started_by_offer": offer_id,
         "started_by": actor,
     }
@@ -456,9 +518,11 @@ def _visible_offers(info: dict, state: dict, offers: list[dict]) -> list[dict]:
         if has_role(info, o["team"].lower()):
             out.append(o)
             continue
-        # The committee sees submitted work, never another team's scratch pad.
+        # The committee sees submitted work, never another team's scratch pad —
+        # including work it voided, which is the whole point of a void being a
+        # status rather than a delete.
         if (has_role(info, "fac") and _is_assigned(state, o["player"], name)
-                and o["status"] in ("submitted", "returned")):
+                and o["status"] in ("submitted", "returned", "voided")):
             out.append(o)
     return out
 
@@ -495,6 +559,10 @@ class ModeIn(BaseModel):
     mode: str
 
 
+class FfaWindowIn(BaseModel):
+    hours: float
+
+
 class RoundIn(BaseModel):
     name: Optional[str] = None
     closes_at: Optional[str] = None    # display label only — nothing acts on it
@@ -505,6 +573,10 @@ class PlayerStateIn(BaseModel):
     status: Optional[str] = None
     subcommittee: Optional[list[str]] = None
     round_id: Optional[str] = None
+
+
+class VoidIn(BaseModel):
+    reason: str = ""
 
 
 class RemandIn(BaseModel):
@@ -551,7 +623,10 @@ def get_board():
             "reason": None if accepting else reason,
             "ffa_deadline": (entry.get("ffa") or {}).get("deadline"),
         }
-    return {"mode": state["mode"], "rounds": state["rounds"], "players": players}
+    # Public: a team about to bid needs to know how long a clock it is starting,
+    # and the length is not committee information the way an offer is.
+    return {"mode": state["mode"], "rounds": state["rounds"], "players": players,
+            "ffa_window_hours": _ffa_window_hours(state)}
 
 
 @router.get("/api/fa/state")
@@ -588,7 +663,8 @@ def get_state(info: dict = Depends(require_any_role("fac", "poext"))):
             "finalized": bool(node.get("final")),
             **({"ballots_cast": len(cast)} if head else {}),
         }
-    return {"mode": state["mode"], "rounds": state["rounds"], "players": players}
+    return {"mode": state["mode"], "rounds": state["rounds"], "players": players,
+            "ffa_window_hours": _ffa_window_hours(state)}
 
 
 @router.put("/api/fa/mode")
@@ -607,6 +683,37 @@ def set_mode(body: ModeIn, info: dict = Depends(require_role("fac_head"))):
     # down must never delay or fail a board change (§ 9).
     fa_notify.notify_mode_change(prev, body.mode, info["name"])
     return {"mode": body.mode, "previous": prev}
+
+
+@router.put("/api/fa/ffa-window")
+def set_ffa_window(body: FfaWindowIn, info: dict = Depends(require_role("fac_head"))):
+    """How long an FFA window runs (§ 4.1). The head's setting, alongside mode
+    and rounds — the length of the window is board policy, not a league rule, so
+    it lives here rather than in the rulebook.
+
+    **It applies to clocks started from now on, and to nothing already running.**
+    Every clock carries the deadline it was stamped with, so this cannot move a
+    deadline a team is already bidding against, and cannot retroactively close a
+    window that is still open. Announced for the same reason a mode change is:
+    the league is acting on this clock.
+    """
+    hours = body.hours
+    if not (FFA_WINDOW_MIN_HOURS <= hours <= FFA_WINDOW_MAX_HOURS):
+        raise HTTPException(422, f"hours must be between {FFA_WINDOW_MIN_HOURS} and "
+                                 f"{FFA_WINDOW_MAX_HOURS}")
+    with _fa_lock:
+        state = _load_state()
+        prev = _ffa_window_hours(state)
+        state["ffa_window_hours"] = hours
+        state.setdefault("history", []).append(
+            {"at": _now(), "by": info["name"], "action": "ffa_window",
+             "from": prev, "to": hours})
+        _save_state(state)
+    log_write(info, f"PUT fa/ffa-window — {prev}h → {hours}h")
+    running = sum(1 for e in (state.get("players") or {}).values()
+                  if (e.get("ffa") or {}).get("deadline") and not _ffa_expired(e))
+    fa_notify.notify_ffa_window_change(prev, hours, info["name"], running)
+    return {"ffa_window_hours": hours, "previous": prev, "clocks_unaffected": running}
 
 
 @router.post("/api/fa/rounds")
@@ -702,15 +809,13 @@ def set_player_state(slug: str, body: PlayerStateIn,
 # ── offers ────────────────────────────────────────────────────────────────────
 
 def _require_team_role(info: dict, team: str):
-    """Drafting gate — any holder of the team's role (§ 6.0). A GM or coach can
-    prepare the whole offer; only the owner can pull the trigger."""
+    """The one gate on an offer (§ 6.0) — any holder of the team's role. Drafting
+    and submitting are both team business: a GM or coach who can prepare the whole
+    offer can also send it, so front offices aren't blocked on the owner being
+    around. The team is always taken from the stored offer, never from the request,
+    so this can only ever act on one's own team."""
     if not (has_role(info, "admin") or has_role(info, team.lower())):
         raise HTTPException(403, f"'{team.lower()}' role required")
-
-
-def _require_team_owner(info: dict, team: str):
-    if not is_team_owner(info, team):
-        raise HTTPException(403, "Only the team owner can submit this offer")
 
 
 @router.get("/api/fa/offers")
@@ -771,6 +876,7 @@ def create_offer(body: OfferCreate, info: dict = Depends(get_token_info)):
             "submitted_by": None,
             "created_at": _now(), "updated_at": _now(), "submitted_at": None,
             "archived_at": None,
+            "void": None,               # § 4.3b {at, by, reason, from_status}
             "offer": {
                 "player": body.player, "team": team,
                 "contract": body.contract.model_dump(),
@@ -844,7 +950,7 @@ def submit_offer(offer_id: str, info: dict = Depends(get_token_info)):
     with _fa_lock:
         offers = _load_offers()
         idx, offer = _find_offer(offers, offer_id)
-        _require_team_owner(info, offer["team"])
+        _require_team_role(info, offer["team"])
         if not _is_live(offer) or offer["status"] not in ("draft", "returned"):
             raise HTTPException(409, f"Offer is {offer['status']}, not submittable")
 
@@ -972,6 +1078,111 @@ def remand_offer(offer_id: str, body: RemandIn, info: dict = Depends(get_token_i
     return offer
 
 
+@router.post("/api/fa/offers/{offer_id}/void")
+def void_offer(offer_id: str, body: VoidIn, info: dict = Depends(get_token_info)):
+    """Take an offer out of play entirely (§ 4.3b) — the escape hatch a remand
+    isn't.
+
+    A remand hands the offer *back* and the team can answer it; the offer is
+    still a live bid meanwhile, still on the ballot, still in the team's
+    exposure. That is the right tool when the terms need changing and the wrong
+    one when the offer should never have counted at all — an offer on the wrong
+    player, a team ruled ineligible after the fact, a duplicate submitted around
+    an outage. Under a remand those sit `returned` forever, visibly awaiting a
+    team that has nothing to say.
+
+    **Head-only, unlike a remand.** Any assigned reviewer may ask for a revision
+    (D14) because the team can always answer. Nobody can answer a void, so it
+    sits with the head beside the other powers that end things — finalize,
+    unlock, assignment. Widening it later is a one-line change; narrowing it
+    after teams have lost bids to it is not.
+
+    **It is not a delete.** The offer, its versions, its remands and its
+    validation stay exactly where they were; `status` leaves `LIVE_STATUSES` and
+    `void` records who, when and why. `restore` puts it back. The § 4.3a rule
+    that nothing is overwritten applies here with more force, not less: a bid
+    the committee erased is precisely the thing a record has to be able to show.
+    """
+    if not _is_head(info):
+        raise HTTPException(403, "Only the FAC head can void an offer — any reviewer may send one back")
+    reason = body.reason.strip()
+    if not reason:
+        # Same rule as a remand's note, for a stronger reason: this one ends a
+        # team's bid with no reply, so "why" is the only thing they get.
+        raise HTTPException(422, "A void requires a reason — the team can't answer it")
+    with _fa_lock:
+        state = _load_state()
+        offers = _load_offers()
+        idx, offer = _find_offer(offers, offer_id)
+        # Archived first, and by name: an archived offer still reads `submitted`,
+        # so the generic message would tell a head their submitted offer isn't
+        # submitted rather than that the player is already decided.
+        if offer.get("archived_at") is not None:
+            raise HTTPException(409, "This player is finalized — reopen them before voiding an offer")
+        if offer["status"] not in VOIDABLE_STATUSES:
+            raise HTTPException(409, f"Offer is {offer['status']} — only a submitted offer can be voided")
+        ballots = _load_ballots()
+        node = (ballots.get(offer["player"]) or {}).get(offer["round_id"] or "") or {}
+        if node.get("final"):
+            # Same as a remand: once the head locks a player, the offers on them
+            # are decided. Reopening (§ 4.1) is the escape hatch from a lock.
+            raise HTTPException(409, "This player is finalized — reopen them before voiding an offer")
+        offer["void"] = {"at": _now(), "by": info["name"], "reason": reason,
+                         # What it goes back to on a restore. Stored rather than
+                         # assumed: a returned offer that gets voided must not
+                         # come back as `submitted` with its remands silently
+                         # answered.
+                         "from_status": offer["status"]}
+        offer["history"].append({"ts": offer["void"]["at"], "actor": info["name"],
+                                 "from": offer["status"], "to": "voided", "reason": reason})
+        offer["status"] = "voided"
+        offer["updated_at"] = offer["void"]["at"]
+        offers[idx] = offer
+        _save_offers(offers)
+    log_write(info, f"POST fa/offers/{offer_id}/void")
+    fa_notify.notify_offer_voided(offer)
+    return offer
+
+
+@router.post("/api/fa/offers/{offer_id}/restore")
+def restore_offer(offer_id: str, info: dict = Depends(get_token_info)):
+    """Undo a void (§ 4.3b), back to whatever status it held. `unlock` is to
+    `finalize` what this is to `void` — a power that ends something needs a way
+    back, or a misclick is the one action on the board nobody can answer.
+
+    Two things can make a restore illegal, and both come from the void having
+    worked: the team may have bid again in the meantime (one live offer per team
+    per player, § 4.2/D5), and the player may since have been finalized.
+    """
+    if not _is_head(info):
+        raise HTTPException(403, "Only the FAC head can restore a voided offer")
+    with _fa_lock:
+        offers = _load_offers()
+        idx, offer = _find_offer(offers, offer_id)
+        if offer["status"] != "voided":
+            raise HTTPException(409, f"Offer is {offer['status']}, not voided")
+        if offer.get("archived_at") is not None:
+            raise HTTPException(409, "This player was finalized after the void — reopen them first")
+        back = (offer.get("void") or {}).get("from_status") or "submitted"
+        if any(o["team"] == offer["team"] and o["player"] == offer["player"] and _is_live(o)
+               for o in offers):
+            # The void freed the team to bid again, and it did. Restoring now
+            # would put two live offers from one team on one player, which is
+            # the invariant `create_offer` exists to hold.
+            raise HTTPException(409, f"{offer['team']} has since submitted another offer on this player")
+        voided = offer.get("void") or {}
+        offer["status"] = back
+        offer["void"] = None
+        offer["updated_at"] = _now()
+        offer["history"].append({"ts": offer["updated_at"], "actor": info["name"],
+                                 "from": "voided", "to": back})
+        offers[idx] = offer
+        _save_offers(offers)
+    log_write(info, f"POST fa/offers/{offer_id}/restore")
+    fa_notify.notify_offer_restored(offer, voided)
+    return offer
+
+
 # ── review ────────────────────────────────────────────────────────────────────
 
 def _team_commitment(team: str, offers: list[dict], ctx: dict) -> dict:
@@ -1067,6 +1278,13 @@ def review_player(slug: str, info: dict = Depends(get_token_info)):
             "outstanding_remands": [r for r in o["remands"] if r["from_version"] >= o["version"]],
         })
 
+    # Out of play, so never revalidated and never a ballot option — but listed,
+    # because "the committee erased a bid" is exactly the kind of thing a review
+    # page has to be able to show. Archived voids belong to a closed round.
+    voided = [o for o in offers
+              if o["player"] == slug and o["status"] == "voided"
+              and o.get("archived_at") is None]
+
     teams = sorted({o["team"] for o in live})
     entry = _player_entry(state, slug)
     return {
@@ -1074,6 +1292,7 @@ def review_player(slug: str, info: dict = Depends(get_token_info)):
         "pool": pool[slug],
         "state": {**entry, "ffa_expired": _ffa_expired(entry)},
         "offers": rendered,
+        "voided_offers": voided,
         "commitments": {t: _team_commitment(t, offers, ctx) for t in teams},
         "ballot_options": _ballot_options(slug, live, pool),
         "assignable": _assignable(slug, offers) if _is_head(info) else [],
@@ -1139,8 +1358,23 @@ def get_ballots(slug: str, info: dict = Depends(get_token_info)):
         raise HTTPException(422, "This player hasn't been opened in a round yet")
     node = _ballot_node(_load_ballots(), slug, round_id)
     assigned = _player_entry(state, slug).get("subcommittee") or []
-    revised = [o for o in _offers_for(_load_offers(), slug)
+    all_offers = _load_offers()
+    revised = [o for o in _offers_for(all_offers, slug)
                if o["status"] in ("submitted", "returned") and o["version"] > 1]
+    gone = {o["id"] for o in all_offers if o["player"] == slug and o["status"] == "voided"}
+
+    def _voided_since(cast: dict) -> list[str]:
+        """Offers this member put balls on that the head has since voided
+        (§ 4.3b).
+
+        The § 4.3a rule holds harder here: a ballot is flagged, never rewritten.
+        Redistributing someone's balls because an option left the board is the
+        software inventing a vote nobody cast — and the member may well want the
+        rest of their ballot to stand exactly as it is. So the balls stay put,
+        the member is shown that some of them are on a voided offer, and
+        `finalize` reports the same thing to the head.
+        """
+        return sorted(k for k, n in (cast.get("balls") or {}).items() if n and k in gone)
 
     def _revised_since(cast: dict) -> list[str]:
         """Offers resubmitted after this ballot was last touched (§ 4.3a).
@@ -1164,11 +1398,12 @@ def get_ballots(slug: str, info: dict = Depends(get_token_info)):
         # here rather than guessed client-side from role names: a conflict comes
         # from an active *tenure*, which the browser has no business reasoning
         # about.
-        "your_conflict": _conflict_team(info["name"], slug, _load_offers()),
+        "your_conflict": _conflict_team(info["name"], slug, all_offers),
         # In-progress ballots are visible inside the sub-committee by design
         # (§ 4.5) — `updated_at` is what lets a member tell a considered ballot
         # from one cast a minute ago in response to theirs.
-        "ballots": {name: {**cast, "revised_since": _revised_since(cast)}
+        "ballots": {name: {**cast, "revised_since": _revised_since(cast),
+                           "voided_since": _voided_since(cast)}
                     for name, cast in node["ballots"].items()},
         "outstanding": [m for m in assigned if m not in node["ballots"]],
         "final": node["final"],
@@ -1252,11 +1487,19 @@ def finalize_player(slug: str, info: dict = Depends(require_role("fac_head"))):
                 totals[key] = totals.get(key, 0) + n
         offers = _load_offers()
         live = _offers_for(offers, slug)
+        voided = [o for o in offers
+                  if o["player"] == slug and o["status"] == "voided"
+                  and o.get("archived_at") is None]
         outstanding = [
             {"offer": o["id"], "number": o["number"], "team": o["team"],
              "remands": [r for r in o["remands"] if r["from_version"] >= o["version"]]}
             for o in live if o["status"] == "returned"
         ]
+        # Balls cast on an offer voided mid-round. `totals` stays exactly as
+        # cast — the record is what the members voted, not what the software
+        # thinks they'd have voted — so the head is told instead, alongside the
+        # unanswered remands, and reads the totals knowing it.
+        stranded = {o["id"]: (o["team"], o["number"]) for o in voided}
         node["final"] = {
             "locked_at": _now(), "locked_by": info["name"],
             # Stored, not recomputed on read: this is the record of what was
@@ -1266,9 +1509,15 @@ def finalize_player(slug: str, info: dict = Depends(require_role("fac_head"))):
             "voters": sorted(node["ballots"]),
             "abstained": [m for m in assigned if m not in node["ballots"]],
             "outstanding_remands": outstanding,
+            "voided_options": [{"offer": oid, "team": team, "number": num,
+                                "balls": totals[oid]}
+                               for oid, (team, num) in stranded.items() if totals.get(oid)],
             "round_id": round_id,
         }
-        for o in live:
+        # Voided offers are archived with the round too — they belong to it, and
+        # leaving them unarchived would carry a dead bid into the next one and
+        # keep `restore` open on a decided player.
+        for o in live + voided:
             o["archived_at"] = node["final"]["locked_at"]
         state["players"].setdefault(slug, {})["status"] = "closed"
         _save_offers(offers)

@@ -9,8 +9,9 @@ whole design:
   changed**. Reviewing a revision without seeing what moved is the same work
   twice (§ 4.3a).
 * **`fa-news`** (`DISCORD_FA_NEWS_CHANNEL`) — public, league-wide, and
-  **FFA-mode only**. Exactly two posts per player: the 24-hour clock starting,
-  and the window closing. No team, no dollars, no offer count, ever — that a
+  **FFA-mode only**. Exactly two posts per player: the clock starting, and the
+  window closing. Each names the length off the clock's own stamp, since the
+  head can change how long a window runs (§ 4.1). No team, no dollars, no offer count, ever — that a
   team is bidding is committee information (§ 9.2).
 
 The second bullet is a security property, not a stylistic one, so it is enforced
@@ -65,15 +66,17 @@ PDC_BURST_WINDOW   = 900
 NEWS_MAX_BURST     = 60
 NEWS_BURST_WINDOW  = 900
 
-# A closure post older than the window it's closing isn't news, it's a replay —
-# the case that matters is deploying this module while clocks that expired weeks
-# ago are still unflagged in `fa-state.json`. The sweep still stamps them (so
-# they never post later either); it just doesn't announce them.
+# An absolute lateness bound on a closure post, independent of how long the
+# window itself ran: a day late isn't news, it's a replay. The case that matters
+# is deploying this module while clocks that expired weeks ago are still
+# unflagged in `fa-state.json`. The sweep still stamps them (so they never post
+# later either); it just doesn't announce them.
 MAX_CLOSE_AGE_HOURS = 24
 
 COLOR_SUBMIT   = 0x22C55E   # matches the `sign` badge — an offer is a signing proposal
 COLOR_REVISION = 0x60A5FA
 COLOR_REMAND   = 0xFB923C
+COLOR_VOID     = 0xEF4444   # a remand is orange because it comes back; this doesn't
 COLOR_BOARD    = 0xA78BFA   # mode / round / clock — the head moving the board
 COLOR_FINAL    = 0xD4AF37
 
@@ -90,6 +93,17 @@ def _parse_ts(ts: Optional[str]) -> Optional[datetime]:
     except ValueError:
         return None
     return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+def _window_label(ffa: dict) -> str:
+    """"24-hour ", for the window this player's clock actually got — the head can
+    change the length (§ 4.1) and a post must describe the clock it announces,
+    not the setting current when it was read. Empty (so the sentence reads "the
+    window") when the length is unrecoverable. Imported at call time because
+    `free_agency` imports this module."""
+    from .free_agency import ffa_window_label
+    label = ffa_window_label(ffa)
+    return f"{label} " if label else ""
 
 
 def _stamp(ts: Optional[str], style: str = "f") -> str:
@@ -280,6 +294,32 @@ def _remand_embed(offer: dict, remand: dict) -> dict:
     }
 
 
+def _void_embed(offer: dict, void: dict) -> dict:
+    """§ 4.3b. Carries the terms that were voided, not just the fact of it — the
+    bid is leaving the board, so the announcement is the last place it appears in
+    full for anyone not reading the review page."""
+    slug = offer["player"]
+    contract = (offer.get("offer") or {}).get("contract") or {}
+    fields = [
+        {"name": "Player", "value": f"[{_name(slug)}]({SITE}/players/?p={slug})", "inline": True},
+        {"name": "Team", "value": f"[{offer['team']}]({SITE}/teams/{offer['team']})", "inline": True},
+        {"name": "Offer", "value": f"#{offer['number']} · v{offer.get('version', 1)}", "inline": True},
+        {"name": "Reason", "value": _truncate(void.get("reason"), 1000) or "—", "inline": False},
+    ]
+    breakdown = _contract_breakdown(contract)
+    if breakdown:
+        fields.append({"name": "Voided terms", "value": breakdown, "inline": False})
+    return {
+        "title": f"{offer['team']} — offer to {_name(slug)} voided",
+        "description": "Out of play as if it had never been submitted: off the ballot, out of "
+                       f"{offer['team']}'s exposure, and they may bid again. The record is kept.",
+        "color": COLOR_VOID,
+        "fields": fields,
+        "url": _offer_link(offer),
+        "footer": {"text": f"voided by {void.get('by') or '?'}"},
+    }
+
+
 # ── the two channels ──────────────────────────────────────────────────────────
 
 def _alert(embed_fn) -> bool:
@@ -323,12 +363,63 @@ def notify_offer_remanded(offer: dict, remand: dict) -> None:
     _alert(lambda: {"embeds": [_remand_embed(offer, remand)]})
 
 
+def notify_offer_voided(offer: dict) -> None:
+    """Private channel only — like every other offer event. A void names a team
+    and prices its bid, so it is committee information by § 9.2, and `_news`
+    could not carry it even if a caller tried."""
+    void = offer.get("void") or {}
+    _alert(lambda: {"embeds": [_void_embed(offer, void)]})
+
+
+def notify_offer_restored(offer: dict, void: dict) -> None:
+    """The undo. Announced for the same reason `void` is: the committee saw the
+    bid leave the board, so it has to see it come back."""
+    _alert(lambda: {"embeds": [{
+        "title": f"{offer['team']} — offer to {_name(offer['player'])} restored",
+        "description": f"The void is undone; the offer is **{offer['status']}** again, "
+                       f"on the ballot and back in {offer['team']}'s exposure.",
+        "color": COLOR_REVISION,
+        "fields": [
+            {"name": "Offer", "value": f"#{offer['number']} · v{offer.get('version', 1)}",
+             "inline": True},
+            {"name": "Had been voided",
+             "value": f"{_stamp(void.get('at'))} by {void.get('by') or '?'}", "inline": True},
+            {"name": "Stated reason", "value": _truncate(void.get("reason"), 1000) or "—",
+             "inline": False},
+        ],
+        "url": _offer_link(offer),
+    }]})
+
+
 def notify_mode_change(previous: str, mode: str, actor: str) -> None:
     """Private only. The league learns free agency is live from the clock posts
     (§ 9.2), which are the thing it can act on; the mode flip itself is board
     mechanics."""
     _alert(lambda: {"embeds": [{
         "title": f"Free agency mode — {previous} → {mode}",
+        "color": COLOR_BOARD,
+        "url": PDC_SITE,
+        "footer": {"text": f"set by {actor}"},
+    }]})
+
+
+def notify_ffa_window_change(previous: float, hours: float, actor: str,
+                             running: int = 0) -> None:
+    """Private only, like the mode flip it sits beside — board mechanics. The
+    league reads the length off each clock post, which carries the real deadline.
+
+    `running` is stated because it is the question a committee member will ask
+    on seeing this, and the answer is always "none of them": clocks keep the
+    deadline they were stamped with (§ 4.1)."""
+    def num(h):
+        return int(h) if float(h).is_integer() else round(float(h), 1)
+    _alert(lambda: {"embeds": [{
+        "title": f"FFA window length — {num(previous)}h → {num(hours)}h",
+        "description": (f"Applies to clocks started from now on. "
+                        + (f"**{running}** clock{'s' if running != 1 else ''} already running "
+                           f"keep{'' if running != 1 else 's'} the deadline "
+                           f"{'they were' if running != 1 else 'it was'} stamped with."
+                           if running else "No clocks are currently running.")),
         "color": COLOR_BOARD,
         "url": PDC_SITE,
         "footer": {"text": f"set by {actor}"},
@@ -349,7 +440,7 @@ def notify_round_opened(rnd: dict, actor: str) -> None:
 
 
 def notify_ffa_started(slug: str, ffa: dict) -> None:
-    """The first *submitted* offer started a player's 24-hour window (§ 4.1).
+    """The first *submitted* offer started a player's FFA window (§ 4.1).
 
     Both channels fire, with different content: the committee gets who started
     it, the league gets the deadline and nothing else.
@@ -364,8 +455,8 @@ def notify_ffa_started(slug: str, ffa: dict) -> None:
                     "inline": True}],
         "footer": {"text": f"submitted by {ffa.get('started_by') or '?'}"},
     }]})
-    _news(slug, f"🕐 **{_name(slug)}** has received an FFA offer. A 24-hour clock is now "
-                f"running — other teams have until {_stamp(deadline)} "
+    _news(slug, f"🕐 **{_name(slug)}** has received an FFA offer. A {_window_label(ffa)}clock "
+                f"is now running — other teams have until {_stamp(deadline)} "
                 f"({_stamp(deadline, 'R')}) to submit offers.")
 
 
@@ -394,8 +485,8 @@ def notify_ffa_closed(slug: str, ffa: dict) -> None:
         "url": f"{PDC_SITE}/#/p/{slug}",
         "footer": {"text": "closed on the clock"},
     }]})
-    _news(slug, f"🔒 The 24-hour window on **{_name(slug)}** has closed. No further offers "
-                f"are being accepted; the FAC will review.")
+    _news(slug, f"🔒 The {_window_label(ffa)}window on **{_name(slug)}** has closed. No further "
+                f"offers are being accepted; the FAC will review.")
 
 
 def notify_player_finalized(slug: str, final: dict, offers: list[dict]) -> None:

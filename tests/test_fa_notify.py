@@ -145,6 +145,26 @@ check("...and claims no outcome",
 check("the committee channel hears about the clock too", len(pdc()) == 2, len(pdc()))
 
 
+# The head can change how long a window runs (§ 4.1), so neither post may say
+# "24-hour" from a constant — each names the length off the clock it announces.
+reset()
+long_ffa = {"started_at": iso(0), "deadline": iso(72), "window_hours": 72,
+            "started_by_offer": "f7c1a9b2", "started_by": "phxOwner"}
+fn.notify_ffa_started("curry-stephen", long_ffa)
+fn.notify_ffa_closed("curry-stephen", dict(long_ffa, deadline=iso(-1)))
+public = news()
+check("a clock post names the window that clock actually got",
+      all("72-hour" in t and "24-hour" not in t for t in public), public)
+
+reset()
+fn.notify_ffa_window_change(24, 72, "facHead", running=2)
+check("changing the window length is committee business — private only",
+      len(pdc()) == 1 and len(news()) == 0, (len(pdc()), len(news())))
+check("...and says plainly that running clocks are untouched",
+      "clocks already running keep the deadline" in pdc()[0]["description"],
+      pdc()[0]["description"])
+
+
 print("\nfa-news — exactly twice per player, across a whole lifecycle")
 
 reset()
@@ -265,6 +285,39 @@ fn.notify_offer_remanded(offer(), {"at": iso(0), "by": "memberA", "note": "n", "
                                    "conflict": None})
 check("an unconflicted remand carries no warning",
       not any("Conflict" in f["name"] for f in pdc()[0]["fields"]))
+
+
+# ── Void / restore (§ 4.3b) ───────────────────────────────────────────────────
+# A void names a team and prices its bid, so it is committee information exactly
+# like a submission is. Nothing about it being a *removal* makes it public.
+print("\npdc-alerts — a void carries the terms it removed, and stays private")
+
+reset()
+v = offer(status="voided",
+          void={"at": iso(0), "by": "facHead", "reason": "Submitted on the wrong player",
+                "from_status": "submitted"})
+fn.notify_offer_voided(v)
+e = pdc()[0]
+check("the void is announced privately, and only privately",
+      len(pdc()) == 1 and news() == [], news())
+check("the title says it was voided", "voided" in e["title"], e["title"])
+check("...coloured apart from a remand, which comes back", e["color"] == fn.COLOR_VOID)
+check("the reason is quoted", "wrong player" in field(e, "Reason"), field(e, "Reason"))
+check("the terms leaving the board are shown one last time",
+      "26-27" in field(e, "Voided terms"), field(e, "Voided terms"))
+check("...and it is attributed to the head who did it",
+      "facHead" in e["footer"]["text"], e["footer"])
+check("the announcement says the team may bid again",
+      "bid again" in e["description"], e["description"])
+
+reset()
+fn.notify_offer_restored(offer(status="submitted"), v["void"])
+e = pdc()[0]
+check("the undo is announced too — the channel watched the bid leave",
+      len(pdc()) == 1 and news() == [], news())
+check("...saying what it came back as", "**submitted**" in e["description"], e["description"])
+check("...and recalling why it went", "wrong player" in field(e, "Stated reason"),
+      field(e, "Stated reason"))
 
 
 # ── Finalize (§ 4.4, § 11.1) ──────────────────────────────────────────────────
@@ -388,6 +441,8 @@ reset()
 for name, call in [
     ("a malformed offer", lambda: fn.notify_offer_submitted({})),
     ("a malformed remand", lambda: fn.notify_offer_remanded({}, {})),
+    ("a malformed void", lambda: fn.notify_offer_voided({})),
+    ("a malformed restore", lambda: fn.notify_offer_restored({}, {})),
     ("a malformed finalize", lambda: fn.notify_player_finalized("x", {}, [])),
     ("an ffa object with no deadline", lambda: fn.notify_ffa_started("x", {})),
     ("bios being unavailable", None),

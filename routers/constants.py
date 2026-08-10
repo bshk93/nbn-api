@@ -127,6 +127,7 @@ ROSTER_MAX = 15            # regular-season standard-roster limit (Article II)
 ROSTER_OFFSEASON_MAX = 20  # offseason ceiling; teams must trim to ROSTER_MAX before the season
 ROSTER_MIN = 14            # standard-roster minimum, year-round (§ 2.1) — trade legality is judged against this full floor (§ 2.1a)
 ROSTER_CHARGE_MIN = 12     # real, persisted Empty Roster Charge floor (§ 2.1a) — narrower than ROSTER_MIN; below 12 the charge counts as real guaranteed salary, not just a trade-legality mock
+TWO_WAY_MAX = 3            # G-League two-way slots, outside the standard limit (§ 2.2). No offseason band, unlike ROSTER_MAX/ROSTER_OFFSEASON_MAX — § 2.2 grants none
 
 # § 4.2 tier boundary constants
 SALARY_MATCH_TIER1_CAP = 8_527_000

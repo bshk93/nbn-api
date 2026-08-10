@@ -41,9 +41,10 @@ def check(name, cond):
 
 
 class Contract:
-    def __init__(self, salaries, ctype="standard"):
+    def __init__(self, salaries, ctype="standard", years_experience=None):
         self.salaries = salaries
         self.type = ctype
+        self.years_experience = years_experience
 
 
 def main():
@@ -81,15 +82,33 @@ def main():
     print("\nminimum salary")
     bios2 = {"vet": {"draft_year": 2016}, "unknown": {}}
 
-    def mins(salaries, player="unknown", ctype="standard", date="2026-08-07"):
-        return T._check_minimum_salary(Contract(salaries, ctype), player, bios2,
+    def mins(salaries, player="unknown", ctype="standard", date="2026-08-07", exp=None):
+        return T._check_minimum_salary(Contract(salaries, ctype, exp), player, bios2,
                                        SEASON, CAP_LEVELS, txn_date=date)
 
     r = mins({"26-27": "$1,000"})
     check("$1,000 in the offseason is an error", r is not None and not r.passed and r.level == "error")
 
+    # Above the league floor is never an *error*. But for a player whose
+    # experience can't be established, a figure this low is minimum territory
+    # and no tier could be checked — that combination used to report a clean
+    # pass, which is how a 12-year veteran got signed at the rookie minimum for
+    # every year of a multi-year deal without a word from the validator.
     r = mins({"26-27": "$1,400,000"})
-    check("at/above the league floor passes", r is not None and r.passed)
+    check("at/above the league floor is not an error", r is not None and r.level != "error")
+    check("...but unknown experience in minimum territory warns",
+          r is not None and not r.passed and r.level == "warning"
+          and "can't be established" in r.message)
+
+    r = mins({"26-27": "$1,400,000"}, exp=0)
+    check("...and declaring experience on the contract clears it",
+          r is not None and r.passed)
+
+    # A deal well clear of the scale isn't a minimum contract, so an unknown
+    # tier is nothing to warn about — this must stay quiet for ordinary signings.
+    r = mins({"26-27": "$25,000,000"})
+    check("a non-minimum salary with unknown experience stays quiet",
+          r is not None and r.passed)
 
     # Proration: only Year 1, only in-season.
     r = mins({"26-27": "$39,820"}, date="2026-04-11")

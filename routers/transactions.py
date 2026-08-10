@@ -13,7 +13,8 @@ from pydantic import BaseModel
 from .constants import (
     DATA_DIR, CAP_LEVELS_FILE, TRANSACTIONS_FILE, VALID_TEAMS, ROOM_ZONE_BASELINE_FILE,
     _txn_lock, _deadcap_lock, _state_lock, _picks_lock, _trade_exc_lock,
-    ROSTER_MAX, ROSTER_OFFSEASON_MAX, ROSTER_MIN, ROSTER_CHARGE_MIN, SALARY_MATCH_TIER1_CAP, SALARY_MATCH_TIER2_CAP,
+    ROSTER_MAX, ROSTER_OFFSEASON_MAX, ROSTER_MIN, ROSTER_CHARGE_MIN, TWO_WAY_MAX,
+    SALARY_MATCH_TIER1_CAP, SALARY_MATCH_TIER2_CAP,
 )
 from .storage import (
     read_csv, write_csv, _load_json, log_write, _parse_dollar, _season_start, _season_shift,
@@ -280,6 +281,14 @@ def _append_transaction(txn: dict):
 class ContractIn(BaseModel):
     type: str = "player"  # "player" or "two-way"
     salaries: dict[str, str] = {}
+    # § 3.12: years of NBA experience **as of this contract's first salary
+    # year**, used to place each year on the Minimum Salary Scale. Declared on
+    # the contract because the scale is contract math and the bio can't supply
+    # it — `draft_year` is the NBN draft for identity purposes and is null for
+    # every player who entered the league before it (and forever, for UDFAs),
+    # which silently priced multi-year minimums flat at the rookie tier.
+    # Optional: absent, the draft_year proxy applies exactly as before.
+    years_experience: Optional[int] = None
     cap_holds: dict[str, str] = {}
     guaranteed: dict[str, str] = {}
     guarantee_dates: dict[str, str] = {}
@@ -1986,7 +1995,21 @@ def _is_standard_roster_slot(bio_type: str) -> bool:
     return bio_type not in _ROSTER_EXEMPT_TYPES
 
 
-def _count_standard_roster(team: str) -> int:
+def _count_standard_roster(team: str, excluding: Optional[str] = None) -> int:
+    """Standard bodies on `team`'s roster, optionally net of one player.
+
+    `excluding` exists because a team's own free agent **stays on the roster CSV
+    with `type: "player"`** — a cap hold is still a roster row. So re-signing him
+    reuses the slot he already occupies, and the caller's `+1` would count him
+    twice. This is the roster-count twin of the salary math in `_validate_sign`,
+    which already nets the signee's own hold out of the projection rather than
+    stacking the new contract on top of it.
+
+    Only the signing path passes it. An offer sheet's signee is on the
+    *incumbent's* roster, not the offering team's, and `convert_twoway`'s player
+    is two-way and therefore already exempt from this count — both are genuine
+    additions and their `+1` is right.
+    """
     path = DATA_DIR / f"{team.lower()}-roster.csv"
     if not path.exists():
         return 0
@@ -1995,8 +2018,75 @@ def _count_standard_roster(team: str) -> int:
     return sum(
         1 for r in rows
         if r.get("SLUG", "").strip()
+        and r["SLUG"] != excluding
         and _is_standard_roster_slot(bios.get(r["SLUG"], {}).get("type", ""))
     )
+
+
+def _count_two_way_roster(team: str, excluding: Optional[str] = None) -> int:
+    """§ 2.2 two-way slots in use. Same `excluding` rule as the standard count —
+    a two-way whose deal has lapsed is still a roster row, so re-signing your own
+    two-way must not read as claiming a fourth slot."""
+    path = DATA_DIR / f"{team.lower()}-roster.csv"
+    if not path.exists():
+        return 0
+    _, rows = read_csv(path)
+    bios = load_player_bios()
+    return sum(
+        1 for r in rows
+        if r.get("SLUG", "").strip()
+        and r["SLUG"] != excluding
+        and bios.get(r["SLUG"], {}).get("type", "") == "two-way"
+    )
+
+
+def _check_signing_method_declared(
+    team: str, method: Optional[str], contract_type: str
+) -> "CheckResult | None":
+    """§ 3.1–§ 3.6 must be funded by *something*, and a blank method was silently
+    exempt from proving it.
+
+    `_check_signing_method_funding` returns early for any method outside the
+    cap-space/MLE family — and `None` is outside it — so declaring nothing
+    skipped funding validation altogether rather than failing it. Nine live FA
+    offers reached the committee that way (2026-08-10), five of them for real
+    money from teams over the Cap.
+
+    Two-ways are exempt for real, not by omission: they carry $0 and sit outside
+    Team Salary (§ 2.2), so there is no exception for them to be funded from.
+    """
+    if contract_type == "two-way" or method:
+        return None
+    return CheckResult(
+        check=f"signing_method_declared_{team.lower()}", passed=False, level="error",
+        message=(f"{team} must declare how this signing is funded — cap space, Bird "
+                 f"Rights, an exception, or the minimum (§ 3.1–§ 3.6). Without a method "
+                 f"nothing checks that the money is actually available."),
+    )
+
+
+def _two_way_slot_check(team: str, after: int, verb: str) -> "CheckResult | None":
+    """§ 2.2: at most TWO_WAY_MAX two-way players, in G-League slots outside the
+    standard limit.
+
+    A hard error with no warning band, unlike `_roster_size_check`'s 16–20 — the
+    offseason ceiling in § 2.1 is written into the rules, and § 2.2 grants no
+    equivalent, so a fourth two-way is not a "trim it later" situation.
+
+    Nothing enforced this before: `_validate_sign` skips the standard roster
+    check for a two-way contract (correctly — they sit outside the 15), and every
+    other check no-ops on the $0 salary a two-way carries, so a two-way signing
+    was reaching `_apply_sign` having passed *zero* checks. The verdict was not
+    "legal", it was unexamined.
+    """
+    if after > TWO_WAY_MAX:
+        return CheckResult(
+            check="two_way_slots", passed=False, level="error",
+            message=(f"{team} would carry {after} two-way players, over the "
+                     f"{TWO_WAY_MAX}-slot limit (§ 2.2) — convert or release a two-way "
+                     f"before {verb}."),
+        )
+    return None
 
 
 def _roster_size_check(team: str, after: int, verb: str) -> "CheckResult | None":
@@ -2036,6 +2126,29 @@ def _min_salary_scale_tier(years_exp: int) -> str:
     """Maps a raw years-of-NBA-experience count to a min_salary_scale key
     ("0".."9","10+")."""
     return "10+" if years_exp >= 10 else str(max(0, years_exp))
+
+
+def _contract_years_exp(contract, season: str) -> Optional[int]:
+    """Years of NBA experience in `season` per the contract's own declaration.
+
+    `ContractIn.years_experience` is stated **as of the contract's first salary
+    year**, so it is anchored rather than floating: one more season of the deal
+    is one more year of service, and re-reading the contract in a later league
+    year still resolves correctly. That anchoring is why this is contract
+    specification rather than a player field — a bare count on a bio would mean
+    something different every year it was read.
+
+    Returns None when nothing is declared, which callers must read as "fall
+    back to the draft_year proxy", not as zero experience.
+    """
+    declared = getattr(contract, "years_experience", None) if contract else None
+    if declared is None:
+        return None
+    years = [yr for yr in (getattr(contract, "salaries", None) or {})]
+    if not years:
+        return None
+    first = min(years, key=_season_start)
+    return max(0, int(declared) + _season_start(season) - _season_start(first))
 
 
 def _max_salary_pct(years_exp: int) -> float:
@@ -2650,7 +2763,8 @@ def _preview_fa_hold(
     return out
 
 
-def _one_year_min_cap_hit(bio: dict, season: str, cap_levels: dict) -> Optional[int]:
+def _one_year_min_cap_hit(bio: dict, season: str, cap_levels: dict,
+                          contract=None) -> Optional[int]:
     """§ 3.12: a 1-year minimum contract's cap hit is capped at the 2-year
     veteran minimum, regardless of the player's actual NBA experience tier —
     the league reimburses the difference, mirroring the NBA's veteran-minimum
@@ -2660,11 +2774,15 @@ def _one_year_min_cap_hit(bio: dict, season: str, cap_levels: dict) -> Optional[
     can't be determined (e.g. undrafted player, scale not configured yet) —
     callers should treat that as "can't check," not "no cap applies."
     """
-    draft_year = bio.get("draft_year")
     scale = (cap_levels.get(season, {}) or {}).get("min_salary_scale") or {}
-    if not draft_year or not scale:
+    if not scale:
         return None
-    years_exp = _season_start(season) + 2000 - int(draft_year)
+    years_exp = _contract_years_exp(contract, season)
+    if years_exp is None:
+        draft_year = bio.get("draft_year")
+        if not draft_year:
+            return None
+        years_exp = _season_start(season) + 2000 - int(draft_year)
     tier_amt = scale.get(_min_salary_scale_tier(years_exp), 0)
     two_yr_amt = scale.get("2", 0)
     if tier_amt <= 0:
@@ -2992,8 +3110,20 @@ def _salary_match_limit(outgoing: int) -> int:
 
 
 def _check_contract_raises(
-    contract: ContractIn, bird_pct: bool, cur_season: str
+    contract: ContractIn, bird_pct: bool, cur_season: str,
+    bio: Optional[dict] = None, cap_levels: Optional[dict] = None,
 ) -> Optional[CheckResult]:
+    """§ 3.9 / § 3.13: no year-over-year change above 5% (8% with Full Bird)
+    of Year 1.
+
+    **Minimum-scale years are exempt.** § 3.12 says a multi-year minimum deal
+    pays "the scale for the player's years of experience that season," and the
+    scale's own steps are far bigger than 5% at the bottom — a 26-27 rookie
+    minimum rising to the 1-year tier is a 61% raise. Applying the ladder to it
+    rejected a contract the rulebook explicitly prescribes. Pass `bio` and
+    `cap_levels` to enable the exemption; without them the ladder applies to
+    every year (the old behaviour), since there is no scale to compare against.
+    """
     if contract.type == "two-way":
         return None
 
@@ -3014,17 +3144,33 @@ def _check_contract_raises(
     if yr1_sal == 0:
         return None
 
+    def _at_minimum(yr: str, salary: int) -> bool:
+        # 5% of grace above the scale figure — the same margin the ladder
+        # itself allows — because the alternative is failing a rules check
+        # over a rounded entry: a team that types "$1,400,000" for a
+        # $1,357,763 rookie minimum has still written a minimum deal. It
+        # can't disguise a real raise, since both ends of the step must sit
+        # on their own season's minimum before anything is exempted.
+        if not cap_levels or (bio is None and _contract_years_exp(contract, yr) is None):
+            return False
+        ceiling = _minimum_year_ceiling(bio or {}, yr, cap_levels, contract)
+        return ceiling is not None and salary <= round(ceiling * 1.05) + 1
+
     max_step = round(pct * yr1_sal)
-    violations = []
+    violations, exempt = [], []
     for i in range(1, len(years)):
         prev_sal = _parse_dollar(contract.salaries[years[i - 1]])
         this_sal = _parse_dollar(contract.salaries[years[i]])
         diff = abs(this_sal - prev_sal)
-        if diff > max_step + 1:
-            violations.append(
-                f"{years[i]}: ${prev_sal:,} → ${this_sal:,} "
-                f"(Δ${diff:,}, max ${max_step:,})"
-            )
+        if diff <= max_step + 1:
+            continue
+        if _at_minimum(years[i - 1], prev_sal) and _at_minimum(years[i], this_sal):
+            exempt.append(years[i])
+            continue
+        violations.append(
+            f"{years[i]}: ${prev_sal:,} → ${this_sal:,} "
+            f"(Δ${diff:,}, max ${max_step:,})"
+        )
 
     if violations:
         return CheckResult(
@@ -3034,6 +3180,16 @@ def _check_contract_raises(
             message=(
                 f"Raise/decrease limit violated ({pct_label} of Year 1 = ${max_step:,}/yr): "
                 + "; ".join(violations)
+            ),
+        )
+    if exempt:
+        return CheckResult(
+            check="raise_limit",
+            passed=True,
+            message=(
+                f"Every year is at the § 3.12 minimum salary scale, so the {pct_label} "
+                f"raise ladder doesn't apply to the step into "
+                + ", ".join(exempt) + "."
             ),
         )
     return None
@@ -3741,9 +3897,23 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
             ))
 
     if details.contract.type != "two-way":
-        r = _roster_size_check(team, _count_standard_roster(team) + 1, "signing")
+        r = _roster_size_check(
+            team, _count_standard_roster(team, excluding=details.player) + 1, "signing")
         if r:
             checks.append(r)
+    else:
+        # § 2.2. The standard check is skipped above because two-ways sit outside
+        # the 15 — but "outside the 15" was being read as "outside every limit",
+        # and their own three-slot cap went unenforced on both the offer path and
+        # the office's submit path.
+        r = _two_way_slot_check(
+            team, _count_two_way_roster(team, excluding=details.player) + 1, "signing")
+        if r:
+            checks.append(r)
+
+    r = _check_signing_method_declared(team, details.signing_method, details.contract.type)
+    if r:
+        checks.append(r)
 
     # § 3.8. Runs before the raise check below, because declaring a Bird tier
     # is what unlocks the 8% raise ceiling — an unsupported declaration buys
@@ -3754,7 +3924,8 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
         checks.append(r)
 
     bird_pct = details.bird_rights_type in ("QVFA", "EQVFA")
-    r = _check_contract_raises(details.contract, bird_pct=bird_pct, cur_season=season)
+    r = _check_contract_raises(details.contract, bird_pct=bird_pct, cur_season=season,
+                               bio=bios.get(details.player) or {}, cap_levels=ctx["cap_levels"])
     if r:
         checks.append(r)
 
@@ -3807,20 +3978,53 @@ def _check_signing_eligibility(player: str, team: str, season: str,
     return None
 
 
+def _min_scale_for_season(season: str, cap_levels: dict) -> dict:
+    """`season`'s minimum salary scale, falling back to the latest configured
+    season at or before it. Later league years routinely have no scale on file
+    yet — a contract signed today can easily run past the last season the
+    office has set figures for."""
+    scale = (cap_levels.get(season, {}) or {}).get("min_salary_scale") or {}
+    if scale:
+        return scale
+    for yr in sorted(cap_levels, key=_season_start, reverse=True):
+        if _season_start(yr) <= _season_start(season):
+            older = (cap_levels.get(yr) or {}).get("min_salary_scale") or {}
+            if older:
+                return older
+    return {}
+
+
 def _min_salary_floor(season: str, cap_levels: dict) -> int:
     """The 0-years tier for `season`, falling back to the latest configured
     season when that one has no scale yet. Minimum scales only ever rise, so
     an older season's figure is a conservative floor for a later one — it can
     under-flag, never produce a false positive."""
-    scale = (cap_levels.get(season, {}) or {}).get("min_salary_scale") or {}
-    if scale.get("0"):
-        return scale["0"]
-    for yr in sorted(cap_levels, key=_season_start, reverse=True):
-        if _season_start(yr) <= _season_start(season):
-            amt = ((cap_levels.get(yr) or {}).get("min_salary_scale") or {}).get("0")
-            if amt:
-                return amt
-    return 0
+    return _min_scale_for_season(season, cap_levels).get("0", 0)
+
+
+def _minimum_year_ceiling(bio: dict, season: str, cap_levels: dict,
+                          contract=None) -> Optional[int]:
+    """The most a § 3.12 minimum contract can pay this player in `season` — the
+    figure that decides whether a contract year is a minimum year at all.
+
+    The contract's own declared experience when it has one, else their tier by
+    the draft year, else the top (10+) row, since nothing above the veteran
+    minimum is a minimum contract for anyone. Returns None when no scale is
+    configured at or before `season`, which callers must read as "can't tell",
+    not "not a minimum"."""
+    scale = _min_scale_for_season(season, cap_levels)
+    if not scale:
+        return None
+    years_exp = _contract_years_exp(contract, season)
+    if years_exp is None:
+        draft_year = (bio or {}).get("draft_year")
+        if draft_year:
+            years_exp = _season_start(season) + 2000 - int(draft_year)
+    if years_exp is not None:
+        amt = scale.get(_min_salary_scale_tier(years_exp))
+        if amt:
+            return amt
+    return max(scale.values())
 
 
 def _check_minimum_salary(contract, player: str, bios: dict, season: str,
@@ -3877,31 +4081,62 @@ def _check_minimum_salary(contract, player: str, bios: dict, season: str,
                     f"${floor:,} (§ 3.12) — {when}."
                 ),
             )
-        tier_floor = _min_salary_for(bios.get(player) or {}, yr, cap_levels)
+        tier_floor = _min_salary_for(bios.get(player) or {}, yr, cap_levels, contract)
         if tier_floor and amount < tier_floor:
+            declared = _contract_years_exp(contract, yr)
+            basis = (f"{declared} years of experience in {yr}, per the contract"
+                     if declared is not None else
+                     "experience inferred from their real NBA draft year")
             return CheckResult(
                 check=check_name, passed=False, level="warning",
                 message=(
                     f"{yr} salary of ${amount:,} is below this player's ${tier_floor:,} "
                     f"minimum for their experience tier (§ 3.12), though above the league "
-                    f"floor of ${floor:,}. Experience is inferred from their real NBA draft "
-                    f"year — double check before submitting."
+                    f"floor of ${floor:,} — {basis}. Double check before submitting."
                 ),
             )
+
+    # Experience unknown *and* the deal is priced in minimum territory: say so
+    # rather than passing clean. This is the hole a flat multi-year minimum went
+    # through — no draft_year meant no tier to compare against, so a 12-year
+    # veteran signed at the rookie minimum for every year reported "meets the
+    # § 3.12 minimum salary." Only fires when it could actually be a minimum
+    # deal, so ordinary signings stay quiet.
+    if _contract_years_exp(contract, season) is None and not (bios.get(player) or {}).get("draft_year"):
+        first = min((contract.salaries or {}), key=_season_start, default=None)
+        vet_min = _min_scale_for_season(first, cap_levels).get("10+", 0) if first else 0
+        if first and vet_min and _parse_dollar(contract.salaries[first]) <= vet_min:
+            return CheckResult(
+                check=check_name, passed=False, level="warning",
+                message=(
+                    f"This is priced as a minimum contract, but {player}'s years of NBA "
+                    f"experience can't be established — no draft year on file and none "
+                    f"declared on the contract — so no year could be checked against its "
+                    f"tier on the Minimum Salary Scale (§ 3.12). Set the contract's years "
+                    f"of experience so each year is priced and validated on its own tier."
+                ),
+            )
+
     return CheckResult(
         check=check_name, passed=True,
         message="Every contract year meets the § 3.12 minimum salary.",
     )
 
 
-def _min_salary_for(bio: dict, season: str, cap_levels: dict) -> Optional[int]:
+def _min_salary_for(bio: dict, season: str, cap_levels: dict,
+                    contract=None) -> Optional[int]:
     """That season's minimum for this player's experience tier, or None when
-    experience can't be established (undrafted, or scale not configured)."""
+    experience can't be established (nothing declared on the contract, no
+    draft year, or scale not configured)."""
     scale = (cap_levels.get(season, {}) or {}).get("min_salary_scale") or {}
-    draft_year = bio.get("draft_year")
-    if not scale or not draft_year:
+    if not scale:
         return None
-    years_exp = _season_start(season) + 2000 - int(draft_year)
+    years_exp = _contract_years_exp(contract, season)
+    if years_exp is None:
+        draft_year = bio.get("draft_year")
+        if not draft_year:
+            return None
+        years_exp = _season_start(season) + 2000 - int(draft_year)
     return scale.get(_min_salary_scale_tier(years_exp)) or None
 
 
@@ -3921,7 +4156,8 @@ def _check_minimum_contract_cap_hit(details: SignDetails, bios: dict, season: st
     salaries = details.contract.salaries or {}
     if len(salaries) != 1 or season not in salaries:
         return None
-    expected = _one_year_min_cap_hit(bios.get(details.player, {}), season, cap_levels)
+    expected = _one_year_min_cap_hit(bios.get(details.player, {}), season, cap_levels,
+                                     details.contract)
     if expected is None:
         return None
     submitted = _parse_dollar(salaries[season])
@@ -4949,7 +5185,8 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
                               f"{len(real_years)} years ({', '.join(real_years) or 'none'}) (§ 3.14)."),
                 ))
 
-            r = _check_contract_raises(signing.contract, bird_pct=False, cur_season=season)
+            r = _check_contract_raises(signing.contract, bird_pct=False, cur_season=season,
+                                       bio=bios.get(slug) or {}, cap_levels=ctx["cap_levels"])
             if r:
                 r.check = f"sat_raise_limit_{slug}"
                 checks.append(r)
@@ -5041,7 +5278,8 @@ def _validate_convert_twoway(details: ConvertTwoWayDetails, ctx: dict) -> list[C
         if r:
             checks.append(r)
 
-    r = _check_contract_raises(details.contract, bird_pct=False, cur_season=season)
+    r = _check_contract_raises(details.contract, bird_pct=False, cur_season=season,
+                               bio=bios.get(details.player) or {}, cap_levels=ctx["cap_levels"])
     if r:
         checks.append(r)
 

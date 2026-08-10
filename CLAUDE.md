@@ -86,11 +86,21 @@ Two invariants, neither negotiable:
   its own; every figure comes from `_signing_fact_sheet` and its helpers.
 
 Derived rules live server-side so there is one of each: `revised_since` (a ballot
-cast before an offer was revised), `your_conflict` / `assignable` (§ 4.6 conflicts,
-from `_conflict_team` — a conflict comes from an active *tenure*, not a team role),
+cast before an offer was revised), `voided_since` (§ 4.3b — balls on an offer the
+head has since voided), `your_conflict` / `assignable` (§ 4.6 conflicts, from
+`_conflict_team` — a conflict comes from an active *tenure*, not a team role),
 and `balloted` / `ballots_cast` on `GET /api/fa/state` (own ballot always,
 everyone's count head-only). `tests/test_fa_offers.py` and `tests/test_fa_pool.py`
 pin the lot.
+
+**An offer's status is the only thing that decides whether it's in play.**
+`_is_live` = not archived and `status in LIVE_STATUSES`, and it is the single
+gate behind the ballot options, `_team_commitment`, `_conflict_team`, the
+one-live-offer-per-team rule, and every edit/submit/remand guard. `voided`
+(§ 4.3b, head-only, reversible via `/restore`) is deliberately outside that set
+so all of it follows without a second rule; `archived_at` (§ 4.2, stamped by
+finalize) is the other half. If you add a status, decide which side of `_is_live`
+it sits on and change nothing else.
 
 ## Data model reference
 

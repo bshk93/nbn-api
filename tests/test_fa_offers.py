@@ -88,7 +88,6 @@ PHX_OWNER = {"name": "phxOwner", "roles": ["phx"]}
 PHX_GM = {"name": "phxGM", "roles": ["phx"]}
 BKN_OWNER = {"name": "bknOwner", "roles": ["bkn"]}
 
-OWNERS = {"phxOwner": "PHX", "bknOwner": "BKN"}
 CURRENT_TEAM = {"memberB": "PHX", "phxOwner": "PHX", "phxGM": "PHX", "bknOwner": "BKN"}
 
 fa._load_state = lambda: STATE
@@ -102,7 +101,6 @@ fa._current_league_year = lambda: "26-27"
 fa.load_members = lambda: MEMBERS
 fa.log_write = lambda info, msg: None
 fa._member_current_team = lambda name, members=None: CURRENT_TEAM.get(name)
-fa.is_team_owner = lambda info, team: OWNERS.get(info["name"]) == team.upper()
 
 # The validator is exercised by its own suites (test_signing_eligibility,
 # test_signing_method_funding, …). Here it only needs to be *the same call*, so
@@ -166,7 +164,7 @@ check("conflicted assignee flagged inline, not refused (§ 4.6)",
 
 # ══ drafting ══════════════════════════════════════════════════════════════════
 
-print("\ndrafting (§ 6.0 — team role drafts, owner submits)")
+print("\ndrafting (§ 6.0 — the team's role is the one gate, drafting and submitting alike)")
 raises("a player who isn't open takes no offers", 422,
        lambda: make_offer(PHX_OWNER, player="young-rfa"))
 raises("no team role, no draft", 403, lambda: make_offer(BKN_OWNER, team="PHX"))
@@ -192,16 +190,18 @@ check("draft is editable by any team-role holder",
 # ══ submit ════════════════════════════════════════════════════════════════════
 
 print("\nsubmit")
-raises("a GM cannot pull the trigger", 403, lambda: fa.submit_offer(o1["id"], PHX_GM))
+raises("another team can't submit your offer — the team comes off the stored offer",
+       403, lambda: fa.submit_offer(o1["id"], BKN_OWNER))
 
 LEGAL["legal"] = False
 raises("an offer failing an error-level check can't be submitted (no force)", 422,
-       lambda: fa.submit_offer(o1["id"], PHX_OWNER))
+       lambda: fa.submit_offer(o1["id"], PHX_GM))
 check("a rejected submit leaves it a draft", o1["status"] == "draft")
 LEGAL["legal"] = True
 
-o1 = fa.submit_offer(o1["id"], PHX_OWNER)
-check("submitted by the owner", o1["status"] == "submitted" and o1["submitted_by"] == "phxOwner")
+o1 = fa.submit_offer(o1["id"], PHX_GM)
+check("any team-role holder can submit, not just the owner (§ 6.0)",
+      o1["status"] == "submitted" and o1["submitted_by"] == "phxGM")
 check("round stamped at submit", o1["round_id"] == "r1")
 check("validation frozen at submit (§ 5.2)", o1["validation"]["legal"] is True)
 
@@ -488,6 +488,73 @@ f1 = fa.submit_offer(f1["id"], PHX_OWNER)
 check("the FFA window does not gate a revision the committee itself asked for (§ 4.3a)",
       f1["status"] == "submitted" and f1["version"] == 2)
 
+# ══ the window's length is the head's setting (§ 4.1) ═════════════════════════
+#
+# The property that makes it safe to expose at all: the setting is read in one
+# place, `_start_ffa_clock`, and every clock then carries its own deadline. So
+# changing it cannot move a deadline a team is already bidding against, and
+# shortening it cannot retroactively close a window that is still open. If a
+# reader is ever added that consults the setting instead of the stamp, the two
+# "already running" checks below are what fails.
+
+print("\nFFA window length (§ 4.1 — the head's setting, never retroactive)")
+check("a board starts on the 24-hour default", fa._ffa_window_hours(STATE) == 24)
+
+fa.submit_offer(make_offer(BKN_OWNER, player="young-rfa", team="BKN")["id"], BKN_OWNER)
+running = STATE["players"]["young-rfa"]["ffa"]
+check("a clock started under the default runs 24 hours",
+      (fa._parse_ts(running["deadline"]) - fa._parse_ts(running["started_at"]))
+      == timedelta(hours=24))
+
+frozen = running["deadline"]
+res = fa.set_ffa_window(fa.FfaWindowIn(hours=48), HEAD)
+check("the head sets the length", res["ffa_window_hours"] == 48 and res["previous"] == 24)
+check("...and is told how many live clocks it does not touch", res["clocks_unaffected"] == 1)
+check("a clock already running keeps the deadline it was stamped with",
+      STATE["players"]["young-rfa"]["ffa"]["deadline"] == frozen)
+
+# Shortening is the dangerous direction: read live, a 1-hour setting would close
+# every window opened more than an hour ago, retroactively, without a write.
+fa.set_ffa_window(fa.FfaWindowIn(hours=1), HEAD)
+check("...and shortening the setting cannot retroactively expire it",
+      STATE["players"]["young-rfa"]["ffa"]["deadline"] == frozen
+      and fa._accepts_offers(STATE, "young-rfa", POOL)[0] is True)
+fa.set_ffa_window(fa.FfaWindowIn(hours=48), HEAD)
+
+raises("a window of zero is refused", 422, lambda: fa.set_ffa_window(fa.FfaWindowIn(hours=0), HEAD))
+raises("...and one longer than a week", 422, lambda: fa.set_ffa_window(fa.FfaWindowIn(hours=169), HEAD))
+check("a refused setting changes nothing", fa._ffa_window_hours(STATE) == 48)
+
+# Every string the league reads names the window *that clock* got, not the
+# setting current when it was rendered — otherwise a change mid-round rewrites
+# the history of every window that already ran.
+STATE["players"]["young-rfa"]["ffa"]["deadline"] = past
+accepting, reason = fa._accepts_offers(STATE, "young-rfa", POOL)
+check("an expired window is refused naming its own length, not the current setting",
+      accepting is False and "24-hour" in reason)
+
+fa.set_player_state("young-rfa", fa.PlayerStateIn(status="open"), HEAD)
+check("reopening clears the clock", STATE["players"]["young-rfa"]["ffa"] is None)
+# Called directly rather than through another submission: this is the single
+# function that reads the setting, and the submit path's own use of it is
+# already pinned above.
+fa._start_ffa_clock(STATE, "young-rfa", "some-offer", "bknOwner")
+fresh = STATE["players"]["young-rfa"]["ffa"]
+check("the next clock started runs the new length",
+      (fa._parse_ts(fresh["deadline"]) - fa._parse_ts(fresh["started_at"])) == timedelta(hours=48))
+
+check("the label reads off the stamp", fa.ffa_window_label(fresh) == "48-hour")
+check("...keeps a fractional window honest",
+      fa.ffa_window_label({"started_at": "2026-08-10T00:00:00+00:00",
+                           "deadline": "2026-08-10T01:30:00+00:00"}) == "1.5-hour")
+check("...and says nothing rather than a wrong number with no stamp",
+      fa.ffa_window_label({"deadline": "2026-08-10T01:30:00+00:00"}) == "")
+
+# Back to the default, clock cleared: the board section below reads this player
+# as one still taking offers.
+fa.set_ffa_window(fa.FfaWindowIn(hours=24), HEAD)
+STATE["players"]["young-rfa"]["ffa"] = None
+
 # ══ board ═════════════════════════════════════════════════════════════════════
 
 print("\npublic board (§ 6.1 — the fact that a team is bidding is committee information)")
@@ -537,6 +604,125 @@ check("…and flags a conflicted assignee *before* the head confirms",
       == {"facHead": None, "memberA": None, "memberB": "PHX"})
 check("a reviewer who isn't the head gets no picker",
       fa.review_player("curry-stephen", MEM_A)["assignable"] == [])
+
+# ══ void / restore (§ 4.3b) ═══════════════════════════════════════════════════
+#
+# The property under test is that a void is *not a delete and not a remand*: it
+# takes the offer out of play through `_is_live` — one gate, so the ballot, the
+# exposure figure, the conflict flag and the one-live-offer rule all follow
+# without a second rule to keep in step — while leaving the record intact and
+# reversible. A remand leaves the bid live and awaiting a team that may have
+# nothing to say; that is the gap this fills.
+
+print("\nvoid + restore (§ 4.3b — out of play, not deleted)")
+STATE["mode"] = "rounds"
+OFFERS[:] = [o for o in OFFERS if o["player"] != "curry-stephen"]
+BALLOTS.pop("curry-stephen", None)
+fa.open_round(fa.RoundIn(name="void round", close_previous=True), HEAD)
+fa.set_player_state("curry-stephen",
+                    fa.PlayerStateIn(status="open", subcommittee=["memberA", "memberB"]), HEAD)
+
+vp = fa.submit_offer(make_offer(PHX_OWNER)["id"], PHX_OWNER)
+vb = fa.submit_offer(make_offer(BKN_OWNER, team="BKN")["id"], BKN_OWNER)
+
+raises("a void requires a reason — the team can't answer it", 422,
+       lambda: fa.void_offer(vp["id"], fa.VoidIn(reason="  "), HEAD))
+raises("a reviewer who may remand may not void", 403,
+       lambda: fa.void_offer(vp["id"], fa.VoidIn(reason="wrong player"), MEM_A))
+raises("a draft can't be voided — the committee never saw it", 409,
+       lambda: fa.void_offer(draft_only["id"], fa.VoidIn(reason="nope"), HEAD))
+
+before = fa.review_player("curry-stephen", HEAD)
+check("both offers are on the ballot before the void",
+      {opt["key"] for opt in before["ballot_options"]} == {vp["id"], vb["id"], "NO_SIGNING"})
+
+vp = fa.void_offer(vp["id"], fa.VoidIn(reason="Submitted on the wrong player"), HEAD)
+check("void leaves LIVE_STATUSES", vp["status"] == "voided" and fa._is_live(vp) is False)
+check("who, when and why are on the record, with the status to come back to",
+      vp["void"]["by"] == "facHead"
+      and vp["void"]["reason"] == "Submitted on the wrong player"
+      and vp["void"]["from_status"] == "submitted")
+check("…and it is not a delete — the offer, its terms and its history all stand",
+      vp in OFFERS and vp["offer"]["contract"]["salaries"]["26-27"] == "$40,000,000"
+      and vp["history"][-1]["to"] == "voided")
+
+after = fa.review_player("curry-stephen", HEAD)
+check("a voided offer is off the ballot",
+      {opt["key"] for opt in after["ballot_options"]} == {vb["id"], "NO_SIGNING"})
+check("…and out of the offers under review", [o["id"] for o in after["offers"]] == [vb["id"]])
+check("…but listed as voided, because an erased bid is what a record is for",
+      [o["id"] for o in after["voided_offers"]] == [vp["id"]])
+check("the team's exposure drops as if it had never bid",
+      "PHX" not in after["commitments"]
+      and fa.get_commitment("phx", PHX_GM)["committed_year1"] == 0)
+check("…and the conflict it created is gone with it",
+      fa._conflict_team("memberB", "curry-stephen", OFFERS) is None)
+
+raises("a voided offer can't be edited", 409,
+       lambda: fa.patch_offer(vp["id"], fa.OfferPatch(pitch="please"), PHX_GM))
+raises("…or resubmitted", 409, lambda: fa.submit_offer(vp["id"], PHX_OWNER))
+raises("…or sent back", 409,
+       lambda: fa.remand_offer(vp["id"], fa.RemandIn(note="add a year"), MEM_A))
+raises("…or voided twice", 409,
+       lambda: fa.void_offer(vp["id"], fa.VoidIn(reason="again"), HEAD))
+
+# The whole point: "as if it wasn't submitted" has to include being able to
+# submit again. `create_offer`'s one-live-offer rule reads `_is_live`, so this
+# falls out of the status rather than needing its own exception.
+redo = make_offer(PHX_OWNER, y1="$30,000,000")
+check("the team may bid again — the void freed the slot", redo["status"] == "draft")
+raises("…and while it holds that slot, the void can't be undone under it", 409,
+       lambda: fa.restore_offer(vp["id"], HEAD))
+fa.delete_offer(redo["id"], PHX_OWNER)
+
+raises("only the head can undo a void", 403, lambda: fa.restore_offer(vp["id"], MEM_A))
+vp = fa.restore_offer(vp["id"], HEAD)
+check("restore puts it back to the status it held, not a guessed one",
+      vp["status"] == "submitted" and vp["void"] is None)
+check("…and it is a live bid again",
+      {opt["key"] for opt in fa.review_player("curry-stephen", HEAD)["ballot_options"]}
+      == {vp["id"], vb["id"], "NO_SIGNING"})
+raises("restoring a live offer is refused", 409, lambda: fa.restore_offer(vp["id"], HEAD))
+
+# A returned offer must come back returned — otherwise the void would silently
+# answer the remands against it.
+fa.remand_offer(vb["id"], fa.RemandIn(note="trim year 1"), MEM_A)
+vb = fa.void_offer(vb["id"], fa.VoidIn(reason="BKN withdrew by agreement"), HEAD)
+vb = fa.restore_offer(vb["id"], HEAD)
+check("a voided remand comes back returned, its notes still unanswered",
+      vb["status"] == "returned"
+      and [r["note"] for r in vb["remands"] if r["from_version"] >= vb["version"]]
+      == ["trim year 1"])
+
+# ── a ballot cast on an offer that is then voided ─────────────────────────────
+#
+# § 4.3a's rule, applied harder: flagged, never rewritten. Redistributing balls
+# nobody redistributed would be the software inventing a vote.
+fa.cast_ballot("curry-stephen", fa.BallotIn(balls={vp["id"]: 700, vb["id"]: 300}), MEM_A)
+vp = fa.void_offer(vp["id"], fa.VoidIn(reason="PHX ruled ineligible"), HEAD)
+view = fa.get_ballots("curry-stephen", MEM_A)
+check("a ballot with balls on a voided offer is flagged, never rewritten",
+      view["ballots"]["memberA"]["voided_since"] == [vp["id"]]
+      and view["ballots"]["memberA"]["balls"] == {vp["id"]: 700, vb["id"]: 300})
+
+final = fa.finalize_player("curry-stephen", HEAD)
+check("totals are recorded as cast, voided option included",
+      final["totals"] == {vp["id"]: 700, vb["id"]: 300})
+check("…and the head is told which of them went nowhere",
+      final["voided_options"] == [{"offer": vp["id"], "team": "PHX",
+                                   "number": vp["number"], "balls": 700}])
+check("finalize archives the voided offer with the round it belonged to",
+      vp.get("archived_at") == final["locked_at"])
+raises("…so a decided player's void can't be undone behind the lock", 409,
+       lambda: fa.restore_offer(vp["id"], HEAD))
+check("a voided offer archived by finalize drops off the review page",
+      fa.review_player("curry-stephen", HEAD)["voided_offers"] == [])
+raises("…and an archived offer is refused by name, not as 'not submitted'", 409,
+       lambda: fa.void_offer(vb["id"], fa.VoidIn(reason="too late"), HEAD))
+fa.unlock_player("curry-stephen", HEAD)
+check("unlock un-archives the voided offer too, or restore stays wrongly shut",
+      vp.get("archived_at") is None
+      and fa.restore_offer(vp["id"], HEAD)["status"] == "submitted")
 
 print("\n" + ("=" * 40))
 if FAILS:
