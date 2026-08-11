@@ -460,6 +460,44 @@ def notify_ffa_started(slug: str, ffa: dict) -> None:
                 f"({_stamp(deadline, 'R')}) to submit offers.")
 
 
+def notify_ffa_extended(slug: str, ffa: dict, added_hours: float,
+                        reason: str, actor: str, reopened: bool) -> None:
+    """The head pushed a window's deadline out (§ 4.1).
+
+    Both channels, for the same reason the clock start fires on both: a team
+    deciding whether to bid needs the new deadline, and it is the one FFA fact
+    that is not committee-private. The public line carries the player, the new
+    deadline and the head's reason — **never a team and never a dollar figure**,
+    which `_news` enforces by only accepting a slug and a string.
+
+    `reopened` distinguishes the two cases in the copy: extending a live window
+    is more time, while extending an expired one puts a player back on the
+    board, and a team that had stopped watching needs to be told which.
+    """
+    deadline = ffa.get("deadline")
+    _alert(lambda: {"embeds": [{
+        "title": (f"FFA window {'reopened' if reopened else 'extended'} — {_name(slug)}"),
+        "description": (f"Offers now close {_stamp(deadline)} ({_stamp(deadline, 'R')}). "
+                        f"Existing offers stand and ballots are unaffected."),
+        "color": COLOR_BOARD,
+        "url": f"{PDC_SITE}/#/p/{slug}",
+        "fields": [
+            {"name": "Added", "value": f"{_hours(added_hours)}h", "inline": True},
+            {"name": "Window now", "value": _window_label(ffa) or "—", "inline": True},
+            {"name": "Reason", "value": reason or "—", "inline": False},
+        ],
+        "footer": {"text": f"{'reopened' if reopened else 'extended'} by {actor}"},
+    }]})
+    verb = ("has been **reopened**" if reopened else "has been **extended**")
+    _news(slug, f"🕐 The window on **{_name(slug)}** {verb} by {_hours(added_hours)} hours — "
+                f"offers now close {_stamp(deadline)} ({_stamp(deadline, 'R')}). "
+                f"Reason: {reason}")
+
+
+def _hours(h: float) -> str:
+    return str(int(h)) if float(h).is_integer() else str(round(float(h), 1))
+
+
 def notify_ffa_closed(slug: str, ffa: dict) -> None:
     """The window expired. Emitted by whichever request first observed it (§ 4.1),
     guarded upstream by a flag on the player's `ffa` object so it fires once.

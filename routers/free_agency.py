@@ -563,6 +563,11 @@ class FfaWindowIn(BaseModel):
     hours: float
 
 
+class FfaExtendIn(BaseModel):
+    hours: float
+    reason: str
+
+
 class RoundIn(BaseModel):
     name: Optional[str] = None
     closes_at: Optional[str] = None    # display label only — nothing acts on it
@@ -714,6 +719,84 @@ def set_ffa_window(body: FfaWindowIn, info: dict = Depends(require_role("fac_hea
                   if (e.get("ffa") or {}).get("deadline") and not _ffa_expired(e))
     fa_notify.notify_ffa_window_change(prev, hours, info["name"], running)
     return {"ffa_window_hours": hours, "previous": prev, "clocks_unaffected": running}
+
+
+@router.post("/api/fa/players/{slug}/ffa-extend")
+def extend_ffa_window(slug: str, body: FfaExtendIn,
+                      info: dict = Depends(require_role("fac_head"))):
+    """Push one player's FFA deadline out, keeping everything already bid.
+
+    **This is the deliberate exception to "a setting can never move a running
+    deadline" (§ 4.1), and it is safe for the reasons that rule isn't.** That
+    rule protects teams from `PUT /api/fa/ffa-window` leaking into clocks they
+    are already bidding against — an invisible, global, retroactive change. This
+    is none of those: one named player, by the head, with a required reason, and
+    announced on both channels before anyone can act on it. `_start_ffa_clock`
+    still reads the setting exactly once and still never re-reads it; nothing
+    about that changed.
+
+    **It is not the same operation as reopening.** `PUT /api/fa/players/{slug}`
+    with `status: "open"` clears `ffa` outright and mints a fresh `round_id`, so
+    the next offer starts a brand-new window and ballots already cast land in a
+    different bucket — a second window, deliberately. This keeps the same
+    window: same `round_id`, same ballots, same offers, more time. The head
+    needs both, and picking the wrong one silently discards a round of votes.
+
+    Works on an expired clock as well as a live one, which is the case that
+    prompted it: an expired window has no other route back short of a reopen
+    that throws the deliberation away. Extending from `max(now, deadline)` is
+    what makes the two cases behave the same way — "six more hours" means six
+    hours from now on a window that already lapsed, not six hours added to a
+    moment in the past.
+    """
+    if not (0 < body.hours <= FFA_WINDOW_MAX_HOURS):
+        raise HTTPException(422, f"hours must be above 0 and at most {FFA_WINDOW_MAX_HOURS}")
+    reason = (body.reason or "").strip()
+    if not reason:
+        raise HTTPException(422, "A reason is required — it is shown to every team.")
+
+    with _fa_lock:
+        state = _load_state()
+        if state.get("mode") != "ffa":
+            raise HTTPException(422, f"Free agency is in {state.get('mode')} mode, not FFA — "
+                                     f"there is no window to extend.")
+        entry = _player_entry(state, slug)
+        ffa = entry.get("ffa")
+        if not ffa or not ffa.get("deadline"):
+            raise HTTPException(422, "No FFA window has started on this player — a window "
+                                     "begins when the first offer is submitted.")
+        old_deadline = _parse_ts(ffa["deadline"])
+        now = datetime.now(timezone.utc)
+        reopened = old_deadline <= now
+        new_deadline = max(now, old_deadline) + timedelta(hours=body.hours)
+
+        ffa["deadline"] = new_deadline.isoformat()
+        started = _parse_ts(ffa.get("started_at"))
+        if started:
+            # Recomputed, not incremented: `ffa_window_label` describes the
+            # window this clock actually ran, and every refusal string and post
+            # is built from it. Leaving the original length would have the
+            # system telling teams "the 24-hour window" about a 30-hour one.
+            ffa["window_hours"] = round((new_deadline - started).total_seconds() / 3600, 2)
+        # Reviving a lapsed clock has to clear the announcement guard, or the
+        # second expiry passes in silence.
+        ffa.pop("closed_posted", None)
+        ffa.setdefault("extensions", []).append({
+            "at": _now(), "by": info["name"], "hours": body.hours,
+            "reason": reason, "from": old_deadline.isoformat(),
+            "to": ffa["deadline"], "reopened": reopened,
+        })
+        state.setdefault("history", []).append(
+            {"at": _now(), "by": info["name"], "action": "ffa_extend", "player": slug,
+             "from": old_deadline.isoformat(), "to": ffa["deadline"], "reason": reason})
+        _save_state(state)
+        stamped = dict(ffa)
+
+    log_write(info, f"POST fa/{slug}/ffa-extend — +{body.hours}h "
+                    f"({'reopened' if reopened else 'extended'})")
+    fa_notify.notify_ffa_extended(slug, stamped, body.hours, reason, info["name"], reopened)
+    return {"player": slug, "ffa": stamped, "reopened": reopened,
+            "window_label": ffa_window_label(stamped)}
 
 
 @router.post("/api/fa/rounds")

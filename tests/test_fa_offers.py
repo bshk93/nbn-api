@@ -724,6 +724,65 @@ check("unlock un-archives the voided offer too, or restore stays wrongly shut",
       vp.get("archived_at") is None
       and fa.restore_offer(vp["id"], HEAD)["status"] == "submitted")
 
+
+# ── § 4.1 extending one player's window ──────────────────────────────────────
+# The deliberate exception to everything asserted directly above. The setting
+# must never reach a running clock; the *head*, naming one player and giving a
+# reason, may — and the whole point is that it keeps what the reopen path throws
+# away. If these stop holding, extending has silently become a second reopen.
+print("\nExtending a window keeps the round, the offers and the ballots")
+
+fa.fa_notify.notify_ffa_extended = lambda *a, **k: None
+# Self-contained setup: by this point in the file young-rfa's clock has been
+# cleared by the reopen tests, so stamp a fresh one rather than inheriting
+# whatever the previous section happened to leave behind.
+STATE["mode"] = "ffa"
+ext_entry = STATE["players"].setdefault("young-rfa", {})
+ext_entry["ffa"] = None
+fa._start_ffa_clock(STATE, "young-rfa", "offer-ext", "facHead")
+round_before = ext_entry["round_id"]
+deadline_before = fa._parse_ts(ext_entry["ffa"]["deadline"])
+open_before = len([o for o in OFFERS if o["player"] == "young-rfa" and fa._is_live(o)])
+
+res = fa.extend_ffa_window("young-rfa", fa.FfaExtendIn(hours=6, reason="BKN asked"), HEAD)
+after = fa._parse_ts(ext_entry["ffa"]["deadline"])
+check("the deadline moves out by exactly the hours given",
+      after - deadline_before == timedelta(hours=6))
+check("the round id is untouched, so ballots stay in their bucket",
+      ext_entry["round_id"] == round_before)
+check("offers already submitted are still live",
+      len([o for o in OFFERS if o["player"] == "young-rfa" and fa._is_live(o)]) == open_before)
+check("a live window reports as extended, not reopened", res["reopened"] is False)
+check("the window's stated length grows with it, so no post calls a 30-hour window a 24-hour one",
+      ext_entry["ffa"]["window_hours"] == 30)
+check("the extension is recorded with who and why",
+      ext_entry["ffa"]["extensions"][-1]["by"] == "facHead"
+      and ext_entry["ffa"]["extensions"][-1]["reason"] == "BKN asked")
+
+# An expired clock is the case that has no other route back: reopening clears
+# the clock *and* mints a new round id, discarding the deliberation.
+ext_entry["ffa"]["deadline"] = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+ext_entry["ffa"]["closed_posted"] = fa._now()
+check("...and it really is closed first", fa._accepts_offers(STATE, "young-rfa", POOL)[0] is False)
+res = fa.extend_ffa_window("young-rfa", fa.FfaExtendIn(hours=6, reason="lapsed overnight"), HEAD)
+check("a lapsed window can be revived", res["reopened"] is True)
+check("...measured from now, not from the deadline it blew past",
+      fa._parse_ts(ext_entry["ffa"]["deadline"]) - datetime.now(timezone.utc)
+      > timedelta(hours=5, minutes=30))
+check("...and the player accepts offers again",
+      fa._accepts_offers(STATE, "young-rfa", POOL)[0] is True)
+check("...with the closed-post guard cleared so the second expiry is announced",
+      "closed_posted" not in ext_entry["ffa"])
+check("...keeping the same round id, unlike a reopen",
+      ext_entry["round_id"] == round_before)
+
+raises("a reason is required — it is what every team is shown", 422,
+       lambda: fa.extend_ffa_window("young-rfa", fa.FfaExtendIn(hours=6, reason="  "), HEAD))
+raises("...as is a positive number of hours", 422,
+       lambda: fa.extend_ffa_window("young-rfa", fa.FfaExtendIn(hours=0, reason="x"), HEAD))
+raises("a player with no window started has nothing to extend", 422,
+       lambda: fa.extend_ffa_window("never-opened", fa.FfaExtendIn(hours=6, reason="x"), HEAD))
+
 print("\n" + ("=" * 40))
 if FAILS:
     print(f"FAILURES: {FAILS}")

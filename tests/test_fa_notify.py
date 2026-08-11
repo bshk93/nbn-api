@@ -145,6 +145,45 @@ check("...and claims no outcome",
 check("the committee channel hears about the clock too", len(pdc()) == 2, len(pdc()))
 
 
+# ── § 4.1 window extension ────────────────────────────────────────────────────
+print("\nExtending a window announces on both channels, leaking neither team nor figure")
+
+EXT = {"deadline": iso(6), "started_at": iso(-24), "window_hours": 30.0,
+       "started_by_offer": "f7c1a9b2", "started_by": "phxOwner"}
+
+reset()
+fn.notify_ffa_extended("curry-stephen", EXT, 6, "MEM never got a window", "facHead", False)
+ext_pub, ext_pdc = news(), pdc()
+check("an extension posts to both channels", len(ext_pub) == 1 and len(ext_pdc) == 1,
+      (ext_pub, ext_pdc))
+check("the public line names the player and the new deadline",
+      "Stephen Curry" in ext_pub[0] and "<t:" in ext_pub[0], ext_pub[0])
+check("...and carries the head's reason verbatim",
+      "MEM never got a window" in ext_pub[0], ext_pub[0])
+# The reason is author-supplied text, so it is the one string on this path that
+# could carry an abbreviation into the public channel. That is the head's call
+# and visible to them as they type it; what must never leak is anything the
+# *system* adds. Assert the machine-built part specifically.
+machine = ext_pub[0].split("Reason:")[0]
+check("nothing the system composes leaks a team",
+      not ABBR_RE.search(machine), machine)
+check("nothing the system composes leaks a figure", "$" not in machine, machine)
+check("the private post distinguishes an extension from a reopen",
+      "extended" in ext_pdc[0]["title"].lower(), ext_pdc[0]["title"])
+check("...and states that existing offers stand",
+      "stand" in ext_pdc[0]["description"], ext_pdc[0]["description"])
+check("...and reports the window's new total length",
+      "30-hour" in field(ext_pdc[0], "Window now"), field(ext_pdc[0], "Window now"))
+
+reset()
+fn.notify_ffa_extended("curry-stephen", {**EXT, "deadline": iso(6)}, 6,
+                       "clock lapsed over a holiday", "facHead", True)
+check("reviving a lapsed window says reopened, not extended",
+      "reopened" in pdc()[0]["title"].lower() and "reopened" in news()[0],
+      (pdc()[0]["title"], news()[0]))
+
+
+
 # The head can change how long a window runs (§ 4.1), so neither post may say
 # "24-hour" from a constant — each names the length off the clock it announces.
 reset()
