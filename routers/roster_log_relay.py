@@ -20,12 +20,23 @@ The contract is deliberately narrow — **it relays, it does not interpret**:
   that channel post the signings, renounces, team options and guarantees, and
   all of those are relayed without looking at the words. `#roster-log-nbn-today`
   is *entirely* our own transaction embeds and every one of them is a real
-  applied transaction, so all of it is relayed.
+  applied transaction, so all of it is relayed **except** the ones the
+  submitter marked as already entered — see below.
+* A per-transaction opt-out. `POST /api/transactions` takes
+  `relay_to_roster_log` (default `False`) and `discord_notify` stamps the
+  decision into the embed's footer (`NO_RELAY_MARKER`) rather than storing it
+  anywhere this module would have to look up separately — the footer already
+  travels with the message this relay reads. `_opted_out` checks for it and
+  `is_relayable` folds it in, so an opted-out transaction is skipped exactly
+  like a non-relayable message: cursor advances, nothing sent. The default is
+  *off* because most transactions get typed into #roster-log by hand as part
+  of entering them into the sheet; this exists for the "we already logged it,
+  don't repeat it" case, not the common one.
 
 Duplicates are expected and intended: a renounce shows up both as a human post
-in `#fa-news` and as our embed in `#roster-log-nbn-today`, and both are relayed.
-Matching them would need a fuzzy content match on free text, and a missed entry
-costs more than a doubled line.
+in `#fa-news` and as our embed in `#roster-log-nbn-today`, and both are relayed
+(modulo the opt-out above). Matching them would need a fuzzy content match on
+free text, and a missed entry costs more than a doubled line.
 
 ## Reading, in a service that has only ever written
 
@@ -84,6 +95,7 @@ from pydantic import BaseModel
 from . import auth
 from . import discord_transport as transport
 from .constants import DATA_DIR
+from .discord_notify import NO_RELAY_MARKER
 from .storage import _load_json, _save_json
 
 logger = logging.getLogger("nbn-api")
@@ -221,10 +233,25 @@ def _parts(msg: dict) -> list[dict]:
     return [msg] + [s.get("message") or {} for s in (msg.get("message_snapshots") or [])]
 
 
+def _opted_out(msg: dict) -> bool:
+    """True when `discord_notify` stamped this transaction's embed as already
+    entered into #roster-log by hand (`relay_to_roster_log=False`, the
+    default). The marker lives in each embed's footer, which `_embed_text`
+    never extracts into relayed text, so it can't leak into a message that
+    *is* relayed."""
+    for part in _parts(msg):
+        for embed in part.get("embeds") or []:
+            if NO_RELAY_MARKER in (embed.get("footer") or {}).get("text", ""):
+                return True
+    return False
+
+
 def is_relayable(msg: dict, humans_only: bool) -> bool:
     if msg.get("type") not in (0, 19):      # plain message or inline reply
         return False
     if humans_only and (msg.get("author", {}).get("bot") or msg.get("webhook_id")):
+        return False
+    if _opted_out(msg):
         return False
     return any((p.get("content") or "").strip() or p.get("embeds") or p.get("attachments")
                for p in _parts(msg))

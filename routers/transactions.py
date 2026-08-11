@@ -337,6 +337,11 @@ class TransactionIn(BaseModel):
     # current roster/cap data already reflects) without re-applying it —
     # skips _apply_trade and validation, just logs the record for display.
     historical: bool = False
+    # Whether `roster_log_relay` should mirror this transaction's Discord post
+    # into #roster-log. Default False: most transactions are entered into
+    # #roster-log by hand as part of working the transaction, so mirroring by
+    # default would double it up — this opts in only the ones that aren't.
+    relay_to_roster_log: bool = False
 
 
 class OptionDetails(BaseModel):
@@ -5669,7 +5674,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
     # Outside the lock and off the request thread — the roster write and ledger
     # append are already committed, so a Discord problem must not delay or fail
     # them. Historical backfills never reach here (they return far above).
-    notify_transaction(txn, forced_checks)
+    notify_transaction(txn, forced_checks, relay_to_roster_log=body.relay_to_roster_log)
     return txn
 
 

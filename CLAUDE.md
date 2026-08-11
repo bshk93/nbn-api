@@ -200,7 +200,21 @@ message "is" a transaction. A human enters what the line says, and a wrong
 paraphrase there is worse than a line that didn't need entering. Bot posts are
 allowed per source (`SOURCES`): skipped on `#fa-news`, where our own FFA clock
 posts aren't sheet changes, and relayed on `#roster-log-nbn-today`, which is
-nothing but applied transactions. Duplicates across sources are intended.
+nothing but applied transactions — except the ones the submitter already
+entered by hand, see below. Duplicates across sources are intended.
+
+**Per-transaction opt-out.** `POST /api/transactions` takes
+`relay_to_roster_log: bool = False`. `discord_notify.build_embed` stamps the
+decision into that transaction's own embed footer (`NO_RELAY_MARKER`, "not
+relayed to #roster-log") rather than a separate store this module would have to
+query — the footer already travels with the exact message this module reads.
+`_opted_out` checks it and `is_relayable` folds it in, so an opted-out
+transaction is skipped the same way any non-relayable message is: cursor
+advances past it, nothing sent. `_embed_text` never extracts the footer into
+relayed text, so the marker can't leak into a message that *is* relayed.
+Default is `False` because most transactions get typed into #roster-log by
+hand while being worked — this exists for the "already logged, don't repeat
+it" case, which is the exception, not the common path.
 
 Four anti-dump gates, since the sources hold thousands of old messages:
 seeding is silent (a new cursor starts at the newest id and relays nothing),

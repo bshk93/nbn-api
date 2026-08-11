@@ -40,6 +40,11 @@ DISCORD_TXN_CHANNEL = os.environ.get("DISCORD_TXN_CHANNEL", "").strip()
 
 SITE = "https://nbn.today"
 
+# Read by `roster_log_relay` to decide whether to mirror this post into
+# #roster-log. Lives in the footer, which the relay's `_embed_text` never
+# extracts into the relayed text, so the marker itself is never copied along.
+NO_RELAY_MARKER = "not relayed to #roster-log"
+
 TYPE_LABELS = {
     "sign": "Signing", "offer_sheet": "Offer Sheet", "pick": "Draft Pick",
     "offer_sheet_decision": "Offer Sheet Decision",
@@ -319,7 +324,8 @@ def _describe(txn: dict, bios: dict) -> str:
     return ""
 
 
-def build_embed(txn: dict, forced_checks: Optional[list[str]] = None) -> dict:
+def build_embed(txn: dict, forced_checks: Optional[list[str]] = None,
+                 relay_to_roster_log: bool = False) -> dict:
     bios = load_player_bios()
     t = txn.get("type", "")
     d = txn.get("details") or {}
@@ -379,6 +385,11 @@ def build_embed(txn: dict, forced_checks: Optional[list[str]] = None) -> dict:
     if d.get("_source") == "owner_self_serve":
         who += " (team owner)"
     footer = f"{who} · {txn.get('date', '')}"
+    # `roster_log_relay` mirrors this channel into #roster-log by default; when
+    # the submitter says it's already there, this marker (read from the footer,
+    # which the relay otherwise ignores entirely) tells it to skip this one.
+    if not relay_to_roster_log:
+        footer += f" · {NO_RELAY_MARKER}"
 
     return {
         "title": title,
@@ -430,9 +441,15 @@ def _is_fresh(txn: dict) -> bool:
     return (datetime.now(timezone.utc) - created).total_seconds() <= MAX_AGE_SECONDS
 
 
-def notify_transaction(txn: dict, forced_checks: Optional[list[str]] = None) -> None:
+def notify_transaction(txn: dict, forced_checks: Optional[list[str]] = None,
+                        relay_to_roster_log: bool = False) -> None:
     """Announce one just-submitted transaction. Fire-and-forget: returns
     immediately, the POST runs on a daemon thread.
+
+    `relay_to_roster_log` controls only whether `roster_log_relay` mirrors this
+    post into #roster-log — it still always posts here. Defaults to False
+    because most transactions are entered into #roster-log by hand already
+    (that's the whole reason the relay exists to catch the ones that aren't).
 
     Never raises — the caller has already written the roster and appended the
     ledger entry, and a notification problem must not surface as a failed
@@ -448,5 +465,5 @@ def notify_transaction(txn: dict, forced_checks: Optional[list[str]] = None) -> 
     # Built lazily, so a suppressed burst doesn't reload every player bio per
     # refused message.
     transport.send(DISCORD_TXN_CHANNEL,
-                   lambda: {"embeds": [build_embed(txn, forced_checks)]},
+                   lambda: {"embeds": [build_embed(txn, forced_checks, relay_to_roster_log)]},
                    max_burst=MAX_BURST, burst_window=BURST_WINDOW)
