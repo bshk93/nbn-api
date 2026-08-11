@@ -5,8 +5,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import auth, players, roster_picks, transactions, boxscores, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, discord, trade_finder, picks_preview, suggestions, google_sheets, free_agency
+from routers import auth, players, roster_picks, transactions, boxscores, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, discord, trade_finder, picks_preview, suggestions, google_sheets, free_agency, roster_log_relay
 from routers.picks_scheduler import start_picks_horizon_scheduler
+from routers.roster_log_relay import start_roster_log_relay
 
 logging.basicConfig(
     stream=sys.stdout,
@@ -21,6 +22,7 @@ logger = logging.getLogger("nbn-api")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     start_picks_horizon_scheduler()
+    start_roster_log_relay()
     yield
 
 
@@ -54,3 +56,4 @@ app.include_router(trade_finder.router)
 app.include_router(suggestions.router)
 app.include_router(google_sheets.router)   # POST /api/trade-sheet — publish a workbook to Drive
 app.include_router(free_agency.router)     # GET /api/fa/pool — PDC free-agency Phase 1 (nbn-today/docs/pdc-free-agency-spec.md)
+app.include_router(roster_log_relay.router)  # mirrors the transaction channels into #roster-log

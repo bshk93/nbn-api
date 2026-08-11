@@ -185,6 +185,47 @@ process.
   - `/help` — ephemeral embed listing every command, grouped. Hand-maintained in
     `_HELP_GROUPS`; update it when adding/removing a command.
 
+## #roster-log mirror (`routers/roster_log_relay.py`)
+
+The one place this service **reads** Discord. `#roster-log` is the committee's
+list of changes still to be entered into the sheets and the site; a human used to
+copy each message into it by hand from four channels. This polls those channels
+(`GET /channels/{id}/messages?after=`, every 60s — REST reads don't need the
+Message Content intent, and no gateway is involved) and reposts new **parent**
+messages (`type` 0 and 19) verbatim via `discord_transport`'s shared queue.
+Destination is `DISCORD_ROSTER_LOG_CHANNEL`; unset, the module never starts.
+
+It **relays, it does not interpret** — no summarizing, no deciding whether a
+message "is" a transaction. A human enters what the line says, and a wrong
+paraphrase there is worse than a line that didn't need entering. Bot posts are
+allowed per source (`SOURCES`): skipped on `#fa-news`, where our own FFA clock
+posts aren't sheet changes, and relayed on `#roster-log-nbn-today`, which is
+nothing but applied transactions. Duplicates across sources are intended.
+
+Four anti-dump gates, since the sources hold thousands of old messages:
+seeding is silent (a new cursor starts at the newest id and relays nothing),
+messages older than `MAX_AGE_HOURS` are skipped, the destination has a burst cap,
+and each poll examines at most `MAX_PER_POLL` per source. **A refused send is a
+throttle, not a drop** — unlike `discord_notify`, the cursor is not advanced past
+a message that wasn't enqueued, so a clipped burst is relayed next cycle. Cursors
+live in `roster-log-relay.json`; deleting it re-seeds (and relays nothing).
+
+Because seeding skips history, carrying an older message across is deliberate and
+manual: `GET /api/roster-log/candidates?source=…` lists what's there with the exact
+text each would become, `POST /api/roster-log/relay` sends up to 25 named ids, and
+`GET /api/roster-log/status` shows the cursors. All three are admin-only.
+
+Each entry is posted as a **bare embed** — description and colour, no title,
+source label, author or timestamp. Plain text ran consecutive entries together
+and `#roster-log` is read as a checklist of separate things to enter, so the card
+is a *boundary*, not a header; anything added to it is content the source message
+didn't have. An image attachment is hung off the card as `image`, since a URL
+inside an embed description is only a link.
+
+Relayed text carries `allowed_mentions: {"parse": []}` — the team-role pings in
+nearly every `#fa-news` signing still *render*, they just don't notify twice.
+`tests/test_roster_log_relay.py` pins all of the above.
+
 ## Google Sheets export (`POST /api/trade-sheet`)
 
 `routers/google_sheets.py`. Takes an `.xlsx` upload (multipart: `file`, `name`),
