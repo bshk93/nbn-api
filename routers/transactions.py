@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from .constants import (
     DATA_DIR, CAP_LEVELS_FILE, TRANSACTIONS_FILE, VALID_TEAMS, ROOM_ZONE_BASELINE_FILE,
+    ROOKIE_SCALE_FILE,
     _txn_lock, _deadcap_lock, _state_lock, _picks_lock, _trade_exc_lock,
     ROSTER_MAX, ROSTER_OFFSEASON_MAX, ROSTER_MIN, ROSTER_CHARGE_MIN, TWO_WAY_MAX,
     SALARY_MATCH_TIER1_CAP, SALARY_MATCH_TIER2_CAP,
@@ -2120,6 +2121,48 @@ def _rookie_min_salary(season: str, cap_levels: dict) -> int:
     """The 0-years-experience tier of that season's minimum salary scale
     (§ 1.7) — the figure an Empty Roster Charge (§ 2.1a) uses per open slot."""
     return (cap_levels.get(season, {}).get("min_salary_scale") or {}).get("0", 0)
+
+
+def _rookie_scale_contract(draft_year: Optional[int], draft_round: Optional[int],
+                           draft_pick: Optional[int]) -> Optional[dict]:
+    """§ 7.1's prescribed first-round rookie deal for one draft slot, or None
+    when there's no scale on file for that year (or the pick isn't a first).
+
+    Returns `{"salaries": {...}, "cap_holds": {...}, "amounts": [...]}`, with
+    the season keys derived from the draft year: a 2026 pick's Year 1 is 26-27.
+
+    **One reader, two callers.** The validator scores a submitted contract
+    against this and the office form prefills from it, so the schedule — four
+    years, Years 3 and 4 as team options, and a fifth figure that is the § 3.10
+    RFA hold rather than a contract year — is stated once. `rookie-scale.json`
+    is loaded per call rather than cached: it changes about once a year, and a
+    stale table would silently price a real contract.
+    """
+    if draft_round != 1 or not draft_year or not draft_pick:
+        return None
+    if not ROOKIE_SCALE_FILE.exists():
+        return None
+    try:
+        scale = json.loads(ROOKIE_SCALE_FILE.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    rows = scale.get(str(draft_year))
+    if not rows or not (1 <= draft_pick <= len(rows)):
+        return None
+    amounts = [int(a) for a in rows[draft_pick - 1]]
+    if len(amounts) < 5 or not all(amounts[:5]):
+        return None  # a pre-five-column table can't express the hold; don't guess
+
+    first = f"{draft_year % 100:02d}-{(draft_year + 1) % 100:02d}"
+    seasons = [first] + [_season_shift(first, i) for i in range(1, 5)]
+    return {
+        "amounts": amounts[:5],
+        "salaries": {s: f"${a:,}" for s, a in zip(seasons, amounts[:5])},
+        # Years 3 and 4 are team options; the fifth year is the free-agent hold
+        # the deal rolls into, which is why it is tagged rather than left bare.
+        "cap_holds": {seasons[2]: "TEAM_OPT", seasons[3]: "TEAM_OPT", seasons[4]: "RFA"},
+        "seasons": seasons,
+    }
 
 
 def _min_salary_scale_tier(years_exp: int) -> str:
@@ -5286,8 +5329,117 @@ def _validate_convert_twoway(details: ConvertTwoWayDetails, ctx: dict) -> list[C
     return checks
 
 
+def _validate_sign_pick(details: SignPickDetails, ctx: dict) -> list[CheckResult]:
+    """Article VII pick signing.
+
+    This ran **no checks at all** until 2026-08-11 — `sign_pick` was simply
+    absent from `_VALIDATORS`, so a pick signing skipped the hard cap and the
+    roster ceiling that § 1.3 explicitly promises it enforces ("any signing,
+    trade, draft pick signing, or two-way conversion"). Structurally it is the
+    two-way conversion's twin: the player is already on the roster carrying no
+    salary, and the signing adds their Year 1 in one step.
+    """
+    checks = []
+    bios = ctx["bios"]; season = ctx["cur_season"]
+    bio = bios.get(details.player) or {}
+
+    team_map = _build_team_map()
+    team = team_map.get(details.player)
+
+    # `_apply_sign_pick` refuses anyone not holding draft rights, with a 422 at
+    # apply time. Say so here instead: a check the office can read beats an
+    # exception after they've filled in a contract, and without it the verdict
+    # would come back LEGAL for a signing that cannot be submitted.
+    if bio.get("type") != "draft-rights":
+        checks.append(CheckResult(
+            check="draft_rights", passed=False, level="error",
+            message=(f"{details.player} does not hold unsigned draft rights "
+                     f"(type: {bio.get('type') or 'unset'}) — only a drafted player "
+                     f"can be signed under Article VII."),
+        ))
+
+    # Draft rights carry no salary, so the whole Year 1 figure is new money.
+    # Read the same way `_apply_sign_pick` will write it rather than assuming
+    # Year 1 is the current season — a pick signed before the league year rolls
+    # over prices off the season the contract actually starts in.
+    old_sal = _parse_dollar((bio.get("salaries") or {}).get(season, ""))
+    new_sal = _parse_dollar(details.contract.salaries.get(season, ""))
+    delta = new_sal - old_sal
+
+    if team and delta > 0 and details.contract.type != "two-way":
+        projected = _compute_team_salary_ex_holds(team, bios, season) + delta
+        r = _hard_cap_check(team, projected, season, ctx["team_state"], ctx["cap_levels"])
+        if r:
+            checks.append(r)
+        r = _universal_hard_cap_check(team, projected, season, ctx["cap_levels"])
+        if r:
+            checks.append(r)
+
+    # `draft-rights` is roster-exempt (`_ROSTER_EXEMPT_TYPES`), so signing to a
+    # standard deal is what puts the player on the 15. A two-way stays exempt.
+    if team and details.contract.type != "two-way":
+        r = _roster_size_check(team, _count_standard_roster(team) + 1, "signing this pick")
+        if r:
+            checks.append(r)
+
+    scale = _rookie_scale_contract(bio.get("draft_year"), bio.get("draft_round"),
+                                   bio.get("draft_pick"))
+    if scale and details.contract.type != "two-way":
+        checks.append(_check_rookie_scale_terms(details.contract, scale, bio))
+    elif details.contract.type != "two-way":
+        # No scale to measure against — second-rounders sign off the § 3.12
+        # minimum scale, where the ladder's own minimum exemption applies.
+        r = _check_contract_raises(details.contract, bird_pct=False, cur_season=season,
+                                   bio=bio, cap_levels=ctx["cap_levels"])
+        if r:
+            checks.append(r)
+
+    return checks
+
+
+def _check_rookie_scale_terms(contract: ContractIn, scale: dict,
+                              bio: dict) -> CheckResult:
+    """§ 7.1: a first-rounder's deal is the scale — every year, to the dollar.
+
+    Deliberately **not** run through `_check_contract_raises`: the scale's own
+    Year 1 → Year 2 step lands a few hundred dollars either side of exactly 5%
+    (pick 1 of 2026 rises 5.0024%), so the § 3.9 ladder rejects roughly half of
+    the contracts § 7.1 prescribes. The scale comparison below is both stricter
+    and more useful — it names the year and the difference.
+    """
+    label = f"pick {bio.get('draft_pick')} of {bio.get('draft_year')}"
+    problems = []
+    for season, expected in scale["salaries"].items():
+        got = contract.salaries.get(season)
+        if got is None:
+            problems.append(f"{season}: missing (scale: {expected})")
+        elif _parse_dollar(got) != _parse_dollar(expected):
+            problems.append(f"{season}: {got} (scale: {expected})")
+    extra = sorted(set(contract.salaries) - set(scale["salaries"]))
+    for season in extra:
+        problems.append(f"{season}: not a year of the rookie scale")
+
+    wrong_tags = []
+    for season, want in scale["cap_holds"].items():
+        got = (contract.cap_holds or {}).get(season)
+        if got != want:
+            wrong_tags.append(f"{season} should be {want}, got {got or 'guaranteed'}")
+
+    if not problems and not wrong_tags:
+        return CheckResult(
+            check="rookie_scale", passed=True, level="info",
+            message=f"Terms match the § 7.1 rookie scale for {label}.",
+        )
+    detail = "; ".join(problems + wrong_tags)
+    return CheckResult(
+        check="rookie_scale", passed=False, level="error",
+        message=f"§ 7.1 sets this contract for {label} — {detail}.",
+    )
+
+
 _VALIDATORS = {
     "sign":           _validate_sign,
+    "sign_pick":      _validate_sign_pick,
     "release":        _validate_release,
     "renounce":       _validate_renounce,
     "rescind_renounce": _validate_rescind_renounce,
@@ -5879,6 +6031,61 @@ def validate_sign(body: SignDetails):
         eaps_assumption=body.eaps_assumption,
     )
     return _validation_result(_validate_sign(body, ctx), fact_sheet)
+
+
+@router.post("/api/validate/sign_pick")
+def validate_sign_pick(body: SignPickDetails):
+    """Non-mutating Article VII check of a draft-pick signing.
+
+    Shares `_validate_sign_pick` with `POST /api/transactions` and writes
+    nothing. The team is **derived from the roster holding the rights**, never
+    taken from the request — same as the apply path, so the two can't disagree
+    about who is signing the player.
+    """
+    ctx = _validation_ctx()
+    if body.player not in ctx["bios"]:
+        raise HTTPException(400, f"Unknown player '{body.player}'.")
+    team = _build_team_map().get(body.player)
+    if not team:
+        raise HTTPException(400, f"'{body.player}' is not on any roster.")
+    fact_sheet = _signing_fact_sheet(
+        team, body.player, body.contract, ctx,
+        signing_method="draft_pick",
+        bird_rights_type=body.bird_rights_type,
+        eaps_assumption=body.eaps_assumption,
+        # Draft rights are roster-exempt, so a standard deal is what consumes
+        # the slot — which is exactly what `adds_roster_spot` already means.
+        adds_roster_spot=True,
+    )
+    bio = ctx["bios"].get(body.player) or {}
+    fact_sheet["rookie_scale"] = _rookie_scale_contract(
+        bio.get("draft_year"), bio.get("draft_round"), bio.get("draft_pick"))
+    return _validation_result(_validate_sign_pick(body, ctx), fact_sheet)
+
+
+@router.get("/api/rookie-scale/contract/{slug}")
+def get_rookie_scale_contract(slug: str):
+    """The § 7.1 contract a given drafted player is entitled to, ready to load
+    straight into a contract form.
+
+    Exists so the office form doesn't reimplement § 7.1 to prefill itself —
+    same doctrine as `/free-agency`: the page renders figures, it never derives
+    them. Returns `{"scale": null, ...}` for a second-rounder or a draft year
+    with no table loaded, which the form shows as "enter terms by hand".
+    """
+    bios = load_player_bios()
+    if slug not in bios:
+        raise HTTPException(404, f"Unknown player '{slug}'.")
+    bio = bios[slug]
+    scale = _rookie_scale_contract(bio.get("draft_year"), bio.get("draft_round"),
+                                   bio.get("draft_pick"))
+    return {
+        "player": slug,
+        "draft_year": bio.get("draft_year"),
+        "draft_round": bio.get("draft_round"),
+        "draft_pick": bio.get("draft_pick"),
+        "scale": scale,
+    }
 
 
 @router.get("/api/offer-sheets/open")

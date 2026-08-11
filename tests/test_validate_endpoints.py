@@ -64,6 +64,7 @@ VALIDATE_PATHS = [
     "/api/validate/offer_sheet",
     "/api/validate/offer_sheet_decision",
     "/api/validate/renounce",
+    "/api/validate/sign_pick",
 ]
 
 
@@ -112,10 +113,33 @@ def rfa_subject():
     return None
 
 
+def draft_rights_subject():
+    """A player holding unsigned draft rights, plus their pick slot — the only
+    shape `/api/validate/sign_pick` can resolve. Returns (slug, team, scale),
+    where `scale` is the § 7.1 table entry or None (second-rounder, or a draft
+    year with no table loaded)."""
+    bios = tx.load_player_bios()
+    team_map = tx._build_team_map()
+    for slug, bio in sorted(bios.items()):
+        if bio.get("type") != "draft-rights" or slug not in team_map:
+            continue
+        scale = tx._rookie_scale_contract(
+            bio.get("draft_year"), bio.get("draft_round"), bio.get("draft_pick"))
+        if scale:
+            return slug, team_map[slug], scale
+    for slug, bio in sorted(bios.items()):
+        if bio.get("type") == "draft-rights" and slug in team_map:
+            return slug, team_map[slug], None
+    return None
+
+
 def main():
     rostered, hold = pick_subjects()
     rfa = rfa_subject()
+    rights = draft_rights_subject()
     print(f"subjects: rostered={rostered} hold={hold} rfa={rfa}")
+    print(f"          draft rights={rights[:2] if rights else None} "
+          f"scale={'yes' if rights and rights[2] else 'no'}")
     if not rostered:
         print("no rostered players found — cannot evaluate")
         return 1
@@ -141,6 +165,15 @@ def main():
         # point of the assertion is that it isn't a 500.
         "/api/validate/offer_sheet_decision": {"offer_id": "nope", "outcome": "matched"},
         "/api/validate/renounce": {"player": hold[0] if hold else slug},
+        # A pick signing derives its team from the roster, so the body carries
+        # no team at all — the one endpoint here whose subject is a single
+        # player. Sent at scale terms when there is a scale, so the shape
+        # assertions aren't riding on an illegal verdict.
+        "/api/validate/sign_pick": {
+            "player": rights[0] if rights else slug,
+            "contract": ({"type": "player", "salaries": rights[2]["salaries"],
+                          "cap_holds": rights[2]["cap_holds"]}
+                         if rights and rights[2] else contract)},
     }
     for path in VALIDATE_PATHS:
         r = post(path, bodies[path])
@@ -178,6 +211,8 @@ def main():
         ("/api/validate/offer_sheet",
          {"player": "nobody-atall", "offering_team": team, "contract": contract}),
         ("/api/validate/renounce", {"player": "nobody-atall"}),
+        ("/api/validate/sign_pick",
+         {"player": "nobody-atall", "contract": contract}),
     ]
     for path, body in unknown_cases:
         r = post(path, body)
