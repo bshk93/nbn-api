@@ -14,6 +14,7 @@ from .constants import (
 )
 from .storage import read_csv, write_csv, _load_json, _save_json, log_write, _current_season_str, _current_league_year, _season_start
 from .auth import get_token_info, has_role, require_role
+from . import tradeblock_notify
 
 router = APIRouter()
 
@@ -396,11 +397,20 @@ class TradingBlockEntry(BaseModel):
 class TeamTradeBlock(BaseModel):
     players: list[TradingBlockEntry] = []
     picks: list[PickEntry] = []
+    # Not persisted — see the diff/notify block below. Off by default: most
+    # tradeblock edits are routine roster management, not news.
+    notify_discord: bool = False
 
 
 @router.get("/api/trading-block")
 def get_trading_block():
     return load_trading_block()
+
+
+def _pick_key(p) -> tuple:
+    # Works on both a PickEntry (attribute access) and a raw stored dict.
+    get = (lambda k: getattr(p, k)) if hasattr(p, "year") else (lambda k: p.get(k))
+    return (get("year"), get("round"), get("team"))
 
 
 @router.put("/api/trading-block/{team}")
@@ -415,11 +425,26 @@ def put_trading_block(
     if not has_role(info, team.lower()) and not has_role(info, "admin"):
         raise HTTPException(status_code=403, detail=f"'{team.lower()}' role required")
     data = load_trading_block()
-    data[team] = body.model_dump()
+    old_block = _normalize_team_block(data.get(team, []))
+    data[team] = body.model_dump(exclude={"notify_discord"})
     save_trading_block(data)
     n_players = len(body.players)
     n_picks   = len(body.picks)
     log_write(info, f"PUT trading-block/{team} — {n_players} players, {n_picks} picks")
+
+    if body.notify_discord:
+        old_players = {e.get("player") for e in old_block["players"]}
+        new_players = {e.player for e in body.players}
+        old_pick_keys = {_pick_key(p) for p in old_block["picks"]}
+        new_pick_keys = {_pick_key(p) for p in body.picks}
+        tradeblock_notify.notify_tradeblock_change(
+            member=info.get("name"),
+            team=team,
+            added_players=sorted(new_players - old_players),
+            removed_players=sorted(old_players - new_players),
+            added_picks=[p.model_dump() for p in body.picks if _pick_key(p) not in old_pick_keys],
+            removed_picks=[p for p in old_block["picks"] if _pick_key(p) not in new_pick_keys],
+        )
     return {"ok": True}
 
 
