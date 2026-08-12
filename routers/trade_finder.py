@@ -15,7 +15,7 @@ from .transactions import (
     TradeAsset, TradeTransfer, TradeValidateInput,
     _validate_trade, _check_salary_matching,
     _compute_team_salary, _compute_team_salary_ex_holds,
-    _FA_HOLD_TYPES,
+    _FA_HOLD_TYPES, _resolve_mle_bucket,
 )
 
 # A roster row is excluded from the search entirely (not just from salary
@@ -118,9 +118,8 @@ def _team_financial_summary(team: str, current: int, current_ex_holds: int, cap_
     ts = get_season_state(team_state, team, season)
     apron1 = cl.get("apron1")
     apron2 = cl.get("apron2")
-    mle_amount = {"ntmle": cl.get("ntmle_amount", 0), "tmle": cl.get("tmle_amount", 0)}.get(
-        ts.get("mle_type") or "ntmle", 0
-    )
+    bucket = _resolve_mle_bucket("mle", ts, current, current_ex_holds, cl)
+    mle_amount = cl.get(bucket[1], 0) if bucket else 0
     return {
         "team": team,
         "current_salary": current,

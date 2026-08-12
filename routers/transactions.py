@@ -1218,6 +1218,11 @@ def _apply_convert_twoway(details: ConvertTwoWayDetails, txn_date: str, info: di
 
     bio["type"] = "player"
     cur_season = _season_for_date(txn_date)
+    # Captured before the salary mutation just below, so a generic "mle" that
+    # falls through to _mle_zone_from_salary resolves against the same
+    # pre-conversion Team Salary the validator would score (§ 3.2).
+    salary_before = _compute_team_salary(team, bios, cur_season)
+    salary_ex_holds_before = _compute_team_salary_ex_holds(team, bios, cur_season)
     past, past_gtd, past_gtd_dates, past_gtd_sched = _retained_history(bio, cur_season)
     bio["salaries"] = {**past, **details.contract.salaries}
     bio["cap_holds"] = details.contract.cap_holds
@@ -1238,9 +1243,9 @@ def _apply_convert_twoway(details: ConvertTwoWayDetails, txn_date: str, info: di
         "txn_id": txn_id,
     }]
 
-    hold_cap_levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
+    cap_levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
     hold_notes = _autofill_fa_hold_amounts(
-        bio, team, details.contract.cap_holds, details.contract.salaries, hold_cap_levels,
+        bio, team, details.contract.cap_holds, details.contract.salaries, cap_levels,
         bird_rights_type=details.bird_rights_type, eaps_assumption=details.eaps_assumption,
         slug=details.player,
     )
@@ -1284,8 +1289,15 @@ def _apply_convert_twoway(details: ConvertTwoWayDetails, txn_date: str, info: di
 
                 resolved = details.signing_method
                 if resolved == "mle":
-                    resolved = ts.get("mle_type") or "ntmle"
-                ts["mle_type"] = resolved
+                    cl = cap_levels.get(cur_season, {})
+                    resolved = (ts.get("mle_type")
+                                or _mle_zone_from_salary(salary_before, salary_ex_holds_before, cl)
+                                or "ntmle")
+                # team-state.json's schema (roster_picks.py's PUT validator)
+                # only recognizes the short "room" form — never persist the
+                # long "room_exception" form a declared `room_exception`
+                # signing_method would otherwise stamp here.
+                ts["mle_type"] = "room" if resolved == "room_exception" else resolved
                 if resolved == "ntmle":
                     _maybe_set_hard_cap(ts, "first_apron", f"NTMLE two-way conversion: {details.player}")
                 elif resolved == "tmle":
@@ -1381,6 +1393,12 @@ def _apply_sign(details: SignDetails, txn_date: str, info: dict, txn_id: Optiona
         raise HTTPException(status_code=422, detail=f"Unknown team: {team!r}")
 
     cur_season = _season_for_date(txn_date)
+    cap_levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
+    # Captured before any roster/bio mutation below, so a generic "mle" that
+    # falls through to _mle_zone_from_salary resolves against the same
+    # pre-signing Team Salary the validator scored (§ 3.2).
+    salary_before = _compute_team_salary(team, bios, cur_season)
+    salary_ex_holds_before = _compute_team_salary_ex_holds(team, bios, cur_season)
     team_map = _build_team_map()
     old_hold_team = None
     if details.player in team_map:
@@ -1454,9 +1472,8 @@ def _apply_sign(details: SignDetails, txn_date: str, info: dict, txn_id: Optiona
     # season right after it ends) that the submitter didn't already give a
     # real salary figure for. Runs after the contracts append above so Bird
     # tier can be derived from this contract's own years, not just prior ones.
-    hold_cap_levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
     hold_notes = _autofill_fa_hold_amounts(
-        bio, team, details.contract.cap_holds, details.contract.salaries, hold_cap_levels,
+        bio, team, details.contract.cap_holds, details.contract.salaries, cap_levels,
         bird_rights_type=details.bird_rights_type, eaps_assumption=details.eaps_assumption,
         slug=details.player,
     )
@@ -1488,8 +1505,15 @@ def _apply_sign(details: SignDetails, txn_date: str, info: dict, txn_id: Optiona
 
                 resolved = details.signing_method
                 if resolved == "mle":
-                    resolved = ts.get("mle_type") or "ntmle"
-                ts["mle_type"] = resolved
+                    cl = cap_levels.get(cur, {})
+                    resolved = (ts.get("mle_type")
+                                or _mle_zone_from_salary(salary_before, salary_ex_holds_before, cl)
+                                or "ntmle")
+                # team-state.json's schema (roster_picks.py's PUT validator)
+                # only recognizes the short "room" form — never persist the
+                # long "room_exception" form a declared `room_exception`
+                # signing_method would otherwise stamp here.
+                ts["mle_type"] = "room" if resolved == "room_exception" else resolved
                 if resolved == "ntmle":
                     _maybe_set_hard_cap(ts, "first_apron", f"NTMLE signing: {details.player}")
                 elif resolved == "tmle":
@@ -3352,7 +3376,7 @@ def _check_bae_eligibility(
             check=check_name, passed=False, level="error",
             message=f"{team} has already used the Bi-Annual Exception this season (§ 3.5).",
         )
-    if ts.get("mle_type") == "room":
+    if ts.get("mle_type") in ("room", "room_exception"):
         return CheckResult(
             check=check_name, passed=False, level="error",
             message=(f"{team} has already used cap space or the Room Exception this season — "
@@ -3366,13 +3390,47 @@ def _check_bae_eligibility(
     return None
 
 
-def _resolve_mle_bucket(method: Optional[str], ts: dict) -> Optional[tuple[str, str, str]]:
+def _mle_zone_from_salary(
+    team_salary_full: Optional[int], team_salary_ex_holds: Optional[int], cl: dict
+) -> Optional[str]:
+    """§ 3.2 zone table (room / ntmle / tmle) off live Team Salary — the same
+    rule `computeMleType` in teams/team.js uses to decide what a team's page
+    shows it holds. `_resolve_mle_bucket` falls through to this so an
+    unassigned generic "mle" resolves to whichever bucket the team page
+    already displays, rather than a hardcoded default.
+
+    Returns None (not a guess) when the inputs aren't available — an
+    unconfigured cap-levels season, or a caller that only has scalar figures
+    (this module's own test suite exercising the pre-existing scalar path).
+    """
+    if team_salary_full is None or team_salary_ex_holds is None:
+        return None
+    cap, apron1, ntmle = cl.get("cap"), cl.get("apron1"), cl.get("ntmle_amount")
+    if cap is None or apron1 is None or ntmle is None:
+        return None
+    if cap - team_salary_full > ntmle:
+        return "room"
+    if apron1 - team_salary_ex_holds >= ntmle:
+        return "ntmle"
+    return "tmle"
+
+
+def _resolve_mle_bucket(
+    method: Optional[str], ts: dict,
+    team_salary_full: Optional[int] = None,
+    team_salary_ex_holds: Optional[int] = None,
+    cl: Optional[dict] = None,
+) -> Optional[tuple[str, str, str]]:
     """Which exception bucket an exception-funded `signing_method` actually
     draws on, as ``(resolved_method, cap_levels_amount_key, display_label)``.
 
-    A generic "mle" resolves against whatever bucket the team is already locked
-    into this season (`mle_type`), defaulting to the NTMLE. Returns None for
-    methods that aren't a running dollar balance (cap space, Bird Rights,
+    A generic "mle" resolves against whatever bucket the team is already
+    locked into this season (`mle_type`). If nothing is locked yet, it falls
+    to `_mle_zone_from_salary` — the § 3.2 zone table off live Team Salary —
+    rather than a hardcoded default, so this can't disagree with what the
+    team page shows the team holds. Only degrades to "ntmle" when the zone
+    genuinely can't be computed (no salary figures supplied). Returns None
+    for methods that aren't a running dollar balance (cap space, Bird Rights,
     minimum, BAE, sign-and-trade) — those have dedicated checks.
 
     Shared by `_check_signing_method_funding` and the simulator's fact sheet so
@@ -3380,7 +3438,9 @@ def _resolve_mle_bucket(method: Optional[str], ts: dict) -> Optional[tuple[str, 
     """
     resolved = method
     if resolved == "mle":
-        resolved = ts.get("mle_type") or "ntmle"
+        resolved = (ts.get("mle_type")
+                    or _mle_zone_from_salary(team_salary_full, team_salary_ex_holds, cl or {})
+                    or "ntmle")
     if resolved == "room":          # mle_type stores the short form
         resolved = "room_exception"
     meta = {
@@ -3468,7 +3528,7 @@ def _check_signing_method_funding(
     # Exception-funded. A generic "mle" resolves against whatever bucket the
     # team is already locked into this season, exactly as _apply_sign does —
     # so validation and application can't disagree about which one was used.
-    bucket = _resolve_mle_bucket(method, ts)
+    bucket = _resolve_mle_bucket(method, ts, team_salary_before, team_salary_ex_holds_before, cl)
     if bucket is None:
         return None
     resolved, amount_key, label = bucket
@@ -3713,7 +3773,11 @@ def _check_exception_absorption(
             # figure when bios is available (the production path); otherwise
             # fall back to the live-salary approximation this used before
             # reconstruction existed.
-            july1 = _room_exception_july1_eligible(team, season, bios, cl) if bios is not None else None
+            # `cl` here is already season-indexed (this function's param, not
+            # the full cap-levels dict); _room_exception_july1_eligible does
+            # its own `cap_levels.get(season, {})`, so wrap it back into a
+            # single-season dict rather than double-indexing into {}.
+            july1 = _room_exception_july1_eligible(team, season, bios, {season: cl}) if bios is not None else None
             if july1 is not None:
                 eligible = july1
             else:
@@ -5961,7 +6025,7 @@ def _signing_fact_sheet(team: str, player: str, contract, ctx: dict, *,
 
     # Remaining balance in whichever exception bucket this method draws on.
     exception = None
-    bucket = _resolve_mle_bucket(signing_method, ts)
+    bucket = _resolve_mle_bucket(signing_method, ts, current, current_ex_holds, cl)
     if bucket:
         _resolved, amount_key, label = bucket
         amount = cl.get(amount_key)

@@ -124,6 +124,29 @@ def main():
           run("ntmle", 5000000, 240000000, ex_holds=190000000,
               state={"mle_used": 0, "mle_type": None}) is None)
 
+    print("\n§ 3.2 — a team with no locked mle_type derives its zone from live Team Salary")
+    # Zone lines for CAP_LEVELS: Room ceiling = cap - ntmle = $149,917,000;
+    # NTMLE ceiling = apron1 - ntmle = $193,971,000. This must match
+    # computeMleType in teams/team.js exactly, or the team page and the
+    # signing form disagree about which exception a team holds.
+    check("deep under the cap resolves to the Room Exception",
+          run("mle", 9366000, 100000000) is None)
+    check("...and is bounded by the Room Exception amount",
+          run("mle", 9366001, 100000000) is not None)
+    check("mid-zone resolves to the NTMLE",
+          run("mle", 15044000, 160000000) is None)
+    check("...and is bounded by the NTMLE amount",
+          run("mle", 15044001, 160000000) is not None)
+    # SAC's real 26-27 position (2026-08-12): $201,308,319 Team Salary, no
+    # holds. cap - salary is not > ntmle (not Room); apron1 - salary is
+    # $7,706,681 < $15,044,000 (not NTMLE) — the team page correctly shows
+    # the Taxpayer MLE here. A generic 'mle' signing_method used to default
+    # to the NTMLE regardless, showing SAC an exception it didn't have.
+    check("SAC's real position resolves to the Taxpayer MLE, not the NTMLE",
+          run("mle", 6064000, 201308319) is None)
+    check("...and is bounded by the Taxpayer MLE amount, not the (larger) NTMLE",
+          run("mle", 6064001, 201308319) is not None)
+
     print("\nout of scope / defensive")
     check("bird_rights is not amount-checked", run("bird_rights", 42000000, 202219825) is None)
     check("minimum is not amount-checked", run("minimum", 3876529, 202219825) is None)
@@ -133,10 +156,6 @@ def main():
     check("an unconfigured season is skipped, not failed",
           _check_signing_method_funding("OKC", "cap_space", 42000000, 202219825,
                                         202219825, "99-00", CAP_LEVELS, {}) is None)
-    # A team with no team-state entry defaults to the NTMLE, matching _apply_sign.
-    check("generic 'mle' with no stored mle_type defaults to the NTMLE",
-          run("mle", 15044000, 100000000) is None)
-    check("...and is bounded by the NTMLE amount", run("mle", 15044001, 100000000) is not None)
 
     print("\n" + ("=" * 40))
     if FAILS:
