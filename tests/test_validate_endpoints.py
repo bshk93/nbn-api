@@ -65,6 +65,7 @@ VALIDATE_PATHS = [
     "/api/validate/offer_sheet_decision",
     "/api/validate/renounce",
     "/api/validate/sign_pick",
+    "/api/validate/convert_twoway",
 ]
 
 
@@ -133,13 +134,25 @@ def draft_rights_subject():
     return None
 
 
+def two_way_subject():
+    """A player currently on a two-way contract, plus their team — the only
+    shape `/api/validate/convert_twoway` can resolve."""
+    bios = tx.load_player_bios()
+    team_map = tx._build_team_map()
+    for slug, bio in sorted(bios.items()):
+        if bio.get("type") == "two-way" and slug in team_map:
+            return slug, team_map[slug]
+    return None
+
+
 def main():
     rostered, hold = pick_subjects()
     rfa = rfa_subject()
     rights = draft_rights_subject()
+    twoway = two_way_subject()
     print(f"subjects: rostered={rostered} hold={hold} rfa={rfa}")
     print(f"          draft rights={rights[:2] if rights else None} "
-          f"scale={'yes' if rights and rights[2] else 'no'}")
+          f"scale={'yes' if rights and rights[2] else 'no'} two-way={twoway}")
     if not rostered:
         print("no rostered players found — cannot evaluate")
         return 1
@@ -174,6 +187,10 @@ def main():
             "contract": ({"type": "player", "salaries": rights[2]["salaries"],
                           "cap_holds": rights[2]["cap_holds"]}
                          if rights and rights[2] else contract)},
+        # Same shape as sign_pick: no team in the body, derived from the roster.
+        "/api/validate/convert_twoway": {
+            "player": twoway[0] if twoway else slug,
+            "contract": contract},
     }
     for path in VALIDATE_PATHS:
         r = post(path, bodies[path])
@@ -212,6 +229,8 @@ def main():
          {"player": "nobody-atall", "offering_team": team, "contract": contract}),
         ("/api/validate/renounce", {"player": "nobody-atall"}),
         ("/api/validate/sign_pick",
+         {"player": "nobody-atall", "contract": contract}),
+        ("/api/validate/convert_twoway",
          {"player": "nobody-atall", "contract": contract}),
     ]
     for path, body in unknown_cases:

@@ -267,6 +267,14 @@ class CheckResult(BaseModel):
 
 # ── Transaction load/save ─────────────────────────────────────────────────────
 
+# § 5.1 waiver claims are sealed (nbn-today/docs/waiver-wire-spec.md § 2) — a
+# pending `waiver_claim` (and its `waiver_claim_withdraw`) must never surface
+# through the general-purpose, unauthenticated ledger endpoints below.
+# routers/waivers.py reads the raw ledger directly via `_load_transactions`,
+# bypassing this redaction entirely, which is exactly where these belong.
+_SEALED_TXN_TYPES = {"waiver_claim", "waiver_claim_withdraw"}
+
+
 def _load_transactions() -> list[dict]:
     return _load_json(TRANSACTIONS_FILE, [])
 
@@ -698,15 +706,19 @@ def _retained_history(bio: dict, cur_season: str):
     )
 
 
-def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[str, dict, str]:
+def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[str, dict, str, dict]:
     """Removes player from roster, converts guaranteed salary to dead cap.
-    Returns (team, dead_cap, terminated_salary).
+    Returns (team, dead_cap, terminated_salary, snapshot).
 
     `terminated_salary` is the release-season salary the terminated contract
     carried — captured here because it is the figure § 1.4 Row D compares
     against the NTMLE when the player later signs elsewhere. Dead cap is not a
     usable substitute: a non-guaranteed contract can terminate with a large
-    salary and leave no dead cap at all."""
+    salary and leave no dead cap at all.
+
+    `snapshot` is the pre-release contract (same field set `_RENOUNCE_SNAPSHOT_FIELDS`
+    already names, reused here) — the § 5.1 waiver wire's claim window needs it to
+    hand the untouched contract to a claiming team; see routers/waivers.py."""
     bios = load_player_bios()
     if details.player not in bios:
         raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
@@ -719,6 +731,7 @@ def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[
     cur_season = _season_for_date(txn_date)
 
     bio = bios[details.player]
+    snapshot = {f: json.loads(json.dumps(bio.get(f))) for f in _RENOUNCE_SNAPSHOT_FIELDS if f in bio}
     terminated_salary = str((bio.get("salaries") or {}).get(cur_season, "") or "")
     holds_map = bio.get("cap_holds") or {}
     guaranteed = bio.get("guaranteed", {})
@@ -813,7 +826,7 @@ def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[
 
     _scrub_trading_block({team: {details.player}}, bios)
     log_write(info, f"TXN release — {details.player} from {team}")
-    return team, dead_cap, terminated_salary
+    return team, dead_cap, terminated_salary, snapshot
 
 
 def _season_after(season: str) -> str:
@@ -2805,6 +2818,23 @@ def _preview_fa_hold(
     season has no EAPS on file and no assumption supplied, which is a normal
     intermediate state in a form that revalidates on every keystroke. That
     becomes `needs_eaps`, not a failed request.
+
+    `probe["contracts"]` gets the proposed deal appended before tier is
+    derived — mirroring `_apply_sign`/`_apply_sign_pick`/`_apply_convert_twoway`,
+    which append the just-signed contract to `bio["contracts"]` *before*
+    calling `_autofill_fa_hold_amounts`, specifically so a multi-year deal's
+    own years count toward the tenure its trailing hold prices (a player who
+    signs a 3-year deal will, by the hold season, actually have played those
+    3 years). Preview used to derive tier from the bio as it stood *before*
+    the deal — under-counting tenure relative to what apply would see, so a
+    signing could preview as e.g. Non-QVFA (no EAPS needed, field hidden,
+    verdict green) and then 422 at submit demanding an eaps_assumption the
+    form never asked for, because apply's `_derive_bird_tier` fallback saw
+    the deal's own years and read QVFA. Only the fallback path (no ledger
+    acquisition record) was ever exposed to this — `_bird_tenure` derives
+    tenure from real elapsed calendar time and was never affected — but nothing
+    about `slug`/ledger completeness is known to the caller building a preview,
+    so this must mirror the apply-time bio unconditionally to guarantee parity.
     """
     explicit = contract.salaries or {}
     holds = {s: t for s, t in (contract.cap_holds or {}).items()
@@ -2812,11 +2842,13 @@ def _preview_fa_hold(
     if not holds:
         return None
     season = sorted(holds)[0]
-    tier = bird_rights_type or _derive_bird_tier(bio, team, season, slug)
+
+    probe = {**bio, "salaries": {**(bio.get("salaries") or {}), **explicit},
+              "contracts": (bio.get("contracts") or []) + [{"team": team, "salaries": explicit}]}
+    tier = bird_rights_type or _derive_bird_tier(probe, team, season, slug)
     out = {"season": season, "type": holds[season], "bird_tier": tier,
            "amount": None, "needs_eaps": False, "note": None}
 
-    probe = {**bio, "salaries": {**(bio.get("salaries") or {}), **explicit}}
     out["prior_salary"] = _parse_dollar(probe["salaries"].get(_season_shift(season, -1), "")) or None
     if not out["prior_salary"]:
         out["note"] = (f"no {_season_shift(season, -1)} salary on file to base the hold on "
@@ -3947,14 +3979,18 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
     projected_ex_holds = current_ex_holds - (0 if is_fa_hold else existing_hold) + new_sal
     # Both the apron-triggered hard cap and the league-wide Hard Cap (§ 1.3)
     # are computed on the ex-holds figure — a free-agent hold isn't an active
-    # player salary.
-    r = _hard_cap_check(team, projected_ex_holds, season,
-                        ctx["team_state"], ctx["cap_levels"])
-    if r:
-        checks.append(r)
-    r = _universal_hard_cap_check(team, projected_ex_holds, season, ctx["cap_levels"])
-    if r:
-        checks.append(r)
+    # player salary. A two-way sits outside Team Salary entirely (§ 2.2), so
+    # with new_sal == 0 this would otherwise just report whatever hard-cap
+    # breach already existed before the signing, worded as if the two-way
+    # caused it.
+    if details.contract.type != "two-way":
+        r = _hard_cap_check(team, projected_ex_holds, season,
+                            ctx["team_state"], ctx["cap_levels"])
+        if r:
+            checks.append(r)
+        r = _universal_hard_cap_check(team, projected_ex_holds, season, ctx["cap_levels"])
+        if r:
+            checks.append(r)
 
     if details.signing_method == "bae":
         cl = ctx["cap_levels"].get(season, {})
@@ -5668,11 +5704,15 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             stored_details = details.model_dump()
             stored_details["team"] = team
         elif body.type == "release":
-            team, dead_cap, terminated_salary = _apply_release(details, body.date, info)
+            team, dead_cap, terminated_salary, snapshot = _apply_release(details, body.date, info)
             stored_details = details.model_dump()
             stored_details["team"] = team
             stored_details["dead_cap"] = dead_cap
             stored_details["terminated_salary"] = terminated_salary
+            # Restore source for a waiver claim during the § 5.1 48-hour window
+            # (routers/waivers.py) — same idea as renounce's `_snapshot`, just a
+            # different mutation to undo.
+            stored_details["_snapshot"] = snapshot
         elif body.type == "renounce":
             team, snapshot = _apply_renounce(details, body.date, info)
             stored_details = details.model_dump()
@@ -5739,6 +5779,14 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
     # append are already committed, so a Discord problem must not delay or fail
     # them. Historical backfills never reach here (they return far above).
     notify_transaction(txn, forced_checks, relay_to_roster_log=body.relay_to_roster_log)
+    if body.type == "release" and stored_details.get("_snapshot"):
+        # § 5.1 waiver wire (nbn-today/docs/waiver-wire-spec.md § 6) — opens the
+        # 48-hour claim window's #waivers + fa-news announcements. Imported here
+        # rather than at module load: waiver_notify -> waivers would be the
+        # natural direction, and transactions.py is what waivers.py itself
+        # imports from, so a top-level import here would be circular.
+        from .waiver_notify import notify_waived
+        notify_waived(stored_details["player"], team)
     return txn
 
 
@@ -5750,7 +5798,12 @@ def list_transactions(
     limit: int = 100,
     offset: int = 0,
 ):
-    txns = _load_transactions()
+    # § 5.1 waiver claims are sealed (nbn-today/docs/waiver-wire-spec.md § 2) —
+    # nothing that landed in this generally-public ledger endpoint may reveal
+    # a pending claim, even to someone who explicitly asks for the type. The
+    # resolution (`waiver_clear`) is fine to show: by the time it exists the
+    # outcome is real and visible on a roster anyway.
+    txns = [t for t in _load_transactions() if t.get("type") not in _SEALED_TXN_TYPES]
 
     if team:
         t_upper = team.upper()
@@ -5785,6 +5838,8 @@ def list_transactions(
 def get_transaction(txn_id: str):
     for t in _load_transactions():
         if t.get("id") == txn_id:
+            if t.get("type") in _SEALED_TXN_TYPES:
+                raise HTTPException(status_code=404, detail="Transaction not found")
             return t
     raise HTTPException(status_code=404, detail="Transaction not found")
 
@@ -6130,6 +6185,38 @@ def validate_sign_pick(body: SignPickDetails):
     fact_sheet["rookie_scale"] = _rookie_scale_contract(
         bio.get("draft_year"), bio.get("draft_round"), bio.get("draft_pick"))
     return _validation_result(_validate_sign_pick(body, ctx), fact_sheet)
+
+
+@router.post("/api/validate/convert_twoway")
+def validate_convert_twoway(body: ConvertTwoWayDetails):
+    """Non-mutating check of a two-way → standard conversion.
+
+    Shares `_validate_convert_twoway` with `POST /api/transactions` and writes
+    nothing. The team is **derived from the roster**, never taken from the
+    request — same as `_apply_convert_twoway` and the same reasoning as
+    `validate_sign_pick`.
+
+    This is why `/transactions` used to be able to demand an EAPS answer with
+    nowhere to give one: `_apply_convert_twoway` prices the trailing § 3.10
+    hold through the same `_autofill_fa_hold_amounts` a signing goes through,
+    and rejects with a 422 when that hold is Full Bird and the season has no
+    real EAPS on file — but with no validator here, the office form had no
+    fact sheet to read `needs_eaps` off of, so it never revealed the field
+    that would have answered the question before submit.
+    """
+    ctx = _validation_ctx()
+    if body.player not in ctx["bios"]:
+        raise HTTPException(400, f"Unknown player '{body.player}'.")
+    team = _build_team_map().get(body.player)
+    if not team:
+        raise HTTPException(400, f"'{body.player}' is not on any roster.")
+    fact_sheet = _signing_fact_sheet(
+        team, body.player, body.contract, ctx,
+        signing_method=body.signing_method,
+        bird_rights_type=body.bird_rights_type,
+        eaps_assumption=body.eaps_assumption,
+    )
+    return _validation_result(_validate_convert_twoway(body, ctx), fact_sheet)
 
 
 @router.get("/api/rookie-scale/contract/{slug}")

@@ -158,6 +158,27 @@ def main():
     check("nothing to price off -> explains itself, doesn't raise",
           no_history["amount"] is None and no_history["note"])
 
+    print("\n_preview_fa_hold must agree with what apply will actually require")
+    # _apply_sign/_apply_sign_pick/_apply_convert_twoway all append the deal
+    # being signed to bio["contracts"] *before* pricing its trailing hold, so
+    # a fresh 3-year deal to a player with zero contract history reads as
+    # QVFA at apply time (the fallback tenure scan counts the deal's own
+    # years). The preview used to derive tier from the bio as it stood before
+    # that append, so it missed this and reported Non-QVFA/no EAPS needed —
+    # a green verdict for a signing that would 422 at submit. Regression for
+    # the fix: preview must reach the same tier apply would.
+    fresh_bio = {}
+    fresh_contract = _C(
+        {"26-27": "$5,000,000", "27-28": "$5,250,000", "28-29": "$5,500,000"},
+        {"29-30": "UFA"},
+    )
+    fresh = _preview_fa_hold(fresh_bio, "ATL", fresh_contract, CAP_LEVELS)
+    check("a 3-year deal to a no-history player derives QVFA, same as apply would",
+          fresh["bird_tier"] == "QVFA")
+    check("and previews needs_eaps instead of silently reporting Non-QVFA/legal",
+          fresh["needs_eaps"] is True)
+    check("still leaves the real bio untouched", fresh_bio == {})
+
     print("\n" + ("=" * 40))
     if FAILS:
         print(f"FAILED: {FAILS}")

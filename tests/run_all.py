@@ -8,6 +8,7 @@ import sys
 MODULES = ["test_stepien_rule", "test_picks_matching", "test_tpe_and_hardcap",
            "test_cap_room_contagion",
            "test_signing_method_funding", "test_two_way_slots",
+           "test_two_way_hard_cap",
            "test_exception_absorption_split",
            "test_fa_hold_calc", "test_room_exception_july1",
            "test_bird_rights_tenure", "test_signing_eligibility",
@@ -16,7 +17,8 @@ MODULES = ["test_stepien_rule", "test_picks_matching", "test_tpe_and_hardcap",
            "test_fa_offers", "test_fa_notify", "test_auth_session",
            "test_contract_shorthand", "test_validate_endpoints",
            "test_roster_log_relay",
-           "test_minimum_contract_raises", "test_tradeblock_notify"]
+           "test_minimum_contract_raises", "test_tradeblock_notify",
+           "test_waivers"]
 
 
 def main():

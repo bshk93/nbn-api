@@ -391,6 +391,85 @@ def notify_offer_restored(offer: dict, void: dict) -> None:
     }]})
 
 
+# ── the agent stage (§ 4.7) ───────────────────────────────────────────────────
+# All private. Every event here names a team, an agent, or a set of bids, so
+# none of it could go to `fa-news` even if a caller tried — that is `_news`'s
+# signature (§ 9.2), not caller discipline.
+#
+# Remands and voids issued by an agent deliberately reuse the existing posts
+# above: it is the same event, and `by` already names whoever did it. A parallel
+# format would be two renderings of one thing.
+
+def notify_player_claimed(slug: str, agent: str, blocked: list[str]) -> None:
+    """Announced because a claim is the moment a team is barred from bidding
+    (§ 4.7/D21). The committee finding that out later — from a refusal the team
+    walks into — is strictly worse than reading it here."""
+    _alert(lambda: {"embeds": [{
+        "title": f"{_name(slug)} — claimed by {agent}",
+        "description": f"**{agent}** is the agent on this player. Offers are theirs to "
+                       f"negotiate and curate; the sub-committee sees what they advance.",
+        "color": COLOR_BOARD,
+        "fields": [
+            {"name": "Now barred from bidding",
+             # The bar is the point of the post, so it is stated even when empty
+             # — a head's claim blocks nobody, and that is worth reading.
+             "value": ", ".join(blocked) if blocked else "— (head claim)", "inline": True},
+        ],
+        "url": f"{PDC_SITE}/#/p/{slug}",
+        "footer": {"text": "the bar is permanent for this player, and survives a release"},
+    }]})
+
+
+def notify_player_released(slug: str, agent: Optional[str], actor: str) -> None:
+    """The release, and — pointedly — that it does not lift the bar."""
+    by = "" if actor == agent else f" by {actor}"
+    _alert(lambda: {"embeds": [{
+        "title": f"{_name(slug)} — released by {agent or '?'}{by}",
+        "description": "Back on the queue for another agent to claim. The teams barred at "
+                       "the claim **stay barred** — the bids have already been read.",
+        "color": COLOR_BOARD,
+        "url": f"{PDC_SITE}/#/p/{slug}",
+    }]})
+
+
+def notify_player_advanced(slug: str, actor: str, offers: list[dict], note: str) -> None:
+    """The handoff. Carries the surviving slate, because *which bids survived*
+    is the substance of what the agent did — a bare "advanced" would send the
+    sub-committee to the dashboard to find out what they are voting on."""
+    def build():
+        rows = [f"{o['team']} · offer #{o['number']} · {_contract_str((o.get('offer') or {}).get('contract') or {})}"
+                for o in sorted(offers, key=lambda o: o["number"])]
+        fields = [{"name": f"Advanced to the sub-committee ({len(offers)})",
+                   "value": "```\n" + ("\n".join(rows) or "—") + "\n```", "inline": False}]
+        if note:
+            fields.append({"name": "Agent's note", "value": _truncate(note, 1000),
+                           "inline": False})
+        return {"embeds": [{
+            "title": f"{_name(slug)} — advanced by {actor}",
+            "description": "Curation is done. The ballot is open once the FAC head assigns a "
+                           "sub-committee; the agent's powers on this player have ended.",
+            "color": COLOR_FINAL,
+            "fields": fields,
+            "url": f"{PDC_SITE}/#/p/{slug}",
+        }]}
+    _alert(build)
+
+
+def notify_returned_to_agent(slug: str, agent: Optional[str], actor: str, reason: str) -> None:
+    """The head undoing an advance. Ballots already cast survive and are flagged
+    (§ 4.7), so this says so rather than implying the slate was reset."""
+    _alert(lambda: {"embeds": [{
+        "title": f"{_name(slug)} — sent back to {agent or 'the agents'}",
+        "description": "The advance is undone and the slate is with the agent again. "
+                       "**Ballots already cast stand** and are flagged as voted on an "
+                       "earlier slate.",
+        "color": COLOR_REMAND,
+        "fields": [{"name": "Reason", "value": _truncate(reason, 1000) or "—", "inline": False}],
+        "url": f"{PDC_SITE}/#/p/{slug}",
+        "footer": {"text": f"sent back by {actor}"},
+    }]})
+
+
 def notify_mode_change(previous: str, mode: str, actor: str) -> None:
     """Private only. The league learns free agency is live from the clock posts
     (§ 9.2), which are the thing it can act on; the mode flip itself is board
@@ -560,10 +639,20 @@ def notify_player_finalized(slug: str, final: dict, offers: list[dict]) -> None:
                                    for r in final["outstanding_remands"]),
                 "inline": False,
             })
+        # § 4.7/D24. An uncontested lock never went to a sub-committee, so the
+        # empty allocation above is the correct record rather than a ballot
+        # nobody filled in — and it has to read that way at a glance.
+        uncontested = final.get("path") == "agent"
         return {"embeds": [{
-            "title": f"Finalized — {_name(slug)}",
-            "description": "Ballots are locked. **No signing has been made** — the FAC "
-                           "enters the transaction by hand.",
+            "title": (f"Finalized (uncontested) — {_name(slug)}" if uncontested
+                      else f"Finalized — {_name(slug)}"),
+            "description": (
+                "Locked by the agent without a ballot — curation left a single bid "
+                "standing (§ 4.7). **No signing has been made** — the FAC enters the "
+                "transaction by hand."
+                if uncontested else
+                "Ballots are locked. **No signing has been made** — the FAC "
+                "enters the transaction by hand."),
             "color": COLOR_FINAL,
             "fields": fields,
             "url": f"{PDC_SITE}/#/p/{slug}",

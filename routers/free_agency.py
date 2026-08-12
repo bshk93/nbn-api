@@ -24,7 +24,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from . import fa_notify
@@ -497,10 +497,189 @@ def _is_assigned(state: dict, slug: str, name: str) -> bool:
     return name in (_player_entry(state, slug).get("subcommittee") or [])
 
 
+# ── the agent stage (§ 4.7) ───────────────────────────────────────────────────
+# A player whose offer window has shut doesn't go straight to a sub-committee;
+# he goes to the agents, who claim him off a shared queue, negotiate the offers
+# down to a final set, and then either advance the survivors or finalize an
+# uncontested one.
+#
+# Two properties below are load-bearing and easy to undo by accident:
+#
+#   * **The stage is derived, never stored** — from `status`, the FFA clock,
+#     `agent.advanced_at` and the finalize record. Storing it would be a second
+#     copy of what those four already determine, and it is the copy that goes
+#     stale: the same trap as the roster CSV's old denormalized `OVR` column.
+#   * **`agent` is round-scoped; `blocked_teams` is not.** A claim belongs to
+#     the window it was made in, and a reopen is a genuine second window (§ 4.1).
+#     The fact that an agent has read every bid on this player does *not*
+#     expire, which is the only reason releasing a claim is safe to allow.
+
+def _is_agent(info: dict) -> bool:
+    return has_role(info, "agent")
+
+
+def _member_teams(name: str, members: Optional[dict] = None) -> set[str]:
+    """Every team this member could be acting for (§ 4.7, D21).
+
+    The **union** of a current front-office tenure and any held team role, not
+    the intersection: either alone makes the conflict real, and demanding both
+    would wave through a GM who holds no team role — precisely the person § 6.2
+    records the dashboard missing when it guessed conflicts from role names.
+    """
+    members = members if members is not None else load_members()
+    member = members.get(name) or {}
+    teams = {r.upper() for r in (member.get("roles") or []) if r.upper() in VALID_TEAMS}
+    current = _member_current_team(name, members)
+    if current:
+        teams.add(current.upper())
+    return teams
+
+
+def _agent_node(state: dict, slug: str) -> dict:
+    """This player's live claim, or `{}`.
+
+    Round-scoped: reopening a player mints a fresh `round_id` (§ 4.1), and that
+    is a deliberate second window, so a claim made in the previous one does not
+    carry into it.
+    """
+    node = _player_entry(state, slug).get("agent") or {}
+    return node if node.get("round_id") == _round_id_for(state, slug) else {}
+
+
+def _claim_holder(state: dict, slug: str) -> Optional[str]:
+    node = _agent_node(state, slug)
+    return None if node.get("released_at") else node.get("claimed_by")
+
+
+def _is_advanced(state: dict, slug: str) -> bool:
+    return bool(_agent_node(state, slug).get("advanced_at"))
+
+
+def _blocked_reason(state: dict, slug: str, team: str) -> Optional[str]:
+    """Why this team may not bid on this player, or None (§ 4.7, D21).
+
+    Server-composed, like every refusal string on `/free-agency` — the team is
+    shown this verbatim rather than the page reasoning about claims. Read off
+    `blocked_teams`, which lives on the player and not on the claim, so it
+    survives both a release and a reopen.
+    """
+    for entry in _player_entry(state, slug).get("blocked_teams") or []:
+        if entry["team"] == team.upper():
+            return (f"{entry['team']} can't bid on this player: {entry['member']} is an "
+                    f"agent and claimed him. That bar is permanent for this player.")
+    return None
+
+
+def _window_closed(state: dict, slug: str, pool: dict) -> bool:
+    """Whether the offer window on this player has shut — the § 4.7 test for
+    "ready for an agent".
+
+    Deliberately `_accepts_offers` inverted rather than its own reading of the
+    clock. "The window is shut" and "no new offer is accepted" are one fact, and
+    saying it twice is how the two come to disagree; this also covers every mode
+    for free — an expired FFA clock, a round the head closed, and the board
+    being closed outright.
+    """
+    return not _accepts_offers(state, slug, pool)[0]
+
+
+def _agent_stage(state: dict, slug: str, pool: dict, finalized: bool) -> str:
+    """`open` → `awaiting_agent` → `with_agent` → `with_committee` → `decided`."""
+    if finalized:
+        return "decided"
+    if _is_advanced(state, slug):
+        return "with_committee"
+    if _claim_holder(state, slug):
+        return "with_agent"
+    if _window_closed(state, slug, pool):
+        return "awaiting_agent"
+    return "open"
+
+
+def _claim_refusal(info: dict, state: dict, slug: str, offers: list[dict], pool: dict,
+                   finalized: bool, viewer_teams: Optional[set[str]] = None) -> Optional[str]:
+    """Why this agent can't claim this player, or None if they can.
+
+    One function behind both `POST …/claim` and the queue's disabled copy, so
+    the reason on the greyed-out button is the refusal the endpoint would
+    actually give — the § 6.3 pattern, and the reason the queue shows blocked
+    players rather than hiding them.
+    """
+    if finalized:
+        return "This player is already finalized."
+    holder = _claim_holder(state, slug)
+    if holder:
+        return ("You're the agent on this player."
+                if holder == info["name"] else f"{holder} is the agent on this player.")
+    if _is_advanced(state, slug):
+        return "This player has already been advanced to the sub-committee."
+    if not _window_closed(state, slug, pool):
+        return "The offer window on this player is still open."
+    bidding = {o["team"] for o in _offers_for(offers, slug)
+               if o["status"] in ("submitted", "returned")}
+    if not bidding:
+        return "There are no offers on this player to curate."
+    # The head is exempt, and not as a courtesy: they already read every offer
+    # on every player (§ 6.1), so barring their team here would cost something
+    # real and protect nothing that isn't already visible to them.
+    if not _is_head(info):
+        teams = viewer_teams if viewer_teams is not None else _member_teams(info["name"])
+        mine = teams & bidding
+        if mine:
+            return (f"{', '.join(sorted(mine))} has a live offer on this player, "
+                    f"so you can't be his agent.")
+    return None
+
+
+def _require_curator(info: dict, state: dict, slug: str):
+    """Who may remand, void, restore or annotate an offer (§ 4.7 — reverses D14).
+
+    The claiming agent, while they still hold the player and haven't advanced
+    him, plus head and admin who keep every power everywhere. Assigned
+    sub-committee members no longer have it: they review a set an agent has
+    already curated, and two parties negotiating the same offer with the same
+    owner is the ambiguity the stage exists to remove.
+    """
+    if _is_head(info):
+        return
+    name = info.get("name")
+    if _claim_holder(state, slug) == name and not _is_advanced(state, slug):
+        return
+    if _is_agent(info):
+        holder = _claim_holder(state, slug)
+        if holder and holder != name:
+            raise HTTPException(403, f"{holder} is the agent on this player")
+        if _is_advanced(state, slug):
+            raise HTTPException(403, "This player has been advanced to the sub-committee — "
+                                     "ask the FAC head to send him back")
+        raise HTTPException(403, "Claim this player before acting on his offers")
+    raise HTTPException(403, "Only this player's agent or the FAC head can do that")
+
+
 def _require_reviewer(info: dict, state: dict, slug: str):
     """A sub-committee is transparent to itself and opaque to everyone outside
     it — a `fac` member not assigned to this player sees neither the offers nor
-    the ballots, only that the player exists (§ 4.5)."""
+    the ballots, only that the player exists (§ 4.5).
+
+    The claiming agent passes too: reading every offer in full *is* what a claim
+    grants (§ 4.7). Ballots are the exception and go through
+    `_require_ballot_viewer` instead — an agent never sees one.
+    """
+    if _is_head(info) or (has_role(info, "fac") and _is_assigned(state, slug, info["name"])):
+        return
+    if _claim_holder(state, slug) == info.get("name"):
+        return
+    raise HTTPException(403, "You aren't on this player's sub-committee")
+
+
+def _require_ballot_viewer(info: dict, state: dict, slug: str):
+    """§ 4.5's table exactly — and pointedly *not* `_require_reviewer`.
+
+    Agents see no ballot on any player, including one they claimed and
+    advanced: their judgment is spent on the slate, watching it voted on invites
+    relitigating it, and every power that could act on what they saw ends at the
+    advance.
+    """
     if _is_head(info) or (has_role(info, "fac") and _is_assigned(state, slug, info["name"])):
         return
     raise HTTPException(403, "You aren't on this player's sub-committee")
@@ -522,6 +701,14 @@ def _visible_offers(info: dict, state: dict, offers: list[dict]) -> list[dict]:
         # including work it voided, which is the whole point of a void being a
         # status rather than a delete.
         if (has_role(info, "fac") and _is_assigned(state, o["player"], name)
+                and o["status"] in ("submitted", "returned", "voided")):
+            out.append(o)
+            continue
+        # The claiming agent gets exactly what an assigned reviewer gets, on the
+        # player they hold and no other — that grant is what a claim *is*
+        # (§ 4.7). Unclaimed players stay shut to them, which is why the queue
+        # carries an offer count and nothing else.
+        if (_claim_holder(state, o["player"]) == name
                 and o["status"] in ("submitted", "returned", "voided")):
             out.append(o)
     return out
@@ -593,6 +780,18 @@ class BallotIn(BaseModel):
     note: str = ""
 
 
+class AdvanceIn(BaseModel):
+    note: str = ""
+
+
+class ReturnToAgentIn(BaseModel):
+    reason: str = ""
+
+
+class AgentNoteIn(BaseModel):
+    note: str = ""
+
+
 def _clean_promises(p: PromisesIn) -> dict:
     if p.role not in PROMISE_ROLES:
         raise HTTPException(422, f"promises.role must be one of {sorted(PROMISE_ROLES)}")
@@ -603,15 +802,45 @@ def _clean_promises(p: PromisesIn) -> dict:
 
 # ── board / state ─────────────────────────────────────────────────────────────
 
+def _optional_info(request: Request,
+                   authorization: Optional[str] = Header(None),
+                   nbn_session: Optional[str] = Cookie(None)) -> Optional[dict]:
+    """The caller if they're signed in, `None` if they aren't — never a 401.
+
+    Only `GET /api/fa/board` uses it, and only to tell a team something about
+    *itself* on an otherwise public payload (§ 4.7's bar). Anything a stranger
+    shouldn't read stays behind a real gate.
+    """
+    try:
+        return get_token_info(request, authorization, nbn_session)
+    except HTTPException:
+        return None
+
+
 @router.get("/api/fa/board")
-def get_board():
+def get_board(info: Optional[dict] = Depends(_optional_info)):
     """Public. Mode, rounds, and which players are accepting offers — plus the
     FFA deadlines, which § 9.2 already announces to the league. Deliberately
     carries no contract detail, no offering team, and no offer count: the fact
-    that a team is bidding is committee information."""
+    that a team is bidding is committee information.
+
+    One authenticated addition: `your_block`, the § 4.7 bar on a player, present
+    only for a caller who holds the barred team's own role. It has to reach the
+    team somehow — § 8.1 shows a refusal in the disabled ⋯ menu rather than
+    letting them build an offer that 422s on submit — but *which agent claimed
+    whom* is committee information, announced on `pdc-alerts` and nowhere else.
+    So it is scoped to the team it stops, not added to the public body.
+    """
     state = _load_state()
     _sweep_ffa_expiry(state)
     pool = _live_pool()
+    # The caller's own teams, resolved once — every team role they hold, since a
+    # member can act for more than one and each has its own bar.
+    # `isinstance` rather than a truth test: the suites call these endpoint
+    # functions directly, so an un-injected `info` is the `Depends` marker
+    # object, which is truthy and has no `.get`.
+    my_teams = ({t for t in VALID_TEAMS if has_role(info, t.lower())}
+                if isinstance(info, dict) and not has_role(info, "admin") else set())
     players = {}
     for slug in pool:
         entry = _player_entry(state, slug)
@@ -621,11 +850,18 @@ def get_board():
         # entry, so omitting the closed players would force /free-agency to
         # reinvent those strings client-side and the two would drift. The pool
         # itself is already public, so listing it with a status leaks nothing.
+        blocked = next((b for b in (_blocked_reason(state, slug, t) for t in sorted(my_teams))
+                        if b), None)
         players[slug] = {
             "status": entry.get("status", "closed"),
             "round_id": entry.get("round_id"),
-            "accepting": accepting,
-            "reason": None if accepting else reason,
+            # A bar makes the player un-offerable for *this* team however the
+            # board reads, so it overrides `accepting` rather than sitting
+            # beside it — otherwise the ⋯ menu offers a contract the create
+            # endpoint refuses.
+            "accepting": accepting and not blocked,
+            "reason": blocked or (None if accepting else reason),
+            "your_block": blocked,
             "ffa_deadline": (entry.get("ffa") or {}).get("deadline"),
         }
     # Public: a team about to bid needs to know how long a clock it is starting,
@@ -635,7 +871,7 @@ def get_board():
 
 
 @router.get("/api/fa/state")
-def get_state(info: dict = Depends(require_any_role("fac", "poext"))):
+def get_state(info: dict = Depends(require_any_role("fac", "agent", "poext"))):
     """The committee's view: everything on the board plus the sub-committee
     assignments, which the public board withholds.
 
@@ -650,23 +886,46 @@ def get_state(info: dict = Depends(require_any_role("fac", "poext"))):
     _sweep_ffa_expiry(state)
     offers = _load_offers()
     ballots = _load_ballots()
+    pool = _live_pool()
     head = _is_head(info)
     counts: dict[str, int] = {}
+    bidders: dict[str, set[str]] = {}
     for o in offers:
         if _is_live(o) and o["status"] != "draft":
             counts[o["player"]] = counts.get(o["player"], 0) + 1
+            bidders.setdefault(o["player"], set()).add(o["team"])
+    # Resolved once, not per player: `_member_teams` reads members.json, and the
+    # loop below runs sixty times on the live board.
+    agent_view = _is_agent(info) and not head
+    viewer_teams = _member_teams(info["name"]) if agent_view else set()
     players = {}
     for slug, entry in state["players"].items():
         node = (ballots.get(slug) or {}).get(entry.get("round_id") or "") or {}
         cast = node.get("ballots") or {}
+        finalized = bool(node.get("final"))
+        agent = _agent_node(state, slug)
+        # § 6.1: the count is itself information. On a player their own team is
+        # bidding on — the one player they can never claim — "six teams are in
+        # on him" is exactly the intelligence D21 withholds, and it would arrive
+        # without them lifting a finger.
+        conflict = sorted(viewer_teams & bidders.get(slug, set())) if agent_view else []
         players[slug] = {
             **entry,
             "ffa_expired": _ffa_expired(entry),
-            "offer_count": counts.get(slug, 0),
+            "offer_count": None if conflict else counts.get(slug, 0),
             "mine": info["name"] in (entry.get("subcommittee") or []),
             "balloted": info["name"] in cast,
-            "finalized": bool(node.get("final")),
+            "finalized": finalized,
+            # § 4.7 — derived, never stored.
+            "stage": _agent_stage(state, slug, pool, finalized),
+            "claimed_by": _claim_holder(state, slug),
+            "advanced_at": agent.get("advanced_at"),
+            "agent_note": agent.get("note") or "",
             **({"ballots_cast": len(cast)} if head else {}),
+            **({"your_conflict": conflict,
+                "claim_refusal": _claim_refusal(info, state, slug, offers, pool,
+                                                finalized, viewer_teams)}
+               if agent_view else {}),
         }
     return {"mode": state["mode"], "rounds": state["rounds"], "players": players,
             "ffa_window_hours": _ffa_window_hours(state)}
@@ -936,6 +1195,11 @@ def create_offer(body: OfferCreate, info: dict = Depends(get_token_info)):
         accepting, reason = _accepts_offers(state, body.player, pool)
         if not accepting:
             raise HTTPException(422, reason)
+        blocked = _blocked_reason(state, body.player, team)
+        if blocked:
+            # § 4.7/D21. Refused at create, not just at submit, so a team never
+            # builds an offer it was never going to be allowed to send.
+            raise HTTPException(422, blocked)
         offers = _load_offers()
         if any(o["team"] == team and o["player"] == body.player and _is_live(o) for o in offers):
             # § 4.2 / D5. One live offer per team per player: with no withdrawal
@@ -1045,6 +1309,15 @@ def submit_offer(offer_id: str, info: dict = Depends(get_token_info)):
                 raise HTTPException(422, reason)
         elif offer["player"] not in pool:
             raise HTTPException(422, "This player is no longer a free agent")
+        blocked = _blocked_reason(state, offer["player"], offer["team"])
+        if blocked:
+            # Belt and braces: `create_offer` already refuses, and a claim is
+            # itself refused while the claiming agent's team has a live offer,
+            # so a draft can't normally survive to here. It can when the *head*
+            # claims (D21 exempts them from the conflict check), and if
+            # `blocked_teams` ever grows a second source this is the gate that
+            # holds. A resubmission is blocked too — the bar is on the player.
+            raise HTTPException(422, blocked)
         # A resubmission skips the window check on purpose (§ 4.3a): the 24-hour
         # clock governs *new* offers from other teams, and a revision the
         # committee itself asked for is part of its own review.
@@ -1100,9 +1373,15 @@ def submit_offer(offer_id: str, info: dict = Depends(get_token_info)):
 @router.post("/api/fa/offers/{offer_id}/remand")
 def remand_offer(offer_id: str, body: RemandIn, info: dict = Depends(get_token_info)):
     """Send a submitted offer back for revision (§ 4.3a) — the committee's power,
-    never the team's. Any assigned sub-committee member may do it (D14): the FAC
-    reviews as a group, so a reviewer who wants a term changed shouldn't have to
-    route through the head.
+    never the team's.
+
+    **Who may: the claiming agent, plus head and admin (§ 4.7, reversing D14).**
+    This was any assigned sub-committee member until the agent stage landed;
+    negotiating the offers down to a final set is now the agent's job, and a
+    reviewer looking at the curated slate asks the agent, or asks the head to
+    send the whole player back. Everything else about a remand is unchanged
+    whoever issues it — the note requirement, the additive behaviour, the
+    version freeze, the diff, the ballot flag.
     """
     note = body.note.strip()
     if not note:
@@ -1113,7 +1392,7 @@ def remand_offer(offer_id: str, body: RemandIn, info: dict = Depends(get_token_i
         state = _load_state()
         offers = _load_offers()
         idx, offer = _find_offer(offers, offer_id)
-        _require_reviewer(info, state, offer["player"])
+        _require_curator(info, state, offer["player"])
         if not _is_live(offer) or offer["status"] not in ("submitted", "returned"):
             raise HTTPException(409, f"Offer is {offer['status']} — only a submitted offer can be sent back")
         ballots = _load_ballots()
@@ -1174,11 +1453,15 @@ def void_offer(offer_id: str, body: VoidIn, info: dict = Depends(get_token_info)
     an outage. Under a remand those sit `returned` forever, visibly awaiting a
     team that has nothing to say.
 
-    **Head-only, unlike a remand.** Any assigned reviewer may ask for a revision
-    (D14) because the team can always answer. Nobody can answer a void, so it
-    sits with the head beside the other powers that end things — finalize,
-    unlock, assignment. Widening it later is a one-line change; narrowing it
-    after teams have lost bids to it is not.
+    **Head-only, plus the claiming agent (§ 4.7).** It was head-only outright,
+    on the reasoning that nobody can answer a void so it belongs with the powers
+    that end things. The agent stage is the widening that section predicted:
+    dropping a bid from the slate *is* an agent's filter, and giving that its
+    own terminal status would have duplicated everything `voided` already does.
+    Still head-only on any player nobody has claimed, and on any player already
+    advanced. What did *not* widen is the reason requirement — a void ends a
+    team's bid with no reply whoever issues it, and `void.by` is what tells them
+    which of the two did it.
 
     **It is not a delete.** The offer, its versions, its remands and its
     validation stay exactly where they were; `status` leaves `LIVE_STATUSES` and
@@ -1186,8 +1469,6 @@ def void_offer(offer_id: str, body: VoidIn, info: dict = Depends(get_token_info)
     that nothing is overwritten applies here with more force, not less: a bid
     the committee erased is precisely the thing a record has to be able to show.
     """
-    if not _is_head(info):
-        raise HTTPException(403, "Only the FAC head can void an offer — any reviewer may send one back")
     reason = body.reason.strip()
     if not reason:
         # Same rule as a remand's note, for a stronger reason: this one ends a
@@ -1197,6 +1478,7 @@ def void_offer(offer_id: str, body: VoidIn, info: dict = Depends(get_token_info)
         state = _load_state()
         offers = _load_offers()
         idx, offer = _find_offer(offers, offer_id)
+        _require_curator(info, state, offer["player"])
         # Archived first, and by name: an archived offer still reads `submitted`,
         # so the generic message would tell a head their submitted offer isn't
         # submitted rather than that the player is already decided.
@@ -1233,15 +1515,21 @@ def restore_offer(offer_id: str, info: dict = Depends(get_token_info)):
     `finalize` what this is to `void` — a power that ends something needs a way
     back, or a misclick is the one action on the board nobody can answer.
 
+    Gated exactly as `void` is (§ 4.7): head, admin, or the claiming agent while
+    they still hold the player.
+
     Two things can make a restore illegal, and both come from the void having
     worked: the team may have bid again in the meantime (one live offer per team
     per player, § 4.2/D5), and the player may since have been finalized.
     """
-    if not _is_head(info):
-        raise HTTPException(403, "Only the FAC head can restore a voided offer")
     with _fa_lock:
+        state = _load_state()
         offers = _load_offers()
         idx, offer = _find_offer(offers, offer_id)
+        # Restore follows void (§ 4.7): whoever could take the bid off the board
+        # can put it back. An agent who drops an offer and reconsiders before
+        # advancing shouldn't need the head to undo it.
+        _require_curator(info, state, offer["player"])
         if offer["status"] != "voided":
             raise HTTPException(409, f"Offer is {offer['status']}, not voided")
         if offer.get("archived_at") is not None:
@@ -1264,6 +1552,192 @@ def restore_offer(offer_id: str, info: dict = Depends(get_token_info)):
     log_write(info, f"POST fa/offers/{offer_id}/restore")
     fa_notify.notify_offer_restored(offer, voided)
     return offer
+
+
+@router.put("/api/fa/offers/{offer_id}/agent-note")
+def set_agent_note(offer_id: str, body: AgentNoteIn, info: dict = Depends(get_token_info)):
+    """The agent's optional note on an offer, carried to the sub-committee
+    (§ 4.7). Advice, not a ranking: a real agent tells the committee what they
+    make of a bid, and the committee still votes.
+
+    Not announced. It travels with the offer to the review page, and a note
+    posted to Discord every time it is edited would be noise.
+    """
+    with _fa_lock:
+        state = _load_state()
+        offers = _load_offers()
+        idx, offer = _find_offer(offers, offer_id)
+        _require_curator(info, state, offer["player"])
+        if offer.get("archived_at") is not None:
+            raise HTTPException(409, "This player is finalized")
+        offer["agent_note"] = body.note.strip()
+        offer["agent_note_by"] = info["name"] if offer["agent_note"] else None
+        offer["updated_at"] = _now()
+        offers[idx] = offer
+        _save_offers(offers)
+    log_write(info, f"PUT fa/offers/{offer_id}/agent-note")
+    return offer
+
+
+# ── the agent stage (§ 4.7) ───────────────────────────────────────────────────
+
+@router.post("/api/fa/players/{slug}/claim")
+def claim_player(slug: str, info: dict = Depends(require_role("agent"))):
+    """Take a player whose offer window has shut (§ 4.7).
+
+    Exclusive: the agents divide the queue by taking from it, which only works
+    if taking is real. A second agent gets the holder's name back, not a share.
+
+    **The claim is the conflict gate and it cuts both ways** (D21). It is
+    refused when the claiming agent's own team has a live bid — the one hard
+    block in a spec that otherwise only warns (§ 4.6) — and, on success, it bars
+    that agent's team(s) from bidding on this player from then on. That bar is
+    permanent, stored on the player rather than on the claim, so it survives a
+    release and a reopen. Without that permanence, releasing would be a way to
+    read every rival's figure and then bid into a field only you have seen.
+    """
+    pool = _live_pool()
+    with _fa_lock:
+        state = _load_state()
+        _sweep_ffa_expiry(state)
+        if slug not in state["players"]:
+            raise HTTPException(404, f"'{slug}' hasn't been opened on the board")
+        round_id = _round_id_for(state, slug)
+        if not round_id:
+            raise HTTPException(422, "This player hasn't been opened in a round yet")
+        offers = _load_offers()
+        finalized = bool(_ballot_node(_load_ballots(), slug, round_id).get("final"))
+        refusal = _claim_refusal(info, state, slug, offers, pool, finalized)
+        if refusal:
+            raise HTTPException(422, refusal)
+        entry = state["players"].setdefault(slug, {})
+        entry["agent"] = {
+            "round_id": round_id,
+            "claimed_by": info["name"], "claimed_at": _now(),
+            "released_at": None, "released_by": None,
+            "advanced_at": None, "advanced_by": None, "note": "",
+            "returns": [],
+        }
+        # The head is exempt from the bar as they are from the conflict check:
+        # they already read every offer on every player (§ 6.1), so barring
+        # their team would cost something real and hide nothing from them.
+        blocked = [] if _is_head(info) else sorted(_member_teams(info["name"]))
+        existing = {b["team"] for b in entry.get("blocked_teams") or []}
+        entry.setdefault("blocked_teams", []).extend(
+            {"team": t, "member": info["name"], "at": _now(), "reason": "claim"}
+            for t in blocked if t not in existing)
+        _save_state(state)
+    log_write(info, f"POST fa/players/{slug}/claim")
+    # Announced because it is the moment a team is barred from bidding: the
+    # committee learning of it later, from a refusal the team hits, is worse.
+    fa_notify.notify_player_claimed(slug, info["name"], blocked)
+    return {"player": slug, "agent": entry["agent"], "blocked_teams": entry["blocked_teams"]}
+
+
+@router.post("/api/fa/players/{slug}/release")
+def release_player(slug: str, info: dict = Depends(get_token_info)):
+    """Drop a claim (§ 4.7). The holder or the head.
+
+    **`blocked_teams` is deliberately not cleared** — see `claim_player`. This
+    is the asymmetry that makes release safe to offer at all, and the dashboard
+    says so on the button rather than letting anyone assume otherwise.
+    """
+    with _fa_lock:
+        state = _load_state()
+        holder = _claim_holder(state, slug)
+        if not holder:
+            raise HTTPException(409, "Nobody holds this player")
+        if holder != info["name"] and not _is_head(info):
+            raise HTTPException(403, f"{holder} is the agent on this player")
+        if _is_advanced(state, slug):
+            raise HTTPException(409, "This player has already been advanced to the sub-committee")
+        node = state["players"][slug]["agent"]
+        node["released_at"] = _now()
+        node["released_by"] = info["name"]
+        _save_state(state)
+    log_write(info, f"POST fa/players/{slug}/release")
+    fa_notify.notify_player_released(slug, holder, info["name"])
+    return {"player": slug, "agent": node}
+
+
+@router.post("/api/fa/players/{slug}/advance")
+def advance_player(slug: str, body: AdvanceIn, info: dict = Depends(get_token_info)):
+    """Hand the surviving offers to the sub-committee (§ 4.7).
+
+    This is what opens the ballot — `cast_ballot` refuses before it — and it is
+    one-way for the agent: their powers on the player end here, and only the
+    head can send him back. The head still assigns the sub-committee separately
+    (D9's empty default stands); an advanced player with nobody assigned is
+    waiting on the head, and the dashboard says which.
+    """
+    with _fa_lock:
+        state = _load_state()
+        _require_curator(info, state, slug)
+        round_id = _round_id_for(state, slug)
+        if not round_id:
+            raise HTTPException(422, "This player hasn't been opened in a round yet")
+        if _is_advanced(state, slug):
+            raise HTTPException(409, "This player has already been advanced")
+        if bool(_ballot_node(_load_ballots(), slug, round_id).get("final")):
+            raise HTTPException(409, "This player is finalized")
+        offers = _load_offers()
+        live = [o for o in _offers_for(offers, slug)
+                if o["status"] in ("submitted", "returned")]
+        if not live:
+            # An empty slate is not a decision to hand over. If curation left
+            # nothing standing, finalize says that; advancing would put a
+            # sub-committee in front of a ballot with only NO_SIGNING on it.
+            raise HTTPException(422, "Every offer on this player has been voided — "
+                                     "finalize him rather than advancing an empty slate")
+        node = state["players"].setdefault(slug, {}).setdefault("agent", {
+            "round_id": round_id, "claimed_by": None, "claimed_at": None,
+            "released_at": None, "released_by": None, "returns": [],
+        })
+        node["round_id"] = round_id
+        node["advanced_at"] = _now()
+        node["advanced_by"] = info["name"]
+        node["note"] = body.note.strip()
+        _save_state(state)
+    log_write(info, f"POST fa/players/{slug}/advance — {len(live)} offer(s)")
+    fa_notify.notify_player_advanced(slug, info["name"], live, node["note"])
+    return {"player": slug, "agent": node, "advanced": [o["id"] for o in live]}
+
+
+@router.post("/api/fa/players/{slug}/return-to-agent")
+def return_to_agent(slug: str, body: ReturnToAgentIn,
+                    info: dict = Depends(require_role("fac_head"))):
+    """Undo an advance (§ 4.7). Head-only, reason required.
+
+    Without it "advance" is one-way and a slate that turns out to be wrong — a
+    survivor gone illegal, a bid that shouldn't have been voided — would need an
+    `unlock` on a player who was never finalized.
+
+    **Ballots already cast are kept and flagged, never discarded**, the third
+    application of § 4.3a's rule after `revised_since` and `voided_since`. The
+    flag is derived in `get_ballots` from the timestamps here, so the rule keeps
+    one implementation.
+    """
+    reason = body.reason.strip()
+    if not reason:
+        raise HTTPException(422, "Sending a player back requires a reason — "
+                                 "the agent is being asked to redo work")
+    with _fa_lock:
+        state = _load_state()
+        if not _is_advanced(state, slug):
+            raise HTTPException(409, "This player hasn't been advanced")
+        round_id = _round_id_for(state, slug)
+        if bool(_ballot_node(_load_ballots(), slug, round_id or "").get("final")):
+            raise HTTPException(409, "This player is finalized — unlock him first")
+        node = state["players"][slug]["agent"]
+        node.setdefault("returns", []).append(
+            {"at": _now(), "by": info["name"], "reason": reason,
+             "advanced_at": node.get("advanced_at"), "advanced_by": node.get("advanced_by")})
+        node["advanced_at"] = None
+        node["advanced_by"] = None
+        _save_state(state)
+    log_write(info, f"POST fa/players/{slug}/return-to-agent")
+    fa_notify.notify_returned_to_agent(slug, node.get("claimed_by"), info["name"], reason)
+    return {"player": slug, "agent": node}
 
 
 # ── review ────────────────────────────────────────────────────────────────────
@@ -1370,10 +1844,20 @@ def review_player(slug: str, info: dict = Depends(get_token_info)):
 
     teams = sorted({o["team"] for o in live})
     entry = _player_entry(state, slug)
+    round_id = _round_id_for(state, slug)
+    finalized = bool(_ballot_node(_load_ballots(), slug, round_id or "").get("final"))
     return {
         "player": slug,
         "pool": pool[slug],
-        "state": {**entry, "ffa_expired": _ffa_expired(entry)},
+        "state": {**entry, "ffa_expired": _ffa_expired(entry),
+                  # § 4.7 — the panel needs to know which actions to offer, and
+                  # deriving that in page JS would be a second copy of the rule.
+                  "stage": _agent_stage(state, slug, pool, finalized),
+                  "claimed_by": _claim_holder(state, slug),
+                  "advanced_at": _agent_node(state, slug).get("advanced_at"),
+                  "agent_note": _agent_node(state, slug).get("note") or "",
+                  "returns": _agent_node(state, slug).get("returns") or [],
+                  "is_agent": _claim_holder(state, slug) == info["name"]},
         "offers": rendered,
         "voided_offers": voided,
         "commitments": {t: _team_commitment(t, offers, ctx) for t in teams},
@@ -1434,7 +1918,9 @@ def _ballot_node(ballots: dict, slug: str, round_id: str, create: bool = False) 
 @router.get("/api/fa/players/{slug}/ballots")
 def get_ballots(slug: str, info: dict = Depends(get_token_info)):
     state = _load_state()
-    _require_reviewer(info, state, slug)
+    # Not `_require_reviewer`: that one admits the claiming agent, and an agent
+    # never sees a ballot (§ 4.5, § 4.7).
+    _require_ballot_viewer(info, state, slug)
     _sweep_ffa_expiry(state)
     round_id = _round_id_for(state, slug)
     if not round_id:
@@ -1472,9 +1958,22 @@ def get_ballots(slug: str, info: dict = Depends(get_token_info)):
         return sorted(o["id"] for o in revised
                       if (_parse_ts(o.get("submitted_at")) or at) > at)
 
+    # The head sent this slate back to its agent after the ballot was cast
+    # (§ 4.7) — the third case of § 4.3a's flag-don't-discard rule. A member who
+    # voted on a slate that has since gone back for more work is told, not
+    # silently reset; re-saving their ballot clears their own flag.
+    returns = _agent_node(state, slug).get("returns") or []
+    last_return = _parse_ts(returns[-1]["at"]) if returns else None
+
+    def _returned_since(cast: dict) -> bool:
+        at = _parse_ts(cast.get("updated_at"))
+        return bool(last_return and at and last_return > at)
+
     return {
         "player": slug, "round_id": round_id,
         "subcommittee": assigned,
+        "advanced_at": _agent_node(state, slug).get("advanced_at"),
+        "returns": returns,
         # The viewer's own conflict, resolved by the same `_conflict_team` that
         # stamps it onto a cast ballot — so the banner a member sees before they
         # vote and the flag the head sees afterwards can never disagree. Derived
@@ -1486,7 +1985,8 @@ def get_ballots(slug: str, info: dict = Depends(get_token_info)):
         # (§ 4.5) — `updated_at` is what lets a member tell a considered ballot
         # from one cast a minute ago in response to theirs.
         "ballots": {name: {**cast, "revised_since": _revised_since(cast),
-                           "voided_since": _voided_since(cast)}
+                           "voided_since": _voided_since(cast),
+                           "returned_since": _returned_since(cast)}
                     for name, cast in node["ballots"].items()},
         "outstanding": [m for m in assigned if m not in node["ballots"]],
         "final": node["final"],
@@ -1508,6 +2008,12 @@ def cast_ballot(slug: str, body: BallotIn, info: dict = Depends(get_token_info))
     round_id = _round_id_for(state, slug)
     if not round_id:
         raise HTTPException(422, "This player hasn't been opened in a round yet")
+    if not _is_advanced(state, slug):
+        # § 4.7. Nothing is balloted before the agent hands the slate over —
+        # gated here and not only in the dashboard, so the stage is a rule
+        # rather than a layout.
+        raise HTTPException(422, "This player is still with his agent — "
+                                 "the ballot opens when the slate is advanced")
 
     pool = _live_pool()
     with _fa_lock:
@@ -1543,7 +2049,7 @@ def cast_ballot(slug: str, body: BallotIn, info: dict = Depends(get_token_info))
 
 
 @router.post("/api/fa/players/{slug}/finalize")
-def finalize_player(slug: str, info: dict = Depends(require_role("fac_head"))):
+def finalize_player(slug: str, info: dict = Depends(get_token_info)):
     """Locks the ballots and records the totals.
 
     Unanswered remands warn, never block (D15) — they come back in the response
@@ -1552,9 +2058,26 @@ def finalize_player(slug: str, info: dict = Depends(require_role("fac_head"))):
 
     This is also the point at which offers are archived, which is what frees a
     team to bid on the same player again in a later round (§ 13.1).
+
+    **The claiming agent may finalize a player they haven't advanced** (§ 4.7,
+    D24) — the uncontested case, where curation left one bid standing and
+    balloting 1,000 balls at a single option is ceremony. It costs nothing
+    structurally because finalize never named a winner: it locks, records,
+    archives and closes, so an uncontested finalize records one surviving offer
+    and empty totals, which reads correctly as exactly that.
+
+    `final.path` distinguishes the two routes, and it reflects the **route, not
+    the actor** — a head finalizing a player who never went to a sub-committee
+    is still the uncontested path, because that is what happened.
     """
     with _fa_lock:
         state = _load_state()
+        advanced = _is_advanced(state, slug)
+        if not _is_head(info):
+            if not (_claim_holder(state, slug) == info["name"] and not advanced):
+                raise HTTPException(
+                    403, "This player has been advanced — only the FAC head can lock the ballot"
+                    if advanced else "'fac_head' role required")
         round_id = _round_id_for(state, slug)
         if not round_id:
             raise HTTPException(422, "This player hasn't been opened in a round yet")
@@ -1596,6 +2119,10 @@ def finalize_player(slug: str, info: dict = Depends(require_role("fac_head"))):
                                 "balls": totals[oid]}
                                for oid, (team, num) in stranded.items() if totals.get(oid)],
             "round_id": round_id,
+            # § 4.7/D24. Which route the player took, so an uncontested lock is
+            # never later mistaken for a ballot nobody filled in.
+            "path": "committee" if advanced else "agent",
+            "agent": _claim_holder(state, slug),
         }
         # Voided offers are archived with the round too — they belong to it, and
         # leaving them unarchived would carry a dead bid into the next one and

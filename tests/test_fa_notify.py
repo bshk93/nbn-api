@@ -218,9 +218,17 @@ fn.notify_offer_submitted(offer(version=2, versions=[{"version": 1, "offer": o["
                           {"version": 1, "offer": o["offer"], "pitch": o["pitch"],
                            "promises": o["promises"]})
 fn.notify_ffa_closed("curry-stephen", {"deadline": iso(-1)})
+# The agent stage sits between the window closing and the ballot (§ 4.7), so a
+# real lifecycle now runs through it — and every one of these names a team, an
+# agent or a slate of bids, which is why none of them may reach the public feed.
+fn.notify_player_claimed("curry-stephen", "agentA", ["WAS"])
+fn.notify_player_released("curry-stephen", "agentA", "agentA")
+fn.notify_player_claimed("curry-stephen", "agentB", ["ORL"])
+fn.notify_player_advanced("curry-stephen", "agentB", [o], "PHX is the only real bid")
+fn.notify_returned_to_agent("curry-stephen", "agentB", "facHead", "year 3 went illegal")
 fn.notify_player_finalized("curry-stephen", {"totals": {}, "voters": [], "locked_by": "facHead"}, [])
-check("six committee events produce six private posts", len(pdc()) == 6, len(pdc()))
-check("...and exactly two public posts", len(news()) == 2, news())
+check("eleven committee events produce eleven private posts", len(pdc()) == 11, len(pdc()))
+check("...and still exactly two public posts", len(news()) == 2, news())
 check("...neither of which leaks a team or a figure",
       not any(ABBR_RE.search(t) or "$" in t for t in news()), news())
 
@@ -381,6 +389,82 @@ check("locking with unanswered remands is on the record",
       any("unanswered remands" in f["name"] for f in e["fields"]))
 check("the post is explicit that nobody has been signed",
       "No signing has been made" in e["description"], e["description"])
+
+
+# ── The agent stage (§ 4.7, § 9.1) ────────────────────────────────────────────
+print("\npdc-alerts — the agent stage, private and never public")
+
+reset()
+fn.notify_player_claimed("curry-stephen", "Avatar", ["WAS"])
+e = pdc()[0]
+check("a claim is announced — it is the moment a team loses the right to bid",
+      len(pdc()) == 1 and news() == [], news())
+check("...naming the agent", "Avatar" in e["title"], e["title"])
+check("...and the team it just barred", "WAS" in field(e, "Now barred"), field(e, "Now barred"))
+check("...saying the bar outlives the claim",
+      "survives a release" in e["footer"]["text"], e["footer"])
+
+reset()
+fn.notify_player_claimed("curry-stephen", "facHead", [])
+check("a head's claim bars nobody, and says so rather than rendering blank",
+      "head claim" in field(pdc()[0], "Now barred"), field(pdc()[0], "Now barred"))
+
+reset()
+fn.notify_player_released("curry-stephen", "Avatar", "Avatar")
+e = pdc()[0]
+check("a release is announced privately", len(pdc()) == 1 and news() == [], news())
+check("...and repeats that the bar stays", "stay barred" in e["description"], e["description"])
+
+reset()
+fn.notify_player_released("curry-stephen", "Avatar", "facHead")
+check("a head prising a claim loose names both parties",
+      "Avatar" in pdc()[0]["title"] and "facHead" in pdc()[0]["title"], pdc()[0]["title"])
+
+reset()
+fn.notify_player_advanced("curry-stephen", "Avatar",
+                          [offer(), offer(id="b2", number=43, team="BKN")],
+                          "PHX is the stronger fit")
+e = pdc()[0]
+adv = field(e, "Advanced")
+check("the advance is private", len(pdc()) == 1 and news() == [], news())
+check("...and carries the surviving slate, not just the fact of it",
+      "PHX" in adv and "BKN" in adv and "#42" in adv and "#43" in adv, adv)
+check("...counted in the field name", "(2)" in
+      next(f["name"] for f in e["fields"] if f["name"].startswith("Advanced")))
+check("...with the agent's note", "stronger fit" in field(e, "Agent's note"))
+check("...and says the ballot waits on the head assigning a sub-committee",
+      "assigns a sub-committee" in e["description"], e["description"])
+
+reset()
+fn.notify_player_advanced("curry-stephen", "Avatar", [offer()], "")
+check("no note renders no note field, rather than an empty one",
+      not any(f["name"] == "Agent's note" for f in pdc()[0]["fields"]))
+
+reset()
+fn.notify_returned_to_agent("curry-stephen", "Avatar", "facHead", "PHX's year 3 went illegal")
+e = pdc()[0]
+check("a send-back is private", len(pdc()) == 1 and news() == [], news())
+check("...carries the head's reason", "year 3" in field(e, "Reason"), field(e, "Reason"))
+check("...and states that cast ballots survive it",
+      "Ballots already cast stand" in e["description"], e["description"])
+
+reset()
+fn.notify_player_finalized("curry-stephen",
+                           {"locked_at": iso(0), "locked_by": "Avatar", "totals": {},
+                            "voters": [], "path": "agent"}, [offer()])
+e = pdc()[0]
+check("an uncontested lock reads as uncontested, not as a ballot nobody filled in",
+      "uncontested" in e["title"].lower(), e["title"])
+check("...explaining that curation left one bid standing",
+      "single bid" in e["description"], e["description"])
+check("...and still signing nobody", "No signing has been made" in e["description"])
+
+reset()
+fn.notify_player_finalized("curry-stephen",
+                           {"locked_at": iso(0), "locked_by": "facHead", "totals": {},
+                            "voters": [], "path": "committee"}, [offer()])
+check("a committee lock keeps the plain title",
+      "uncontested" not in pdc()[0]["title"].lower(), pdc()[0]["title"])
 
 
 # ── Expiry announces once, and never re-announces (§ 4.1, § 9.2) ──────────────

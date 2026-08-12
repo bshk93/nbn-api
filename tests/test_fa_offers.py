@@ -24,6 +24,11 @@ What's worth pinning here is the set of properties that are load-bearing
   * **Visibility is enforced server-side, per request** (§ 4.5, § 6.1): a `fac`
     member not assigned to a player sees neither the offers nor the ballots, and
     the committee never sees another team's drafts.
+  * **The agent stage** (§ 4.7): a claim is exclusive, it is refused when the
+    agent's own team is bidding (D21 — the one hard block), and the bar it
+    creates on that team is **permanent**, surviving both a release and a
+    reopen. Nothing is balloted before the advance, an agent never sees a
+    ballot, and `final.path` records the route rather than the actor.
 
 Everything is patched into memory — the endpoint functions are called directly,
 so nothing touches fa-*.json in NBS_DATA_DIR and no real validator runs.
@@ -78,7 +83,14 @@ POOL = {
 
 MEMBERS = {"facHead": {"roles": ["fac_head"]}, "memberA": {"roles": ["fac"]},
            "memberB": {"roles": ["fac", "phx"]}, "phxOwner": {"roles": ["phx"]},
-           "phxGM": {"roles": ["phx"]}}
+           "phxGM": {"roles": ["phx"]},
+           # § 4.7. `agentA` holds no team, which is the clean case; `agentPhx`
+           # owns a team that bids, which is the conflict D21 hard-blocks.
+           "agentA": {"roles": ["agent"]}, "agentB": {"roles": ["agent"]},
+           "agentPhx": {"roles": ["agent", "phx"]},
+           # No team *role*, only a GM tenure — `_member_teams` must still see
+           # LAL, which is the half a role-only reading would miss.
+           "agentLalGm": {"roles": ["agent"]}, "lalOwner": {"roles": ["lal"]}}
 
 HEAD = {"name": "facHead", "roles": ["fac_head"]}
 MEM_A = {"name": "memberA", "roles": ["fac"]}
@@ -87,8 +99,14 @@ UNASSIGNED = {"name": "outsider", "roles": ["fac"]}
 PHX_OWNER = {"name": "phxOwner", "roles": ["phx"]}
 PHX_GM = {"name": "phxGM", "roles": ["phx"]}
 BKN_OWNER = {"name": "bknOwner", "roles": ["bkn"]}
+AGENT = {"name": "agentA", "roles": ["agent"]}
+AGENT_B = {"name": "agentB", "roles": ["agent"]}
+AGENT_PHX = {"name": "agentPhx", "roles": ["agent", "phx"]}
+AGENT_LAL_GM = {"name": "agentLalGm", "roles": ["agent"]}
+LAL_OWNER = {"name": "lalOwner", "roles": ["lal"]}
 
-CURRENT_TEAM = {"memberB": "PHX", "phxOwner": "PHX", "phxGM": "PHX", "bknOwner": "BKN"}
+CURRENT_TEAM = {"memberB": "PHX", "phxOwner": "PHX", "phxGM": "PHX", "bknOwner": "BKN",
+                "agentPhx": "PHX", "agentLalGm": "LAL", "lalOwner": "LAL"}
 
 fa._load_state = lambda: STATE
 fa._save_state = lambda s: None
@@ -237,23 +255,40 @@ check("but the team sees its own draft",
 
 # ══ remand ════════════════════════════════════════════════════════════════════
 
-print("\nremand (§ 4.3a — a committee power, never a team power)")
-raises("a remand requires a note", 422,
-       lambda: fa.remand_offer(o1["id"], fa.RemandIn(note="   "), MEM_A))
-raises("an unassigned member can't remand", 403,
+print("\nremand (§ 4.3a — now the agent's power, § 4.7 reversing D14)")
+raises("an assigned sub-committee member can no longer remand (reverses D14)", 403,
+       lambda: fa.remand_offer(o1["id"], fa.RemandIn(note="add a year"), MEM_A))
+raises("an unassigned member certainly can't", 403,
        lambda: fa.remand_offer(o1["id"], fa.RemandIn(note="add a year"), UNASSIGNED))
+raises("nor an agent who hasn't claimed the player", 403,
+       lambda: fa.remand_offer(o1["id"], fa.RemandIn(note="add a year"), AGENT))
 
-o1 = fa.remand_offer(o1["id"], fa.RemandIn(note="Add a fourth year"), MEM_A)
+# The window has to shut before an agent can take him (§ 4.7 / D20).
+raises("…and he can't be claimed while the window is still open", 422,
+       lambda: fa.claim_player("curry-stephen", AGENT))
+fa.set_player_state("curry-stephen", fa.PlayerStateIn(status="closed"), HEAD)
+raises("an agent whose own team is bidding can't be his agent (D21)", 422,
+       lambda: fa.claim_player("curry-stephen", AGENT_PHX))
+claim = fa.claim_player("curry-stephen", AGENT)
+check("the claim records the agent", claim["agent"]["claimed_by"] == "agentA")
+check("an agent with no team bars nobody", claim["blocked_teams"] == [])
+raises("a second agent gets the holder, not a share", 422,
+       lambda: fa.claim_player("curry-stephen", AGENT_B))
+
+raises("a remand still requires a note", 422,
+       lambda: fa.remand_offer(o1["id"], fa.RemandIn(note="   "), AGENT))
+
+o1 = fa.remand_offer(o1["id"], fa.RemandIn(note="Add a fourth year"), AGENT)
 check("first remand flips it to returned", o1["status"] == "returned")
 check("the note is on the record, attributed",
-      o1["remands"][0]["by"] == "memberA" and o1["remands"][0]["note"] == "Add a fourth year")
+      o1["remands"][0]["by"] == "agentA" and o1["remands"][0]["note"] == "Add a fourth year")
 check("an unconflicted remand carries no conflict", o1["remands"][0]["conflict"] is None)
 
-o1 = fa.remand_offer(o1["id"], fa.RemandIn(note="…and trim year 1"), MEM_B)
+o1 = fa.remand_offer(o1["id"], fa.RemandIn(note="…and trim year 1"), HEAD)
 check("a second remand is additive, not a second round-trip",
       len(o1["remands"]) == 2 and o1["status"] == "returned")
-check("a conflicted remand is flagged like a conflicted ballot",
-      o1["remands"][1]["conflict"] == "PHX")
+check("the head keeps remand everywhere, alongside the agent",
+      o1["remands"][1]["by"] == "facHead")
 
 fa.patch_offer(o1["id"], fa.OfferPatch(contract=contract("$44,000,000")), PHX_GM)
 check("a returned offer is editable again — by the same people who drafted it",
@@ -321,6 +356,17 @@ check("an RFA's ballot carries the QO line, marked estimated (§ 7.2)",
 # ══ ballots ═══════════════════════════════════════════════════════════════════
 
 print("\nballots (§ 4.4)")
+raises("nothing is balloted before the agent advances the slate (§ 4.7)", 422,
+       lambda: fa.cast_ballot("curry-stephen",
+                              fa.BallotIn(balls={o1["id"]: 1000}), MEM_A))
+adv = fa.advance_player("curry-stephen", fa.AdvanceIn(note="both worth a look"), AGENT)
+check("advancing hands over the surviving slate",
+      set(adv["advanced"]) == {o1["id"], o2["id"]} and adv["agent"]["advanced_at"])
+raises("…and the agent's powers on him end there", 403,
+       lambda: fa.remand_offer(o1["id"], fa.RemandIn(note="one more"), AGENT))
+raises("advancing twice is refused", 409,
+       lambda: fa.advance_player("curry-stephen", fa.AdvanceIn(), HEAD))
+
 raises("an unassigned member can't cast one — a ballot is a vote, not a power", 403,
        lambda: fa.cast_ballot("curry-stephen",
                               fa.BallotIn(balls={"NO_SIGNING": 1000}), UNASSIGNED))
@@ -350,8 +396,9 @@ check("a sub-committee is transparent to itself, in progress included (§ 4.5)",
       set(view["ballots"]) == {"memberA", "memberB"})
 check("nobody outstanding once both have voted", view["outstanding"] == [])
 
-# Revise an offer out from under both cast ballots.
-fa.remand_offer(o1["id"], fa.RemandIn(note="drop year 3"), MEM_A)
+# Revise an offer out from under both cast ballots. Post-advance this is the
+# head's to do — the agent is out of it (§ 4.7).
+fa.remand_offer(o1["id"], fa.RemandIn(note="drop year 3"), HEAD)
 fa.patch_offer(o1["id"], fa.OfferPatch(contract=contract("$46,000,000")), PHX_GM)
 o1 = fa.submit_offer(o1["id"], PHX_OWNER)
 view = fa.get_ballots("curry-stephen", MEM_A)
@@ -372,8 +419,10 @@ check("…and revisiting one clears its flag, leaving the other member's standin
 # ══ finalize / unlock ═════════════════════════════════════════════════════════
 
 print("\nfinalize + unlock")
-o2 = fa.remand_offer(o2["id"], fa.RemandIn(note="we need a team option"), MEM_A)
+o2 = fa.remand_offer(o2["id"], fa.RemandIn(note="we need a team option"), HEAD)
 final = fa.finalize_player("curry-stephen", HEAD)
+check("a finalize after an advance records the committee route (§ 4.7)",
+      final["path"] == "committee")
 check("totals are summed and stored, not recomputed on read",
       final["totals"] == {o1["id"]: 1500, o2["id"]: 500})
 check("voters and abstentions are on the record",
@@ -386,7 +435,7 @@ raises("ballots are locked after finalize", 409,
        lambda: fa.cast_ballot("curry-stephen",
                               fa.BallotIn(balls={o1["id"]: 1000}), MEM_A))
 raises("a remand cannot follow a finalize", 409,
-       lambda: fa.remand_offer(o1["id"], fa.RemandIn(note="one more thing"), MEM_A))
+       lambda: fa.remand_offer(o1["id"], fa.RemandIn(note="one more thing"), HEAD))
 raises("finalizing twice is refused", 409, lambda: fa.finalize_player("curry-stephen", HEAD))
 
 check("finalize archives the offers", all(o.get("archived_at") for o in [o1, o2]))
@@ -482,7 +531,7 @@ late = make_offer  # a *new* offer from another team is refused past the deadlin
 OFFERS[:] = [o for o in OFFERS if o["team"] != "BKN"]
 raises("no new offers past the deadline", 422, lambda: late(BKN_OWNER, team="BKN"))
 
-f1 = fa.remand_offer(f1["id"], fa.RemandIn(note="add a player option"), MEM_A)
+f1 = fa.remand_offer(f1["id"], fa.RemandIn(note="add a player option"), HEAD)
 fa.patch_offer(f1["id"], fa.OfferPatch(contract=contract("$45,000,000")), PHX_OWNER)
 f1 = fa.submit_offer(f1["id"], PHX_OWNER)
 check("the FFA window does not gate a revision the committee itself asked for (§ 4.3a)",
@@ -627,7 +676,7 @@ vb = fa.submit_offer(make_offer(BKN_OWNER, team="BKN")["id"], BKN_OWNER)
 
 raises("a void requires a reason — the team can't answer it", 422,
        lambda: fa.void_offer(vp["id"], fa.VoidIn(reason="  "), HEAD))
-raises("a reviewer who may remand may not void", 403,
+raises("a sub-committee member may neither remand nor void (\u00a7 4.7)", 403,
        lambda: fa.void_offer(vp["id"], fa.VoidIn(reason="wrong player"), MEM_A))
 raises("a draft can't be voided — the committee never saw it", 409,
        lambda: fa.void_offer(draft_only["id"], fa.VoidIn(reason="nope"), HEAD))
@@ -662,7 +711,7 @@ raises("a voided offer can't be edited", 409,
        lambda: fa.patch_offer(vp["id"], fa.OfferPatch(pitch="please"), PHX_GM))
 raises("…or resubmitted", 409, lambda: fa.submit_offer(vp["id"], PHX_OWNER))
 raises("…or sent back", 409,
-       lambda: fa.remand_offer(vp["id"], fa.RemandIn(note="add a year"), MEM_A))
+       lambda: fa.remand_offer(vp["id"], fa.RemandIn(note="add a year"), HEAD))
 raises("…or voided twice", 409,
        lambda: fa.void_offer(vp["id"], fa.VoidIn(reason="again"), HEAD))
 
@@ -675,7 +724,8 @@ raises("…and while it holds that slot, the void can't be undone under it", 409
        lambda: fa.restore_offer(vp["id"], HEAD))
 fa.delete_offer(redo["id"], PHX_OWNER)
 
-raises("only the head can undo a void", 403, lambda: fa.restore_offer(vp["id"], MEM_A))
+raises("a sub-committee member can\u2019t undo a void either", 403,
+       lambda: fa.restore_offer(vp["id"], MEM_A))
 vp = fa.restore_offer(vp["id"], HEAD)
 check("restore puts it back to the status it held, not a guessed one",
       vp["status"] == "submitted" and vp["void"] is None)
@@ -686,7 +736,7 @@ raises("restoring a live offer is refused", 409, lambda: fa.restore_offer(vp["id
 
 # A returned offer must come back returned — otherwise the void would silently
 # answer the remands against it.
-fa.remand_offer(vb["id"], fa.RemandIn(note="trim year 1"), MEM_A)
+fa.remand_offer(vb["id"], fa.RemandIn(note="trim year 1"), HEAD)
 vb = fa.void_offer(vb["id"], fa.VoidIn(reason="BKN withdrew by agreement"), HEAD)
 vb = fa.restore_offer(vb["id"], HEAD)
 check("a voided remand comes back returned, its notes still unanswered",
@@ -698,6 +748,9 @@ check("a voided remand comes back returned, its notes still unanswered",
 #
 # § 4.3a's rule, applied harder: flagged, never rewritten. Redistributing balls
 # nobody redistributed would be the software inventing a vote.
+# Ballots need the slate advanced (§ 4.7); the head may do it directly on a
+# player no agent has claimed.
+fa.advance_player("curry-stephen", fa.AdvanceIn(), HEAD)
 fa.cast_ballot("curry-stephen", fa.BallotIn(balls={vp["id"]: 700, vb["id"]: 300}), MEM_A)
 vp = fa.void_offer(vp["id"], fa.VoidIn(reason="PHX ruled ineligible"), HEAD)
 view = fa.get_ballots("curry-stephen", MEM_A)
@@ -782,6 +835,170 @@ raises("...as is a positive number of hours", 422,
        lambda: fa.extend_ffa_window("young-rfa", fa.FfaExtendIn(hours=0, reason="x"), HEAD))
 raises("a player with no window started has nothing to extend", 422,
        lambda: fa.extend_ffa_window("never-opened", fa.FfaExtendIn(hours=6, reason="x"), HEAD))
+
+# ══ the agent stage (§ 4.7) ═══════════════════════════════════════════════════
+#
+# The properties worth pinning are the ones a later change could quietly undo:
+#
+#   * **The bar a claim creates is permanent** — it survives a release and a
+#     reopen. Without that, releasing is a way to read every rival's figure and
+#     then bid into a field only you have seen, which is the whole reason the
+#     conflict check exists.
+#   * **The conflict block reads tenure OR role**, not either alone.
+#   * **Nothing is balloted before the advance**, gated in the API and not only
+#     in the dashboard.
+#   * **A head can always act**, on any player, claimed or not — the fallback
+#     that keeps the stage from deadlocking when every agent is conflicted out.
+#   * **`final.path` reflects the route, not the actor.**
+
+print("\nthe agent stage (§ 4.7)")
+STATE["mode"] = "rounds"
+OFFERS[:] = [o for o in OFFERS if o["player"] != "curry-stephen"]
+BALLOTS.pop("curry-stephen", None)
+STATE["players"].pop("curry-stephen", None)
+fa.open_round(fa.RoundIn(name="agent round", close_previous=True), HEAD)
+fa.set_player_state("curry-stephen",
+                    fa.PlayerStateIn(status="open", subcommittee=["memberA"]), HEAD)
+ap = fa.submit_offer(make_offer(PHX_OWNER)["id"], PHX_OWNER)
+ab = fa.submit_offer(make_offer(BKN_OWNER, team="BKN", y1="$36,000,000")["id"], BKN_OWNER)
+
+check("a player with an open window is not yet ready for an agent",
+      fa._agent_stage(STATE, "curry-stephen", POOL, False) == "open")
+fa.set_player_state("curry-stephen", fa.PlayerStateIn(status="closed"), HEAD)
+check("closing the window puts him on the agents' queue",
+      fa._agent_stage(STATE, "curry-stephen", POOL, False) == "awaiting_agent")
+
+# D21 — the one hard block in a spec that otherwise only warns (§ 4.6).
+check("the refusal names the team, and it is the server that composes it",
+      "PHX has a live offer" in fa._claim_refusal(AGENT_PHX, STATE, "curry-stephen",
+                                                  OFFERS, POOL, False))
+check("a GM tenure with no team role still counts as a team (§ 4.7)",
+      fa._member_teams("agentLalGm") == {"LAL"}
+      and fa._member_teams("agentPhx") == {"PHX"})
+
+ac = fa.claim_player("curry-stephen", AGENT_LAL_GM)
+check("an agent whose team isn't bidding may claim", ac["agent"]["claimed_by"] == "agentLalGm")
+check("…and the claim bars their team from bidding on him",
+      [b["team"] for b in ac["blocked_teams"]] == ["LAL"])
+check("the stage moves with the claim",
+      fa._agent_stage(STATE, "curry-stephen", POOL, False) == "with_agent")
+
+raises("the barred team can't draft an offer on him", 422,
+       lambda: make_offer(LAL_OWNER, team="LAL"))
+
+# § 8.1's convention: a team is shown the refusal in the disabled ⋯ menu rather
+# than discovering it from a 422 on an offer they've already written. The bar is
+# scoped to the team it stops — *which agent claimed whom* is committee
+# information, announced on pdc-alerts and nowhere else.
+board_lal = fa.get_board(LAL_OWNER)["players"]["curry-stephen"]
+check("the barred team is told, on the board, in the server's own words",
+      board_lal["accepting"] is False
+      and "agentLalGm is an agent and claimed him" in board_lal["your_block"]
+      and board_lal["reason"] == board_lal["your_block"])
+board_bkn = fa.get_board(BKN_OWNER)["players"]["curry-stephen"]
+check("...and nobody else is — not another team",
+      board_bkn["your_block"] is None)
+check("...nor the public", fa.get_board()["players"]["curry-stephen"]["your_block"] is None)
+
+# The bar is what makes releasing safe to offer at all.
+fa.release_player("curry-stephen", AGENT_LAL_GM)
+check("a released player goes back on the queue",
+      fa._claim_holder(STATE, "curry-stephen") is None
+      and fa._agent_stage(STATE, "curry-stephen", POOL, False) == "awaiting_agent")
+raises("…but the bar survives the release — the bids have already been read", 422,
+       lambda: make_offer(LAL_OWNER, team="LAL"))
+fa.set_player_state("curry-stephen", fa.PlayerStateIn(status="open"), HEAD)
+raises("…and it survives a reopen too, unlike the claim itself", 422,
+       lambda: make_offer(LAL_OWNER, team="LAL"))
+fa.set_player_state("curry-stephen", fa.PlayerStateIn(status="closed"), HEAD)
+
+# Visibility: the queue carries a count and nothing else until a claim.
+check("an unclaimed player's offers are shut to an agent",
+      fa.list_offers(player="curry-stephen", info=AGENT) == [])
+raises("…and so is the review page", 403,
+       lambda: fa.review_player("curry-stephen", AGENT))
+fa.claim_player("curry-stephen", AGENT)
+check("claiming opens every offer on him, in full",
+      {o["id"] for o in fa.list_offers(player="curry-stephen", info=AGENT)} == {ap["id"], ab["id"]})
+check("…and the review page with them",
+      len(fa.review_player("curry-stephen", AGENT)["offers"]) == 2)
+check("but only on the player they hold",
+      fa.list_offers(player="young-rfa", info=AGENT) == [])
+raises("an agent never sees a ballot, on any player (§ 4.5)", 403,
+       lambda: fa.get_ballots("curry-stephen", AGENT))
+
+# The filter is a void, and the team is told why in the void's own reason.
+ab = fa.void_offer(ab["id"], fa.VoidIn(reason="Not competitive; BKN passed"), AGENT)
+check("an agent may void on the player they hold",
+      ab["status"] == "voided" and ab["void"]["by"] == "agentA")
+check("…and the team's answer is the reason, server-composed",
+      ab["void"]["reason"] == "Not competitive; BKN passed")
+ab = fa.restore_offer(ab["id"], AGENT)
+check("restore follows void — the agent can undo their own filter",
+      ab["status"] == "submitted")
+ab = fa.void_offer(ab["id"], fa.VoidIn(reason="Not competitive"), AGENT)
+
+ap = fa.set_agent_note(ap["id"], fa.AgentNoteIn(note="Best of the three; wants 3 years"), AGENT)
+check("the agent's note travels with the offer",
+      ap["agent_note"] == "Best of the three; wants 3 years"
+      and ap["agent_note_by"] == "agentA")
+
+raises("an agent can't void on a player they don't hold", 403,
+       lambda: fa.void_offer(draft_only["id"], fa.VoidIn(reason="no"), AGENT_B))
+
+# ── the uncontested exit (D24) ────────────────────────────────────────────────
+raises("nothing is balloted while he is still with his agent", 422,
+       lambda: fa.cast_ballot("curry-stephen", fa.BallotIn(balls={ap["id"]: 1000}), MEM_A))
+uncontested = fa.finalize_player("curry-stephen", AGENT)
+check("an agent may lock a player they hold and haven't advanced",
+      uncontested["locked_by"] == "agentA")
+check("…recorded as the uncontested route, not a ballot nobody filled in",
+      uncontested["path"] == "agent" and uncontested["totals"] == {})
+check("…and it archives like any finalize", ap.get("archived_at") is not None)
+
+# ── advance, and the head's send-back ─────────────────────────────────────────
+fa.unlock_player("curry-stephen", HEAD)
+adv = fa.advance_player("curry-stephen", fa.AdvanceIn(note="PHX is the only real bid"), AGENT)
+check("advancing carries the agent's note to the committee",
+      adv["agent"]["note"] == "PHX is the only real bid")
+check("the stage moves to the committee",
+      fa._agent_stage(STATE, "curry-stephen", POOL, False) == "with_committee")
+raises("an agent can't finalize a player they've advanced", 403,
+       lambda: fa.finalize_player("curry-stephen", AGENT))
+
+fa.cast_ballot("curry-stephen", fa.BallotIn(balls={ap["id"]: 1000}), MEM_A)
+sent = fa.return_to_agent("curry-stephen",
+                          fa.ReturnToAgentIn(reason="PHX's year 3 is illegal now"), HEAD)
+check("the head can undo an advance", sent["agent"]["advanced_at"] is None
+      and fa._agent_stage(STATE, "curry-stephen", POOL, False) == "with_agent")
+check("…on the record, with the reason and what it undid",
+      sent["agent"]["returns"][0]["reason"] == "PHX's year 3 is illegal now"
+      and sent["agent"]["returns"][0]["advanced_by"] == "agentA")
+raises("a send-back requires a reason", 422,
+       lambda: fa.return_to_agent("curry-stephen", fa.ReturnToAgentIn(reason=" "), HEAD))
+
+view = fa.get_ballots("curry-stephen", MEM_A)
+check("a ballot cast before the send-back is flagged, never discarded (§ 4.7)",
+      view["ballots"]["memberA"]["returned_since"] is True
+      and view["ballots"]["memberA"]["balls"] == {ap["id"]: 1000})
+fa.advance_player("curry-stephen", fa.AdvanceIn(), AGENT)
+fa.cast_ballot("curry-stephen", fa.BallotIn(balls={ap["id"]: 1000}), MEM_A)
+check("…and re-voting clears the member's own flag",
+      fa.get_ballots("curry-stephen", MEM_A)["ballots"]["memberA"]["returned_since"] is False)
+
+# ── an empty slate is a finalize, not an advance ──────────────────────────────
+fa.return_to_agent("curry-stephen", fa.ReturnToAgentIn(reason="one more look"), HEAD)
+fa.void_offer(ap["id"], fa.VoidIn(reason="PHX withdrew"), AGENT)
+raises("advancing an empty slate is refused — finalize says it instead", 422,
+       lambda: fa.advance_player("curry-stephen", fa.AdvanceIn(), AGENT))
+
+# ── the head's fallback (§ 2) ─────────────────────────────────────────────────
+fa.restore_offer(ap["id"], AGENT)
+check("the head may act on a player another agent holds",
+      fa.remand_offer(ap["id"], fa.RemandIn(note="head override"), HEAD)["status"] == "returned")
+STATE["players"]["curry-stephen"].pop("agent", None)
+check("…and on one nobody holds at all",
+      fa.void_offer(ap["id"], fa.VoidIn(reason="head cleanup"), HEAD)["status"] == "voided")
 
 print("\n" + ("=" * 40))
 if FAILS:
