@@ -623,13 +623,30 @@ def team_ratings_response(team_arg: str) -> dict:
 
 
 # ── /roster ───────────────────────────────────────────────────────────────────
-# Mirrors the team page's "Rosters" tab (buildRosterTable's 'depth' mode in
-# teams/team.js): a starting five (one player per slot, PG→C, best legal
-# assignment by OVR) followed by the bench in OVR order, then two-way /
-# draft-rights / dead-cap entries. The starting-five search below is a direct
-# port of computeStartingFive in teams/lineup.js -- keep the two in sync.
+# Vertical depth chart: one block per position (PG→C), starter bolded on top,
+# reserves below by OVR. The starting five is picked the same way as the team
+# page's Rosters tab (buildRosterTable's 'depth' mode in teams/team.js) -- the
+# search below is a direct port of computeStartingFive in teams/lineup.js,
+# keep the two in sync. Reserves are bucketed by primary position (pos[0]),
+# not full eligibility.
+#
+# A player's CURRENT-season cap_holds entry (this season is itself a pending
+# option / non-guaranteed year, or the player is only on the roster via an
+# unrenounced UFA/RFA hold) is shown as a plain-text tag, not color -- Discord
+# markdown bold and ANSI color can't apply to the same run of text (bold only
+# renders outside a fenced code block; ANSI color only renders inside one),
+# and the starter needing to be bold wins that trade-off. Tags reuse the
+# site's PO/TO/NG shorthand from contract.js; UFA/RFA have no shorter form.
 
 DEPTH_SLOTS = ["PG", "SG", "SF", "PF", "C"]
+
+_HOLD_TAG = {"UFA": "UFA", "RFA": "RFA", "PLAYER_OPT": "PO", "TEAM_OPT": "TO", "NON_GTD": "NG"}
+
+
+def _player_line(p: dict, bold: bool) -> str:
+    tag = f" ({_HOLD_TAG[p['hold_type']]})" if p.get("hold_type") in _HOLD_TAG else ""
+    text = f"{_display_name(p['name_raw'])} — {_fmt_ovr(p['ovr'])}{tag}"
+    return f"**{text}**" if bold else text
 
 
 def _compute_starting_five(players: list[dict]) -> list[dict | None]:
@@ -681,6 +698,7 @@ def _roster_augmented(team: str) -> list[dict]:
     bios = _load_json(PLAYER_BIOS_FILE, {})
     ovr_history = _load_json(OVR_FILE, {})
     current_ovr = {slug: entries[-1]["ovr"] for slug, entries in ovr_history.items() if entries}
+    cur_season = _current_league_year()
 
     players = []
     for r in _load_csv(roster_path):
@@ -688,12 +706,23 @@ def _roster_augmented(team: str) -> list[dict]:
         if not slug:
             continue
         bio = bios.get(slug, {})
+        hold = (bio.get("cap_holds") or {}).get(cur_season)
+        # UFA/RFA means "no signed contract, just a placeholder charge" -- so
+        # it's only trustworthy when there's no real salary this season too.
+        # A UFA/RFA entry alongside an actual salary is a stale leftover from
+        # before the player re-signed (53 of these league-wide vs. 0 clean
+        # current-season UFA/RFA holds, checked 2026-08-13); PLAYER_OPT /
+        # TEAM_OPT / NON_GTD legitimately coexist with a salary (the pending
+        # option's or non-guaranteed year's dollar figure) so those are kept.
+        if hold in ("UFA", "RFA") and (bio.get("salaries") or {}).get(cur_season):
+            hold = None
         players.append({
             "slug": slug,
-            "name": _display_name(bio.get("name", "")) or slug,
+            "name_raw": bio.get("name", "") or slug,
             "pos_list": bio.get("pos") or [],
             "ovr": current_ovr.get(slug),
             "type": bio.get("type") or "",
+            "hold_type": hold,
         })
     return players
 
@@ -706,6 +735,29 @@ _ROSTER_TYPE_LABELS = {"two-way": "Two-Way Contracts", "draft-rights": "Draft Ri
 _ROSTER_TYPE_ORDER = {"two-way": 0, "draft-rights": 1, "dead": 2}
 
 
+def _depth_rows(players: list[dict]) -> list[list[dict | None]]:
+    """One list per DEPTH_SLOTS position: [starter, *bench], unpadded.
+    Starter comes from computeStartingFive (full eligibility); everyone else
+    is bucketed by primary position (pos_list[0]) and sorted by OVR desc."""
+    starter_pool = [p for p in players if p["type"] == "player"]
+    five = _compute_starting_five(starter_pool)
+    started_ids = {id(p) for p in five if p is not None}
+
+    by_pos: dict[str, list[dict]] = {slot: [] for slot in DEPTH_SLOTS}
+    for p in starter_pool:
+        if id(p) in started_ids:
+            continue
+        pos_list = p.get("pos_list") or []
+        primary = pos_list[0] if pos_list and pos_list[0] in by_pos else None
+        if primary is None:
+            continue
+        by_pos[primary].append(p)
+    for slot in DEPTH_SLOTS:
+        by_pos[slot].sort(key=lambda p: -(p["ovr"] or 0))
+
+    return [[starter] + by_pos[slot] for slot, starter in zip(DEPTH_SLOTS, five)]
+
+
 def roster_response(team_arg: str) -> dict:
     team = team_arg.strip().upper()
     if team not in TEAM_NAMES:
@@ -715,24 +767,13 @@ def roster_response(team_arg: str) -> dict:
     if not players:
         return _error(f"No roster on file for **{TEAM_NAMES[team]}**.")
 
-    starter_pool = [p for p in players if p["type"] == "player"]
-    five = _compute_starting_five(starter_pool)
-    started_ids = {id(p) for p in five if p is not None}
-
-    lines = ["**Starters**"]
-    for slot, p in zip(DEPTH_SLOTS, five):
-        if p is None:
-            lines.append(f"`{slot}`  *(none eligible)*")
-        else:
-            lines.append(f"`{slot}`  {p['name']} — {_fmt_ovr(p['ovr'])}")
-
-    bench = sorted((p for p in starter_pool if id(p) not in started_ids),
-                    key=lambda p: -(p["ovr"] or 0))
-    if bench:
-        lines.append("")
-        lines.append("**Bench**")
-        for p in bench:
-            lines.append(f"{p['name']} — {_fmt_ovr(p['ovr'])}")
+    rows = _depth_rows(players)
+    blocks = []
+    for slot, row in zip(DEPTH_SLOTS, rows):
+        starter, *reserves = row
+        block = [f"**{slot}**", _player_line(starter, bold=True) if starter else "*(none eligible)*"]
+        block += [_player_line(p, bold=False) for p in reserves]
+        blocks.append("\n".join(block))
 
     rest = sorted((p for p in players if p["type"] != "player"),
                   key=lambda p: (_ROSTER_TYPE_ORDER.get(p["type"], 3), -(p["ovr"] or 0)))
@@ -740,12 +781,11 @@ def roster_response(team_arg: str) -> dict:
     for p in rest:
         rest_by_type.setdefault(p["type"], []).append(p)
     for t, plist in rest_by_type.items():
-        lines.append("")
-        lines.append(f"**{_ROSTER_TYPE_LABELS.get(t, t.title() or 'Other')}**")
-        for p in plist:
-            lines.append(f"{p['name']} — {_fmt_ovr(p['ovr'])}")
+        block = [f"**{_ROSTER_TYPE_LABELS.get(t, t.title() or 'Other')}**"]
+        block += [_player_line(p, bold=False) for p in plist]
+        blocks.append("\n".join(block))
 
-    desc = "\n".join(lines)
+    desc = "\n\n".join(blocks)
     if len(desc) > 4090:
         desc = desc[:4080] + "\n…"
 
@@ -754,7 +794,7 @@ def roster_response(team_arg: str) -> dict:
         "url": f"https://nbn.today/teams/{team}/",
         "color": TEAM_COLORS.get(team, NBN_BLUE),
         "description": desc,
-        "footer": {"text": "NBN roster · depth-chart order"},
+        "footer": {"text": "NBN roster · depth chart · (UFA/RFA/PO/TO/NG) flags this season's pending option/hold status"},
     }
     return {"type": CHANNEL_MESSAGE, "data": {"embeds": [embed]}}
 
