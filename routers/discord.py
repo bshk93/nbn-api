@@ -31,11 +31,12 @@ from fastapi import APIRouter, Request, Response
 from nacl.exceptions import BadSignatureError
 from nacl.signing import VerifyKey
 
-from .constants import DATA_DIR, ATTRIBUTES_FILE, PLAYER_BIOS_FILE  # NBS_DATA_DIR; holds raw playoff box scores
+from .constants import DATA_DIR, ATTRIBUTES_FILE, PLAYER_BIOS_FILE, OVR_FILE  # NBS_DATA_DIR; holds raw playoff box scores
 from .storage import _load_json, _current_league_year
 from .auth import load_members, save_members
 from .tips import perform_tip, TipError
 from .invest import get_all_holdings, compute_member_pnl  # net worth + per-stock P&L
+from .players import _display_name  # 'LAST, FIRST' bio name -> title-case 'First Last'
 
 logger = logging.getLogger("nbn-api.discord")
 
@@ -617,6 +618,143 @@ def team_ratings_response(team_arg: str) -> dict:
         "description": header,
         "fields": fields,
         "footer": {"text": "2K attributes via 2kratings.com · average + league rank across top 8 rostered players by 2K overall"},
+    }
+    return {"type": CHANNEL_MESSAGE, "data": {"embeds": [embed]}}
+
+
+# ── /roster ───────────────────────────────────────────────────────────────────
+# Mirrors the team page's "Rosters" tab (buildRosterTable's 'depth' mode in
+# teams/team.js): a starting five (one player per slot, PG→C, best legal
+# assignment by OVR) followed by the bench in OVR order, then two-way /
+# draft-rights / dead-cap entries. The starting-five search below is a direct
+# port of computeStartingFive in teams/lineup.js -- keep the two in sync.
+
+DEPTH_SLOTS = ["PG", "SG", "SF", "PF", "C"]
+
+
+def _compute_starting_five(players: list[dict]) -> list[dict | None]:
+    def ovr_of(p):
+        try:
+            return float(p.get("ovr") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    candidates = []
+    for slot in DEPTH_SLOTS:
+        elig = [p for p in players if slot in (p.get("pos_list") or [])]
+        elig.sort(key=lambda p: -ovr_of(p))
+        candidates.append(elig[:len(DEPTH_SLOTS)])
+
+    def score_of(assign):
+        return (sum(1 for p in assign if p is not None),
+                tuple(ovr_of(p) if p is not None else -1 for p in assign))
+
+    used: set[int] = set()
+    cur: list[dict | None] = [None] * len(DEPTH_SLOTS)
+    best, best_score = None, None
+
+    def search(i):
+        nonlocal best, best_score
+        if i == len(DEPTH_SLOTS):
+            score = score_of(cur)
+            if best_score is None or score > best_score:
+                best_score, best = score, list(cur)
+            return
+        for p in candidates[i]:
+            pid = id(p)
+            if pid in used:
+                continue
+            used.add(pid)
+            cur[i] = p
+            search(i + 1)
+            used.discard(pid)
+            cur[i] = None
+        cur[i] = None  # leaving the slot empty is always a legal branch
+        search(i + 1)
+
+    search(0)
+    return best or [None] * len(DEPTH_SLOTS)
+
+
+def _roster_augmented(team: str) -> list[dict]:
+    roster_path = SITE_DIR / "data" / f"{team.lower()}-roster.csv"
+    bios = _load_json(PLAYER_BIOS_FILE, {})
+    ovr_history = _load_json(OVR_FILE, {})
+    current_ovr = {slug: entries[-1]["ovr"] for slug, entries in ovr_history.items() if entries}
+
+    players = []
+    for r in _load_csv(roster_path):
+        slug = (r.get("SLUG") or "").strip()
+        if not slug:
+            continue
+        bio = bios.get(slug, {})
+        players.append({
+            "slug": slug,
+            "name": _display_name(bio.get("name", "")) or slug,
+            "pos_list": bio.get("pos") or [],
+            "ovr": current_ovr.get(slug),
+            "type": bio.get("type") or "",
+        })
+    return players
+
+
+def _fmt_ovr(ovr) -> str:
+    return str(ovr) if ovr is not None else "—"
+
+
+_ROSTER_TYPE_LABELS = {"two-way": "Two-Way Contracts", "draft-rights": "Draft Rights", "dead": "Dead Cap"}
+_ROSTER_TYPE_ORDER = {"two-way": 0, "draft-rights": 1, "dead": 2}
+
+
+def roster_response(team_arg: str) -> dict:
+    team = team_arg.strip().upper()
+    if team not in TEAM_NAMES:
+        return _error(f"Unknown team **{team_arg}**. Use a 3-letter abbreviation, e.g. `HOU`.")
+
+    players = _roster_augmented(team)
+    if not players:
+        return _error(f"No roster on file for **{TEAM_NAMES[team]}**.")
+
+    starter_pool = [p for p in players if p["type"] == "player"]
+    five = _compute_starting_five(starter_pool)
+    started_ids = {id(p) for p in five if p is not None}
+
+    lines = ["**Starters**"]
+    for slot, p in zip(DEPTH_SLOTS, five):
+        if p is None:
+            lines.append(f"`{slot}`  *(none eligible)*")
+        else:
+            lines.append(f"`{slot}`  {p['name']} — {_fmt_ovr(p['ovr'])}")
+
+    bench = sorted((p for p in starter_pool if id(p) not in started_ids),
+                    key=lambda p: -(p["ovr"] or 0))
+    if bench:
+        lines.append("")
+        lines.append("**Bench**")
+        for p in bench:
+            lines.append(f"{p['name']} — {_fmt_ovr(p['ovr'])}")
+
+    rest = sorted((p for p in players if p["type"] != "player"),
+                  key=lambda p: (_ROSTER_TYPE_ORDER.get(p["type"], 3), -(p["ovr"] or 0)))
+    rest_by_type: dict[str, list[dict]] = {}
+    for p in rest:
+        rest_by_type.setdefault(p["type"], []).append(p)
+    for t, plist in rest_by_type.items():
+        lines.append("")
+        lines.append(f"**{_ROSTER_TYPE_LABELS.get(t, t.title() or 'Other')}**")
+        for p in plist:
+            lines.append(f"{p['name']} — {_fmt_ovr(p['ovr'])}")
+
+    desc = "\n".join(lines)
+    if len(desc) > 4090:
+        desc = desc[:4080] + "\n…"
+
+    embed = {
+        "title": f"{TEAM_NAMES[team]} — Roster",
+        "url": f"https://nbn.today/teams/{team}/",
+        "color": TEAM_COLORS.get(team, NBN_BLUE),
+        "description": desc,
+        "footer": {"text": "NBN roster · depth-chart order"},
     }
     return {"type": CHANNEL_MESSAGE, "data": {"embeds": [embed]}}
 
@@ -1348,6 +1486,7 @@ _HELP_GROUPS = [
     ]),
     ("Teams & League", [
         "`/team team [season]` — roster + per-game stats",
+        "`/roster team` — current roster: starting five, bench, two-way, dead cap",
         "`/team-ratings team` — average 2K attributes + league rank across a team's top 8 players",
         "`/standings [season]` — conference standings",
         "`/leaders [stat] [season] [team]` — top-10 totals",
@@ -1418,6 +1557,8 @@ def dispatch(data: dict, invoker: dict) -> dict:
         return ratings_response(_option(data, "player"))
     if cmd == "team":
         return team_response(_option(data, "team"), _option(data, "season"))
+    if cmd == "roster":
+        return roster_response(_option(data, "team"))
     if cmd == "team-ratings":
         return team_ratings_response(_option(data, "team"))
     if cmd == "leaders":

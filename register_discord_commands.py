@@ -75,6 +75,18 @@ COMMANDS = [
         ],
     },
     {
+        "name": "roster",
+        "description": "A team's current roster: starting five, bench, two-way, draft rights, dead cap",
+        "options": [
+            {
+                "name": "team",
+                "description": "Team abbreviation, e.g. HOU",
+                "type": 3,
+                "required": True,
+            },
+        ],
+    },
+    {
         "name": "team-ratings",
         "description": "A team's average NBA 2K attributes (+ league rank) across its top 8 rostered players",
         "options": [
