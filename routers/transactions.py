@@ -2222,6 +2222,136 @@ def _rookie_scale_contract(draft_year: Optional[int], draft_round: Optional[int]
     }
 
 
+# § 7.1 second-round minimum-scale structures: the tier (years-of-experience
+# key into that season's min_salary_scale) for each year of the deal.
+#
+# **Flat within each declared segment, not escalating** — same convention as
+# the general § 3.12 minimum contract (a declared experience figure is fixed
+# for the life of the deal; only that season's own scale value moves the
+# dollar amount from year to year). "Year 2: 2nd-year rookie minimum" reads
+# as "what this deal pays in its 2nd year," not "bump the experience tier" —
+# confirmed against a real 3-year second-round submission (Otega Oweh,
+# 2026-08-14): all three years priced at flat tier 1
+# ($2,185,116 / $2,571,895 / $2,791,275 for 26-27/27-28/28-29), which only
+# reads as a raise because the season's own scale is growing, not because the
+# tier climbed. An earlier cut of this table had it escalating 1/2/3, which
+# is wrong.
+#
+# The 4-year option's Year 1 -> Year 2 step is a genuine, explicitly-stated
+# *decrease* (tier 2 down to tier 1) — the one place the deal's declared tier
+# actually changes. Years 3-4 are inferred to hold flat at that same
+# lower tier (2, 1, 1, 1), by analogy with the confirmed 3-year case; there is
+# no real 4-year second-round submission yet to check this segment against,
+# so treat it as provisional until one comes through.
+_SECOND_ROUND_SCALE_TIERS = {
+    3: [1, 1, 1],
+    4: [2, 1, 1, 1],
+}
+# 1-based year index -> cap_holds tag. Year 1 (and, on the 4-year deal, Year 2)
+# carry no tag at all — they're plain guaranteed money.
+_SECOND_ROUND_SCALE_TAGS = {
+    3: {2: "NON_GTD", 3: "TEAM_OPT"},
+    4: {3: "NON_GTD", 4: "TEAM_OPT"},
+}
+
+
+def _second_round_scale_contract(contract: "ContractIn", cap_levels: dict) -> Optional[dict]:
+    """§ 7.1's prescribed second-round minimum-scale deal for the seasons the
+    contract actually declares, or None when it isn't a recognizable 3- or
+    4-year second-round shape.
+
+    Anchored on the contract's own earliest declared season rather than the
+    player's draft year, so a pick signed after their draft season (a
+    holdover unsigned draft-rights case) is still scored correctly. Mirrors
+    `_rookie_scale_contract`'s one-reader shape: the validator scores a
+    submitted contract against this, so the schedule is stated once.
+
+    Deliberately **not** run through `_check_contract_raises` (§ 3.9's 5%
+    ladder) — same reasoning as the first-round scale: the steps between
+    tiers here are routinely far bigger than 5%, and the 4-year option's
+    Year 1 -> Year 2 step isn't even a raise.
+
+    A trailing UFA/RFA season — the § 3.10 hold the deal rolls into once it
+    ends — is not a contract year (same convention `contract.js`'s
+    `isFaHold` enforces everywhere else). Counting it inflated a 3-year deal
+    to 4 salary entries, which picked the wrong tier sequence entirely and
+    scored a correctly-priced 3-year deal against the 4-year table.
+    """
+    fa_hold_seasons = {
+        yr for yr, ht in (contract.cap_holds or {}).items() if ht in _FA_HOLD_TYPES
+    }
+    salary_seasons = sorted(
+        (yr for yr in (contract.salaries or {}) if yr not in fa_hold_seasons),
+        key=lambda y: (_season_start(y), y),
+    )
+    num_years = len(salary_seasons)
+    tiers = _SECOND_ROUND_SCALE_TIERS.get(num_years)
+    if not tiers:
+        return None
+    first = salary_seasons[0]
+    seasons = [first] + [_season_shift(first, i) for i in range(1, num_years)]
+    salaries = {}
+    for season, tier in zip(seasons, tiers):
+        scale = _min_scale_for_season(season, cap_levels)
+        amt = scale.get(str(tier))
+        if not amt:
+            return None  # no scale configured that far out — can't score it
+        salaries[season] = f"${amt:,}"
+    cap_holds = {
+        seasons[idx - 1]: tag
+        for idx, tag in _SECOND_ROUND_SCALE_TAGS.get(num_years, {}).items()
+    }
+    return {"salaries": salaries, "cap_holds": cap_holds, "seasons": seasons}
+
+
+def _check_second_round_scale_terms(contract: "ContractIn", bio: dict,
+                                    cap_levels: dict) -> Optional[CheckResult]:
+    """§ 7.1: score a second-round pick's deal against whichever fixed
+    structure (3-year or 4-year) matches how many salary years it declares.
+
+    Returns None (nothing to check) rather than a passing result when the
+    year count doesn't match either structure — that isn't necessarily an
+    off-scale deal, it might be a two-way or a shape this function can't
+    recognize, and callers fall back to the generic minimum/ladder checks in
+    that case.
+    """
+    scale = _second_round_scale_contract(contract, cap_levels)
+    if not scale:
+        return None
+    num_years = len(scale["salaries"])
+    fa_hold_seasons = {
+        yr for yr, ht in (contract.cap_holds or {}).items() if ht in _FA_HOLD_TYPES
+    }
+    label = f"pick {bio.get('draft_pick')} of {bio.get('draft_year')} (2nd round)"
+    problems = []
+    for season, expected in scale["salaries"].items():
+        got = contract.salaries.get(season)
+        if got is None:
+            problems.append(f"{season}: missing (scale: {expected})")
+        elif _parse_dollar(got) != _parse_dollar(expected):
+            problems.append(f"{season}: {got} (scale: {expected})")
+    extra = sorted(set(contract.salaries) - set(scale["salaries"]) - fa_hold_seasons)
+    for season in extra:
+        problems.append(f"{season}: not a year of the § 7.1 second-round scale")
+
+    wrong_tags = []
+    for season, want in scale["cap_holds"].items():
+        got = (contract.cap_holds or {}).get(season)
+        if got != want:
+            wrong_tags.append(f"{season} should be {want}, got {got or 'guaranteed'}")
+
+    if not problems and not wrong_tags:
+        return CheckResult(
+            check="second_round_scale", passed=True, level="info",
+            message=f"Terms match the § 7.1 {num_years}-year second-round scale for {label}.",
+        )
+    detail = "; ".join(problems + wrong_tags)
+    return CheckResult(
+        check="second_round_scale", passed=False, level="error",
+        message=f"§ 7.1 sets the {num_years}-year second-round scale for {label} — {detail}.",
+    )
+
+
 def _min_salary_scale_tier(years_exp: int) -> str:
     """Maps a raw years-of-NBA-experience count to a min_salary_scale key
     ("0".."9","10+")."""
@@ -5538,12 +5668,22 @@ def _validate_sign_pick(details: SignPickDetails, ctx: dict) -> list[CheckResult
     if scale and details.contract.type != "two-way":
         checks.append(_check_rookie_scale_terms(details.contract, scale, bio))
     elif details.contract.type != "two-way":
-        # No scale to measure against — second-rounders sign off the § 3.12
-        # minimum scale, where the ladder's own minimum exemption applies.
-        r = _check_contract_raises(details.contract, bird_pct=False, cur_season=season,
-                                   bio=bio, cap_levels=ctx["cap_levels"])
+        # Second-rounders sign off the § 7.1 second-round scale (3- or 4-year
+        # minimum structure), not the first-round table. That scale isn't
+        # monotonic by years-of-experience — the 4-year option's Year 1 ->
+        # Year 2 step is a decrease — so it gets the same exact-match
+        # treatment as the first-round scale rather than the § 3.9 ladder,
+        # which rejected it outright (a real Year 1 -> Year 2 step here is
+        # tens of percent either way). Only falls back to the generic ladder
+        # check when the year count doesn't match a recognized structure.
+        r = _check_second_round_scale_terms(details.contract, bio, ctx["cap_levels"])
         if r:
             checks.append(r)
+        else:
+            r = _check_contract_raises(details.contract, bird_pct=False, cur_season=season,
+                                       bio=bio, cap_levels=ctx["cap_levels"])
+            if r:
+                checks.append(r)
 
     return checks
 
