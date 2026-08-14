@@ -47,6 +47,7 @@ STORE = {"seq": 0, "items": []}
 sg._load_store = lambda: STORE
 sg._save_store = lambda store: None
 sg.log_write = lambda info, msg: None
+sg.inbox.notify_member = lambda *a, **k: None
 
 AUTHOR = {"name": "bryn", "roles": []}
 OTHER = {"name": "someone_else", "roles": ["phx"]}

@@ -43,6 +43,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
+from . import inbox
 from .constants import (
     DATA_DIR, CAP_LEVELS_FILE, TRANSACTIONS_FILE, VALID_TEAMS,
     _txn_lock, _deadcap_lock,
@@ -117,6 +118,7 @@ def _waiver_claims_for(released_txn_id: str, txns: Optional[list[dict]] = None) 
             "signing_method": d.get("signing_method"),
             "eaps_assumption": d.get("eaps_assumption"),
             "submitted_at": t.get("created_at"),
+            "created_by": t.get("created_by"),
         })
     return out
 
@@ -462,7 +464,7 @@ def _resolve_one_waiver(release_txn: dict, txns: list[dict]) -> Optional[tuple]:
 
     if priority["status"] == "no_claims":
         _log_waiver_clear(release_txn, "unclaimed", _SYSTEM_INFO)
-        return ("closed", player, False)
+        return ("closed", player, False, release_txn["id"], None)
 
     if priority["status"] == "tied":
         already_flagged = any(
@@ -487,20 +489,40 @@ def _resolve_one_waiver(release_txn: dict, txns: list[dict]) -> Optional[tuple]:
             release_txn, "unclaimed", _SYSTEM_INFO,
             notes="Every claim on file failed re-validation at resolution time (spec § 5 step 6).",
         )
-        return ("closed", player, False)
+        return ("closed", player, False, release_txn["id"], None)
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     _apply_waiver_transfer(release_txn, winner, today, _SYSTEM_INFO)
     _log_waiver_clear(release_txn, "claimed", _SYSTEM_INFO,
                       claimed_by=winner["team"], signing_method=winner.get("signing_method"))
-    return ("closed", player, True)
+    return ("closed", player, True, release_txn["id"], winner["team"])
+
+
+def _notify_waiver_claimants(released_txn_id: str, player: str, claimed_by: Optional[str]) -> None:
+    """Tells each claimant, win or lose, once a waiver resolves — fires outside
+    the txn lock, same rule Discord already follows here. The window's sealed
+    (spec § 2) only while it's open; by resolution the outcome is already
+    public via the roster/ledger, so naming the winner to a losing claimant
+    isn't a new leak."""
+    for claim in _waiver_claims_for(released_txn_id):
+        recipient = claim.get("created_by")
+        if not recipient or recipient in ("system", "unknown"):
+            continue
+        if claimed_by and claim["team"] == claimed_by:
+            inbox.notify_member(recipient, f"Your waiver claim on {player} was awarded to {claim['team']}",
+                                link="/transactions")
+        else:
+            text = (f"Your waiver claim on {player} lost priority to {claimed_by}" if claimed_by
+                    else f"Your waiver claim on {player} was not awarded")
+            inbox.notify_member(recipient, text, link="/transactions")
 
 
 def _fire_waiver_notification(note: tuple) -> None:
     from . import waiver_notify
     if note[0] == "closed":
-        _, player, claimed = note
+        _, player, claimed, txn_id, claimed_by = note
         waiver_notify.notify_window_closed(player, claimed)
+        _notify_waiver_claimants(txn_id, player, claimed_by)
     elif note[0] == "tied":
         _, player, tied_teams, h2h, season = note
         waiver_notify.notify_manual_tie(player, tied_teams or [], h2h, season)
@@ -697,4 +719,5 @@ def resolve_waiver(txn_id: str, body: WaiverResolveDetails,
 
     from . import waiver_notify
     waiver_notify.notify_window_closed(release_txn["details"]["player"], bool(body.team))
+    _notify_waiver_claimants(txn_id, release_txn["details"]["player"], team if body.team else None)
     return txn

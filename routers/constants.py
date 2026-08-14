@@ -68,6 +68,8 @@ SESSIONS_FILE   = DATA_DIR / "sessions.json"
 JOIN_SUBMISSIONS_FILE = DATA_DIR / "join-submissions.json"
 JOIN_BLACKLIST_FILE   = DATA_DIR / "join-blacklist.json"
 MEMBER_SEEN_FILE      = DATA_DIR / "member-seen.json"
+# Per-member notifications: { "<member>": [{id, ts, text, link, read}] }
+INBOX_FILE = DATA_DIR / "inboxes.json"
 
 PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PLAYER", "PROTECTED", "SWAP_OWNER", "NOTES", "FROZEN", "FROZEN_REASON"]
 

@@ -105,8 +105,13 @@ def _cookie_accepted(path: str) -> bool:
     Widening this later is a one-line change; narrowing it after the fact would
     not be. `POST /api/auth/session` is deliberately *not* on the list — minting
     takes the real token, so a session can never renew itself past its expiry.
+
+    `/api/inbox/*` joined for the same reason `/api/fa/*` did: it's read on
+    every page load (the header badge) and its writes are self-scoped
+    mark-read actions with zero blast radius, not a place a CSRF'd request
+    could move anything of value.
     """
-    return path == "/api/auth/me" or path.startswith("/api/fa/")
+    return path == "/api/auth/me" or path.startswith("/api/fa/") or path.startswith("/api/inbox")
 
 
 def _load_sessions() -> dict:
@@ -659,10 +664,13 @@ def update_member(name: str, body: MemberUpdate, info: dict = Depends(get_token_
     if name not in members:
         raise HTTPException(status_code=404, detail=f"Member '{name}' not found")
     member = members[name]
+    roles_changed = False
+    tenures_changed = False
     if body.roles is not None:
         invalid = [r for r in body.roles if r not in VALID_ROLES]
         if invalid:
             raise HTTPException(status_code=422, detail=f"Invalid roles: {invalid}")
+        roles_changed = member.get("roles", []) != body.roles
         member["roles"] = body.roles
     if body.tenures is not None:
         for t in body.tenures:
@@ -670,10 +678,21 @@ def update_member(name: str, body: MemberUpdate, info: dict = Depends(get_token_
                 raise HTTPException(status_code=422, detail=f"Invalid team: {t.team}")
             if t.position not in VALID_MEMBER_POSITIONS:
                 raise HTTPException(status_code=422, detail=f"Invalid position: {t.position}")
-        member["tenures"] = [t.model_dump() for t in body.tenures]
+        new_tenures = [t.model_dump() for t in body.tenures]
+        tenures_changed = member.get("tenures", []) != new_tenures
+        member["tenures"] = new_tenures
     members[name] = member
     save_members(members)
     log_write(info, f"PATCH members — updated {name!r}")
+    # Local import: inbox.py imports get_token_info from this module at load
+    # time, so importing it back at module scope here would be circular.
+    if name != info["name"] and (roles_changed or tenures_changed):
+        from . import inbox
+        if roles_changed:
+            inbox.notify_member(name, f"Your roles were updated: {', '.join(member.get('roles', [])) or '(none)'}",
+                                link="/members")
+        if tenures_changed:
+            inbox.notify_member(name, "Your team tenure was updated", link="/members")
     return {"name": name, "roles": member.get("roles", []), "tenures": member.get("tenures", [])}
 
 

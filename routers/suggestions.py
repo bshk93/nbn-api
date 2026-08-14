@@ -6,6 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from . import inbox
 from .constants import SUGGESTIONS_FILE
 from .storage import _load_json, _save_json, log_write
 from .auth import get_token_info, has_role
@@ -106,6 +107,7 @@ def create_suggestion(body: SuggestionCreate, info: dict = Depends(get_token_inf
 
 @router.patch("/api/suggestions/{suggestion_id}")
 def patch_suggestion(suggestion_id: str, body: SuggestionPatch, info: dict = Depends(get_token_info)):
+    notify_status_change = None
     with _suggestions_lock:
         store = _load_store()
         idx = _find(store, suggestion_id)
@@ -122,6 +124,8 @@ def patch_suggestion(suggestion_id: str, body: SuggestionPatch, info: dict = Dep
                 s["comments"].append(
                     _new_entry("status", info["name"], **{"from": s["status"], "to": body.status})
                 )
+                if s.get("author") and s["author"] != info["name"]:
+                    notify_status_change = (s["author"], s["title"], body.status)
             s["status"] = body.status
 
         if body.title is not None or body.description is not None:
@@ -141,6 +145,9 @@ def patch_suggestion(suggestion_id: str, body: SuggestionPatch, info: dict = Dep
         store["items"][idx] = s
         _save_store(store)
     log_write(info, f"PATCH suggestions/{suggestion_id}")
+    if notify_status_change:
+        author, title, new_status = notify_status_change
+        inbox.notify_member(author, f"Your suggestion \"{title}\" is now {new_status}", link="/suggestions")
     return s
 
 
@@ -160,7 +167,11 @@ def add_comment(suggestion_id: str, body: CommentBody, info: dict = Depends(get_
         comment = _new_entry("comment", info["name"], body=text)
         s["comments"].append(comment)
         _save_store(store)
+        author = s.get("author")
+        title = s.get("title")
     log_write(info, f"POST suggestions/{suggestion_id}/comments")
+    if author and author != info["name"]:
+        inbox.notify_member(author, f"New comment on your suggestion \"{title}\"", link="/suggestions")
     return comment
 
 

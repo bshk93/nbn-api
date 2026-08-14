@@ -23,6 +23,7 @@ from .storage import (
 )
 from .auth import require_role, get_token_info, is_team_owner
 from .discord_notify import notify_transaction
+from . import inbox
 from .players import load_player_bios, save_player_bios, _build_team_map, _scrub_trading_block
 from .roster_picks import (
     load_picks, save_picks, _all_picks_flat,
@@ -1405,6 +1406,20 @@ def _apply_sign(details: SignDetails, txn_date: str, info: dict, txn_id: Optiona
     if team not in VALID_TEAMS:
         raise HTTPException(status_code=422, detail=f"Unknown team: {team!r}")
 
+    # An empty contract used to sail through silently: no salary year gets
+    # added, and `bio["cap_holds"] = details.contract.cap_holds` below
+    # *replaces* whatever hold the player already carried, so a blank
+    # submission could erase a real cap hold and leave the player on the
+    # roster with no salary at all (nbn-today/BACKLOG.md, Battle/ATL
+    # 2026-08-12). Offer sheets already refuse this (§ 3.15's 2-year floor);
+    # a plain sign just needs at least one year for the contract to mean
+    # anything.
+    if not details.contract.salaries:
+        raise HTTPException(
+            status_code=422,
+            detail="Sign contract must include at least one season of salary — an empty contract signs nothing.",
+        )
+
     cur_season = _season_for_date(txn_date)
     cap_levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
     # Captured before any roster/bio mutation below, so a generic "mle" that
@@ -2214,26 +2229,33 @@ def _min_salary_scale_tier(years_exp: int) -> str:
 
 
 def _contract_years_exp(contract, season: str) -> Optional[int]:
-    """Years of NBA experience in `season` per the contract's own declaration.
+    """Years of NBA experience for pricing `season` per the contract's own
+    declaration — flat across every year of the deal, not escalating one tier
+    per contract year. `ContractIn.years_experience` is declared once, at
+    signing, and applies unchanged to every season of that same contract; the
+    raise from one contract year to the next comes entirely from that season's
+    own minimum-scale figures moving (cap growth), not from climbing a tier.
 
-    `ContractIn.years_experience` is stated **as of the contract's first salary
-    year**, so it is anchored rather than floating: one more season of the deal
-    is one more year of service, and re-reading the contract in a later league
-    year still resolves correctly. That anchoring is why this is contract
-    specification rather than a player field — a bare count on a bio would mean
-    something different every year it was read.
+    This used to add one year of experience per elapsed contract year off the
+    declared anchor. Reversed 2026-08-13 against the league's own live cap
+    sheet ("NBN Rosters and Salaries 2026-27"): Jamison Battle's 2-year
+    minimum (`years_experience: 2`) is recorded there as $2,449,421 / $2,664,401
+    for 26-27 / 27-28 — both the tier-**2** figure, not tier 3. Escalating had
+    this contract, entered correctly, showing a permanent false-positive
+    warning against a tier it was never meant to reach. Real NBA references
+    (HoopsHype, Spotrac) don't agree on this either — one climbs a multi-year
+    minimum's tier per contract year, one doesn't — and the league's own
+    practice, per this contract, is the flat reading.
 
     Returns None when nothing is declared, which callers must read as "fall
-    back to the draft_year proxy", not as zero experience.
+    back to the draft_year proxy" (which *does* still climb — real elapsed
+    calendar time is a different thing from a declared contract anchor), not
+    as zero experience.
     """
     declared = getattr(contract, "years_experience", None) if contract else None
     if declared is None:
         return None
-    years = [yr for yr in (getattr(contract, "salaries", None) or {})]
-    if not years:
-        return None
-    first = min(years, key=_season_start)
-    return max(0, int(declared) + _season_start(season) - _season_start(first))
+    return max(0, int(declared))
 
 
 def _max_salary_pct(years_exp: int) -> float:
@@ -3973,6 +3995,17 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
     bios = ctx["bios"]; season = ctx["cur_season"]
     team = details.team.upper()
 
+    # Surfaced in the office's live rubric before submit — _apply_sign hard-
+    # rejects this too, but that's a 422 after the fact. An empty contract
+    # used to score every other check as a vacuous pass (minimum_salary
+    # included, since its loop has nothing to iterate), reading all-green for
+    # a signing that added no salary year at all.
+    if not details.contract.salaries:
+        checks.append(CheckResult(
+            check="contract_has_salary_years", passed=False, level="error",
+            message="This contract has no salary years — nothing would actually be signed. Add at least one season.",
+        ))
+
     current_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
     existing_hold, is_fa_hold = _signee_existing_hold(team, details.player, bios, season)
     new_sal = _parse_dollar(details.contract.salaries.get(season, ""))
@@ -4082,7 +4115,7 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
         checks.append(r)
 
     r = _check_minimum_salary(details.contract, details.player, bios, season, ctx["cap_levels"],
-                              txn_date=ctx.get("txn_date"))
+                              txn_date=ctx.get("txn_date"), signing_method=details.signing_method)
     if r:
         checks.append(r)
 
@@ -4176,7 +4209,8 @@ def _minimum_year_ceiling(bio: dict, season: str, cap_levels: dict,
 
 
 def _check_minimum_salary(contract, player: str, bios: dict, season: str,
-                          cap_levels: dict, txn_date: Optional[str] = None) -> Optional[CheckResult]:
+                          cap_levels: dict, txn_date: Optional[str] = None,
+                          signing_method: Optional[str] = None) -> Optional[CheckResult]:
     """§ 3.12: no contract year may pay below that season's minimum salary.
 
     Proration is the wrinkle. The league prorates in-season minimum signings
@@ -4193,11 +4227,21 @@ def _check_minimum_salary(contract, player: str, bios: dict, season: str,
         warning, since experience is inferred from `draft_year` rather than
         verified (same treatment § 3.11 gives it)
 
+    A genuine 1-year `minimum` deal (a single salary year) is checked against
+    the § 3.12 veteran-minimum hardship cap (`_one_year_min_cap_hit`) instead
+    of the raw experience-tier figure. Without this, a correctly-priced 1-year
+    veteran-minimum deal (e.g. a 5-years-experience player capped at the 2-year
+    figure) failed this check while `_check_minimum_contract_cap_hit` passed
+    the exact same submission — two checks contradicting each other on the
+    one contract shape the hardship exception exists for. Caught live
+    2026-08-13 on Nahshon Hyland's 1-yr minimum with GSW.
+
     Two-way contracts are exempt: they don't pay on the standard scale.
     """
     if contract.type == "two-way":
         return None
     check_name = "minimum_salary"
+    is_one_year_min = signing_method == "minimum" and len(contract.salaries or {}) == 1
     # The league year starts July 1; games start in the autumn. A signing in
     # Jul-Sep therefore precedes the season and cannot be prorated. Deliberately
     # a coarse rule — proration isn't in the rulebook yet, so there is no
@@ -4229,7 +4273,9 @@ def _check_minimum_salary(contract, player: str, bios: dict, season: str,
                     f"${floor:,} (§ 3.12) — {when}."
                 ),
             )
-        tier_floor = _min_salary_for(bios.get(player) or {}, yr, cap_levels, contract)
+        tier_floor = (_one_year_min_cap_hit(bios.get(player) or {}, yr, cap_levels, contract)
+                     if is_one_year_min else
+                     _min_salary_for(bios.get(player) or {}, yr, cap_levels, contract))
         if tier_floor and amount < tier_floor:
             declared = _contract_years_exp(contract, yr)
             basis = (f"{declared} years of experience in {yr}, per the contract"
@@ -4661,7 +4707,7 @@ def _validate_offer_sheet(details: OfferSheetDetails, ctx: dict) -> list[CheckRe
         ))
 
     r = _check_minimum_salary(details.contract, details.player, bios, season, ctx["cap_levels"],
-                              txn_date=ctx.get("txn_date"))
+                              txn_date=ctx.get("txn_date"), signing_method=details.signing_method)
     if r:
         checks.append(r)
 
@@ -5787,6 +5833,24 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
         # imports from, so a top-level import here would be circular.
         from .waiver_notify import notify_waived
         notify_waived(stored_details["player"], team)
+    if body.type == "offer_sheet":
+        # No submitted_by/created_by to address the way a self-serve PDC offer
+        # has — this is entered by an office member on the team's behalf, so
+        # it's the retaining team's business generally, not one member's.
+        inbox.notify_team(
+            stored_details["retaining_team"],
+            f"{stored_details['teams'][0]} submitted an offer sheet on your restricted free agent "
+            f"{stored_details.get('player')} — you have 48 hours to match (§ 3.15).",
+            link="/transactions",
+        )
+    elif body.type == "offer_sheet_decision":
+        matched = stored_details.get("outcome") == "matched"
+        text = (f"{stored_details.get('retaining_team')} matched your offer sheet for "
+                f"{stored_details.get('player')} — they keep the player."
+                if matched else
+                f"{stored_details.get('retaining_team')} did not match your offer sheet for "
+                f"{stored_details.get('player')} — the player signs with you.")
+        inbox.notify_team(stored_details.get("offering_team"), text, link="/transactions")
     return txn
 
 

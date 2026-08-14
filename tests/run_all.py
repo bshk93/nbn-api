@@ -18,7 +18,9 @@ MODULES = ["test_stepien_rule", "test_picks_matching", "test_tpe_and_hardcap",
            "test_contract_shorthand", "test_validate_endpoints",
            "test_roster_log_relay",
            "test_minimum_contract_raises", "test_tradeblock_notify",
-           "test_waivers"]
+           "test_waivers", "test_sign_requires_salary",
+           "test_one_year_min_cap_hit_consistency",
+           "test_inbox", "test_inbox_wiring"]
 
 
 def main():

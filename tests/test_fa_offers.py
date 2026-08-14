@@ -118,6 +118,7 @@ fa._live_pool = lambda: POOL
 fa._current_league_year = lambda: "26-27"
 fa.load_members = lambda: MEMBERS
 fa.log_write = lambda info, msg: None
+fa.inbox.notify_member = lambda *a, **k: None
 fa._member_current_team = lambda name, members=None: CURRENT_TEAM.get(name)
 
 # The validator is exercised by its own suites (test_signing_eligibility,

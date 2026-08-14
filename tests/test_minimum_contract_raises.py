@@ -14,6 +14,13 @@ are at that season's minimum for that player (plus 5% of rounding grace), so an
 ordinary contract with a big jump is still an error, and so is a deal that
 starts at the minimum and then leaps above the scale.
 
+2026-08-13: the "experience declared on the contract" section below was
+rewritten after `_contract_years_exp` stopped escalating a declared
+`years_experience` by one tier per contract year (checked against the
+league's own live cap sheet, which prices multi-year minimums flat). A
+multi-year minimum still raises year over year — that comes from each
+season's own scale table moving, not from the tier climbing.
+
     venv/bin/python -m tests.test_minimum_contract_raises
 """
 from __future__ import annotations
@@ -129,8 +136,13 @@ def main():
     print("\nexperience declared on the contract (§ 3.12)")
     # The bio proxy is unavailable for most veterans — draft_year is the NBN
     # draft and is null for everyone who predates it, and permanently null for
-    # UDFAs. The contract states its own figure instead, anchored to its first
-    # salary year so it stays correct read from any later league year.
+    # UDFAs. The contract states its own figure instead — flat across every
+    # year of that contract, not escalating one tier per contract year.
+    # Reversed 2026-08-13 against the league's own live cap sheet: Jamison
+    # Battle's 2-year minimum (years_experience: 2) is recorded there as
+    # $2,449,421 / $2,664,401 for 26-27 / 27-28 — both the tier-2 figure.
+    # Escalating had this contract, entered correctly, reading as underpaid
+    # against a tier it was never meant to reach.
     def ceil(exp, yr, first="26-27", n=3):
         seasons = ["26-27", "27-28", "28-29", "29-30"][:n]
         if first != "26-27":
@@ -140,31 +152,38 @@ def main():
 
     check("declared experience beats an absent draft_year",
           ceil(4, "26-27") == SCALE["4"])
-    check("...and the tier steps one row per contract year",
-          ceil(4, "27-28") == SCALE["5"] and ceil(4, "28-29") == SCALE["6"])
-    check("...anchored to the contract's own first year, not the league year",
-          ceil(4, "28-29", first="27-28") == SCALE["5"])
+    check("...and the tier stays flat across every contract year",
+          ceil(4, "27-28") == SCALE["4"] and ceil(4, "28-29") == SCALE["4"])
+    check("...regardless of which season the contract actually starts in",
+          ceil(4, "28-29", first="27-28") == SCALE["4"])
     check("a 10+ veteran stays on the top row as the deal runs",
           ceil(12, "26-27") == SCALE["10+"] and ceil(12, "28-29") == SCALE["10+"])
     check("declaring nothing still falls back to the draft_year proxy",
           _minimum_year_ceiling(VET, "26-27", CAP_LEVELS,
                                 ContractIn(salaries={"26-27": "$1"})) == SCALE["10+"])
 
-    # The whole point: a multi-year minimum priced off the scale must survive
-    # the § 3.13 ladder for a player the bio can say nothing about.
+    # The whole point: a flat-tier multi-year minimum still raises year over
+    # year, because each season's own scale table moves (cap growth) — the
+    # tier doesn't need to climb for that. Real 27-28 figures, matching how
+    # Battle's actual contract prices (tier "2": $2,449,421 -> $2,664,401).
+    CAP_LEVELS_27_28 = {**CAP_LEVELS, "27-28": {"cap": 173250000, "min_salary_scale": {
+        "0": 2294370, "1": 2571895, "2": 2664401, "3": 2756912, "4": 2988178,
+        "5": 3219451, "6": 3450720, "7": 3681991, "8": 3700320, "9": 4070355,
+        "10+": 4070355}}}
     r = _check_contract_raises(
-        ContractIn(salaries={"26-27": f"${SCALE['4']:,}", "27-28": f"${SCALE['5']:,}",
-                             "28-29": f"${SCALE['6']:,}"}, years_experience=4),
-        bird_pct=False, cur_season=SEASON, bio=UNDRAFTED, cap_levels=CAP_LEVELS,
+        ContractIn(salaries={"26-27": f"${SCALE['4']:,}",
+                             "27-28": f"${CAP_LEVELS_27_28['27-28']['min_salary_scale']['4']:,}"},
+                   years_experience=4),
+        bird_pct=False, cur_season=SEASON, bio=UNDRAFTED, cap_levels=CAP_LEVELS_27_28,
     )
-    check("a climbing minimum for an undrafted vet clears the ladder",
+    check("a flat-tier minimum for an undrafted vet clears the ladder off scale growth alone",
           r is not None and r.passed)
     # ...and it must not become a loophole: a real raise off a minimum base is
     # still a raise, declared experience or not.
     r = _check_contract_raises(
         ContractIn(salaries={"26-27": f"${SCALE['4']:,}", "27-28": "$8,000,000"},
                    years_experience=4),
-        bird_pct=False, cur_season=SEASON, bio=UNDRAFTED, cap_levels=CAP_LEVELS,
+        bird_pct=False, cur_season=SEASON, bio=UNDRAFTED, cap_levels=CAP_LEVELS_27_28,
     )
     check("...but a jump clear of the scale is still an error",
           r is not None and not r.passed)

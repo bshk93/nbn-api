@@ -27,7 +27,7 @@ from typing import Optional
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 
-from . import fa_notify
+from . import fa_notify, inbox
 from .auth import (get_token_info, has_role, load_members,
                    require_any_role, require_role)
 from .constants import (CAP_LEVELS_FILE, FA_BALLOTS_FILE, FA_OFFERS_FILE,
@@ -1437,6 +1437,10 @@ def remand_offer(offer_id: str, body: RemandIn, info: dict = Depends(get_token_i
         _save_offers(offers)
     log_write(info, f"POST fa/offers/{offer_id}/remand")
     fa_notify.notify_offer_remanded(offer, entry)
+    recipient = offer.get("submitted_by") or offer.get("created_by")
+    if recipient:
+        inbox.notify_member(recipient, f"Your offer for {offer['player']} was sent back: {note}",
+                             link="/free-agency")
     return offer
 
 
@@ -1506,6 +1510,10 @@ def void_offer(offer_id: str, body: VoidIn, info: dict = Depends(get_token_info)
         _save_offers(offers)
     log_write(info, f"POST fa/offers/{offer_id}/void")
     fa_notify.notify_offer_voided(offer)
+    recipient = offer.get("submitted_by") or offer.get("created_by")
+    if recipient:
+        inbox.notify_member(recipient, f"Your offer for {offer['player']} was voided: {reason}",
+                             link="/free-agency")
     return offer
 
 
@@ -1551,6 +1559,10 @@ def restore_offer(offer_id: str, info: dict = Depends(get_token_info)):
         _save_offers(offers)
     log_write(info, f"POST fa/offers/{offer_id}/restore")
     fa_notify.notify_offer_restored(offer, voided)
+    recipient = offer.get("submitted_by") or offer.get("created_by")
+    if recipient:
+        inbox.notify_member(recipient, f"Your offer for {offer['player']} was restored — it's live again",
+                             link="/free-agency")
     return offer
 
 
@@ -1737,6 +1749,8 @@ def return_to_agent(slug: str, body: ReturnToAgentIn,
         _save_state(state)
     log_write(info, f"POST fa/players/{slug}/return-to-agent")
     fa_notify.notify_returned_to_agent(slug, node.get("claimed_by"), info["name"], reason)
+    if node.get("claimed_by"):
+        inbox.notify_member(node["claimed_by"], f"{slug} was sent back to you: {reason}", link="/pdc")
     return {"player": slug, "agent": node}
 
 
@@ -2135,6 +2149,15 @@ def finalize_player(slug: str, info: dict = Depends(get_token_info)):
         _save_state(state)
     log_write(info, f"POST fa/players/{slug}/finalize")
     fa_notify.notify_player_finalized(slug, node["final"], live)
+    # Neutral on purpose — finalize never names a winner (the FAC enters the
+    # actual signing on /transactions by hand, same rule notify_player_finalized
+    # follows), so this tells each bidder voting closed without claiming who
+    # it favored.
+    for o in live:
+        recipient = o.get("submitted_by") or o.get("created_by")
+        if recipient:
+            inbox.notify_member(recipient, f"Voting closed on {slug} — check the result",
+                                 link="/free-agency")
     return node["final"]
 
 
