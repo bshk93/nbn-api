@@ -75,6 +75,12 @@ INBOX_FILE = DATA_DIR / "inboxes.json"
 # BIO_REWARDS_FILE/the curator direct-edit path (players.py) — this is the
 # open-submission-with-review path for members who aren't curators.
 CLEANUP_SUBMISSIONS_FILE = DATA_DIR / "cleanup-submissions.json"
+# Read by the discord_fa gap type (nbn-api/docs/discord-transaction-backfill.md):
+# the flagged bucket is the question bank, the submitted-state file is written
+# to on approval so the standalone backfill scripts can't later re-submit the
+# same candidate as a duplicate transaction.
+DISCORD_FA_RESOLVED_FILE  = DATA_DIR / "discord-fa-signings-resolved.json"
+DISCORD_FA_SUBMITTED_FILE = DATA_DIR / "discord-fa-signings-submitted.json"
 
 PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PLAYER", "PROTECTED", "SWAP_OWNER", "NOTES", "FROZEN", "FROZEN_REASON"]
 

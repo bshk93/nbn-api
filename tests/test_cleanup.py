@@ -1,20 +1,30 @@
 """Regression tests for "Clean Up the Poo Poo" (routers/cleanup.py).
 
-Written 2026-08-16 alongside the feature. Pins the properties that matter most:
+Written 2026-08-16 alongside the feature, extended the same day for the
+discord_fa gap type. Pins the properties that matter most:
 
   * **The submitter gets paid, never the approving admin** — cleanup.py bypasses
     players.py's PUT handler entirely so its own NB¥10 auto-reward can't fire
     and mis-credit whoever's token approved the submission.
   * **Self-approval is blocked** even for admin.
   * **Competing submissions are allowed**; approving one supersedes the rest
-    for the same (slug, field) rather than rejecting them.
+    for the same gap (bio field, or Discord candidate) rather than rejecting them.
   * **A race against another write path** (the field got filled some other
-    way between submission and review) auto-rejects at approval time instead
-    of silently overwriting or double-paying.
-  * **Rejection never writes** the bio.
+    way between submission and review; or another submission for the same
+    Discord candidate got approved first) auto-rejects at approval time
+    instead of silently overwriting or double-paying.
+  * **Rejection never writes** the bio (or posts a transaction).
+  * **A flagged Discord message's already-exact candidates aren't gaps** — a
+    message can be flagged over ONE unresolved player while other players in
+    the same batch announcement already matched cleanly.
+  * **Approving a discord_fa submission calls the real historical-append
+    functions** (mocked here, but the same ones submit_discord_fa_signings.py
+    calls) and records the candidate into the shared submitted-state file so
+    that script can't later resubmit it as a duplicate transaction.
 
-These patch the store and player-bios into memory — nothing touches
-cleanup-submissions.json or player-bios.json in NBS_DATA_DIR.
+These patch the store, player-bios, and the Discord-backfill files into
+memory — nothing touches cleanup-submissions.json, player-bios.json,
+transactions.json, or discord-fa-signings-submitted.json in NBS_DATA_DIR.
 
     venv/bin/python -m tests.test_cleanup
 """
@@ -63,6 +73,55 @@ cu.save_player_bios = lambda data: saved_bios_calls.append(dict(data))
 reward_calls = []
 cu._award_cleanup_reward = lambda name, amount, reason: reward_calls.append((name, amount, reason))
 
+DISCORD_FLAGGED = {
+    "flagged": [
+        {
+            "discord_id": "d1", "date": "2020-11-10", "channel": "2020-fanews",
+            "description": "The Boston Celtics decline Jevonte Green's 2020-21 team option.",
+            "candidates": [
+                {"kind": "option", "slug": "green-javonte", "note": "fuzzy:javonte green",
+                 "raw_player": "Jevonte Green", "decision": "decline", "option_type": "TEAM_OPT", "year": "20-21"},
+            ],
+        },
+        {
+            # batch message: one exact (not a gap) + one unresolved (a gap)
+            "discord_id": "d2", "date": "2021-07-17", "channel": "2021-fanews",
+            "description": "The Hawks accept Nathan Knight's option. The Hawks decline Devontae Cacok's option.",
+            "candidates": [
+                {"kind": "option", "slug": "knight-nathan", "note": "exact", "raw_player": "Nathan Knight",
+                 "decision": "accept", "option_type": "TEAM_OPT", "year": "21-22"},
+                {"kind": "option", "slug": None, "note": "unresolved", "raw_player": "Devontae Cacok",
+                 "decision": "decline", "option_type": "TEAM_OPT", "year": "21-22"},
+            ],
+        },
+        {
+            "discord_id": "d3", "date": "2020-11-17", "channel": "2020-fanews",
+            "description": "Malcolm Calazon agrees to sign with the Los Angeles Lakers",
+            "candidates": [
+                {"kind": "sign", "team": "LAL", "slug": None, "note": "unresolved", "raw_player": "Malcolm Calazon"},
+            ],
+        },
+    ],
+}
+cu._load_json = lambda path, default: DISCORD_FLAGGED if path == cu.DISCORD_FA_RESOLVED_FILE else (
+    _submitted_state if path == cu.DISCORD_FA_SUBMITTED_FILE else default)
+_submitted_state = {}
+def _fake_save_json(path, data):
+    global _submitted_state
+    if path == cu.DISCORD_FA_SUBMITTED_FILE:
+        _submitted_state = data
+cu._save_json = _fake_save_json
+
+historical_calls = []
+def _fake_create_sign(details, body, info):
+    historical_calls.append(("sign", details, body))
+    return {"id": "txn1", "type": "sign"}
+def _fake_create_option(details, body, info):
+    historical_calls.append(("option", details, body))
+    return {"id": "txn2", "type": "option"}
+cu._create_historical_sign = _fake_create_sign
+cu._create_historical_option = _fake_create_option
+
 SUBMITTER = {"name": "alice", "roles": ["uta"]}
 OTHER_SUBMITTER = {"name": "bob", "roles": ["phx"]}
 ADMIN = {"name": "root", "roles": ["admin"]}
@@ -70,11 +129,20 @@ ADMIN = {"name": "root", "roles": ["admin"]}
 # ── gaps ─────────────────────────────────────────────────────────────────────
 print("\ngaps")
 gaps = cu.get_gaps()
-gap_fields = {(g["slug"], g["field"]) for g in gaps}
+bio_gaps = [g for g in gaps if g["gap_type"] == "bio_field"]
+fa_gaps = [g for g in gaps if g["gap_type"] == "discord_fa"]
+gap_fields = {(g["slug"], g["field"]) for g in bio_gaps}
 check("empty college is a gap", ("test-player-one", "college") in gap_fields)
 check("filled college is not a gap", ("test-player-two", "college") not in gap_fields)
 check("all-null draft trio is one draft_info gap", ("test-player-one", "draft_info") in gap_fields)
 check("filled country is not a gap", ("test-player-one", "country") not in gap_fields)
+
+fa_keys = {(g["discord_id"], g["candidate_index"]) for g in fa_gaps}
+check("low-confidence candidate is a gap", ("d1", 0) in fa_keys)
+check("exact candidate in a batch message is not a gap", ("d2", 0) not in fa_keys)
+check("unresolved candidate in the same batch message is a gap", ("d2", 1) in fa_keys)
+check("fully-unresolved sign candidate is a gap", ("d3", 0) in fa_keys)
+check("exactly 3 discord_fa gaps total", len(fa_gaps) == 3)
 
 # ── submission validation ───────────────────────────────────────────────────
 print("\nsubmission validation")
@@ -101,7 +169,7 @@ check("credited to the actual submitter", sub1["submitted_by"] == "alice")
 sub2 = cu.create_submission(cu.SubmissionCreate(slug="test-player-one", field="college", value="Saint Mary's"), OTHER_SUBMITTER)
 check("a second submitter can compete for the same gap", sub2["status"] == "pending")
 
-gaps_after = {(g["slug"], g["field"]) for g in cu.get_gaps()}
+gaps_after = {(g["slug"], g["field"]) for g in cu.get_gaps() if g["gap_type"] == "bio_field"}
 check("a field with a pending submission drops out of the gap list", ("test-player-one", "college") not in gaps_after)
 
 # ── self-approval blocked ────────────────────────────────────────────────────
@@ -151,12 +219,77 @@ raises("empty reject reason is refused", 422,
            cu.create_submission(cu.SubmissionCreate(slug="test-player-two", field="weight", value=200), SUBMITTER)["id"],
            cu.RejectBody(reason="   "), ADMIN))
 
+# ── discord_fa: submission validation ───────────────────────────────────────
+print("\ndiscord_fa validation")
+CAROL = {"name": "carol", "roles": ["mia"]}
+raises("unknown discord candidate", 400, lambda: cu.create_submission(
+    cu.SubmissionCreate(gap_type="discord_fa", discord_id="nope", candidate_index=0, value={"slug": "x"}), CAROL))
+raises("candidate index out of range", 400, lambda: cu.create_submission(
+    cu.SubmissionCreate(gap_type="discord_fa", discord_id="d1", candidate_index=5, value={"slug": "green-javonte"}), CAROL))
+raises("missing slug in value", 422, lambda: cu.create_submission(
+    cu.SubmissionCreate(gap_type="discord_fa", discord_id="d1", candidate_index=0, value={}), CAROL))
+raises("unknown player slug", 400, lambda: cu.create_submission(
+    cu.SubmissionCreate(gap_type="discord_fa", discord_id="d1", candidate_index=0, value={"slug": "nobody-real"}), CAROL))
+
+# ── discord_fa: approval writes via the real historical-append path ─────────
+print("\ndiscord_fa approval")
+BIOS["green-javonte"] = {"name": "GREEN, JAVONTE"}
+fa_sub = cu.create_submission(
+    cu.SubmissionCreate(gap_type="discord_fa", discord_id="d1", candidate_index=0, value={"slug": "green-javonte"}), CAROL)
+check("starts pending", fa_sub["status"] == "pending")
+check("snapshots the raw message so Mine/Review can render it later",
+      fa_sub["context"]["description"] == DISCORD_FLAGGED["flagged"][0]["description"])
+
+fa_approved = cu.approve_submission(fa_sub["id"], ADMIN)
+check("status becomes approved", fa_approved["status"] == "approved")
+check("flat discord_fa reward", fa_approved["reward_nby"] == cu.DISCORD_FA_REWARD)
+check("credited to carol, not the admin",
+      reward_calls[-1][0] == "carol" and reward_calls[-1][1] == cu.DISCORD_FA_REWARD)
+check("called the option historical-append (this candidate's kind)", historical_calls[-1][0] == "option")
+check("historical-append got the confirmed slug", historical_calls[-1][1].player == "green-javonte")
+check("recorded into the shared submitted-state file (de-dup with the admin script)",
+      any(k.startswith("d1:option:green-javonte:") for k in _submitted_state))
+
+fa_gaps_after = {(g["discord_id"], g["candidate_index"]) for g in cu.get_gaps() if g["gap_type"] == "discord_fa"}
+check("an approved discord_fa candidate is no longer a gap", ("d1", 0) not in fa_gaps_after)
+
+# batch message: resolving the one real gap doesn't touch the sibling exact candidate
+BIOS["cacok-devontae"] = {"name": "CACOK, DEVONTAE"}
+batch_sub = cu.create_submission(
+    cu.SubmissionCreate(gap_type="discord_fa", discord_id="d2", candidate_index=1, value={"slug": "cacok-devontae"}), CAROL)
+cu.approve_submission(batch_sub["id"], ADMIN)
+check("historical-append called for the batch candidate too", historical_calls[-1][1].player == "cacok-devontae")
+
+# competing discord_fa submissions: same supersede behavior as bio fields
+BIOS["cazalon-malcolm"] = {"name": "CAZALON, MALCOLM"}
+BIOS["someone-else"] = {"name": "ELSE, SOMEONE"}
+fa_race1 = cu.create_submission(
+    cu.SubmissionCreate(gap_type="discord_fa", discord_id="d3", candidate_index=0, value={"slug": "cazalon-malcolm"}), CAROL)
+fa_race2 = cu.create_submission(
+    cu.SubmissionCreate(gap_type="discord_fa", discord_id="d3", candidate_index=0, value={"slug": "someone-else"}), SUBMITTER)
+cu.approve_submission(fa_race1["id"], ADMIN)
+fa_race2_after = next(it for it in STORE["items"] if it["id"] == fa_race2["id"])
+check("losing competing discord_fa submission is superseded", fa_race2_after["status"] == "superseded")
+raises("a 3rd submission for an already-approved candidate is refused outright", 409, lambda: cu.create_submission(
+    cu.SubmissionCreate(gap_type="discord_fa", discord_id="d3", candidate_index=0, value={"slug": "someone-else"}), OTHER_SUBMITTER))
+
 # ── mine / list ──────────────────────────────────────────────────────────────
 print("\nlisting")
 mine = cu.my_submissions(SUBMITTER)
 check("mine returns only alice's submissions", all(m["submitted_by"] == "alice" for m in mine))
 pending = cu.list_submissions(status="pending", info=ADMIN)
 check("status filter works", all(p["status"] == "pending" for p in pending))
+
+# ── stats (feeds the Archivist achievement tier) ────────────────────────────
+print("\nstats")
+cu.load_members = lambda: {"alice": {}, "bob": {}, "root": {}, "carol": {}, "nobody_else": {}}
+all_stats = cu.get_all_cleanup_stats()
+check("every member present, even with zero approvals", set(all_stats) == {"alice", "bob", "root", "carol", "nobody_else"})
+check("alice's one bio_field approval counted", all_stats["alice"]["approved_count"] == 1)
+check("bob's superseded submission doesn't count", all_stats["bob"]["approved_count"] == 0)
+check("carol's discord_fa approvals count toward the same stat", all_stats["carol"]["approved_count"] == 3)
+check("get_member_cleanup_stats matches the bulk figure", cu.get_member_cleanup_stats("alice") == all_stats["alice"])
+raises("unknown member", 404, lambda: cu.get_member_cleanup_stats("nobody"))
 
 print()
 if FAILS:
