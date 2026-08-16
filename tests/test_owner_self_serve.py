@@ -99,9 +99,9 @@ SEASON = "26-27"      # so the FA window is 27-28
 NEXT = "27-28"
 
 
-def elig(holds, on_roster=True, team="PHX"):
+def elig(holds, on_roster=True, team="PHX", player_type=""):
     txn._build_team_map = lambda: ({"p": team} if on_roster else {})
-    bios = {"p": {"name": "TEST, PLAYER", "cap_holds": holds,
+    bios = {"p": {"name": "TEST, PLAYER", "cap_holds": holds, "type": player_type,
                   "salaries": {NEXT: "$10,000,000"}}}
     return _renounce_eligibility("p", bios, SEASON)
 
@@ -122,6 +122,10 @@ check("a team option likewise",
       not elig({NEXT: "TEAM_OPT", "28-29": "UFA"})["ok"])
 check("no cap holds at all is not renounceable",
       not elig({})["ok"])
+check("unsigned draft rights ARE renounceable despite no cap hold at all",
+      elig({}, player_type="draft-rights")["ok"])
+check("...reported with a DRAFT_RIGHTS hold_type, not a UFA/RFA one",
+      elig({}, player_type="draft-rights")["hold_type"] == "DRAFT_RIGHTS")
 check("a free agent on nobody's roster is not renounceable",
       not elig({NEXT: "UFA"}, on_roster=False)["ok"])
 check("an unknown slug is rejected, not scored",

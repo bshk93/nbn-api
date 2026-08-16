@@ -70,6 +70,11 @@ JOIN_BLACKLIST_FILE   = DATA_DIR / "join-blacklist.json"
 MEMBER_SEEN_FILE      = DATA_DIR / "member-seen.json"
 # Per-member notifications: { "<member>": [{id, ts, text, link, read}] }
 INBOX_FILE = DATA_DIR / "inboxes.json"
+# "Clean Up the Poo Poo" — member-submitted bio-gap fills, admin-reviewed.
+# See nbn-today/docs/clean-up-the-poopoo-spec.md. Deliberately separate from
+# BIO_REWARDS_FILE/the curator direct-edit path (players.py) — this is the
+# open-submission-with-review path for members who aren't curators.
+CLEANUP_SUBMISSIONS_FILE = DATA_DIR / "cleanup-submissions.json"
 
 PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PLAYER", "PROTECTED", "SWAP_OWNER", "NOTES", "FROZEN", "FROZEN_REASON"]
 
@@ -82,6 +87,7 @@ _ovr_lock      = threading.Lock()
 _state_lock    = threading.Lock()
 _deadcap_lock  = threading.Lock()
 _trade_exc_lock = threading.Lock()
+_cleanup_lock   = threading.Lock()
 _invest_lock   = threading.Lock()
 _market_lock   = threading.Lock()
 

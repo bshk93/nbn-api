@@ -837,8 +837,8 @@ def _season_after(season: str) -> str:
 
 
 def _renounce_eligibility(player: str, bios: dict, cur_season: str) -> dict:
-    """Whether `player` is a renounceable free-agent hold, as
-    ``{ok, team, cutoff, hold_type, reason}``.
+    """Whether `player` is a renounceable free-agent hold — or unsigned draft
+    rights (§ 7.1) — as ``{ok, team, cutoff, hold_type, reason}``.
 
     The single § 3.10 eligibility test, shared by `_apply_renounce` (which
     hard-fails on it), `_validate_renounce` (which reports it as a check) and
@@ -848,6 +848,8 @@ def _renounce_eligibility(player: str, bios: dict, cur_season: str) -> dict:
 
     `cutoff` is the earliest UFA/RFA hold season: everything from there on is
     hold bookkeeping rather than real pay, so it's what the apply path trims to.
+    For unsigned draft rights (no hold, no salary, `hold_type` "DRAFT_RIGHTS")
+    it's just `next_season` — the trim is a no-op since there's nothing to trim.
     """
     out = {"ok": False, "team": None, "cutoff": None, "hold_type": None, "reason": ""}
     if player not in bios:
@@ -861,7 +863,17 @@ def _renounce_eligibility(player: str, bios: dict, cur_season: str) -> dict:
     out["team"] = team
 
     next_season = _season_after(cur_season)
-    holds = (bios[player].get("cap_holds") or {})
+    bio = bios[player]
+    holds = (bio.get("cap_holds") or {})
+
+    # Unsigned draft rights (§ 7.1's "retaining unsigned draft rights") carry no
+    # cap hold at all — no salary, no cap_holds entry — since the player has
+    # never signed a contract. The rights themselves are what's given up, so
+    # they're renounceable on that basis alone rather than needing a UFA/RFA
+    # hold to point at.
+    if bio.get("type") == "draft-rights":
+        out.update(ok=True, cutoff=next_season, hold_type="DRAFT_RIGHTS")
+        return out
 
     # Must be a clean free-agent hold for the current FA period: the player's
     # earliest cap hold is a UFA/RFA for the upcoming season (their contract has
@@ -4562,11 +4574,17 @@ def _validate_renounce(details: RenounceDetails, ctx: dict) -> list[CheckResult]
 
     team = elig["team"]
     name = (bios.get(details.player) or {}).get("name") or details.player
-    checks.append(CheckResult(
-        check="renounce_eligible", passed=True,
-        message=(f"{name} is a {elig['hold_type']} cap hold for {elig['cutoff']} — "
-                 f"renounceable under § 3.10."),
-    ))
+    if elig["hold_type"] == "DRAFT_RIGHTS":
+        checks.append(CheckResult(
+            check="renounce_eligible", passed=True,
+            message=f"{name} is unsigned draft rights — renounceable under § 3.10.",
+        ))
+    else:
+        checks.append(CheckResult(
+            check="renounce_eligible", passed=True,
+            message=(f"{name} is a {elig['hold_type']} cap hold for {elig['cutoff']} — "
+                     f"renounceable under § 3.10."),
+        ))
 
     after = _count_standard_roster(team) - 1
     if after < ROSTER_CHARGE_MIN:

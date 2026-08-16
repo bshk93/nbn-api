@@ -225,6 +225,23 @@ def _award_bio_reward(name: str, amount: float) -> tuple[float, float]:
     return amount, balances[name]
 
 
+def _award_cleanup_reward(name: str, amount: float, reason: str) -> tuple[float, float]:
+    """Award *amount* to *name* for an approved Clean Up the Poo Poo submission.
+    Deliberately separate from _award_bio_reward: that one fires off the direct
+    curator/rosters edit path (players.py), this one off admin approval of a
+    member's submission — crediting the submitter, never whoever's token made
+    the approval call. Returns (amount, new_balance)."""
+    with _balances_lock:
+        balances = _load_balances()
+        _init_bal(balances, name)
+        balances[name] = round(balances[name] + amount, 2)
+        _save_balances(balances)
+    ts = datetime.now(timezone.utc).isoformat()
+    _append_ledger([{"ts": ts, "member": name, "delta": amount,
+                     "balance": balances[name], "reason": reason}])
+    return amount, balances[name]
+
+
 def _bet_summary(bet: dict) -> dict:
     wagers = bet.get("wagers", {})
     option_totals: dict[str, float] = {opt["id"]: 0.0 for opt in bet["options"]}
