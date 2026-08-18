@@ -67,10 +67,15 @@ def _qo_amount(bio: dict, class_year: str, prior_salary: int, cap_levels: dict) 
     """§ 3.9 qualifying offer amount — proposed formula, pending BOD confirmation.
 
     First-round picks still on the rookie scale price off the Year 4 team
-    option (§ 7.1), which has no source yet (`/api/rookie-scale` returns `{}`,
-    tracked BACKLOG P3 — see docs/extensions.md § 8.3) — so that branch
-    returns None rather than guess. Everyone else (2nd round, UDFA, or any
-    other player under 4 years of experience) gets the greater of the
+    option (§ 7.1) — that branch returns None rather than guess, but not
+    because the data is missing: `/api/rookie-scale` has been populated for
+    2025 and 2026 since `build/load_rookie_scale.py` shipped (docstring
+    corrected 2026-08-19; it previously cited that as the reason and was
+    stale). The real blocker is BACKLOG [P1]: the § 3.9 formula itself is an
+    unratified synthesis pending BOD confirmation, so wiring the now-available
+    rookie-scale figure in here would bake an unratified number into a QO
+    amount before the formula is settled. Everyone else (2nd round, UDFA, or
+    any other player under 4 years of experience) gets the greater of the
     applicable minimum salary scale figure (§ 3.12) or 125% of prior salary.
     """
     if bio.get("draft_round") == 1:

@@ -112,7 +112,12 @@ VALID_ROLES = {
     # `agent` sits between a closed offer window and a sub-committee ballot
     # (§ 4.7): agents claim players off a shared queue, negotiate the offers
     # down to a final set, and either advance the survivors or finalize an
-    # uncontested one.
+    # uncontested one. `agent` is a single role shared across FA and
+    # extensions (decided 2026-08-18, docs/poext-extension-pipeline.md § 2.9)
+    # — the agent represents the player, not either committee, so the same
+    # person claims/negotiates on both sides. Claim state (`blocked_teams`)
+    # still lives on separate per-pipeline objects; sharing the role does not
+    # mean sharing a claim record.
     "fac", "fac_head", "agent", "poext", "poext_head",
 } | {t.lower() for t in VALID_TEAMS}
 
@@ -124,14 +129,20 @@ ROLE_IMPLIES: dict[str, set[str]] = {
     # specific per-player assignment, and a board-wide implication would put
     # every board member on every ballot roster.
     #
-    # `fac_head → agent` is what keeps § 4.7 from deadlocking: agents claim
-    # players themselves and an agent may not claim one their own team is
-    # bidding on, so with every agent conflicted out somebody has to be able to
-    # act. Deliberately *not* symmetric — `agent` implies nothing, and in
-    # particular not `fac`, which would put an agent on ballot rosters (§ 2:
-    # the two sets are meant to be disjoint people).
+    # `fac_head → agent` / `poext_head → agent` keep § 4.7 (and its poext
+    # analogue) from deadlocking: agents claim players themselves and an agent
+    # may not claim one their own team is bidding on, so with every agent
+    # conflicted out somebody has to be able to act. Because `agent` is one
+    # shared role (see the VALID_ROLES comment above), each grant is a side
+    # door into the *other* committee's agent duties too — a fac_head is also
+    # a poext agent, and vice versa. Accepted deliberately: heads are already
+    # trusted at that level, and building a scoped "agent, but only for your
+    # own committee's deadlock" variant isn't worth it for two heads. `agent`
+    # itself still implies nothing, and in particular not `fac`/`poext`, which
+    # would put an agent on a ballot roster (§ 2: the two sets are meant to be
+    # disjoint people).
     "fac_head": {"fac", "agent"},
-    "poext_head": {"poext"},
+    "poext_head": {"poext", "agent"},
 }
 
 CURATOR_FIELDS = {

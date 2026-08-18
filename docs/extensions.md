@@ -90,6 +90,14 @@ class ExtensionDetails(BaseModel):
     bird_rights_type: Optional[str] = None
     eaps_assumption: Optional[str] = None
     announced_date: Optional[str] = None   # § 4.5 6-month clock; defaults to txn date
+    attested_contract_start: Optional[str] = None  # season string; required by the
+        # UI (not the schema) when _player_acquisition_index has no record for the
+        # player. Decided 2026-08-19 — see nbn-today/docs/poext-extension-pipeline.md
+        # § 2.3a/D15. Never trusted as a definite basis: always warn-severity, unless
+        # it contradicts other partial ledger history the player does have (a trade,
+        # a release), which promotes to error. Not persisted anywhere — re-asked on
+        # every proposal for a player still missing a ledger record, deliberately
+        # (rare enough that the real fix is the BACKLOG [P3] backfill, not a cache).
 ```
 
 `contract.salaries` is keyed by the seasons the **new money** covers, and must
@@ -152,13 +160,20 @@ is a real limit, and the last one needs a decision:
 - **It cannot distinguish "never guaranteed" from "not recorded".** Both look
   like an absent key. With `guaranteed` populated for 18 of 1018 bios, nearly
   every answer rests on that ambiguity.
-- **Option years are a judgment, not a fact.** Is a player-option year "fully
-  guaranteed"? If the player exercises it, they are paid in full. Rule 2
-  excludes option years, so an extension on a deal ending in a player option
-  starts *before* that option year — and would then collide with the option
-  salary if exercised. The alternative (count option years as guaranteed) risks
-  starting a year late when it is declined. **This is the substantive open
-  question inside Q2**, not the convention itself.
+- **Option years are a judgment, not a fact — DECIDED 2026-08-18, fully.** An
+  option year never counts as "guaranteed" for rule 2's computation, and is
+  treated as **declined outright** by the act of signing the extension — not a
+  probabilistic guess, an assumption baked into what an extension *is*. So on a
+  deal ending `... GTD, GTD, PLAYER_OPT`, the extension's first season lands on
+  the same season as that option year and **supersedes** it: the extension's
+  salary figure for that season is what the player is actually paid, and the
+  option is mooted rather than colliding with it. § 3's "must not overlap the
+  existing contract" means the *guaranteed* years, not an option year the
+  extension itself is declining on the player's behalf — those aren't locked
+  terms, they're a contingency the extension resolves. No separate handling
+  needed at merge time: the existing "current-season-onwards entries are
+  replaced by each new contract" convention (CLAUDE.md, Player fields) already
+  does exactly this when the extension's `salaries` are merged into the bio.
 
 ## 5. Validation checks
 
@@ -168,7 +183,7 @@ where a rule depends on data known to be thin, it warns.
 
 | Check | Level | Rule | Notes |
 |---|---|---|---|
-| `extension_eligibility` | error | 1, 2 | Prior contract length and position within it are fully derivable from `salaries` + `cap_holds`. No excuse to warn. |
+| `extension_eligibility` | error / warning | 1, 2 | **Corrected 2026-08-19 — was wrongly rated pure error.** Not derivable from `salaries` + `cap_holds` alone: `salaries` is left-truncated at 25-26, so read that way 0 of 502 rostered players are eligible. Derive contract start from the ledger (`_player_acquisition_index`, same as § 3.8) instead. **Error** from a definite ledger basis, **warn** from an indefinite one (no ledger record) or from a submitter attestation with nothing to contradict it — a gap can only produce false *ineligibility*, never a false approval, so error-by-default would wrongly refuse legal extensions. **Error** if an attestation contradicts other partial ledger history the player does have. See `nbn-today/docs/poext-extension-pipeline.md` § 2.3/§ 2.3a/D15 for the full reasoning and the attestation mechanic. |
 | `extension_window` | warning | § 6.3 | Needs a regular-season start date the system does not have (same gap as proration — see BACKLOG). Warn until there is one. |
 | `extension_service` | error / warning | 3 | Reuse `_bird_tenure`. Error on a definite basis, warn on `trade_floor`/unknown — the same asymmetry § 3.8 uses, and for the same reason. |
 | `extension_not_minimum` | error | 4 | Reuse `_min_salary_floor`. |
@@ -201,8 +216,11 @@ current-season replacement. Fields:
 - extended term: first season, years, salary by season, options, trailing hold
 - the 140% ceiling, which basis it used (prior salary vs EAPS), and the headroom
 - team salary in the first extended season, with the apron/hard-cap position
-  **for that season** — noting that cap levels for future seasons may not exist
-  in `cap-levels.json` yet (only 25-26 and 26-27 are configured today)
+  **for that season** — noting that cap levels for 27-28 onward exist in
+  `cap-levels.json` and are all zero, not merely absent (corrected — see
+  `nbn-today/docs/poext-extension-pipeline.md` § 2.2). A zero threshold must
+  report *cannot evaluate*, never a pass; only 25-26 and 26-27 carry real
+  figures today
 
 The invariant from the signing sheet carries over: **no parallel cap math.**
 Build every figure from the same helpers the validator used.
@@ -214,32 +232,40 @@ These are real, and two of them gate correctness rather than polish:
 1. **EAPS is unset** (`26-27: 0`, `25-26: null`). Rule 7's second branch is
    uncomputable. Either the committee sets EAPS in Cap Settings, or rule 7 is
    redefined as prior-salary-only. Until then that half warns.
-2. **Guarantee data is ~empty** — drives rule 10 via the §4 convention.
-3. **`/api/rookie-scale` returns `{}`** (known BACKLOG P3). Rookie Scale
-   *eligibility* is derivable from `draft_round`/`draft_year` in the bio, so
-   this does not block — but rookie-scale extension *amounts* have no source.
+2. **Guarantee data is ~empty** — drives rule 10 via the §4 convention, which is
+   now ratified (§4 point 4, §9 item 2) — the data sparsity itself is unchanged,
+   but it's no longer an open-question risk, just a case where rule 2 fires far
+   more often than rule 1.
+3. ~~`/api/rookie-scale` returns `{}`~~ **CLOSED.** Populated for 2025 and 2026
+   via `build/load_rookie_scale.py`. This item was stale — see
+   `nbn-today/docs/poext-extension-pipeline.md` § 9 blocker 5.
 4. **No regular-season start date** anywhere in the system. Blocks § 6.3
    windows; identical gap to the proration item.
 
 ## 9. Open questions for the committee
 
-1. **Likely a non-issue — confirm the reading.** § 6.3 is titled "Submission
-   Windows & Process", and every bullet under its three headings is window,
-   channel, resubmission and proposal count: it sets **no term restrictions**,
-   so "Veteran Extension" is a scheduling bucket, not a stricter kind of
-   extension. Read that way the sections reconcile — § 6.2 rule 2 is the hard
-   eligibility test, and § 6.3's buckets map onto it: Rookie Scale ("4th and
-   final year") and Veteran-expiring are both final years, leaving
-   Veteran-non-expiring to mean exactly "Year 4 of a 5-year contract", the only
-   non-final year § 6.2 permits. § 6.3's looser gloss ("a multi-year deal not
-   in their final year") is then just imprecise wording. Worth confirming,
-   because the alternative reading makes most of the league extendable rather
-   than roughly a dozen players; implement § 6.2 rule 2 either way.
-2. Is "final fully guaranteed year" the §4 rule-2 convention? Ratify or replace
-   — and settle the option-year sub-question in §4, which the convention alone
-   does not answer.
-3. When does 140%-of-EAPS apply instead of 140%-of-prior-salary? "Whichever
-   applies" is not implementable as written.
+1. ~~Likely a non-issue — confirm the reading.~~ **DECIDED 2026-08-18: strict
+   reading.** § 6.2 rule 2 is the hard eligibility test; § 6.3's three buckets
+   are scheduling only, not an independent grant. Rookie Scale ("4th and final
+   year") and Veteran-expiring are both final years; Veteran-non-expiring means
+   exactly "Year 4 of a 5-year contract", the only non-final position § 6.2
+   permits. § 6.3's looser gloss ("a multi-year deal not in their final year")
+   is imprecise wording, not a wider rule. This is what makes the real
+   population ~32 players rather than most of the league (§ 2.3 of
+   `nbn-today/docs/poext-extension-pipeline.md`).
+2. **DECIDED 2026-08-18, fully.** "Final fully guaranteed year" is the §4
+   rule-2 convention, ratified, including the option-year sub-question: an
+   option year never counts as guaranteed, and is treated as **declined
+   outright** by the act of extending — so when rule 2 lands the extension's
+   first season on the same season as a trailing option year, the extension
+   **supersedes** it rather than colliding with it. No implementation gap:
+   merging the extension's `salaries` into the bio already overwrites
+   current-season-onward entries.
+3. **Still open — needs to be put to the committee explicitly**, not inferred.
+   When does 140%-of-EAPS apply instead of 140%-of-prior-salary? "Whichever
+   applies" is not implementable as written, and EAPS is unset for every
+   season on file regardless, so the branch can't be exercised even once this
+   is answered without also setting EAPS in Cap Settings.
 4. ~~Does an extension reset § 3.8 Bird tenure?~~ **DECIDED 2026-08-07: no.**
    An extension adds years to a live contract; the player never reaches free
    agency, so service accrues uninterrupted. Locked into the code — the
