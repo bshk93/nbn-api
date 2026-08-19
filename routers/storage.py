@@ -15,10 +15,16 @@ def _atomic_write(path: Path, text: str):
     file — they see either the old contents or the new, never a half-written mix."""
     tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{id(text)}")
     tmp.write_text(text)
-    # These files are served statically by nginx (e.g. {abbr}-roster.csv), so they
-    # must stay world-readable regardless of the writing process's umask. Without
+    # New files are served statically by nginx (e.g. {abbr}-roster.csv), so they
+    # must be world-readable regardless of the writing process's umask. Without
     # this, a writer running under umask 077 produces 0600 files and nginx 403s.
-    os.chmod(tmp, 0o644)
+    #
+    # An existing file keeps the mode it already has. os.replace() swaps in the
+    # temp file wholesale, so a fixed 0644 here silently un-did any chmod an
+    # operator applied — members.json and sessions.json hold credentials and are
+    # deliberately 0600, and every write would have reset them to world-readable.
+    mode = (path.stat().st_mode & 0o777) if path.exists() else 0o644
+    os.chmod(tmp, mode)
     os.replace(tmp, path)
 
 
