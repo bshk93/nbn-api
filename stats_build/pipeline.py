@@ -25,6 +25,7 @@ import csv
 import json
 import math
 import re
+from fractions import Fraction
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
@@ -48,6 +49,10 @@ PORTED = (
     "nbntv-classics/playoff-classics.csv",
     "players/player_seasons.csv",
     "players/player_seasons_playoffs.csv",
+    "standings/standings-history.csv",
+    *(f"data/{t.lower()}-seasons.csv" for t in (
+        "ATL BKN BOS CHA CHI CLE DAL DEN DET GSW HOU IND LAC LAL MEM MIA MIL "
+        "MIN NOP NYK OKC ORL PHI PHX POR SAC SAS TOR UTA WAS").split()),
 )
 
 SEASON_SUMS = (("MIN", "M"), ("PTS", "P"), ("REB", "R"), ("AST", "A"), ("STL", "S"),
@@ -650,4 +655,296 @@ def build(out_dir: Path, data_dir: Path, args) -> list[str]:
                     *player_seasons(reg_rows, data_dir, playoff_rows))
     csvio.write_csv(out_dir / "players" / "player_seasons_playoffs.csv",
                     *player_seasons(playoff_rows, data_dir))
+
+    seasons = sorted({r["SEASON"] for r in reg_rows})
+    standings = {s: compute_standings([r for r in reg_rows if r["SEASON"] == s])
+                 for s in seasons}
+    ratings = team_ratings(reg_rows)
+    results = playoff_results(playoff_rows)
+    for team in teams:
+        csvio.write_csv(out_dir / "data" / f"{team.lower()}-seasons.csv",
+                        *team_seasons(standings, ratings, results, team))
+    csvio.write_csv(out_dir / "standings" / "standings-history.csv",
+                    *standings_history(standings, ratings, results, teams))
     return list(PORTED)
+
+
+# --------------------------------------------------------------------------
+# Standings, seeding and team ratings
+# --------------------------------------------------------------------------
+
+EAST = {"MIL", "IND", "BOS", "BKN", "ATL", "ORL", "MIA", "PHI", "WAS", "TOR",
+        "CHI", "CHA", "CLE", "NYK", "DET"}
+DIVISIONS = {
+    "Atlantic": {"NYK", "TOR", "BOS", "PHI", "BKN"},
+    "Central": {"DET", "CLE", "MIL", "CHI", "IND"},
+    "Southeast": {"ORL", "ATL", "MIA", "CHA", "WAS"},
+    "Northwest": {"OKC", "DEN", "MIN", "UTA", "POR"},
+    "Pacific": {"LAL", "PHX", "GSW", "SAC", "LAC"},
+    "Southwest": {"SAS", "HOU", "MEM", "DAL", "NOP"},
+}
+_DIVISION_OF = {team: div for div, teams in DIVISIONS.items() for team in teams}
+
+
+def conference(team: str) -> str | None:
+    return "East" if team in EAST else ("West" if team in _DIVISION_OF else None)
+
+
+def team_games(season_rows: list[dict]) -> list[dict]:
+    """One row per team per game: points for, points against, and the labels.
+
+    Points are summed per (date, team, opponent-as-written) — the `@` is
+    stripped only afterwards, exactly as R does, so a home and an away meeting
+    on one date stay separate.
+    """
+    totals: dict[tuple[str, str, str], float] = defaultdict(float)
+    for r in season_rows:
+        v = _stat(r, "P")
+        if v is not None:
+            totals[(r["DATE"], r["TEAM"], r["OPP"])] += v
+
+    scored: dict[tuple[str, str], float] = {}
+    for (date, team, _opp), pts in totals.items():
+        scored.setdefault((date, team), pts)
+
+    games = []
+    for (date, team, opp_raw), pts in totals.items():
+        opp = opp_raw.replace("@", "")
+        against = scored.get((date, opp))
+        games.append({
+            "DATE": date, "TEAM": team, "OPP": opp,
+            "PTS": pts, "OPP_PTS": against,
+            "WIN": against is not None and pts > against,
+            "LOSS": against is not None and pts < against,
+            "CONF": conference(team), "DIV": _DIVISION_OF.get(team),
+            "OPP_CONF": conference(opp), "OPP_DIV": _DIVISION_OF.get(opp),
+        })
+    return games
+
+
+def compute_standings(season_rows: list[dict]) -> list[dict]:
+    """One season's standings, seeded, with the § tie-break chain applied."""
+    games = team_games(season_rows)
+    by_team: dict[str, list[dict]] = defaultdict(list)
+    for g in games:
+        by_team[g["TEAM"]].append(g)
+
+    def pct(w, l):
+        return w / (w + l) if (w + l) else None
+
+    table = []
+    for team, gs in sorted(by_team.items()):
+        w = sum(1 for g in gs if g["WIN"])
+        l = sum(1 for g in gs if g["LOSS"])
+        conf_w = sum(1 for g in gs if g["WIN"] and g["CONF"] == g["OPP_CONF"])
+        conf_l = sum(1 for g in gs if g["LOSS"] and g["CONF"] == g["OPP_CONF"])
+        div_w = sum(1 for g in gs if g["WIN"] and g["DIV"] == g["OPP_DIV"])
+        div_l = sum(1 for g in gs if g["LOSS"] and g["DIV"] == g["OPP_DIV"])
+        ppg = r_mean([g["PTS"] for g in gs])
+        oppg = r_mean([g["OPP_PTS"] for g in gs if g["OPP_PTS"] is not None])
+        table.append({
+            "TEAM": team, "W": w, "L": l, "CONF": gs[0]["CONF"], "DIV": gs[0]["DIV"],
+            "CONF_W": conf_w, "CONF_L": conf_l, "DIV_W": div_w, "DIV_L": div_l,
+            "PPG": ppg, "OPPG": oppg, "PCT": pct(w, l),
+            "CONF_PCT": pct(conf_w, conf_l), "DIV_PCT": pct(div_w, div_l),
+            "DIFF": ppg - oppg,
+        })
+
+    # Head-to-head win rate, used only to break a tie.
+    h2h: dict[tuple[str, str], float] = {}
+    pairs: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
+    for g in games:
+        if g["WIN"]:
+            pairs[(g["TEAM"], g["OPP"])][0] += 1
+        elif g["LOSS"]:
+            pairs[(g["TEAM"], g["OPP"])][1] += 1
+    for key, (w, l) in pairs.items():
+        h2h[key] = w / (w + l) if (w + l) else None
+
+    # Division winner: best record in the division, on the same chain.
+    by_div: dict[str, list[dict]] = defaultdict(list)
+    for row in table:
+        by_div[row["DIV"]].append(row)
+    winners = set()
+    for div, rows in by_div.items():
+        best = sorted(rows, key=lambda r: (-(r["PCT"] or 0), -(r["CONF_PCT"] or 0), -r["DIFF"]))[0]
+        winners.add(best["TEAM"])
+    for row in table:
+        row["DIV_WINNER"] = row["TEAM"] in winners
+
+    def resolve(tied: list[dict]) -> list[dict]:
+        """R's `resolve_nba_ties`, recursion included.
+
+        Order by head-to-head record among the tied teams, then division
+        winner, division record, conference record, point differential. If
+        every team ties on all five, the whole group keeps its order; otherwise
+        the leader is fixed and the rest are re-resolved *without* it — because
+        head-to-head is computed among whoever is still tied, so removing a
+        team can change the order of the others.
+        """
+        if len(tied) == 1:
+            return tied
+        names = {r["TEAM"] for r in tied}
+        h2h_pct = {}
+        for row in tied:
+            vals = [v for (t, o), v in h2h.items()
+                    if t == row["TEAM"] and o in names and v is not None]
+            h2h_pct[row["TEAM"]] = r_mean(vals) if vals else 0
+        ordering = sorted(tied, key=lambda r: (
+            -h2h_pct[r["TEAM"]], not r["DIV_WINNER"], -(r["DIV_PCT"] or 0),
+            -(r["CONF_PCT"] or 0), -r["DIFF"]))
+        top = ordering[0]
+        same = [r for r in ordering
+                if h2h_pct[r["TEAM"]] == h2h_pct[top["TEAM"]]
+                and r["DIV_WINNER"] == top["DIV_WINNER"]
+                and r["DIV_PCT"] == top["DIV_PCT"]
+                and r["CONF_PCT"] == top["CONF_PCT"]
+                and r["DIFF"] == top["DIFF"]]
+        if len(same) == len(ordering):
+            return ordering
+        return [top] + resolve(ordering[1:])
+
+    resolved: list[dict] = []
+    for _key, group in sorted(
+            _group(table, lambda r: (r["CONF"], r["W"], r["L"])).items()):
+        resolved.extend(resolve(group))
+
+    out = []
+    for conf in ("East", "West"):
+        rows = [r for r in resolved if r["CONF"] == conf]
+        if not rows:                              # a season with no games in one
+            continue                              # conference: nothing to seed
+        rows.sort(key=lambda r: -r["W"])          # stable: keeps the tie order
+        best = max(r["W"] - r["L"] for r in rows)
+        for seed, row in enumerate(rows, 1):
+            out.append({
+                "SEED": f"{conf}-{seed}", "TEAM": row["TEAM"],
+                "GB": (best - (row["W"] - row["L"])) / 2,
+                "W": row["W"], "L": row["L"],
+                "PCT": r_round(row["PCT"], 3), "PPG": r_round(row["PPG"], 1),
+                "OPPG": r_round(row["OPPG"], 1), "DIFF": r_round(row["DIFF"], 1),
+                "SEED_NUM": seed,
+            })
+    return out
+
+
+def _group(rows, key):
+    out: dict = defaultdict(list)
+    for r in rows:
+        out[key(r)].append(r)
+    return out
+
+
+def team_ratings(reg_rows: list[dict]) -> dict[tuple[str, str], tuple[float, float]]:
+    """OFF_RTG / DEF_RTG per team-season: scoring against what the opponent
+    had been allowing, and vice versa, both on running averages.
+
+    Each game is measured against the opponent's *cumulative* form up to that
+    point in the season, not their final numbers — so beating a team that was
+    good at the time counts as it looked at the time.
+    """
+    per_game: dict[tuple[str, str, str], float] = defaultdict(float)
+    for r in reg_rows:
+        v = _stat(r, "P")
+        if v is not None:
+            per_game[(r["SEASON"], r["TEAM"], r["DATE"], r["OPP"].replace("@", ""))] = \
+                per_game[(r["SEASON"], r["TEAM"], r["DATE"], r["OPP"].replace("@", ""))] + v
+
+    rows = [{"SEASON": s, "TEAM": t, "DATE": d, "OPP": o, "P": p}
+            for (s, t, d, o), p in per_game.items()]
+
+    # Exact rationals through the running averages: every input is an integer
+    # point total over an integer game count, so the whole chain is exact until
+    # the single conversion at the end. R accumulates in long double, which is
+    # very nearly the same thing; doing it in plain doubles drifts in the last
+    # bits and shows up in a 16-digit rating.
+    for (_season, _team), group in _group(rows, lambda r: (r["TEAM"], r["SEASON"])).items():
+        group.sort(key=lambda r: r["DATE"])
+        running = Fraction(0)
+        for i, r in enumerate(group, 1):
+            running += Fraction(r["P"])
+            r["CUM_PPG"] = running / i
+    points = {(r["TEAM"], r["DATE"]): r for r in rows}
+
+    for (_team, _season), group in _group(rows, lambda r: (r["TEAM"], r["SEASON"])).items():
+        group.sort(key=lambda r: r["DATE"])
+        running = Fraction(0)
+        n = 0
+        for r in group:
+            opp = points.get((r["OPP"], r["DATE"]))
+            if opp is None:
+                continue
+            n += 1
+            running += Fraction(opp["P"])
+            r["CUM_ALLOWED"] = running / n
+
+    out: dict[tuple[str, str], tuple[float, float]] = {}
+    for (team, season), group in _group(rows, lambda r: (r["TEAM"], r["SEASON"])).items():
+        offs, defs = [], []
+        for r in group:
+            opp = points.get((r["OPP"], r["DATE"]))
+            if opp is None or "CUM_ALLOWED" not in opp or "CUM_PPG" not in opp:
+                continue
+            offs.append(float(Fraction(r["P"]) - opp["CUM_ALLOWED"]))
+            defs.append(float(opp["CUM_PPG"] - Fraction(opp["P"])))
+        if offs:
+            out[(team, season)] = (r_mean(offs), r_mean(defs))
+    return out
+
+
+# Awarded by vote, not derived — the only two league honours the raw rows
+# cannot produce. Kept as data rather than a lookup file because that is where
+# job.R keeps them; they move to the awards store when someone adds a UI.
+FOTY = {("ATL", "20-21"), ("NOP", "21-22"), ("SAS", "22-23"), ("UTA", "23-24"), ("MEM", "24-25")}
+COTY = {("SAC", "20-21"), ("IND", "21-22"), ("SAS", "22-23"), ("UTA", "23-24"), ("MEM", "24-25")}
+
+PLAYOFF_RESULTS = ((16, "Champion"), (12, "Runner-Up"), (8, "Conf Finals"), (4, "Second Round"))
+
+TEAM_SEASON_COLS = ["SEASON", "W", "L", "PCT", "PPG", "OPPG", "DIFF", "SEED", "SEED_NUM",
+                    "OFF_RTG", "DEF_RTG", "PLAYOFF_RESULT", "FOTY", "COTY"]
+
+
+def playoff_results(playoff_rows: list[dict]) -> dict[tuple[str, str], str]:
+    """How far each team got, from how many playoff games it won.
+
+    There is no bracket in the raw rows, so the win count *is* the round: 4 to
+    get out of the first round, 16 to win it all.
+    """
+    wins: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
+    seen: set[tuple[str, str]] = set()
+    for r in playoff_rows:
+        season = r["SEASON"].replace(" Playoffs", "")
+        seen.add((season, r["TEAM"]))
+        if (r.get("WL") or "").strip() not in ("", "NA"):
+            wins[(season, r["TEAM"])].add((r["DATE"], r["WL"]))
+    out = {}
+    for key in seen:
+        won = sum(1 for _d, wl in wins.get(key, ()) if wl == "W")
+        out[key] = next((label for threshold, label in PLAYOFF_RESULTS if won >= threshold),
+                        "First Round")
+    return out
+
+
+def team_seasons(standings: dict[str, list[dict]], ratings, results, team: str):
+    """One team's season-by-season history."""
+    rows = []
+    for season in sorted(standings):
+        row = next((r for r in standings[season] if r["TEAM"] == team), None)
+        if row is None:
+            continue
+        off, dfn = ratings.get((team, season), (None, None))
+        rows.append([season, row["W"], row["L"], row["PCT"], row["PPG"], row["OPPG"],
+                     row["DIFF"], row["SEED"], row["SEED_NUM"], off, dfn,
+                     results.get((season, team), "Missed"),
+                     (team, season) in FOTY, (team, season) in COTY])
+    return TEAM_SEASON_COLS, rows
+
+
+def standings_history(standings, ratings, results, teams: list[str]):
+    """Every team-season in one table, ordered as the standings page reads it."""
+    rows = []
+    for team in teams:
+        _cols, team_rows = team_seasons(standings, ratings, results, team)
+        rows.extend(row + [team] for row in team_rows)
+    rows.sort(key=lambda r: (r[0], r[8]))
+    return TEAM_SEASON_COLS + ["TEAM"], rows

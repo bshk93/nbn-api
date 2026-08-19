@@ -70,6 +70,37 @@ MANIFEST_NAME = "_manifest.json"
 # values are fine") would swallow a genuine off-by-one bug; this cannot, and
 # any seventh case, or any of these six moving, fails the gate and gets looked
 # at by a person.
+# The only columns compared with a tolerance rather than exactly, and the only
+# place in the port where a tolerance exists at all.
+#
+# OFF_RTG/DEF_RTG are means over per-game running averages — hundreds of
+# additions deep — and R accumulates them in long double. Python has no long
+# double, and computing the chain in exact rationals lands no closer (tried:
+# 237 differing cells against 223), because R's answer is not the exact value
+# either. The two agree to 13-14 significant digits; the measured worst
+# relative difference across all 465 rating cells is 2.8e-14, and the site
+# renders these to one decimal place.
+#
+# The bound is set three orders above what was measured and eight below
+# anything a logic error could produce: a rating computed wrongly is out by
+# 1e-3 at least, never 1e-11. Scoped by column name so it cannot leak into any
+# other figure.
+RATING_COLUMNS = {"OFF_RTG", "DEF_RTG"}
+RATING_TOLERANCE = 1e-11
+
+
+def rating_noise(column: str, a: str, b: str) -> bool:
+    if column not in RATING_COLUMNS:
+        return False
+    try:
+        fa, fb = float(a), float(b)
+    except (TypeError, ValueError):
+        return False
+    if fa == fb:
+        return True
+    return abs(fa - fb) / max(abs(fa), abs(fb)) <= RATING_TOLERANCE
+
+
 KNOWN_FIXES = {
     # R writes these names wrong, and the port deliberately does not.
     # job.R capitalises with tools::toTitleCase, a *book-title* function whose
@@ -255,6 +286,7 @@ class FileDiff:
     rendering_only: int = 0   # same double, readr printed it longer (see above)
     known_ties: int = 0       # listed in KNOWN_TIES: R's mean won a .xx5 tie
     known_fixes: int = 0      # listed in KNOWN_FIXES: R is wrong, we are not
+    rating_noise: int = 0     # OFF_RTG/DEF_RTG, equal to 13+ significant digits
     note: str = ""
 
     @property
@@ -293,6 +325,10 @@ class Comparison:
     @property
     def known_fix_cells(self) -> int:
         return sum(d.known_fixes for d in self.differing + self.quirk_only)
+
+    @property
+    def rating_noise_cells(self) -> int:
+        return sum(d.rating_noise for d in self.differing + self.quirk_only)
 
     @property
     def rendering_only_cells(self) -> int:
@@ -370,6 +406,9 @@ def _diff_csv(path_a: Path, path_b: Path, rel: str, max_cells: int) -> FileDiff:
             if (rel, col_name, va, vb) in KNOWN_FIXES:
                 d.known_fixes += 1
                 continue
+            if rating_noise(col_name, va, vb):
+                d.rating_noise += 1
+                continue
             d.cells_total += 1
             if len(d.cells) < max_cells:
                 col = head_a[j] if j < len(head_a) else f"col{j}"
@@ -399,7 +438,8 @@ def compare(dir_a: Path, dir_b: Path, max_cells: int = 5,
             identical.append(rel)
         elif rel.endswith(".csv"):
             d = _diff_csv(dir_a / rel, dir_b / rel, rel, max_cells)
-            if d.cells_total == 0 and (d.rendering_only or d.known_ties or d.known_fixes) and not d.note:
+            if d.cells_total == 0 and (d.rendering_only or d.known_ties
+                                       or d.known_fixes or d.rating_noise) and not d.note:
                 quirk_only.append(d)
             else:
                 differing.append(d)
@@ -422,6 +462,8 @@ def render(cmp_: Comparison, label_a: str = "A", label_b: str = "B") -> str:
             parts.append(f"{cmp_.known_tie_cells} listed .xx5 tie")
         if cmp_.known_fix_cells:
             parts.append(f"{cmp_.known_fix_cells} listed fix to an R bug")
+        if cmp_.rating_noise_cells:
+            parts.append(f"{cmp_.rating_noise_cells} rating within 1e-11")
         lines.append(
             f"  {len(cmp_.quirk_only)} file(s) differ only by accepted cells "
             f"({', '.join(parts)}): " + ", ".join(d.path for d in cmp_.quirk_only)

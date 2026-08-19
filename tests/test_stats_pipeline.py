@@ -146,6 +146,29 @@ check("16 playoff wins is the title — there is no bracket in the raw rows",
 check("a team's own duplicate player rows don't inflate its win count",
       pipeline._champion_team_seasons(po * 3) == champs)
 
+print("\nstandings and seeding")
+def _game(date, team, opp, pts):
+    return {"DATE": date, "TEAM": team, "OPP": opp, "P": str(pts), "SEASON": "25-26"}
+rows = []
+for i, (a, b, pa, pb) in enumerate([("BOS", "NYK", 110, 100), ("BOS", "NYK", 105, 95),
+                                    ("PHI", "TOR", 99, 120), ("PHI", "TOR", 90, 130)]):
+    d = f"2025-11-{i + 1:02d}"
+    rows += [_game(d, a, b, pa), _game(d, b, f"@{a}", pb)]
+table = pipeline.compute_standings(rows)
+seeds = {r["TEAM"]: r["SEED"] for r in table}
+check("both 2-0 teams seed above both 0-2 teams",
+      {seeds["BOS"], seeds["TOR"]} == {"East-1", "East-2"}
+      and {seeds["NYK"], seeds["PHI"]} == {"East-3", "East-4"})
+check("every team gets a conference-prefixed seed", all("-" in r["SEED"] for r in table))
+check("games back is derived from the leader", any(r["GB"] == 0 for r in table))
+check("PCT is rounded to three places", all(r["PCT"] is None or round(r["PCT"], 3) == r["PCT"]
+                                            for r in table))
+byteam = {r["TEAM"]: r for r in table}
+check("record counted from points, not a result column",
+      (byteam["BOS"]["W"], byteam["BOS"]["L"]) == (2, 0))
+check("the loser's mirror row is counted too",
+      (byteam["TOR"]["W"], byteam["TOR"]["L"]) == (2, 0))
+
 print("\nagainst the live R output")
 derived = pathlib.Path("/var/lib/nothing-but-stats/derived")
 data_dir = pathlib.Path("/var/lib/nothing-but-stats")
@@ -171,7 +194,27 @@ else:
           render_csv(*pipeline.player_awards(data_dir, pipeline.prepare(data_dir, _Args.season)[1]))
           == (derived / "players" / "player_awards.csv").read_text())
     reg_rows, po_rows = pipeline.prepare(data_dir, _Args.season)
+    from stats_build import csvio
     all_rows = reg_rows + po_rows
+    # Standings, ratings and seeding against R's own file, allowing only the
+    # accepted classes the harness allows.
+    from stats_build.harness import rating_noise
+    seasons_live = sorted({r["SEASON"] for r in reg_rows})
+    standings = {sn: pipeline.compute_standings([r for r in reg_rows if r["SEASON"] == sn])
+                 for sn in seasons_live}
+    ratings = pipeline.team_ratings(reg_rows)
+    results = pipeline.playoff_results(po_rows)
+    header, built = pipeline.standings_history(standings, ratings, results, teams)
+    expected = list(csv.reader((derived / "standings" / "standings-history.csv").read_text().splitlines()))
+    check("standings-history header matches R", header == expected[0])
+    bad = []
+    for got_row, want_row in zip(built, expected[1:]):
+        for j, want in enumerate(want_row):
+            got = csvio.format_field(got_row[j])
+            if got != want and not rating_noise(header[j], want, got):
+                bad.append((want_row[-1], header[j], want, got))
+    check("every seed, record and playoff result matches R exactly", not bad)
+
     from stats_build.harness import KNOWN_TIES
     ties = {(f, player, col): (rv, pv) for f, player, col, rv, pv in KNOWN_TIES}
     for team in teams:

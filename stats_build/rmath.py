@@ -39,10 +39,17 @@ def r_round(x: float, digits: int = 0) -> float:
     below = Decimal(x) - Decimal(lo)
     above = Decimal(hi) - Decimal(x)
     if below < above:
-        return lo
-    if above < below:
-        return hi
-    return lo if lo_i % 2 == 0 else hi          # exact tie: go to even
+        result = lo
+    elif above < below:
+        result = hi
+    else:
+        result = lo if lo_i % 2 == 0 else hi     # exact tie: go to even
+    # A negative value that rounds to zero keeps its sign: R writes `-0`, and
+    # it is real -- a point differential that reached zero from below. Four
+    # cells in the standings depend on it.
+    if result == 0 and math.copysign(1.0, x) < 0:
+        return -0.0
+    return result
 
 
 def r_mean(values: list[float]) -> float:

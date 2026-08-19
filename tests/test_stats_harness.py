@@ -100,8 +100,22 @@ check("but it IS reported, never silent", c.rendering_only_cells == 1 and len(c.
 check("render names the file and the count", "readr rendering" in harness.render(c)
       and "atl-seasons.csv" in harness.render(c))
 
-c = pair({"data/atl-seasons.csv": "SEASON,OFF_RTG\n25-26,1.684188779377918\n"}, RTG)
+c = pair({"data/x.csv": "A,PPG\nx,1.684188779377918\n"},
+         {"data/x.csv": "A,PPG\nx,1.684188779377917\n"})
 check("a DIFFERENT double at the same precision still fails", not c.ok)
+
+print("\nthe rating tolerance — the one tolerance in the port, scoped by column")
+c = pair({"data/atl-seasons.csv": "SEASON,OFF_RTG\n25-26,3.0854126380260944\n"},
+         {"data/atl-seasons.csv": "SEASON,OFF_RTG\n25-26,3.085412638026094\n"})
+check("a rating equal to 13+ significant digits is accepted", c.ok and c.rating_noise_cells == 1)
+c = pair({"data/atl-seasons.csv": "SEASON,OFF_RTG\n25-26,3.0854136380260944\n"},
+         {"data/atl-seasons.csv": "SEASON,OFF_RTG\n25-26,3.085412638026094\n"})
+check("a rating off by 1e-6 relative still FAILS — a real error is never that small",
+      not c.ok)
+c = pair({"data/atl-seasons.csv": "SEASON,PPG\n25-26,3.0854126380260944\n"},
+         {"data/atl-seasons.csv": "SEASON,PPG\n25-26,3.085412638026094\n"})
+check("the same difference in a NON-rating column still fails — scoped by name",
+      not c.ok)
 
 c = pair({"data/x.csv": "A\n0.50\n"}, {"data/x.csv": "A\n0.5\n"})
 check("0.5 vs 0.50 still fails — that is a writer bug, not the quirk", not c.ok)
