@@ -435,10 +435,12 @@ entry point everything triggers — runs `python3 -m stats_build` out of *this*
 checkout. So **this repo deploys first**: a site deploy that lands ahead of an
 API one gives every build `No module named stats_build`.
 
-R is kept **dormant** for one full season (through the 26-27 playoffs), so
-playoffs, awards and rings each run once under Python before Phase 4 deletes
-it. `NBN_STATS_ENGINE=r bash build/build.sh` reaches it, on the same
-`link-public.sh` + `smoke_test.py` tail as the live path.
+R is kept **dormant and permanent** — decided 2026-08-19; it is not being
+uninstalled. Two jobs: it is the rollback (`NBN_STATS_ENGINE=r bash
+build/build.sh`, on the same `link-public.sh` + `smoke_test.py` tail as the
+live path), and it is the only value-level check these 86 files have. Watch
+item: the first time the playoff/awards/rings paths run on new data (the 26-27
+playoffs), run `harness port` and confirm R agrees.
 
 | | |
 |---|---|
@@ -457,9 +459,8 @@ here, not a loud one.
 
 **The gate**, and it is the whole safety story — `build/smoke_test.py` asserts
 columns and row-count floors and *no values at all*, so byte-identical output
-against R is the only oracle the derived files have. It dies with R at Phase 4;
-see the spec's open question, which needs answering before then rather than
-after:
+against R is the only oracle the derived files have — which is exactly why R
+stays. Run this after any change to `pipeline.py`:
 
     python3 -m stats_build.harness port          # run both, diff every file
     python3 -m stats_build.harness determinism   # R twice, then diff

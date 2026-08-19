@@ -21,11 +21,13 @@ directly (not through `build.sh`, which also runs `sync_owners.py` and
 `link-public.sh`, both of which write into the live data directory), with
 `NBN_OUT_DIR` pointed at a scratch tree.
 
-Python is the live engine since 2026-08-19; R is dormant. Everything below
-that describes R -- `run_r`, `KNOWN_FIXES`, `KNOWN_TIES`, `RATING_TOLERANCE`,
-`KNOWN_FIXED_FILES` -- is describing the thing being compared against, and
-becomes meaningless when R is deleted at Phase 4. `determinism` and `diff`
-remain useful against Python alone.
+Python is the live engine since 2026-08-19; R is dormant and stays that way --
+it is not being uninstalled, because this comparison is the only value-level
+check the 86 output files have. So `run_r`, `KNOWN_FIXES`, `KNOWN_TIES`,
+`RATING_TOLERANCE` and `KNOWN_FIXED_FILES` describe a live counterpart, not a
+migration artifact. Keep the accepted-difference lists **enumerated**: new
+seasons can add a cell, and the gate failing until a person looks at it is the
+design working.
 
 CLI:
 
