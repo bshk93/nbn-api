@@ -23,12 +23,14 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
 from stats_build import csvio
+from stats_build.rmath import r_mean, r_round
 
 # Output files this module owns. Everything else is still R's.
 STAT_FILES = {"p": "P", "r": "R", "a": "A", "s": "S", "b": "B", "3pm": "3PM"}
@@ -39,6 +41,9 @@ PORTED = (
     *(f"data/totals-{k}.csv" for k in STAT_FILES),
     *(f"data/game-highs-{k}.csv" for k in STAT_FILES),
     "players/player_awards.csv",
+    *(f"data/{t.lower()}-players.csv" for t in (
+        "ATL BKN BOS CHA CHI CLE DAL DEN DET GSW HOU IND LAC LAL MEM MIA MIL "
+        "MIN NOP NYK OKC ORL PHI PHX POR SAC SAS TOR UTA WAS").split()),
 )
 
 # awards-history.json's keys, and the label each one carries into the CSV, in
@@ -280,6 +285,75 @@ def h2h_matrix(games: Iterable[tuple], teams: list[str]) -> tuple[list[str], lis
 
 
 # --------------------------------------------------------------------------
+# Per-team career lines
+# --------------------------------------------------------------------------
+
+def game_score(row: dict) -> float | None:
+    """clean_allstats' GMSC, rounded to 2 exactly where R rounds it.
+
+    R rounds at load, so every later sum and mean is over the *rounded*
+    figure. Rounding later instead would drift by a few tenths across a
+    300-game career.
+    """
+    parts = {k: _stat(row, k) for k in
+             ("P", "FGM", "FGA", "FTA", "FTM", "OR", "DR", "S", "A", "B", "PF", "TO")}
+    if any(v is None for v in parts.values()):
+        return None
+    return r_round(
+        parts["P"] + 0.4 * parts["FGM"] - 0.7 * parts["FGA"]
+        - 0.4 * (parts["FTA"] - parts["FTM"]) + 0.7 * parts["OR"] + 0.3 * parts["DR"]
+        + parts["S"] + 0.7 * parts["A"] + 0.7 * parts["B"] - 0.4 * parts["PF"] - parts["TO"],
+        2,
+    )
+
+
+def _mean(values: list[float], digits: int) -> float | None:
+    """R's `round(mean(x, na.rm = TRUE), digits)`: blanks leave the denominator.
+
+    `r_mean`, not `sum(x)/n`: R's mean makes a second compensating pass, and
+    the difference is invisible until a value lands on a rounding boundary and
+    the decimal flips. It did, in 11 cells across the 30 team files.
+    """
+    present = [v for v in values if v is not None]
+    if not present:
+        return None
+    return r_round(r_mean(present), digits)
+
+
+TEAM_PLAYER_COLS = ["PLAYER", "GP", "GMSC_TOT", "GMSC_AVG", "PPG", "RPG", "APG",
+                    "SPG", "BPG", "3PMPG", "SEASONS"]
+
+
+def team_players(reg: list[dict], team: str, limit: int = 100):
+    """One team's all-time per-player career lines, best game score first.
+
+    Regular season only. GP counts rows, so a player who appeared for two
+    teams in a season is counted under each — that is what a franchise record
+    book means here.
+    """
+    by_player: dict[str, list[dict]] = defaultdict(list)
+    for r in reg:
+        if r["TEAM"] == team:
+            by_player[r["PLAYER"]].append(r)
+
+    rows = []
+    for player, games in sorted(by_player.items()):
+        gmsc = [game_score(g) for g in games]
+        present = [v for v in gmsc if v is not None]
+        rows.append([
+            player,
+            len(games),
+            r_round(math.fsum(present), 1) if present else None,
+            _mean(gmsc, 2),
+            *(_mean([_stat(g, c) for g in games], 1)
+              for c in ("P", "R", "A", "S", "B", "3PM")),
+            ", ".join(sorted({g["SEASON"] for g in games})),
+        ])
+    rows.sort(key=lambda r: -(r[2] or 0.0))
+    return TEAM_PLAYER_COLS, rows[:limit]
+
+
+# --------------------------------------------------------------------------
 # Player awards
 # --------------------------------------------------------------------------
 
@@ -378,4 +452,8 @@ def build(out_dir: Path, data_dir: Path, args) -> list[str]:
 
     csvio.write_csv(out_dir / "players" / "player_awards.csv",
                     *player_awards(data_dir, playoff_rows))
+
+    for team in teams:
+        csvio.write_csv(out_dir / "data" / f"{team.lower()}-players.csv",
+                        *team_players(reg_rows, team))
     return list(PORTED)

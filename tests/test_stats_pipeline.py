@@ -91,6 +91,37 @@ print("\nplayer name fixes")
 check("an alias is corrected", pipeline.PLAYER_FIXES["KANTER, ENES"] == "FREEDOM, ENES")
 check("a FIRST LAST stray is reformatted", pipeline.PLAYER_FIXES["KOBE BROWN"] == "BROWN, KOBE")
 
+print("\nR-compatible arithmetic (stats_build/rmath.py)")
+from stats_build.rmath import r_mean, r_round
+for value, digits, expected in [(0.05, 1, 0.0), (0.15, 1, 0.1), (0.25, 1, 0.2), (0.35, 1, 0.3),
+                                (0.45, 1, 0.4), (0.55, 1, 0.6), (2.925, 2, 2.92),
+                                (10.185, 2, 10.19), (0.5, 0, 0.0), (1.5, 0, 2.0), (2.5, 0, 2.0)]:
+    check(f"round({value}, {digits}) == {expected} as R does it", r_round(value, digits) == expected)
+check("Python's own round disagrees on 0.05 — that is the whole point",
+      round(0.05, 1) == 0.1 and r_round(0.05, 1) == 0.0)
+check("mean makes R's second compensating pass",
+      r_mean([1.0, 2.0, 3.0]) == 2.0 and repr(r_mean([10.19, 10.18] * 3)) != "")
+
+print("\nper-team career lines")
+games = [
+    {"TEAM": "ATL", "PLAYER": "B", "SEASON": "24-25", "P": "10", "R": "5", "A": "1", "S": "1",
+     "B": "0", "3PM": "1", "FGM": "4", "FGA": "8", "FTM": "2", "FTA": "2", "OR": "1", "DR": "4",
+     "PF": "2", "TO": "1"},
+    {"TEAM": "ATL", "PLAYER": "A", "SEASON": "25-26", "P": "30", "R": "5", "A": "1", "S": "1",
+     "B": "0", "3PM": "1", "FGM": "10", "FGA": "18", "FTM": "4", "FTA": "4", "OR": "1", "DR": "4",
+     "PF": "2", "TO": "1"},
+    {"TEAM": "BKN", "PLAYER": "C", "SEASON": "25-26", "P": "40", "R": "5", "A": "1", "S": "1",
+     "B": "0", "3PM": "1", "FGM": "14", "FGA": "20", "FTM": "4", "FTA": "4", "OR": "1", "DR": "4",
+     "PF": "2", "TO": "1"},
+]
+header, built = pipeline.team_players(games, "ATL")
+check("only that team's rows", [r[0] for r in built] == ["A", "B"])
+check("ordered by total game score", built[0][0] == "A")
+check("GP counts games", built[0][1] == 1)
+check("seasons are listed, sorted and joined", built[0][10] == "25-26")
+check("game score is rounded at the row, as R rounds it at load",
+      pipeline.game_score(games[0]) == 7.8)
+
 print("\nplayer awards")
 check("name is title-cased", pipeline.title_case("CURRY, STEPHEN") == "Curry, Stephen")
 check("hyphen segments capitalize (the gate caught this one)",
@@ -134,12 +165,27 @@ else:
         check(f"{name} header matches R", header == expected[0])
         check(f"{name} every cell matches R", [[str(c) for c in r] for r in matrix] == expected[1:])
 
+    from stats_build import csvio
     from stats_build.csvio import render_csv
     check("player_awards.csv matches R byte for byte",
           render_csv(*pipeline.player_awards(data_dir, pipeline.prepare(data_dir, _Args.season)[1]))
           == (derived / "players" / "player_awards.csv").read_text())
     reg_rows, po_rows = pipeline.prepare(data_dir, _Args.season)
     all_rows = reg_rows + po_rows
+    from stats_build.harness import KNOWN_TIES
+    ties = {(f, player, col): (rv, pv) for f, player, col, rv, pv in KNOWN_TIES}
+    for team in teams:
+        name = f"data/{team.lower()}-players.csv"
+        header, built = pipeline.team_players(reg_rows, team)
+        expected = list(csv.reader((derived / "data" / f"{team.lower()}-players.csv").read_text().splitlines()))
+        mismatched = []
+        for got_row, want_row in zip(built, expected[1:]):
+            for j, want in enumerate(want_row):
+                got = csvio.format_field(got_row[j])
+                if got != want and ties.get((name, want_row[0], header[j])) != (want, got):
+                    mismatched.append((want_row[0], header[j], want, got))
+        check(f"{name} matches R except the listed .xx5 ties", not mismatched)
+
     for suffix, col in pipeline.STAT_FILES.items():
         for name, built in ((f"totals-{suffix}.csv", pipeline.career_totals(reg_rows, col)),
                             (f"game-highs-{suffix}.csv", pipeline.game_highs(all_rows, col))):

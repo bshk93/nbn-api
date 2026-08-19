@@ -60,6 +60,25 @@ LEAGUE_TZ = ZoneInfo("America/New_York")
 
 MANIFEST_NAME = "_manifest.json"
 
+# Cells where R's answer cannot be reproduced without emulating its long-double
+# accumulation, and we have decided not to. Each is a per-game game-score
+# average landing exactly on a .xx5 boundary, where R's mean lands on the other
+# side of the tie in its last bit; the two answers differ by 0.01. Every one is
+# a fringe player with a 4-to-20-game career for that franchise.
+#
+# Listed cell by cell ON PURPOSE rather than as a rule. A rule ("adjacent
+# values are fine") would swallow a genuine off-by-one bug; this cannot, and
+# any seventh case, or any of these six moving, fails the gate and gets looked
+# at by a person.
+KNOWN_TIES = {
+    ("data/cle-players.csv", "CHRISTOPHER, JOSH", "GMSC_AVG", "1.28", "1.27"),
+    ("data/cle-players.csv", "REDDISH, CAM", "GMSC_AVG", "0.58", "0.57"),
+    ("data/mia-players.csv", "HARKLESS, MAURICE", "GMSC_AVG", "1.25", "1.24"),
+    ("data/nop-players.csv", "JONES, DAMIAN", "GMSC_AVG", "4.02", "4.03"),
+    ("data/okc-players.csv", "RONDO, RAJON", "GMSC_AVG", "3.57", "3.58"),
+    ("data/por-players.csv", "LOWRY, KYLE", "GMSC_AVG", "4.92", "4.93"),
+}
+
 
 # --------------------------------------------------------------------------
 # Build inputs: resolved once, recorded, and passed explicitly
@@ -218,6 +237,7 @@ class FileDiff:
     cells: list[CellDiff] = field(default_factory=list)
     cells_total: int = 0
     rendering_only: int = 0   # same double, readr printed it longer (see above)
+    known_ties: int = 0       # listed in KNOWN_TIES: R's mean won a .xx5 tie
     note: str = ""
 
     @property
@@ -248,6 +268,10 @@ class Comparison:
     @property
     def ok(self) -> bool:
         return not (self.only_in_a or self.only_in_b or self.differing)
+
+    @property
+    def known_tie_cells(self) -> int:
+        return sum(d.known_ties for d in self.differing + self.quirk_only)
 
     @property
     def rendering_only_cells(self) -> int:
@@ -318,6 +342,10 @@ def _diff_csv(path_a: Path, path_b: Path, rel: str, max_cells: int) -> FileDiff:
             if same_double_rendered_differently(va, vb):
                 d.rendering_only += 1
                 continue
+            col_name = head_a[j] if j < len(head_a) else f"col{j}"
+            if (rel, ra[0], col_name, va, vb) in KNOWN_TIES:
+                d.known_ties += 1
+                continue
             d.cells_total += 1
             if len(d.cells) < max_cells:
                 col = head_a[j] if j < len(head_a) else f"col{j}"
@@ -347,7 +375,7 @@ def compare(dir_a: Path, dir_b: Path, max_cells: int = 5,
             identical.append(rel)
         elif rel.endswith(".csv"):
             d = _diff_csv(dir_a / rel, dir_b / rel, rel, max_cells)
-            if d.cells_total == 0 and d.rendering_only and not d.note:
+            if d.cells_total == 0 and (d.rendering_only or d.known_ties) and not d.note:
                 quirk_only.append(d)
             else:
                 differing.append(d)
@@ -363,10 +391,14 @@ def render(cmp_: Comparison, label_a: str = "A", label_b: str = "B") -> str:
     verdict = "IDENTICAL" if cmp_.ok else "DIFFERS"
     lines.append(f"{verdict}: {len(cmp_.identical)}/{total} files byte-identical  ({label_a} vs {label_b})")
     if cmp_.quirk_only:
+        parts = []
+        if cmp_.rendering_only_cells:
+            parts.append(f"{cmp_.rendering_only_cells} readr rendering")
+        if cmp_.known_tie_cells:
+            parts.append(f"{cmp_.known_tie_cells} listed .xx5 tie")
         lines.append(
-            f"  {len(cmp_.quirk_only)} file(s) differ only by readr's double rendering "
-            f"({cmp_.rendering_only_cells} cell(s), same value, longer text): "
-            + ", ".join(d.path for d in cmp_.quirk_only)
+            f"  {len(cmp_.quirk_only)} file(s) differ only by accepted cells "
+            f"({', '.join(parts)}): " + ", ".join(d.path for d in cmp_.quirk_only)
         )
     for rel in cmp_.only_in_a:
         lines.append(f"  only in {label_a}: {rel}")

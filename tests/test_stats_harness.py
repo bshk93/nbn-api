@@ -97,7 +97,8 @@ RTG = {"data/atl-seasons.csv": "SEASON,OFF_RTG\n25-26,1.684188779377917\n"}
 c = pair({"data/atl-seasons.csv": "SEASON,OFF_RTG\n25-26,1.6841887793779169\n"}, RTG)
 check("same double printed longer is not a defect", c.ok)
 check("but it IS reported, never silent", c.rendering_only_cells == 1 and len(c.quirk_only) == 1)
-check("render names the file and the count", "readr's double rendering" in harness.render(c))
+check("render names the file and the count", "readr rendering" in harness.render(c)
+      and "atl-seasons.csv" in harness.render(c))
 
 c = pair({"data/atl-seasons.csv": "SEASON,OFF_RTG\n25-26,1.684188779377918\n"}, RTG)
 check("a DIFFERENT double at the same precision still fails", not c.ok)
