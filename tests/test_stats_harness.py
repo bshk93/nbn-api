@@ -18,7 +18,7 @@ import tempfile
 from datetime import date
 from pathlib import Path
 
-from stats_build import harness
+from stats_build import harness, pipeline
 
 FAILS = []
 
@@ -121,13 +121,27 @@ args = harness.BuildArgs.resolve(season="25-26", through="2026-05-10")
 check("through is pinned, not left to job.R's Sys.Date()", args.through == "2026-05-10")
 check("playoffs_from read from build/seasons.conf", args.playoffs_from == "2026-04-13")
 
-print("\nthe Python side")
-try:
-    with tempfile.TemporaryDirectory() as d:
-        harness.run_python(Path(d), args)
-    check("refuses rather than writing an empty tree", False)
-except NotImplementedError:
-    check("refuses rather than writing an empty tree that would diff as 86 missing files", True)
+print("\nthe Python side, mid-port")
+with tempfile.TemporaryDirectory() as d:
+    secs, written = harness.run_python(Path(d), harness.BuildArgs.resolve("25-26", "2026-05-10"))
+    files = set(harness.snapshot(Path(d)))
+check("run_python reports which files it ported", set(written) == files and written)
+check("it writes only those — an unported file is R's, not an empty stub",
+      files == set(pipeline.PORTED))
+
+print("\ncomparing mid-port")
+c = pair({**BASE, "data/extra.csv": "A\n1\n"})
+check("without `only`, an unported file counts as missing", not c.ok)
+tmp = tempfile.TemporaryDirectory()
+a = tree(Path(tmp.name) / "a", {**BASE, "data/only-in-r.csv": "A\n1\n"})
+b = tree(Path(tmp.name) / "b", BASE)
+check("with `only`, the ported files still decide the verdict",
+      harness.compare(a, b, only=BASE.keys()).ok)
+check("and a ported file that differs still fails under `only`",
+      not harness.compare(a, tree(Path(tmp.name) / "c",
+                                  {**BASE, "data/owner_stats.csv": "owner,reg_w,reg_pct\nSkim,42,0.5\n"}),
+                          only=BASE.keys()).ok)
+tmp.cleanup()
 
 print()
 if FAILS:
