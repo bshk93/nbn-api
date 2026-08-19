@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, W
 from pydantic import BaseModel
 
 from .constants import (
+    DERIVED_DIR,
     DATA_DIR, CAP_LEVELS_FILE, ROOKIE_SCALE_FILE, AWARDS_CONFIG_FILE,
     AWARDS_HISTORY_FILE, PLAYER_BIOS_FILE, LEAGUE_STATE_FILE,
     CALENDAR_EVENTS_FILE, CALENDAR_GAMES_FILE, TRIVIA_SCORES_PATH,
@@ -37,7 +38,7 @@ DISCORD_STANDINGS_WEBHOOK = (
     "https://discord.com/api/webhooks/1508510341288689876/"
     "2_KbnDbQ5HqVfT9dvXUuR2oceOLuj4gGWrJZZfqYvH3nODExFoASqsrzZ24FtP2YUyCF"
 )
-NBN_STANDINGS_CSV = NBN_TODAY_DIR / "standings" / "standings-history.csv"
+NBN_STANDINGS_CSV = DERIVED_DIR / "standings" / "standings-history.csv"
 
 
 # ── Cap levels ────────────────────────────────────────────────────────────────

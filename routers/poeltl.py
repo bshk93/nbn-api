@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from .league_time import league_today, league_today_str
 
-from .constants import DATA_DIR, PLAYER_BIOS_FILE, logger
+from .constants import DERIVED_DIR, DATA_DIR, PLAYER_BIOS_FILE, logger
 from .storage import _load_json, _save_json, log_write
 from .auth import get_token_info, require_admin, load_members
 from .bets import (
@@ -27,7 +27,7 @@ router = APIRouter()
 POELTL_STATE_FILE   = DATA_DIR / "poeltl-state.json"
 POELTL_ARCHIVE_FILE = DATA_DIR / "poeltl-archive.json"
 NBN_TODAY_DIR       = Path("/home/skim/projects/nbn-today")
-PLAYER_SEASONS_CSV  = NBN_TODAY_DIR / "players" / "player_seasons.csv"
+PLAYER_SEASONS_CSV  = DERIVED_DIR / "players" / "player_seasons.csv"
 
 POELTL_SEASON      = "25-26"   # update each season
 POELTL_MIN_GAMES   = 40        # minimum games to be eligible

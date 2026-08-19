@@ -45,6 +45,7 @@ from pydantic import BaseModel
 
 from . import inbox
 from .constants import (
+    DERIVED_DIR,
     DATA_DIR, CAP_LEVELS_FILE, TRANSACTIONS_FILE, VALID_TEAMS,
     _txn_lock, _deadcap_lock,
 )
@@ -65,7 +66,7 @@ from .transactions import (
 router = APIRouter()
 
 NBN_TODAY_DIR = Path("/home/skim/projects/nbn-today")
-STANDINGS_CSV = NBN_TODAY_DIR / "standings" / "standings-history.csv"
+STANDINGS_CSV = DERIVED_DIR / "standings" / "standings-history.csv"
 
 WAIVER_WINDOW = timedelta(hours=48)
 

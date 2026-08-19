@@ -22,7 +22,8 @@ MODULES = ["test_stepien_rule", "test_picks_matching", "test_tpe_and_hardcap",
            "test_one_year_min_cap_hit_consistency",
            "test_inbox", "test_inbox_wiring", "test_cleanup",
            "test_stats_harness", "test_stats_writer",
-           "test_stats_pipeline"]
+           "test_stats_pipeline",
+           "test_data_paths"]
 
 
 def main():

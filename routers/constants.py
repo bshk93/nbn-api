@@ -12,6 +12,12 @@ logging.basicConfig(
 logger = logging.getLogger("nbn-api")
 
 DATA_DIR  = Path("/var/lib/nothing-but-stats")
+# The stats build writes here (nbn-today/build/job.R, NBN_OUT_DIR). Until
+# 2026-08-18 these files were reachable through symlinks in the site repo, and
+# several routers still read them by that path; the symlinks are gone, so
+# anything reading build output points here instead. League state the API owns
+# (rosters, picks, bios) stays at DATA_DIR itself.
+DERIVED_DIR = DATA_DIR / "derived"
 RULES_DIR = DATA_DIR / "rules"
 AVATARS_DIR = DATA_DIR / "avatars"
 PENDING_BOXSCORES_DIR  = DATA_DIR / "pending-boxscores"

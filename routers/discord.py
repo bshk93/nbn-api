@@ -31,7 +31,7 @@ from fastapi import APIRouter, Request, Response
 from nacl.exceptions import BadSignatureError
 from nacl.signing import VerifyKey
 
-from .constants import DATA_DIR, ATTRIBUTES_FILE, PLAYER_BIOS_FILE, OVR_FILE  # NBS_DATA_DIR; holds raw playoff box scores
+from .constants import DERIVED_DIR, DATA_DIR, ATTRIBUTES_FILE, PLAYER_BIOS_FILE, OVR_FILE  # NBS_DATA_DIR; holds raw playoff box scores
 from .storage import _load_json, _current_league_year
 from .auth import load_members, save_members
 from .tips import perform_tip, TipError
@@ -49,13 +49,13 @@ DISCORD_ADMIN_ID = os.environ.get("DISCORD_ADMIN_ID", "")
 
 # Stats CSVs live in the site repo (written by build/build.sh), not in DATA_DIR.
 SITE_DIR     = Path("/home/skim/projects/nbn-today")
-SEASONS_CSV  = SITE_DIR / "players" / "player_seasons.csv"
-PLAYOFFS_CSV = SITE_DIR / "players" / "player_seasons_playoffs.csv"
-AWARDS_CSV   = SITE_DIR / "players" / "player_awards.csv"
-STANDINGS_CSV = SITE_DIR / "standings" / "standings-history.csv"
-BRACKETS_CSV  = SITE_DIR / "standings" / "playoff-brackets.csv"
-H2H_CSV       = SITE_DIR / "data" / "h2h-alltime.csv"
-H2H_PO_CSV    = SITE_DIR / "data" / "h2h-playoffs.csv"
+SEASONS_CSV  = DERIVED_DIR / "players" / "player_seasons.csv"
+PLAYOFFS_CSV = DERIVED_DIR / "players" / "player_seasons_playoffs.csv"
+AWARDS_CSV   = DERIVED_DIR / "players" / "player_awards.csv"
+STANDINGS_CSV = DERIVED_DIR / "standings" / "standings-history.csv"
+BRACKETS_CSV  = DERIVED_DIR / "standings" / "playoff-brackets.csv"
+H2H_CSV       = DERIVED_DIR / "data" / "h2h-alltime.csv"
+H2H_PO_CSV    = DERIVED_DIR / "data" / "h2h-playoffs.csv"
 BALANCES_JSON = DATA_DIR / "member-balances.json"
 ALLSTATS_GLOB = "allstats-*.csv"
 
@@ -526,7 +526,7 @@ def _team_top8(team: str, attrs_data: dict, bios: dict, current_season: str) -> 
     require an actual salary figure for the current season -- a hold with no
     real contract has none.
     """
-    roster_path = SITE_DIR / "data" / f"{team.lower()}-roster.csv"
+    roster_path = DATA_DIR / f"{team.lower()}-roster.csv"
     players = []
     for r in _load_csv(roster_path):
         slug = (r.get("SLUG") or "").strip()
@@ -694,7 +694,7 @@ def _compute_starting_five(players: list[dict]) -> list[dict | None]:
 
 
 def _roster_augmented(team: str) -> list[dict]:
-    roster_path = SITE_DIR / "data" / f"{team.lower()}-roster.csv"
+    roster_path = DATA_DIR / f"{team.lower()}-roster.csv"
     bios = _load_json(PLAYER_BIOS_FILE, {})
     ovr_history = _load_json(OVR_FILE, {})
     current_ovr = {slug: entries[-1]["ovr"] for slug, entries in ovr_history.items() if entries}
@@ -858,7 +858,7 @@ _TEAM_COLS = [("PLAYER", True), ("G", False), ("PPG", False), ("RPG", False),
 
 def _team_header(team: str, season: str) -> str:
     """Record / seed / margin line from data/{abbr}-seasons.csv, or '' if absent."""
-    path = SITE_DIR / "data" / f"{team.lower()}-seasons.csv"
+    path = DERIVED_DIR / "data" / f"{team.lower()}-seasons.csv"
     row = next((r for r in _load_csv(path) if r.get("SEASON") == season), None)
     if not row:
         return ""

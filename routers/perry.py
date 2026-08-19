@@ -11,7 +11,7 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 
-from .constants import DATA_DIR, PLAYER_BIOS_FILE, logger
+from .constants import DERIVED_DIR, DATA_DIR, PLAYER_BIOS_FILE, logger
 from .storage import _load_json, _save_json, log_write
 from .auth import get_token_info, require_admin, load_members
 from .bets import (
@@ -25,7 +25,7 @@ PERRY_STATE_FILE   = DATA_DIR / "perry-state.json"
 PERRY_ARCHIVE_FILE = DATA_DIR / "perry-archive.json"
 PERRY_ACTIVITY_FILE = DATA_DIR / "perry-activity.json"
 NBN_TODAY_DIR    = Path("/home/skim/projects/nbn-today")
-PLAYER_SEASONS_CSV = NBN_TODAY_DIR / "players" / "player_seasons.csv"
+PLAYER_SEASONS_CSV = DERIVED_DIR / "players" / "player_seasons.csv"
 
 _perry_lock = threading.Lock()
 _perry_activity_lock = threading.Lock()
