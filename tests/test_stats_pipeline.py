@@ -215,6 +215,44 @@ else:
                 bad.append((want_row[-1], header[j], want, got))
     check("every seed, record and playoff result matches R exactly", not bad)
 
+    # league-history is excluded from the byte gate because R's version is
+    # broken (see harness.KNOWN_FIXED_FILES). That makes THIS the only thing
+    # checking it, so it checks properly: every non-champion cell must still
+    # match R, and the champion must match the finals winner in the bracket.
+    hist_header, hist = pipeline.league_history(data_dir, reg_rows, po_rows, ratings)
+    r_hist = list(csv.DictReader((derived / "data" / "league-history.csv").read_text().splitlines()))
+    first_of = {}
+    for row in r_hist:
+        first_of.setdefault(row["SEASON"], row)
+    check("one row per season, where R emitted one per playoff team",
+          len(hist) == len(first_of) and len(r_hist) > len(hist))
+    off_champion = [(row[0], hist_header[j], first_of[row[0]][hist_header[j]], v)
+                    for row in hist for j, v in enumerate(row)
+                    if hist_header[j] != "CHAMPION"
+                    and csvio.format_field(v) != first_of[row[0]][hist_header[j]]]
+    check("every non-champion cell still matches R exactly", not off_champion)
+    _bcols, brackets = pipeline.playoff_brackets(po_rows, standings)
+    finals = {b[0]: b[6] for b in brackets if str(b[1]) == "4"}
+    champs = {row[0]: row[1] for row in hist if row[1]}
+    check("every champion matches the finals winner in the bracket",
+          champs and all(finals.get(season) == team for season, team in champs.items()))
+
+    check("owner_stats matches R byte for byte",
+          render_csv(*pipeline.owner_stats(data_dir, reg_rows, po_rows, ratings))
+          == (derived / "data" / "owner_stats.csv").read_text())
+    check("h2h-owners matches R byte for byte",
+          render_csv(*pipeline.owner_h2h(data_dir, reg_rows, po_rows, teams))
+          == (derived / "data" / "h2h-owners.csv").read_text())
+    check("hof matches R byte for byte",
+          render_csv(*pipeline.hall_of_fame(data_dir, reg_rows, po_rows))
+          == (derived / "data" / "hof.csv").read_text())
+    check("playoff brackets match R byte for byte",
+          render_csv(*pipeline.playoff_brackets(po_rows, standings))
+          == (derived / "standings" / "playoff-brackets.csv").read_text())
+    check("playoff series margins match R byte for byte",
+          render_csv(*pipeline.playoff_margins(po_rows, standings))
+          == (derived / "nbntv-classics" / "playoff-series-margins.csv").read_text())
+
     from stats_build.harness import KNOWN_TIES
     ties = {(f, player, col): (rv, pv) for f, player, col, rv, pv in KNOWN_TIES}
     for team in teams:

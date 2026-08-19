@@ -25,6 +25,7 @@ import csv
 import json
 import math
 import re
+from datetime import date, timedelta
 from fractions import Fraction
 from collections import defaultdict
 from pathlib import Path
@@ -50,6 +51,12 @@ PORTED = (
     "players/player_seasons.csv",
     "players/player_seasons_playoffs.csv",
     "standings/standings-history.csv",
+    "standings/playoff-brackets.csv",
+    "data/owner_stats.csv",
+    "data/h2h-owners.csv",
+    "data/league-history.csv",
+    "data/hof.csv",
+    "nbntv-classics/playoff-series-margins.csv",
     *(f"data/{t.lower()}-seasons.csv" for t in (
         "ATL BKN BOS CHA CHI CLE DAL DEN DET GSW HOU IND LAC LAL MEM MIA MIL "
         "MIN NOP NYK OKC ORL PHI PHX POR SAC SAS TOR UTA WAS").split()),
@@ -666,6 +673,18 @@ def build(out_dir: Path, data_dir: Path, args) -> list[str]:
                         *team_seasons(standings, ratings, results, team))
     csvio.write_csv(out_dir / "standings" / "standings-history.csv",
                     *standings_history(standings, ratings, results, teams))
+    csvio.write_csv(out_dir / "standings" / "playoff-brackets.csv",
+                    *playoff_brackets(playoff_rows, standings))
+    csvio.write_csv(out_dir / "nbntv-classics" / "playoff-series-margins.csv",
+                    *playoff_margins(playoff_rows, standings))
+    csvio.write_csv(out_dir / "data" / "owner_stats.csv",
+                    *owner_stats(data_dir, reg_rows, playoff_rows, ratings))
+    csvio.write_csv(out_dir / "data" / "h2h-owners.csv",
+                    *owner_h2h(data_dir, reg_rows, playoff_rows, teams))
+    csvio.write_csv(out_dir / "data" / "league-history.csv",
+                    *league_history(data_dir, reg_rows, playoff_rows, ratings))
+    csvio.write_csv(out_dir / "data" / "hof.csv",
+                    *hall_of_fame(data_dir, reg_rows, playoff_rows))
     return list(PORTED)
 
 
@@ -948,3 +967,439 @@ def standings_history(standings, ratings, results, teams: list[str]):
         rows.extend(row + [team] for row in team_rows)
     rows.sort(key=lambda r: (r[0], r[8]))
     return TEAM_SEASON_COLS + ["TEAM"], rows
+
+
+# --------------------------------------------------------------------------
+# Playoff brackets and series margins
+# --------------------------------------------------------------------------
+
+BRACKET_COLS = ["SEASON", "ROUND", "T1", "T2", "T1_W", "T2_W", "WINNER",
+                "T1_SEED", "T1_SEED_NUM", "T2_SEED", "T2_SEED_NUM"]
+MARGIN_COLS = ["SEASON", "ROUND", "T1", "T2", "GAMES", "AVG_MARGIN", "T1_W", "T2_W",
+               "WINNER", "T1_SEED", "T1_SEED_NUM", "T2_SEED", "T2_SEED_NUM"]
+
+
+def _series_games(playoff_rows: list[dict]):
+    """Playoff games keyed by series, with the two teams in a fixed order.
+
+    A series is identified by the alphabetically-first team as T1, so both
+    sides' rows collapse onto one series rather than two mirrored ones.
+    """
+    games: dict[tuple[str, str, str, str], set] = defaultdict(set)
+    for r in playoff_rows:
+        rnd = r.get("ROUND")
+        opp = (r.get("OPP_TEAM") or "").strip()
+        if rnd in (None, "", "NA") or opp in ("", "NA"):
+            continue
+        season = r["SEASON"].replace(" Playoffs", "")
+        t1, t2 = min(r["TEAM"], opp), max(r["TEAM"], opp)
+        games[(season, rnd, t1, t2)].add(
+            (r["DATE"], r["TEAM"], r.get("WL"), r.get("TEAM_PTS"), r.get("OPP_TEAM_PTS")))
+    return games
+
+
+def playoff_brackets(playoff_rows: list[dict], standings: dict[str, list[dict]]):
+    """Every playoff series: who played, who won how many, and their seeds."""
+    seeds = {(season, row["TEAM"]): (row["SEED"], row["SEED_NUM"])
+             for season, rows in standings.items() for row in rows}
+    out = []
+    # Sorted by series key first: R groups by (season, round, T1, T2), so that
+    # is the order the final sort breaks ties against. Two series can share a
+    # season, round and T1 seed number — one per conference.
+    for (season, rnd, t1, t2), games in sorted(_series_games(playoff_rows).items()):
+        t1_w = len({date for date, team, wl, _p, _o in games if team == t1 and wl == "W"})
+        t2_w = len({date for date, team, wl, _p, _o in games if team == t2 and wl == "W"})
+        s1 = seeds.get((season, t1), (None, None))
+        s2 = seeds.get((season, t2), (None, None))
+        out.append([season, rnd, t1, t2, t1_w, t2_w, t1 if t1_w >= t2_w else t2,
+                    s1[0], s1[1], s2[0], s2[1]])
+    out.sort(key=lambda r: (r[0], r[1], r[8] if r[8] is not None else 0))
+    return BRACKET_COLS, out
+
+
+def playoff_margins(playoff_rows: list[dict], standings: dict[str, list[dict]],
+                    min_wins: int = 4):
+    """Average margin per completed series, closest first.
+
+    Only series someone actually won (4+ wins) — an unfinished or forfeited
+    series has no margin worth ranking, and this feeds a "best games" page.
+    """
+    _cols, brackets = playoff_brackets(playoff_rows, standings)
+    by_key = {(b[0], b[1], b[2], b[3]): b for b in brackets}
+
+    out = []
+    for key, games in sorted(_series_games(playoff_rows).items()):
+        margins: dict[str, float] = {}
+        for date, _team, _wl, pts, opp_pts in games:
+            if pts in (None, "", "NA") or opp_pts in (None, "", "NA"):
+                continue
+            margins[date] = abs(float(pts) - float(opp_pts))
+        bracket = by_key.get(key)
+        if not margins or bracket is None or max(bracket[4], bracket[5]) < min_wins:
+            continue
+        out.append([key[0], key[1], key[2], key[3], len(margins),
+                    r_round(r_mean(list(margins.values())), 1),
+                    bracket[4], bracket[5], bracket[6],
+                    bracket[7], bracket[8], bracket[9], bracket[10]])
+    out.sort(key=lambda r: r[5])
+    return MARGIN_COLS, out
+
+
+# --------------------------------------------------------------------------
+# Owners
+# --------------------------------------------------------------------------
+
+OWNER_COLS = ["owner", "teams", "seasons", "best_reg_season", "best_reg_pct",
+              "worst_reg_season", "worst_reg_pct", "reg_w", "reg_l", "reg_pct",
+              "playoff_w", "playoff_l", "playoff_pct", "total_w", "total_l", "total_pct",
+              "playoff_appearances", "po_r2", "po_conf_finals", "po_finals",
+              "championships", "off_rtg", "def_rtg"]
+
+PLAYOFF_DEPTH = (("po_r2", 4), ("po_conf_finals", 8), ("po_finals", 12), ("championships", 16))
+
+
+def load_owner_tenures(data_dir: Path, today: date | None = None) -> list[dict]:
+    """owners.csv as dated tenures: each owner holds a team until the next starts.
+
+    The file records only start dates, so an end date is the day before the
+    next owner of that team took over, and the current owner runs to today.
+    """
+    today = today or datetime.now(LEAGUE_TZ).date() if False else (today or date.today())
+    path = data_dir / "owners.csv"
+    if not path.exists():
+        return []
+    rows = []
+    with path.open(newline="") as fh:
+        for r in csv.DictReader(fh):
+            month, day, year = (int(x) for x in r["start_date"].split("/"))
+            rows.append({"owner": r["owner"], "TEAM": r["team"].upper(),
+                         "start": date(year, month, day)})
+    rows.sort(key=lambda r: (r["TEAM"], r["start"]))
+    for i, r in enumerate(rows):
+        nxt = rows[i + 1] if i + 1 < len(rows) else None
+        r["end"] = (nxt["start"] - timedelta(days=1)
+                    if nxt and nxt["TEAM"] == r["TEAM"] else today)
+    return rows
+
+
+def tenure_seasons(tenure: dict) -> list[str]:
+    """Every league year a tenure touches, by R's `get_owners()` rule.
+
+    Deliberately coarser than game-day attribution: a season counts if the
+    tenure overlapped it *at all*, because the cutover is June and a GM who
+    takes over in the summer owns that season's playoff run even though they
+    were not there for the games. Two owners can therefore both be credited
+    with one season's playoff depth.
+    """
+    def season_year(d: date) -> int:
+        return d.year - (1 if d.month < 6 else 0)
+    return [f"{y % 100:02d}-{(y + 1) % 100:02d}"
+            for y in range(season_year(tenure["start"]), season_year(tenure["end"]) + 1)]
+
+
+def _season_of(day: date) -> str:
+    """The league year a date belongs to: June starts the new one."""
+    y = day.year if day.month >= 6 else day.year - 1
+    return f"{y % 100:02d}-{(y + 1) % 100:02d}"
+
+
+def _owner_games(tenures: list[dict], games: list[dict]) -> dict[str, list[dict]]:
+    """Games attributed to whoever owned that team on the day it was played."""
+    by_team: dict[str, list[dict]] = defaultdict(list)
+    for g in games:
+        by_team[g["TEAM"]].append(g)
+    out: dict[str, list[dict]] = defaultdict(list)
+    for t in tenures:
+        for g in by_team.get(t["TEAM"], ()):
+            if t["start"] <= g["DAY"] <= t["end"]:
+                out[t["owner"]].append(g)
+    return out
+
+
+def _distinct_games(rows: list[dict], gametype: str) -> list[dict]:
+    seen = set()
+    out = []
+    for r in rows:
+        wl = (r.get("WL") or "").strip()
+        if wl in ("", "NA"):
+            continue
+        key = (r["TEAM"], r["DATE"], r["SEASON"], wl, gametype)
+        if key in seen:
+            continue
+        seen.add(key)
+        y, m, d = (int(x) for x in r["DATE"].split("-"))
+        out.append({"TEAM": r["TEAM"], "DATE": r["DATE"], "DAY": date(y, m, d),
+                    "SEASON": r["SEASON"], "WL": wl, "TYPE": gametype})
+    return out
+
+
+def owner_stats(data_dir: Path, reg_rows: list[dict], playoff_rows: list[dict],
+                ratings: dict[tuple[str, str], tuple[float, float]]):
+    """Career totals per GM, attributed by who owned the team on game day."""
+    tenures = load_owner_tenures(data_dir)
+    games = _distinct_games(reg_rows, "REG") + _distinct_games(playoff_rows, "PLAYOFF")
+    per_owner = _owner_games(tenures, games)
+
+    # Games played per team-season, to weight the ratings by workload.
+    counts: dict[tuple[str, str], set] = defaultdict(set)
+    for r in reg_rows:
+        counts[(r["TEAM"], r["SEASON"])].add((r["OPP"].replace("@", ""), r["DATE"]))
+
+    # A season is credited to whoever owned the team at its midpoint (Jan 1).
+    owner_rtg: dict[str, list[tuple[float, float, int]]] = defaultdict(list)
+    for (team, season), (off, dfn) in ratings.items():
+        midpoint = date(2000 + int(season[-2:]), 1, 1)
+        for t in tenures:
+            if t["TEAM"] == team and t["start"] <= midpoint <= t["end"]:
+                owner_rtg[t["owner"]].append((off, dfn, len(counts[(team, season)])))
+
+    # Playoff depth is only counted for seasons that actually finished.
+    po_wins: dict[tuple[str, str], int] = defaultdict(int)
+    for g in games:
+        if g["TYPE"] == "PLAYOFF" and g["WL"] == "W":
+            po_wins[(g["TEAM"], g["SEASON"].replace(" Playoffs", ""))] += 1
+    completed = {season for (_t, season), wins in po_wins.items() if wins >= 16}
+    participants = {(g["TEAM"], g["SEASON"].replace(" Playoffs", ""))
+                    for g in games if g["TYPE"] == "PLAYOFF"}
+
+    rows = []
+    for owner in sorted({t["owner"] for t in tenures}):
+        mine = per_owner.get(owner, [])
+        reg = [g for g in mine if g["TYPE"] == "REG"]
+        po = [g for g in mine if g["TYPE"] == "PLAYOFF"]
+
+        by_season: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+        for g in reg:
+            by_season[_season_of(g["DAY"])][0 if g["WL"] == "W" else 1] += 1
+        seasons = {s: (w, l) for s, (w, l) in sorted(by_season.items()) if w + l}
+        pcts = {s: w / (w + l) for s, (w, l) in seasons.items()}
+        best = max(pcts, key=lambda s: pcts[s]) if pcts else None
+        worst = min(pcts, key=lambda s: pcts[s]) if pcts else None
+
+        reg_w = sum(1 for g in reg if g["WL"] == "W")
+        reg_l = sum(1 for g in reg if g["WL"] == "L")
+        po_w = sum(1 for g in po if g["WL"] == "W")
+        po_l = sum(1 for g in po if g["WL"] == "L")
+
+        depth = dict.fromkeys((name for name, _ in PLAYOFF_DEPTH), 0)
+        owned = {(t["TEAM"], season) for t in tenures if t["owner"] == owner
+                 for season in tenure_seasons(t)}
+        for team, season in sorted(owned & participants):
+            if season not in completed:
+                continue
+            for name, threshold in PLAYOFF_DEPTH:
+                if po_wins[(team, season)] >= threshold:
+                    depth[name] += 1
+
+        weighted = owner_rtg.get(owner, [])
+        total_games = sum(n for _o, _d, n in weighted)
+        off = r_round(math.fsum(o * n for o, _d, n in weighted) / total_games, 2) if total_games else None
+        dfn = r_round(math.fsum(d * n for _o, d, n in weighted) / total_games, 2) if total_games else None
+
+        rows.append([
+            owner, ", ".join(sorted({g["TEAM"] for g in mine})),
+            len(seasons) or None,      # R leaves this NA for a GM with no games
+            f"{seasons[best][0]}-{seasons[best][1]}" if best else None,
+            pcts.get(best) if best else None,
+            f"{seasons[worst][0]}-{seasons[worst][1]}" if worst else None,
+            pcts.get(worst) if worst else None,
+            reg_w, reg_l, r_round(reg_w / (reg_w + reg_l), 3) if reg_w + reg_l else None,
+            po_w, po_l, r_round(po_w / (po_w + po_l), 3) if po_w + po_l else None,
+            reg_w + po_w, reg_l + po_l,
+            r_round((reg_w + po_w) / (reg_w + po_w + reg_l + po_l), 3)
+            if (reg_w + po_w + reg_l + po_l) else None,
+            len({g["SEASON"].replace(" Playoffs", "") for g in po}),
+            *(depth[name] for name, _ in PLAYOFF_DEPTH), off, dfn,
+        ])
+    rows.sort(key=lambda r: (-(r[15] or 0), -r[13]))
+    return OWNER_COLS, rows
+
+
+def owner_h2h(data_dir: Path, reg_rows: list[dict], playoff_rows: list[dict],
+              teams: list[str]):
+    """Each GM's record against each franchise, regular season and playoffs."""
+    tenures = load_owner_tenures(data_dir)
+    games = _distinct_games(reg_rows, "REG") + _distinct_games(playoff_rows, "PLAYOFF")
+    opponents: dict[tuple[str, str, str], str] = {}
+    for r in reg_rows + playoff_rows:
+        opponents[(r["TEAM"], r["DATE"], r["SEASON"])] = r["OPP"].replace("@", "")
+
+    counts: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
+    for t in tenures:
+        for g in games:
+            if g["TEAM"] != t["TEAM"] or not (t["start"] <= g["DAY"] <= t["end"]):
+                continue
+            opp = opponents.get((g["TEAM"], g["DATE"], g["SEASON"]))
+            if not opp:
+                continue
+            counts[(t["owner"], opp)][0 if g["WL"] == "W" else 1] += 1
+
+    header = ["OWNER"] + teams
+    rows = []
+    for owner in sorted({t["owner"] for t in tenures}):
+        row: list[Any] = [owner]
+        for team in teams:
+            w, l = counts.get((owner, team), (0, 0))
+            row.append(f"{w}-{l}")
+        rows.append(row)
+    return header, rows
+
+
+# --------------------------------------------------------------------------
+# League history
+# --------------------------------------------------------------------------
+
+# Finalists are not derivable: the raw rows record a team's playoff wins, so
+# the champion falls out at 16, but "who lost the final" needs the bracket.
+RUNNERS_UP = {
+    "20-21": ("DAL", "MIL", "DEN"), "21-22": ("NOP", "WAS", "GSW"),
+    "22-23": ("CLE", "BKN", "DEN"), "23-24": ("PHX", "NYK", "UTA"),
+    "24-25": ("MIL", "ATL", "OKC"),
+}
+COTY_NAMES = {"20-21": ("That1gal", "SAC"), "21-22": ("Kid Monotone", "IND"),
+              "22-23": ("bryn and Q", "SAS"), "23-24": ("Schu", "UTA"),
+              "24-25": ("CF", "MEM")}
+
+HISTORY_COLS = ["SEASON", "CHAMPION", "RUNNER_UP", "EAST_RUNNER_UP", "WEST_RUNNER_UP",
+                "MVP", "DPOY", "ROTY", "MIP", "FOTY", "COTY",
+                "PTS_LEADER", "REB_LEADER", "AST_LEADER", "STL_LEADER", "BLK_LEADER",
+                "TPM_LEADER", "BEST_OFF", "BEST_DEF", "BEST_OVERALL"]
+HISTORY_LEADERS = (("PTS_LEADER", "P"), ("REB_LEADER", "R"), ("AST_LEADER", "A"),
+                   ("STL_LEADER", "S"), ("BLK_LEADER", "B"), ("TPM_LEADER", "3PM"))
+
+
+def league_history(data_dir: Path, reg_rows: list[dict], playoff_rows: list[dict],
+                   ratings: dict[tuple[str, str], tuple[float, float]]):
+    """One row per season: champion, award winners, stat and rating leaders."""
+    history = json.loads((data_dir / "awards-history.json").read_text()) \
+        if (data_dir / "awards-history.json").exists() else {}
+
+    totals: dict[tuple[str, str], dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    for r in reg_rows:
+        for col in ("P", "R", "A", "S", "B", "3PM"):
+            v = _stat(r, col)
+            if v is not None:
+                totals[(r["SEASON"], r["PLAYER"])][col] += v
+
+    champions = {season for (season, _team) in _champion_team_seasons(playoff_rows)}
+    champion_of = {season.replace(" Playoffs", ""): team
+                   for (season, team) in _champion_team_seasons(playoff_rows)}
+
+    rows = []
+    for season in sorted({r["SEASON"] for r in reg_rows}):
+        runner = RUNNERS_UP.get(season, (None, None, None))
+        awards = history.get(season, {})
+
+        def first(key):
+            values = awards.get(key) or []
+            return values[0] if values else None
+
+        leaders = []
+        for _col, stat in HISTORY_LEADERS:
+            candidates = sorted((p, vals[stat]) for (s, p), vals in totals.items() if s == season)
+            best = max(candidates, key=lambda pv: pv[1], default=None)
+            leaders.append(f"{best[0]} ({csvio.format_field(best[1])})" if best else None)
+
+        season_ratings = [(team, off, dfn) for (team, s), (off, dfn) in ratings.items()
+                          if s == season]
+        rating_cells = []
+        for pick in (lambda t: t[1], lambda t: t[2], lambda t: t[1] + t[2]):
+            if season_ratings:
+                best = max(season_ratings, key=pick)
+                rating_cells.append(f"{best[0]} ({pick(best):+.2f})")
+            else:
+                rating_cells.append(None)
+
+        coty = COTY_NAMES.get(season)
+        rows.append([season, champion_of.get(season), *runner,
+                     first("MVP"), first("DPOY"), first("ROTY"), first("MIP"),
+                     next((t for (t, s) in FOTY if s == season), None),
+                     f"{coty[0]} ({coty[1]})" if coty else None,
+                     *leaders, *rating_cells])
+    return HISTORY_COLS, rows
+
+
+# --------------------------------------------------------------------------
+# Hall of Fame
+# --------------------------------------------------------------------------
+
+# What a Hall of Fame case is made of, and what each piece is worth. Weighted
+# game score carries the volume; the rest is what the league voted on.
+HOF_WEIGHTS = (("RINGS", 10), ("PLAYOFF_APPS", 1), ("MVP", 8), ("DPOY", 5),
+               ("ALLSTARS", 3), ("ALL_NBN_1", 4), ("ALL_NBN_2", 3), ("ALL_NBN_3", 2),
+               ("ALL_DEF", 2), ("SIX_MOY", 3), ("ROY", 3), ("MIP", 2))
+HOF_AWARD_KEYS = {"ALLSTARS": "All-Star", "ALL_NBN_1": "All-NBN-1", "ALL_NBN_2": "All-NBN-2",
+                  "ALL_NBN_3": "All-NBN-3", "MVP": "MVP", "DPOY": "DPOY",
+                  "ALL_DEF": "All-Defense", "SIX_MOY": "6MOY", "ROY": "ROTY", "MIP": "MIP"}
+HOF_COLS = ["PLAYER", "TEAMS", "HOF_POINTS", "RINGS", "PLAYOFF_APPS", "ALLSTARS",
+            "ALL_NBN_1", "ALL_NBN_2", "ALL_NBN_3", "MVP", "DPOY", "ALL_DEF",
+            "SIX_MOY", "ROY", "MIP", "G", "M", "P", "R", "A", "S", "B", "ACTIVE"]
+
+# A playoff game counts for more the deeper the round, and a short series
+# counts for more per game: 5.5 is the average length of a best-of-seven, so a
+# sweep's four games carry the weight of a full series.
+ROUND_MULTIPLIER = {"1": 2, "2": 4, "3": 8, "4": 16}
+AVERAGE_SERIES_GAMES = 5.5
+
+
+def hall_of_fame(data_dir: Path, reg_rows: list[dict], playoff_rows: list[dict],
+                 limit: int = 250):
+    """Career HOF scores: weighted game score, plus what the league voted on."""
+    history = json.loads((data_dir / "awards-history.json").read_text()) \
+        if (data_dir / "awards-history.json").exists() else {}
+    awards: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for _season, season_awards in history.items():
+        for col, key in HOF_AWARD_KEYS.items():
+            for player in season_awards.get(key) or []:
+                awards[player][col] += 1
+
+    all_rows = reg_rows + playoff_rows
+    # Series length, per team-season-round, so a sweep is not punished for it.
+    series_dates: dict[tuple[str, str, str], set[str]] = defaultdict(set)
+    for r in all_rows:
+        series_dates[(r["SEASON"], r["TEAM"], r.get("ROUND"))].add(r["DATE"])
+
+    totals: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    teams_of: dict[str, set[str]] = defaultdict(set)
+    for r in all_rows:
+        player = r["PLAYER"]
+        rnd = r.get("ROUND")
+        gametype_weight = ROUND_MULTIPLIER.get(str(rnd), 1)
+        length_weight = (1 if gametype_weight == 1
+                         else AVERAGE_SERIES_GAMES / len(series_dates[(r["SEASON"], r["TEAM"], rnd)]))
+        gmsc = game_score(r)
+        if gmsc is not None:
+            totals[player]["GMSC_WEIGHTED"] += (
+                gmsc * (1.25 if (r.get("WL") or "").strip() == "W" else 0.75)
+                * gametype_weight * length_weight)
+        totals[player]["G"] += 1
+        for col in ("M", "P", "R", "A", "S", "B"):
+            v = _stat(r, col)
+            if v is not None:
+                totals[player][col] += v
+
+    rings = _rings(playoff_rows)
+    apps: dict[str, set[str]] = defaultdict(set)
+    for r in playoff_rows:
+        apps[r["PLAYER"]].add(r["SEASON"])
+    for r in reg_rows:
+        teams_of[r["PLAYER"]].add(r["TEAM"])
+    latest = max((r["SEASON"] for r in reg_rows), default=None)
+    active = {r["PLAYER"] for r in reg_rows if r["SEASON"] == latest}
+    # NA, not 0, for a player with no regular-season games at all: R derives
+    # this from the regular-season frame, so a playoff-only player has nothing
+    # to be 0 about.
+    played_regular = {r["PLAYER"] for r in reg_rows}
+
+    rows = []
+    for player, stats in sorted(totals.items()):
+        counts = {"RINGS": rings.get(player, 0), "PLAYOFF_APPS": len(apps.get(player, ())),
+                  **{col: awards[player].get(col, 0) for col in HOF_AWARD_KEYS}}
+        points = r_round(stats["GMSC_WEIGHTED"] / 100
+                         + math.fsum(counts[col] * weight for col, weight in HOF_WEIGHTS), 1)
+        rows.append([player, ",".join(sorted(teams_of.get(player, ()))), points,
+                     *(counts[col] for col in HOF_COLS[3:15]),
+                     stats["G"], *(stats[c] for c in ("M", "P", "R", "A", "S", "B")),
+                     1 if player in active else (0 if player in played_regular else None)])
+    rows.sort(key=lambda r: -r[2])
+    return HOF_COLS, rows[:limit]

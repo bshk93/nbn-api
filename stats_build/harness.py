@@ -101,6 +101,20 @@ def rating_noise(column: str, a: str, b: str) -> bool:
     return abs(fa - fb) / max(abs(fa), abs(fb)) <= RATING_TOLERANCE
 
 
+# Whole files where R's output is wrong and the port's is right, so a
+# cell-by-cell comparison cannot even align. Each needs its own real check in
+# tests/test_stats_pipeline.py -- being listed here removes it from the gate,
+# so it must not be the only thing looking at the file.
+KNOWN_FIXED_FILES = {
+    "data/league-history.csv":
+        "R counts playoff wins over PLAYER rows instead of games, so any team "
+        "with about two playoff wins clears the 16-win champion test: 64 rows "
+        "for 6 seasons, 11 'champions' in 20-21 alone. season-summary already "
+        "works around it by deduplicating and taking the champion from the "
+        "bracket ('CSV join artifacts'). The port counts games; every other "
+        "cell matches R exactly, and the champion matches the finals winner.",
+}
+
 KNOWN_FIXES = {
     # R writes these names wrong, and the port deliberately does not.
     # job.R capitalises with tools::toTitleCase, a *book-title* function whose
@@ -313,6 +327,9 @@ class Comparison:
     # Files whose bytes differ ONLY by the readr rendering quirk. Reported, not
     # failed -- every number in them is the same number.
     quirk_only: list[FileDiff] = field(default_factory=list)
+    # Files listed in KNOWN_FIXED_FILES: R is wrong, the port is right, and the
+    # difference is too structural to compare cell by cell.
+    fixed_files: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -432,9 +449,11 @@ def compare(dir_a: Path, dir_b: Path, max_cells: int = 5,
         snap_b = {k: v for k, v in snap_b.items() if k in keep}
     only_a = sorted(set(snap_a) - set(snap_b))
     only_b = sorted(set(snap_b) - set(snap_a))
-    identical, differing, quirk_only = [], [], []
+    identical, differing, quirk_only, fixed_files = [], [], [], []
     for rel in sorted(set(snap_a) & set(snap_b)):
-        if snap_a[rel] == snap_b[rel]:
+        if rel in KNOWN_FIXED_FILES and snap_a[rel] != snap_b[rel]:
+            fixed_files.append(rel)
+        elif snap_a[rel] == snap_b[rel]:
             identical.append(rel)
         elif rel.endswith(".csv"):
             d = _diff_csv(dir_a / rel, dir_b / rel, rel, max_cells)
@@ -445,15 +464,17 @@ def compare(dir_a: Path, dir_b: Path, max_cells: int = 5,
                 differing.append(d)
         else:
             differing.append(FileDiff(path=rel, note="binary/non-CSV difference"))
-    return Comparison(only_a, only_b, identical, differing, quirk_only)
+    return Comparison(only_a, only_b, identical, differing, quirk_only, fixed_files)
 
 
 def render(cmp_: Comparison, label_a: str = "A", label_b: str = "B") -> str:
     lines: list[str] = []
     total = (len(cmp_.identical) + len(cmp_.differing) + len(cmp_.quirk_only)
-             + len(cmp_.only_in_a) + len(cmp_.only_in_b))
+             + len(cmp_.fixed_files) + len(cmp_.only_in_a) + len(cmp_.only_in_b))
     verdict = "IDENTICAL" if cmp_.ok else "DIFFERS"
     lines.append(f"{verdict}: {len(cmp_.identical)}/{total} files byte-identical  ({label_a} vs {label_b})")
+    for rel in cmp_.fixed_files:
+        lines.append(f"  {rel}: differs deliberately — {KNOWN_FIXED_FILES[rel].split('.')[0]}.")
     if cmp_.quirk_only:
         parts = []
         if cmp_.rendering_only_cells:
