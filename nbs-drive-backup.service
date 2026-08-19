@@ -1,0 +1,15 @@
+[Unit]
+Description=Weekly off-site tarball of the league data to Google Drive
+Documentation=file:///home/skim/projects/nbn-today/docs/dev-deploy-setup-spec.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=skim
+WorkingDirectory=/home/skim/projects/nbn-api
+EnvironmentFile=-/home/skim/projects/nbn-api/.env
+ExecStart=/home/skim/projects/nbn-api/venv/bin/python /home/skim/projects/nbn-api/backup_to_drive.py
+# A backup that stops leaving the box and says nothing is how you discover you
+# have no backup at the worst moment. A failed unit is visible in the journal.
+TimeoutStartSec=900

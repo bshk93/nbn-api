@@ -24,6 +24,7 @@ MODULES = ["test_stepien_rule", "test_picks_matching", "test_tpe_and_hardcap",
            "test_stats_harness", "test_stats_writer",
            "test_stats_pipeline",
            "test_allstats_guard", "test_stats_integrity",
+           "test_boxscore_provenance", "test_drive_backup",
            "test_data_paths"]
 
 

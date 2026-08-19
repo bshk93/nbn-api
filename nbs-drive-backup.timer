@@ -1,0 +1,10 @@
+[Unit]
+Description=Send a league data tarball off-site once a week
+
+[Timer]
+OnCalendar=Sun 04:00
+Persistent=true
+RandomizedDelaySec=15min
+
+[Install]
+WantedBy=timers.target

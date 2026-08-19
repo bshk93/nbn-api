@@ -356,6 +356,37 @@ here) **and** the unit exits non-zero, so a violation is visible in
 exists for this caller: the send worker is a daemon thread, so a one-shot script
 would otherwise exit between the enqueue and the send.
 
+**3. Per-game provenance — `routers/boxscore_provenance.py`.** One JSONL line
+per committed game (`boxscore-provenance-{season}.jsonl`), recording who
+committed it, who uploaded it, the score, and the file's row count after. It
+replaces the deleted screenshots as the answer to "where did this line come
+from, and who do I ask about it?" — kilobytes a season against ~1GB/year for the
+images. It is a **log, not state**: nothing reads it to make a decision, which is
+why every failure in it is swallowed rather than raised. A provenance write must
+never be why a real box score fails to commit.
+
+**4. Weekly off-site tarball — `backup_to_drive.py`** (`nbs-drive-backup.timer`,
+Sundays). Third tier, and the only one in a different failure domain from the
+other two (10-minute local git history; push to the private `bshk93/nbn-data`).
+The set is exactly what the snapshot repo tracks (`git ls-files`), so the two
+backups cannot describe different things — 214 files, 12.1MB gzipped.
+
+Credentials are the one exclusion and it is deliberately not all-or-nothing:
+`google-oauth.json` is dropped outright, while **`members.json` is redacted, not
+dropped** — tokens blanked, roles and tenures kept, because a token is one
+rotation to replace and a tenure history is irreplaceable. The tarball is
+re-opened and asserted before upload, so a shape change in `members.json` fails
+the run rather than silently shipping tokens. Uses the existing `drive.file`
+credential (it can only see files it created) and grants **no** permission —
+the opposite of the trade-sheet export, which shares publicly on purpose. Old
+backups are trashed, never deleted, only on this script's own name pattern.
+
+**Restoring** is documented, and was drilled on 2026-08-19: a bare clone of the
+backup rebuilt all 86 derived CSVs byte-identically to live. The procedure and
+its three gotchas (`chmod 600` after a clone, sessions/tokens deliberately
+absent, `owners.csv` regenerated) are in the spec under "Restoring from the
+backup".
+
 ## Stats aggregation (`stats_build/`)
 
 The Python replacement for the R build (`nbn-today/build/job.R`). Plan and full

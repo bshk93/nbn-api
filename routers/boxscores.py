@@ -19,6 +19,7 @@ from .constants import (
 )
 from .storage import read_csv, log_write, _current_season_str
 from .allstats_guard import write_allstats, AllstatsGuardError
+from .boxscore_provenance import record_commit
 from .auth import require_any_role
 from .players import load_player_bios
 from .bets import _award_submission_reward
@@ -466,6 +467,16 @@ def commit_boxscore(body: BoxscoreCommitRequest, info: dict = Depends(require_an
         logger.error("Refused box score write: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
     _remove_from_manual_queue(body.date, home_team, away_team)
+
+    # The screenshots are deleted once this returns, so this line is the only
+    # answer left to "where did this game come from?". Never raises.
+    record_commit(
+        season=body.season, date=body.date, game_type=body.game_type,
+        home_team=home_team, away_team=away_team,
+        home_pts=body.home_pts, away_pts=body.away_pts,
+        rows_added=len(new_rows), file_rows_after=len(existing) + len(new_rows),
+        filename=path.name, committed_by=info.get("name", "unknown"),
+    )
 
     if body.skip_reward:
         reward, new_bal = 0.0, 0.0
