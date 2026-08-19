@@ -43,6 +43,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
+from typing import Iterable
 from zoneinfo import ZoneInfo
 
 # The R build still lives in the site repo; the API already reaches across for
@@ -143,8 +144,8 @@ def run_r(out_dir: Path, args: BuildArgs, quiet: bool = True) -> float:
     return elapsed
 
 
-def run_python(out_dir: Path, args: BuildArgs, quiet: bool = True) -> float:
-    """Run the Python pipeline into `out_dir`. Returns wall-clock seconds.
+def run_python(out_dir: Path, args: BuildArgs, quiet: bool = True) -> tuple[float, list[str]]:
+    """Run the Python pipeline into `out_dir`. Returns (seconds, files written).
 
     Phase 2 fills this in one aggregation at a time; until then it is honest
     about not existing rather than writing an empty tree that would diff as
@@ -160,10 +161,10 @@ def run_python(out_dir: Path, args: BuildArgs, quiet: bool = True) -> float:
         ) from exc
     out_dir.mkdir(parents=True, exist_ok=True)
     start = time.monotonic()
-    pipeline.build(out_dir=out_dir, data_dir=DATA_DIR, args=args)
+    written = pipeline.build(out_dir=out_dir, data_dir=DATA_DIR, args=args)
     elapsed = time.monotonic() - start
     _write_manifest(out_dir, "python", args, elapsed)
-    return elapsed
+    return elapsed, list(written)
 
 
 def _write_manifest(out_dir: Path, engine: str, args: BuildArgs, elapsed: float) -> None:
@@ -324,9 +325,20 @@ def _diff_csv(path_a: Path, path_b: Path, rel: str, max_cells: int) -> FileDiff:
     return d
 
 
-def compare(dir_a: Path, dir_b: Path, max_cells: int = 5) -> Comparison:
-    """Byte-compare two output trees; explain the CSV differences it finds."""
+def compare(dir_a: Path, dir_b: Path, max_cells: int = 5,
+            only: Iterable[str] | None = None) -> Comparison:
+    """Byte-compare two output trees; explain the CSV differences it finds.
+
+    `only` restricts the comparison to the files the Python side has actually
+    ported. Mid-port that is the whole point — without it every run reports
+    80-odd missing files and the one result that matters is buried. It never
+    weakens a verdict: a file in `only` is still compared byte for byte.
+    """
     snap_a, snap_b = snapshot(dir_a), snapshot(dir_b)
+    if only is not None:
+        keep = set(only)
+        snap_a = {k: v for k, v in snap_a.items() if k in keep}
+        snap_b = {k: v for k, v in snap_b.items() if k in keep}
     only_a = sorted(set(snap_a) - set(snap_b))
     only_b = sorted(set(snap_b) - set(snap_a))
     identical, differing, quirk_only = [], [], []
@@ -411,8 +423,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.cmd in ("run-r", "run-py"):
         args = BuildArgs.resolve(a.season, a.through)
-        runner = run_r if a.cmd == "run-r" else run_python
-        secs = runner(a.out, args)
+        secs = run_r(a.out, args) if a.cmd == "run-r" else run_python(a.out, args)[0]
         print(f"{a.cmd}: {len(snapshot(a.out))} files in {secs:.1f}s -> {a.out}")
         return 0
 
@@ -432,9 +443,12 @@ def main(argv: list[str] | None = None) -> int:
     else:
         dr, dp = _default_out("r"), _default_out("py")
         print(f"R:      {run_r(dr, args):.1f}s")
-        print(f"Python: {run_python(dp, args):.1f}s")
-        cmp_ = compare(dr, dp, a.max_cells)
+        secs, written = run_python(dp, args)
+        print(f"Python: {secs:.1f}s  ({len(written)} file(s) ported)")
+        cmp_ = compare(dr, dp, a.max_cells, only=written)
         print(render(cmp_, "R", "python"))
+        remaining = len(snapshot(dr)) - len(written)
+        print(f"  {remaining} file(s) still R-only, not yet ported")
     return 0 if cmp_.ok else 1
 
 
