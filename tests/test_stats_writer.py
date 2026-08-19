@@ -18,6 +18,7 @@ import re
 import sys
 
 from stats_build.csvio import format_field, format_double, quote_field, render_csv
+from tests.r_oracle import r_snapshot
 
 FAILS = []
 
@@ -58,11 +59,14 @@ check("LF only, no CRLF", "\r" not in out)
 check("trailing newline", out.endswith("\n"))
 check("exact bytes", out == "A,B\n1,x\n2,NA\n")
 
-print("\nagainst the real build output")
-root = pathlib.Path("/var/lib/nothing-but-stats/derived")
-files = sorted(root.rglob("*.csv")) if root.is_dir() else []
+# Against R's corpus, not `derived/` -- since the cutover that directory holds
+# this writer's own output, and re-rendering it here would only prove the writer
+# agrees with itself. readr's quirks are only visible in bytes readr wrote.
+print("\nagainst the R build's output")
+root, why = r_snapshot("25-26")
+files = sorted(root.rglob("*.csv")) if root else []
 if not files:
-    print("  [skip] no derived/ on this box")
+    print(f"  [skip] {why}")
 else:
     NUM = re.compile(r"^-?\d+(\.\d+)?$")
     struct_bad, num_checked, num_bad = [], 0, []

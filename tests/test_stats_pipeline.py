@@ -14,6 +14,7 @@ import pathlib
 import sys
 
 from stats_build import pipeline
+from tests.r_oracle import r_snapshot
 
 FAILS = []
 
@@ -169,11 +170,14 @@ check("record counted from points, not a result column",
 check("the loser's mirror row is counted too",
       (byteam["TOR"]["W"], byteam["TOR"]["L"]) == (2, 0))
 
-print("\nagainst the live R output")
-derived = pathlib.Path("/var/lib/nothing-but-stats/derived")
+# `derived/` is the Python build's own output since the cutover, so the R
+# comparison below reads the harness's R snapshot instead -- comparing the port
+# against itself would pass while checking nothing.
+print("\nagainst the R build's output")
 data_dir = pathlib.Path("/var/lib/nothing-but-stats")
-if not (derived / "data/h2h-alltime.csv").exists():
-    print("  [skip] no derived/ on this box")
+derived, why = r_snapshot("25-26", data_dir)
+if derived is None:
+    print(f"  [skip] {why}")
 else:
     class _Args:
         season = "25-26"
