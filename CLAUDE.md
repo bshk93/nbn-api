@@ -302,32 +302,56 @@ returning 502 "credential was revoked", re-run the same script.
 Access tokens are cached in-process until ~60s before expiry; there is no
 persistent token store beyond the refresh token.
 
-## Stats aggregation port (`stats_build/`)
+## Stats aggregation (`stats_build/`)
 
-The R build (`nbn-today/build/job.R`, 1,289 lines) is being ported to Python
-here. Plan and phase state: `nbn-today/docs/stats-pipeline-port-spec.md`.
+The Python replacement for the R build (`nbn-today/build/job.R`). Plan and full
+detail: `nbn-today/docs/stats-pipeline-port-spec.md`.
 
-`stats_build/harness.py` is the gate, and it exists because byte-identical
-output is the port's **only** oracle — `build/smoke_test.py` asserts required
-columns and row-count floors and no values at all. It runs either engine into
-a scratch tree and diffs; a difference where both sides parse to the same
-number is labelled *formatting only* to shorten the fix but still fails. Fix
-the writer, never the comparison. `tests/test_stats_harness.py` (in
-`tests.run_all`) pins that specifically.
+**Status 2026-08-19: all 86 output files are ported and verified, and R is
+still what runs in production.** `build.sh` still calls `job.R`; nothing reads
+`stats_build.pipeline` yet. The cutover (spec Phase 3) is a separate, deliberate
+step — the API triggers Python, R stays dormant for one full season so
+playoffs, awards and rings each run once under the new code, then Phase 4
+deletes it.
 
+**The gate**, and it is the whole safety story — `build/smoke_test.py` asserts
+columns and row-count floors and *no values at all*, so byte-identical output
+against R is the only oracle:
+
+    python3 -m stats_build.harness port          # run both, diff every file
     python3 -m stats_build.harness determinism   # R twice, then diff
-    python3 -m stats_build.harness port          # R vs Python, then diff
+    python3 -m stats_build.harness diff A B
 
-It invokes `Rscript job.R` directly, **not** `build.sh` — build.sh also runs
-`sync_owners.py` and `link-public.sh`, both of which write into the live data
-directory. Keep it that way: the harness must stay read-only against
-`NBS_DATA_DIR`. Established 2026-08-19: the R build is deterministic (86/86
-byte-identical across two runs) and a harness run reproduces the live
-`derived/` tree exactly. `job.R` defaults `through` to `Sys.Date()`, so all
-three build arguments are pinned and recorded in a manifest beside the output.
+47 files come out byte-identical. Everything else is an **enumerated** accepted
+difference in `harness.py` — not a blanket tolerance, so a real bug cannot hide
+behind one:
 
-Phase 2 fills in `stats_build.pipeline.build(out_dir, data_dir, args)`, one
-aggregation at a time, R staying authoritative until each one matches.
+| Class | Cells | What it is |
+|---|---|---|
+| `same_double_rendered_differently` | 2 | readr prints a double one digit longer; same value |
+| `KNOWN_TIES` | 6 | R's long-double mean wins a `.xx5` tie; listed cell by cell |
+| `KNOWN_FIXES` | 10 | R writes `Barton, will` — its title-caser has a small-word list |
+| `RATING_COLUMNS` | 465 | the one tolerance: 1e-11, `OFF_RTG`/`DEF_RTG` only |
+| `KNOWN_FIXED_FILES` | 1 file | `league-history.csv` — R's version is broken |
+
+**`league-history.csv` is the one file the port deliberately does not
+reproduce.** R sums `WL == "W"` over *player* rows rather than games, so a team
+with about two playoff wins clears the 16-win champion test: 64 rows for 6
+seasons, eleven "champions" in 20-21. `season-summary` already works around it.
+Being in `KNOWN_FIXED_FILES` takes it out of the byte gate, so
+`tests/test_stats_pipeline.py` carries its real check — never let that be the
+only place a file is verified without a test standing in for the gate.
+
+**`stats_build/rmath.py` exists because R's arithmetic differs from Python's:**
+`round()` compares against the two representable doubles either side (so
+`round(0.05, 1)` is `0`, where Python gives `0.1`), and `mean()` makes a second
+compensating pass. Both were found as diffs, and both were verified against R
+directly.
+
+**stdlib only. Don't add pandas/numpy** — a dependency the service never
+imports at runtime, and numpy's float and NaN rendering would fight `csvio`,
+which reproduces `readr::write_csv` byte for byte (NA vs empty are different
+values; `-0` keeps its sign; a whole double loses its `.0`).
 
 ## Docs discipline
 
