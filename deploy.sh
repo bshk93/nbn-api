@@ -15,6 +15,16 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
+# Refuse to run from the dev checkout. This script is tracked, so it exists in
+# both, and `cd $(dirname $0)` means running it from -dev would pull into dev and then restart the LIVE service —
+# a deploy that touches neither the tree it pulled nor the tree that serves.
+LIVE="/home/skim/projects/nbn-api"
+if [ "$(pwd -P)" != "$LIVE" ]; then
+    echo "REFUSING: this is the deploy script for $LIVE, and you are in $(pwd -P)." >&2
+    echo "Edit here, push, then run $LIVE/deploy.sh." >&2
+    exit 1
+fi
+
 if ! git diff --quiet || ! git diff --cached --quiet; then
     echo "REFUSING TO DEPLOY: the live tree has uncommitted changes." >&2
     git status --short >&2
