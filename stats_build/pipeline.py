@@ -30,7 +30,37 @@ from typing import Any, Iterable
 from stats_build import csvio
 
 # Output files this module owns. Everything else is still R's.
-PORTED = ("data/h2h-alltime.csv", "data/h2h-playoffs.csv")
+STAT_FILES = {"p": "P", "r": "R", "a": "A", "s": "S", "b": "B", "3pm": "3PM"}
+
+PORTED = (
+    "data/h2h-alltime.csv",
+    "data/h2h-playoffs.csv",
+    *(f"data/totals-{k}.csv" for k in STAT_FILES),
+    *(f"data/game-highs-{k}.csv" for k in STAT_FILES),
+)
+
+# clean_allstats()'s spelling corrections, then job.R's fix_player_names().
+# Both run over the regular season and the playoffs. They are load-bearing:
+# career totals group by this string, so an unfixed alias splits a player's
+# career in two.
+PLAYER_FIXES = {
+    "KANTER, ENES": "FREEDOM, ENES",
+    "BAMBA, MO": "BAMBA, MOHAMED",
+    "CAREY JR., VERNON": "CAREY, VERNON",
+    "CHAMAGNIE, JUSTIN": "CHAMPAGNIE, JUSTIN",
+    "HAMMONDS, RAYSHON": "HAMMONDS, RAYSHAUN",
+    "MATTHEWS, WES": "MATTHEWS, WESLEY",
+    "O'NEALE, ROYCE": "ONEALE, ROYCE",
+    "PIPPEN, SCOTTIE": "PIPPEN, SCOTTY",
+    "ROBINSON, GLENNN": "ROBINSON, GLENN",
+    "WHITE, COLBY": "WHITE, COBY",
+    "BERTANS,DAVIS": "BERTANS, DAVIS",
+    "HIGHSMITH, HAYDEN": "HIGHSMITH, HAYWOOD",
+    "THOMAS, CAMERON": "THOMAS, CAM",
+    "REDDISH, CAMERON": "REDDISH, CAM",
+    "KILLIAN HAYES": "HAYES, KILLIAN",
+    "KOBE BROWN": "BROWN, KOBE",
+}
 
 _SEASON_IN_FILENAME = re.compile(r"\d{2}\.")
 
@@ -88,6 +118,90 @@ def load_game_rows(data_dir: Path, season: str, playoffs: bool = False) -> list[
             r["SEASON"] = file_season
             target.append(r)
     return rows + current
+
+
+def _stat(row: dict[str, str], col: str) -> float | None:
+    """One stat cell as a number, or None for blank/NA (R's `na.rm = TRUE`)."""
+    raw = (row.get(col) or "").strip()
+    if raw in ("", "NA"):
+        return None
+    return float(raw)
+
+
+def prepare(data_dir: Path, season: str) -> tuple[list[dict], list[dict]]:
+    """(regular season rows, playoff rows) with the fixes job.R applies.
+
+    clean_allstats ends in `arrange(PLAYER, DATE)`, and that ordering is not
+    cosmetic: it is the tie-break for every stable sort downstream, so it is
+    reproduced rather than skipped.
+    """
+    out = []
+    for playoffs in (False, True):
+        rows = load_game_rows(data_dir, season, playoffs=playoffs)
+        for r in rows:
+            r["PLAYER"] = PLAYER_FIXES.get(r["PLAYER"], r["PLAYER"])
+            r["gametype"] = "PLAYOFF" if playoffs else "REG"
+            if not playoffs:
+                r["ROUND"] = r["GAME"] = None
+        rows.sort(key=lambda r: (r["PLAYER"], r["DATE"]))
+        out.append(rows)
+    return out[0], out[1]
+
+
+# --------------------------------------------------------------------------
+# Career totals and single-game highs
+# --------------------------------------------------------------------------
+
+def career_totals(reg: list[dict], col: str, limit: int = 250):
+    """Top `limit` career totals for one stat. Regular season only, as in R.
+
+    Ties keep alphabetical player order: R sums inside `group_by(PLAYER)`,
+    which leaves the frame ordered by player, and `arrange(desc(...))` is a
+    stable sort over it.
+    """
+    totals: dict[str, float] = defaultdict(float)
+    for r in reg:
+        v = _stat(r, col)
+        if v is not None:
+            totals[r["PLAYER"]] += v
+    ranked = sorted(sorted(totals.items()), key=lambda kv: -kv[1])[:limit]
+    return (["RANK", "PLAYER", col],
+            [[i, player, value] for i, (player, value) in enumerate(ranked, 1)])
+
+
+GAME_HIGH_COLS = ["DATE", "SEASON", "PLAYER", "TEAM", "OPP", "gametype",
+                  "ROUND", "GAME", "P", "R", "A", "S", "B", "3PM"]
+
+
+def game_highs(all_rows: list[dict], col: str, limit: int = 50):
+    """Top `limit` single games for one stat, regular season and playoffs.
+
+    R sorts by `desc(stat), DATE` — the earlier game wins a tie, and beyond
+    that the frame's own order (regular season rows then playoff rows, each
+    by player then date) decides. A missing value sorts last, as R's `arrange`
+    places NA last even under `desc`.
+    """
+    def key(item):
+        _i, r = item
+        v = _stat(r, col)
+        return (v is None, -(v or 0.0), r["DATE"])
+
+    ranked = sorted(enumerate(all_rows), key=key)[:limit]
+    rows = []
+    for rank, (_i, r) in enumerate(ranked, 1):
+        rows.append([rank] + [r.get(c) if c in ("SEASON", "gametype") else _cell(r, c)
+                              for c in GAME_HIGH_COLS])
+    return ["RANK"] + GAME_HIGH_COLS, rows
+
+
+def _cell(row: dict, col: str):
+    """A game-high cell: numbers as numbers, text as text, blank as NA."""
+    if col in ("P", "R", "A", "S", "B", "3PM"):
+        return _stat(row, col)
+    v = row.get(col)
+    if v in ("", "NA"):
+        return None
+    return v
 
 
 # --------------------------------------------------------------------------
@@ -161,4 +275,10 @@ def build(out_dir: Path, data_dir: Path, args) -> list[str]:
                     *h2h_matrix(_game_level(reg) | _game_level(playoffs), teams))
     csvio.write_csv(out_dir / "data" / "h2h-playoffs.csv",
                     *h2h_matrix(_game_level(playoffs), teams))
+
+    reg_rows, playoff_rows = prepare(data_dir, args.season)
+    all_rows = reg_rows + playoff_rows
+    for suffix, col in STAT_FILES.items():
+        csvio.write_csv(out_dir / "data" / f"totals-{suffix}.csv", *career_totals(reg_rows, col))
+        csvio.write_csv(out_dir / "data" / f"game-highs-{suffix}.csv", *game_highs(all_rows, col))
     return list(PORTED)

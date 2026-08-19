@@ -54,6 +54,43 @@ check("the diagonal is EMPTY, not 0-0 — csvio keeps that distinct from NA",
 h2, m2 = pipeline.h2h_matrix(games, ["ATL", "BKN", "TOR"])
 check("a team with no meetings still gets a 0-0 cell", m2[0][2] == "0-0")
 
+print("\ncareer totals")
+reg = [
+    {"PLAYER": "WOOD, CHRISTIAN", "DATE": "2025-10-22", "P": "10"},
+    {"PLAYER": "OLADIPO, VICTOR", "DATE": "2025-10-22", "P": "10"},
+    {"PLAYER": "CURRY, STEPHEN", "DATE": "2025-10-22", "P": "40"},
+    {"PLAYER": "CURRY, STEPHEN", "DATE": "2025-10-24", "P": ""},
+]
+header, totals = pipeline.career_totals(reg, "P")
+check("header is RANK, PLAYER, stat", header == ["RANK", "PLAYER", "P"])
+check("leader first", totals[0][1] == "CURRY, STEPHEN")
+check("a blank stat is skipped, not zero-summed into a crash", totals[0][2] == 40)
+check("a tie keeps alphabetical player order (R groups by player, then stable-sorts)",
+      [r[1] for r in totals[1:]] == ["OLADIPO, VICTOR", "WOOD, CHRISTIAN"])
+check("ranks are 1..n", [r[0] for r in totals] == [1, 2, 3])
+check("the limit is applied", len(pipeline.career_totals(reg, "P", limit=1)[1]) == 1)
+
+print("\nsingle-game highs")
+games = [
+    {"DATE": "2026-01-02", "SEASON": "25-26", "PLAYER": "B", "TEAM": "ATL", "OPP": "@TOR",
+     "gametype": "REG", "ROUND": None, "GAME": None, "P": "50", "R": "1", "A": "1", "S": "1", "B": "1", "3PM": "1"},
+    {"DATE": "2026-01-01", "SEASON": "25-26", "PLAYER": "A", "TEAM": "TOR", "OPP": "ATL",
+     "gametype": "REG", "ROUND": None, "GAME": None, "P": "50", "R": "1", "A": "1", "S": "1", "B": "1", "3PM": "1"},
+    {"DATE": "2026-01-03", "SEASON": "25-26", "PLAYER": "C", "TEAM": "BKN", "OPP": "NYK",
+     "gametype": "REG", "ROUND": None, "GAME": None, "P": "", "R": "1", "A": "1", "S": "1", "B": "1", "3PM": "1"},
+]
+header, highs = pipeline.game_highs(games, "P")
+check("RANK leads, then the game's columns", header[:4] == ["RANK", "DATE", "SEASON", "PLAYER"])
+check("a tie goes to the EARLIER date", [r[1] for r in highs[:2]] == ["2026-01-01", "2026-01-02"])
+check("a missing stat sorts last, as R puts NA last even under desc()",
+      highs[-1][3] == "C")
+check("the away @ is kept here — game highs show it, unlike h2h", highs[1][5] == "@TOR")
+check("a regular-season row has no ROUND or GAME", highs[0][7] is None and highs[0][8] is None)
+
+print("\nplayer name fixes")
+check("an alias is corrected", pipeline.PLAYER_FIXES["KANTER, ENES"] == "FREEDOM, ENES")
+check("a FIRST LAST stray is reformatted", pipeline.PLAYER_FIXES["KOBE BROWN"] == "BROWN, KOBE")
+
 print("\nagainst the live R output")
 derived = pathlib.Path("/var/lib/nothing-but-stats/derived")
 data_dir = pathlib.Path("/var/lib/nothing-but-stats")
@@ -72,6 +109,15 @@ else:
         expected = list(csv.reader((derived / "data" / name).read_text().splitlines()))
         check(f"{name} header matches R", header == expected[0])
         check(f"{name} every cell matches R", [[str(c) for c in r] for r in matrix] == expected[1:])
+
+    from stats_build.csvio import render_csv
+    reg_rows, po_rows = pipeline.prepare(data_dir, _Args.season)
+    all_rows = reg_rows + po_rows
+    for suffix, col in pipeline.STAT_FILES.items():
+        for name, built in ((f"totals-{suffix}.csv", pipeline.career_totals(reg_rows, col)),
+                            (f"game-highs-{suffix}.csv", pipeline.game_highs(all_rows, col))):
+            check(f"{name} matches R byte for byte",
+                  render_csv(*built) == (derived / "data" / name).read_text())
 
 print()
 if FAILS:
