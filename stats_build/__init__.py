@@ -1,7 +1,10 @@
-"""Stats aggregation — the pipeline that replaces the R build.
+"""Stats aggregation — the build that replaced `nbn-today/build/job.R`.
 
-See `nbn-today/docs/stats-pipeline-port-spec.md`. Phase 1 (this) is the
-run-both-and-diff harness; the pipeline itself lands in Phase 2, one
-aggregation at a time, and each one flips only once its output matches the
-R build byte for byte.
+Live since the cutover on 2026-08-19 (port spec Phase 3). The entry point is
+`python3 -m stats_build`; `nbn-today/build/build.sh` runs it, and R survives
+only as the dormant rollback behind `NBN_STATS_ENGINE=r`.
+
+See `nbn-today/docs/stats-pipeline-port-spec.md`. `harness.py` still runs both
+engines and diffs every file byte for byte — that comparison is the only
+value-level oracle these 86 files have, and it goes when R does.
 """

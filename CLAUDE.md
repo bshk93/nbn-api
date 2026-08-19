@@ -427,19 +427,39 @@ backup".
 
 ## Stats aggregation (`stats_build/`)
 
-The Python replacement for the R build (`nbn-today/build/job.R`). Plan and full
-detail: `nbn-today/docs/stats-pipeline-port-spec.md`.
+The stats build. Replaced the R one (`nbn-today/build/job.R`) at the cutover on
+2026-08-19. Plan and full detail: `nbn-today/docs/stats-pipeline-port-spec.md`.
 
-**Status 2026-08-19: all 86 output files are ported and verified, and R is
-still what runs in production.** `build.sh` still calls `job.R`; nothing reads
-`stats_build.pipeline` yet. The cutover (spec Phase 3) is a separate, deliberate
-step — the API triggers Python, R stays dormant for one full season so
-playoffs, awards and rings each run once under the new code, then Phase 4
-deletes it.
+**This is what runs in production.** `nbn-today/build/build.sh` — still the
+entry point everything triggers — runs `python3 -m stats_build` out of *this*
+checkout. So **this repo deploys first**: a site deploy that lands ahead of an
+API one gives every build `No module named stats_build`.
+
+R is kept **dormant** for one full season (through the 26-27 playoffs), so
+playoffs, awards and rings each run once under Python before Phase 4 deletes
+it. `NBN_STATS_ENGINE=r bash build/build.sh` reaches it, on the same
+`link-public.sh` + `smoke_test.py` tail as the live path.
+
+| | |
+|---|---|
+| `__main__.py` | the entry point: `python3 -m stats_build`. Resolves the season, refuses to run without the raw box scores, writes 86 files into `NBN_OUT_DIR` |
+| `buildargs.py` | the season rule (Sep 30 cutoff, league time), in one place — the entry point and the harness both import it |
+| `pipeline.py` | every aggregation |
+| `csvio.py` | `readr::write_csv`, byte for byte |
+| `rmath.py` | R's `round()` and `mean()` |
+| `harness.py` | run both engines, diff every file |
+
+**One guard R did not have.** The entry point refuses to run when the season's
+`allstats-{season}.csv` is missing, rather than aggregating zero rows and
+writing 86 empty CSVs over 86 good ones. `derived/` is not backed up — the full
+recompute *is* its restore path — so a vacuous success is the expensive failure
+here, not a loud one.
 
 **The gate**, and it is the whole safety story — `build/smoke_test.py` asserts
 columns and row-count floors and *no values at all*, so byte-identical output
-against R is the only oracle:
+against R is the only oracle the derived files have. It dies with R at Phase 4;
+see the spec's open question, which needs answering before then rather than
+after:
 
     python3 -m stats_build.harness port          # run both, diff every file
     python3 -m stats_build.harness determinism   # R twice, then diff

@@ -16,10 +16,16 @@ Two rules this module exists to enforce, both from the spec:
   * **Port bug-for-bug.** A difference is a defect until proven to be an R
     formatting artifact, never an improvement smuggled into a port diff.
 
-Everything here is read-only against `NBS_DATA_DIR`: the R build is invoked
+Everything here is read-only against `NBS_DATA_DIR`: each engine is invoked
 directly (not through `build.sh`, which also runs `sync_owners.py` and
 `link-public.sh`, both of which write into the live data directory), with
 `NBN_OUT_DIR` pointed at a scratch tree.
+
+Python is the live engine since 2026-08-19; R is dormant. Everything below
+that describes R -- `run_r`, `KNOWN_FIXES`, `KNOWN_TIES`, `RATING_TOLERANCE`,
+`KNOWN_FIXED_FILES` -- is describing the thing being compared against, and
+becomes meaningless when R is deleted at Phase 4. `determinism` and `diff`
+remain useful against Python alone.
 
 CLI:
 
@@ -41,22 +47,21 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
-from zoneinfo import ZoneInfo
 
-# The R build still lives in the site repo; the API already reaches across for
-# it (`BUILD_SCRIPT` in routers/build.py). That path disappears at cutover.
-REPO_ROOT = Path(os.environ.get("NBN_SITE_REPO", "/home/skim/projects/nbn-today"))
-BUILD_DIR = Path(os.environ.get("NBN_BUILD_DIR", REPO_ROOT / "build"))
-DATA_DIR = Path(os.environ.get("NBS_DATA_DIR", "/var/lib/nothing-but-stats"))
+# A run's inputs, and where they come from. Shared with the production entry
+# point (`stats_build.__main__`) so the harness and a real build can never
+# resolve a different season for the same day.
+from stats_build.buildargs import (
+    BUILD_DIR, DATA_DIR, LEAGUE_TZ, REPO_ROOT,
+    BuildArgs, resolve_playoffs_from, resolve_season,
+)
 
 # Scratch output lives outside the data directory and off /tmp (a 1GB tmpfs
 # here, with a quota that has bitten before). Two full output trees are ~4MB.
 SCRATCH_ROOT = Path(os.environ.get("NBN_HARNESS_DIR", Path.home() / ".cache" / "nbn-stats-harness"))
-
-LEAGUE_TZ = ZoneInfo("America/New_York")
 
 MANIFEST_NAME = "_manifest.json"
 
@@ -139,59 +144,6 @@ KNOWN_TIES = {
     ("data/okc-players.csv", "RONDO, RAJON", "GMSC_AVG", "3.57", "3.58"),
     ("data/por-players.csv", "LOWRY, KYLE", "GMSC_AVG", "4.92", "4.93"),
 }
-
-
-# --------------------------------------------------------------------------
-# Build inputs: resolved once, recorded, and passed explicitly
-# --------------------------------------------------------------------------
-
-def resolve_season(today: date | None = None) -> str:
-    """Current season, mirroring build.sh's Sep 30 cutoff in league time.
-
-    Deliberately duplicated from build.sh rather than shelled out to: the
-    harness must be able to pin a season explicitly, and build.sh cannot run
-    without also writing to the live data directory. Both disappear into one
-    Python function at cutover.
-    """
-    today = today or datetime.now(LEAGUE_TZ).date()
-    if today.month <= 9:
-        y1, y2 = today.year - 1, today.year
-    else:
-        y1, y2 = today.year, today.year + 1
-    return f"{y1 % 100:02d}-{y2 % 100:02d}"
-
-
-def resolve_playoffs_from(season: str) -> str:
-    conf = BUILD_DIR / "seasons.conf"
-    if not conf.exists():
-        return ""
-    for line in conf.read_text().splitlines():
-        if line.startswith(f"{season}="):
-            return line.split("=", 1)[1].strip()
-    return ""
-
-
-@dataclass(frozen=True)
-class BuildArgs:
-    """The three arguments job.R takes, always stated rather than defaulted.
-
-    `through` matters: job.R defaults it to `Sys.Date()`, so an unpinned build
-    can produce different output on a different day. Two runs being compared
-    must agree on it, or the diff is measuring the calendar.
-    """
-
-    season: str
-    playoffs_from: str
-    through: str
-
-    @classmethod
-    def resolve(cls, season: str | None = None, through: str | None = None) -> "BuildArgs":
-        season = season or resolve_season()
-        return cls(
-            season=season,
-            playoffs_from=resolve_playoffs_from(season),
-            through=through or datetime.now(LEAGUE_TZ).date().isoformat(),
-        )
 
 
 # --------------------------------------------------------------------------
