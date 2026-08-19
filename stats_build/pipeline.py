@@ -22,6 +22,7 @@ idempotent and self-healing.
 from __future__ import annotations
 
 import csv
+import json
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -37,7 +38,29 @@ PORTED = (
     "data/h2h-playoffs.csv",
     *(f"data/totals-{k}.csv" for k in STAT_FILES),
     *(f"data/game-highs-{k}.csv" for k in STAT_FILES),
+    "players/player_awards.csv",
 )
+
+# awards-history.json's keys, and the label each one carries into the CSV, in
+# the order job.R binds them -- the file is not sorted, so this order IS the
+# output order.
+AWARD_LABELS = (
+    ("All-Star", "All-Star"),
+    ("MVP", "Most Valuable Player"),
+    ("DPOY", "Defensive Player of the Year"),
+    ("6MOY", "Sixth Man of the Year"),
+    ("ROTY", "Rookie of the Year"),
+    ("MIP", "Most Improved Player"),
+    ("All-NBN-1", "All-NBN First Team"),
+    ("All-NBN-2", "All-NBN Second Team"),
+    ("All-NBN-3", "All-NBN Third Team"),
+    ("All-Defense", "All-Defense"),
+    ("All-Rookie", "All-Rookie"),
+)
+
+# A playoff team with this many wins has won the title -- there is no bracket
+# record in the raw rows, so the count is the evidence.
+CHAMPION_WINS = 16
 
 # clean_allstats()'s spelling corrections, then job.R's fix_player_names().
 # Both run over the regular season and the playoffs. They are load-bearing:
@@ -257,6 +280,77 @@ def h2h_matrix(games: Iterable[tuple], teams: list[str]) -> tuple[list[str], lis
 
 
 # --------------------------------------------------------------------------
+# Player awards
+# --------------------------------------------------------------------------
+
+def title_case(name: str) -> str:
+    """`CURRY, STEPHEN` -> `Curry, Stephen`; capitalise each name part.
+
+    R does this with `tools::toTitleCase`, which is a *book-title* capitaliser
+    — hence its list of small words ("of", "the", "per", …) left lowercase.
+    That list is off-label here and latently wrong: a player first-named Per
+    would come out as `Smith, per`. It is deliberately not reproduced. Every
+    name in six seasons of league data capitalises identically either way,
+    which the byte-identical gate proves on every run.
+
+    What IS reproduced, because it is real and the gate caught it:
+
+        towns, karl-anthony      -> Towns, Karl-Anthony   (hyphens capitalise)
+        o'neale, royce           -> O'neale, Royce        (apostrophes do NOT)
+    """
+    return re.sub(r"(^|[ -])([a-z])", lambda m: m.group(1) + m.group(2).upper(), name.lower())
+
+
+def player_slug(name: str) -> str:
+    """`Curry, Stephen` -> `curry-stephen`."""
+    s = name.lower().replace(", ", "-").replace(" ", "-")
+    return re.sub(r"[^a-z0-9-]", "", s)
+
+
+def _champion_team_seasons(playoff_rows: list[dict]) -> set[tuple[str, str]]:
+    wins: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
+    for r in playoff_rows:
+        if (r.get("WL") or "").strip() in ("", "NA"):
+            continue
+        wins[(r["SEASON"], r["TEAM"])].add((r["DATE"], r["WL"]))
+    return {
+        key for key, games in wins.items()
+        if sum(1 for _date, wl in games if wl == "W") >= CHAMPION_WINS
+    }
+
+
+def player_awards(data_dir: Path, playoff_rows: list[dict]):
+    """One row per award per player per season, plus a Champion row each.
+
+    Unsorted by design: the award blocks come out in the order job.R binds
+    them, each in awards-history.json's own season and player order, with the
+    champions appended last in player order.
+    """
+    path = data_dir / "awards-history.json"
+    history = json.loads(path.read_text()) if path.exists() else {}
+
+    entries: list[tuple[str, str, str]] = []   # (player, season, award)
+    for key, label in AWARD_LABELS:
+        for season, awards in history.items():
+            for player in awards.get(key) or []:
+                entries.append((player, season, label))
+
+    champions = _champion_team_seasons(playoff_rows)
+    seen = set()
+    for r in playoff_rows:
+        pair = (r["PLAYER"], r["SEASON"])
+        if (r["SEASON"], r["TEAM"]) in champions and pair not in seen:
+            seen.add(pair)
+            entries.append((r["PLAYER"], r["SEASON"], "Champion"))
+
+    rows = []
+    for player, season, award in entries:
+        name = title_case(player)
+        rows.append([player_slug(name), name, season, award])
+    return ["SLUG", "PLAYER", "SEASON", "AWARD"], rows
+
+
+# --------------------------------------------------------------------------
 # Entry point — the contract the harness calls
 # --------------------------------------------------------------------------
 
@@ -281,4 +375,7 @@ def build(out_dir: Path, data_dir: Path, args) -> list[str]:
     for suffix, col in STAT_FILES.items():
         csvio.write_csv(out_dir / "data" / f"totals-{suffix}.csv", *career_totals(reg_rows, col))
         csvio.write_csv(out_dir / "data" / f"game-highs-{suffix}.csv", *game_highs(all_rows, col))
+
+    csvio.write_csv(out_dir / "players" / "player_awards.csv",
+                    *player_awards(data_dir, playoff_rows))
     return list(PORTED)

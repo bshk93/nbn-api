@@ -91,6 +91,30 @@ print("\nplayer name fixes")
 check("an alias is corrected", pipeline.PLAYER_FIXES["KANTER, ENES"] == "FREEDOM, ENES")
 check("a FIRST LAST stray is reformatted", pipeline.PLAYER_FIXES["KOBE BROWN"] == "BROWN, KOBE")
 
+print("\nplayer awards")
+check("name is title-cased", pipeline.title_case("CURRY, STEPHEN") == "Curry, Stephen")
+check("hyphen segments capitalize (the gate caught this one)",
+      pipeline.title_case("TOWNS, KARL-ANTHONY") == "Towns, Karl-Anthony")
+check("apostrophes do NOT — R leaves them", pipeline.title_case("O'NEALE, ROYCE") == "O'neale, Royce")
+check("every space-separated part capitalises", pipeline.title_case("DE LA CRUZ, JUAN") == "De La Cruz, Juan")
+check("no book-title small-word list: R would write 'Smith, per'",
+      pipeline.title_case("SMITH, PER") == "Smith, Per")
+check("slug drops punctuation", pipeline.player_slug("Towns, Karl-Anthony") == "towns-karl-anthony")
+check("slug of a suffix name", pipeline.player_slug("Smith Jr., Nolan") == "smith-jr-nolan")
+
+po = [
+    {"SEASON": "25-26 Playoffs", "TEAM": "ATL", "DATE": f"2026-05-{d:02d}", "WL": "W", "PLAYER": "A"}
+    for d in range(1, 17)
+] + [
+    {"SEASON": "25-26 Playoffs", "TEAM": "ATL", "DATE": "2026-05-01", "WL": "W", "PLAYER": "B"},
+    {"SEASON": "25-26 Playoffs", "TEAM": "BKN", "DATE": "2026-05-01", "WL": "L", "PLAYER": "C"},
+]
+champs = pipeline._champion_team_seasons(po)
+check("16 playoff wins is the title — there is no bracket in the raw rows",
+      champs == {("25-26 Playoffs", "ATL")})
+check("a team's own duplicate player rows don't inflate its win count",
+      pipeline._champion_team_seasons(po * 3) == champs)
+
 print("\nagainst the live R output")
 derived = pathlib.Path("/var/lib/nothing-but-stats/derived")
 data_dir = pathlib.Path("/var/lib/nothing-but-stats")
@@ -111,6 +135,9 @@ else:
         check(f"{name} every cell matches R", [[str(c) for c in r] for r in matrix] == expected[1:])
 
     from stats_build.csvio import render_csv
+    check("player_awards.csv matches R byte for byte",
+          render_csv(*pipeline.player_awards(data_dir, pipeline.prepare(data_dir, _Args.season)[1]))
+          == (derived / "players" / "player_awards.csv").read_text())
     reg_rows, po_rows = pipeline.prepare(data_dir, _Args.season)
     all_rows = reg_rows + po_rows
     for suffix, col in pipeline.STAT_FILES.items():
