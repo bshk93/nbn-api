@@ -17,7 +17,8 @@ from .constants import (
     DATA_DIR, PLAYER_BIOS_FILE, PENDING_BOXSCORES_DIR, MANUAL_QUEUE_FILE,
     BUILD_STATUS_FILE, BUILD_SCRIPT, VALID_TEAMS, _manual_queue_lock, logger,
 )
-from .storage import read_csv, write_csv, log_write, _current_season_str
+from .storage import read_csv, log_write, _current_season_str
+from .allstats_guard import write_allstats, AllstatsGuardError
 from .auth import require_any_role
 from .players import load_player_bios
 from .bets import _award_submission_reward
@@ -457,7 +458,13 @@ def commit_boxscore(body: BoxscoreCommitRequest, info: dict = Depends(require_an
             body.game_type, body.game_num, body.round_num, bios,
         ))
 
-    write_csv(path, expected_headers, existing + new_rows)
+    # Through the guard, never write_csv directly: this is the one write path to
+    # the files that cannot be rebuilt, and it must only ever append.
+    try:
+        write_allstats(path, expected_headers, existing + new_rows)
+    except AllstatsGuardError as exc:
+        logger.error("Refused box score write: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
     _remove_from_manual_queue(body.date, home_team, away_team)
 
     if body.skip_reward:

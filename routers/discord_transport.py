@@ -188,3 +188,24 @@ def send(channel: str, payload, *, max_burst: int, burst_window: int) -> bool:
             return False
     _enqueue({"channel": channel, "payload": payload})
     return True
+
+
+def flush(timeout: float = 30.0) -> bool:
+    """Block until the queue drains, for a caller that is about to exit.
+
+    The worker is a daemon thread, which is right for the API — a shutdown must
+    never wait on Discord — but wrong for a one-shot script (`check_stats_
+    integrity.py`), whose process would exit between the enqueue and the send,
+    dropping the message with no trace. Long-running callers never need this.
+
+    Returns True if the queue emptied within `timeout`. `queue.join()` has no
+    timeout of its own, and blocking forever on a wedged send would hang a timer
+    unit, so this polls instead.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _queue.unfinished_tasks == 0:
+            return True
+        time.sleep(0.1)
+    logger.warning("Discord flush timed out with %d message(s) still queued", _queue.qsize())
+    return False

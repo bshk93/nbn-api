@@ -23,6 +23,7 @@ MODULES = ["test_stepien_rule", "test_picks_matching", "test_tpe_and_hardcap",
            "test_inbox", "test_inbox_wiring", "test_cleanup",
            "test_stats_harness", "test_stats_writer",
            "test_stats_pipeline",
+           "test_allstats_guard", "test_stats_integrity",
            "test_data_paths"]
 
 

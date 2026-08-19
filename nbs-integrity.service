@@ -1,0 +1,15 @@
+[Unit]
+Description=Weekly integrity check on the raw box score CSVs
+Documentation=file:///home/skim/projects/nbn-today/docs/dev-deploy-setup-spec.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=skim
+WorkingDirectory=/home/skim/projects/nbn-api
+# DISCORD_BOT_TOKEN, DISCORD_ALERT_CHANNEL and DISCORD_ADMIN_ID come from here.
+# Without DISCORD_ALERT_CHANNEL the check still runs and still fails the unit on
+# a violation — the journal is the fallback alert.
+EnvironmentFile=-/home/skim/projects/nbn-api/.env
+ExecStart=/home/skim/projects/nbn-api/venv/bin/python /home/skim/projects/nbn-api/check_stats_integrity.py

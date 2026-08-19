@@ -302,6 +302,60 @@ returning 502 "credential was revoked", re-run the same script.
 Access tokens are cached in-process until ~60s before expiry; there is no
 persistent token store beyond the refresh token.
 
+## Protecting the raw box scores
+
+`allstats-{season}.csv` / `allstats-playoffs-{yy}.csv` in NBS_DATA_DIR are the
+one asset here that cannot be rebuilt — 157,430 rows over six seasons, entered
+by hand from screenshots the parser deletes after committing
+(`boxscores.py`'s `rmtree`, deliberate). Every derived CSV and every page on the
+site is a function of them. Two defences, from `nbn-today/docs/dev-deploy-setup-spec.md`
+Phase 2:
+
+**1. Append-only by contract — `routers/allstats_guard.py`.** There is exactly
+one code path that writes these files (`POST /api/boxscores/commit`), and it
+goes through `write_allstats`, never `write_csv`. It refuses three things, each
+a real failure mode rather than a hypothetical:
+
+| Refusal | The failure it prevents |
+|---|---|
+| Fewer rows than are on disk | truncation |
+| The rows on disk are not a prefix of the write | a rewrite of history dressed up as a write |
+| A column on disk is missing from the header list | `write_csv` uses `extrasaction="ignore"`, so it drops the column from every row silently |
+
+The third is not theoretical: **the older season files genuinely have different
+headers** — 20-21 through 23-24 have no `OPP_RAW`, several carry `SEASON`, and
+the blank column is `...27` rather than `' '`. Committing a game to an old
+season with `REG_ALLSTATS_HEADERS` would have erased a column across the whole
+file. Overriding is per-call (`allow_shrink=True`) or per-process
+(`NBN_ALLSTATS_ALLOW_SHRINK=1`), and logs at WARNING either way. Hand-editing
+the file is outside the guard by construction — it covers the code paths,
+which is where the accidents are.
+
+**2. Weekly integrity check — `check_stats_integrity.py`** (`nbs-integrity.timer`,
+Mondays). Row counts only ever go up; a **closed season never changes at all**,
+so its `sha256` must match forever. State is `stats-integrity.json` in the data
+dir, which the snapshot timer tracks, so the manifest's history is off-box
+beside the files it describes.
+
+Two things about it that are load-bearing:
+
+- **A violation is never written into the manifest.** The stored entry stays as
+  it was, so the next run compares against the last *good* state and alerts
+  again. Re-baselining on sight would report each corruption once and then treat
+  it as the new floor. `--accept` re-baselines deliberately, once a human has
+  resolved the finding.
+- **The newest season on disk is live alongside the current one.** The stats
+  clock rolls over July 1 (`_current_season_str`) but a playoff run can finish
+  after it — the 25-26 finals were 2026-06-18, and a slower postseason would
+  have landed in July against a clock already reading 26-27. Freezing last
+  season the moment the calendar turns would alert on a real game.
+
+Alerts go to `DISCORD_ALERT_CHANNEL` (inert if unset, like every other feed
+here) **and** the unit exits non-zero, so a violation is visible in
+`systemctl status` with no channel configured at all. `discord_transport.flush()`
+exists for this caller: the send worker is a daemon thread, so a one-shot script
+would otherwise exit between the enqueue and the send.
+
 ## Stats aggregation (`stats_build/`)
 
 The Python replacement for the R build (`nbn-today/build/job.R`). Plan and full
