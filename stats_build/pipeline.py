@@ -47,6 +47,7 @@ PORTED = (
     "data/franchise-records.csv",
     "nbntv-classics/playoff-classics.csv",
     "players/player_seasons.csv",
+    "players/player_seasons_playoffs.csv",
 )
 
 SEASON_SUMS = (("MIN", "M"), ("PTS", "P"), ("REB", "R"), ("AST", "A"), ("STL", "S"),
@@ -472,6 +473,9 @@ PLAYER_SEASON_COLS = (["PLAYER", "SEASON", "TEAM", "G"]
                       + list(BIO_COLS) + ["RINGS", "SLUG"])
 
 
+PLAYOFF_SEASON_COLS = [c for c in PLAYER_SEASON_COLS if c != "RINGS"]
+
+
 def _rings(playoff_rows: list[dict]) -> dict[str, int]:
     champions = _champion_team_seasons(playoff_rows)
     won: dict[str, set[str]] = defaultdict(set)
@@ -481,7 +485,7 @@ def _rings(playoff_rows: list[dict]) -> dict[str, int]:
     return {player: len(seasons) for player, seasons in won.items()}
 
 
-def player_seasons(rows: list[dict], data_dir: Path, playoff_rows: list[dict]):
+def player_seasons(rows: list[dict], data_dir: Path, playoff_rows: list[dict] | None = None):
     """One row per player per season per team, with a bio snapshot attached.
 
     A *full* join with the bios, so a drafted player who has never played gets
@@ -490,7 +494,11 @@ def player_seasons(rows: list[dict], data_dir: Path, playoff_rows: list[dict]):
     bio is missing entirely, so stats are never dropped for want of a bio.
     """
     bios = load_bios(data_dir)
-    rings = _rings(playoff_rows)
+    # RINGS and the bio-only rows belong to the regular-season file only. The
+    # playoff file is a left join with no ring column: a player who never made
+    # the playoffs simply isn't in it, so there is nothing to pad.
+    regular = playoff_rows is not None
+    rings = _rings(playoff_rows) if regular else {}
 
     grouped: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
     for r in rows:
@@ -507,26 +515,28 @@ def player_seasons(rows: list[dict], data_dir: Path, playoff_rows: list[dict]):
             return max(vals) if vals else None
         gmsc = [v for g in games if (v := game_score(g)) is not None]
         bio = bios.get(player, {})
-        out.append([player, season, team, len(games)]
-                   + [total(src) for _c, src in SEASON_SUMS]
-                   + [high(src) for _c, src in SEASON_HIGHS]
-                   + [max(gmsc) if gmsc else None]
-                   + [total(src) for _c, src in SEASON_TAIL_SUMS]
-                   + [math.fsum(gmsc), max(g["DATE"] for g in games)]
-                   + [bio.get(c) for c in BIO_COLS]
-                   + [rings.get(player, 0), None])
+        row = ([player, season, team, len(games)]
+               + [total(src) for _c, src in SEASON_SUMS]
+               + [high(src) for _c, src in SEASON_HIGHS]
+               + [max(gmsc) if gmsc else None]
+               + [total(src) for _c, src in SEASON_TAIL_SUMS]
+               + [math.fsum(gmsc), max(g["DATE"] for g in games)]
+               + [bio.get(c) for c in BIO_COLS])
+        out.append(row + ([rings.get(player, 0), None] if regular else [None]))
 
-    # Full join: bios with no stat line at all, kept only if they were drafted.
-    for name, bio in bios.items():
-        if name not in seen_players and bio.get("NBN_DFT_YR") is not None:
-            out.append([name] + [None] * (len(PLAYER_SEASON_COLS) - len(BIO_COLS) - 3)
-                       + [bio.get(c) for c in BIO_COLS] + [rings.get(name, 0), None])
+    cols = PLAYER_SEASON_COLS if regular else PLAYOFF_SEASON_COLS
+    if regular:
+        # Full join: bios with no stat line at all, kept only if they were drafted.
+        for name, bio in bios.items():
+            if name not in seen_players and bio.get("NBN_DFT_YR") is not None:
+                out.append([name] + [None] * (len(cols) - len(BIO_COLS) - 3)
+                           + [bio.get(c) for c in BIO_COLS] + [rings.get(name, 0), None])
 
     for row in out:
         row[0] = title_case(row[0])
         row[-1] = player_slug(row[0])
     out.sort(key=lambda r: (r[0], r[1] is None, r[1] or "", r[26] is None, r[26] or ""))
-    return PLAYER_SEASON_COLS, out
+    return cols, out
 
 
 # --------------------------------------------------------------------------
@@ -638,4 +648,6 @@ def build(out_dir: Path, data_dir: Path, args) -> list[str]:
                     *playoff_classics(playoff_rows))
     csvio.write_csv(out_dir / "players" / "player_seasons.csv",
                     *player_seasons(reg_rows, data_dir, playoff_rows))
+    csvio.write_csv(out_dir / "players" / "player_seasons_playoffs.csv",
+                    *player_seasons(playoff_rows, data_dir))
     return list(PORTED)
