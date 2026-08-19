@@ -1,0 +1,40 @@
+# Pinned from the live venv (python 3.14.4) on 2026-08-19, so a dev checkout
+# can rebuild the same environment:
+#
+#     python3 -m venv venv && venv/bin/pip install -r requirements.txt
+#
+# Exact pins on purpose — this file exists to make two environments match,
+# not to express a supported range. Regenerate with venv/bin/pip freeze.
+
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anthropic==0.104.1
+anyio==4.13.0
+certifi==2026.5.20
+cffi==2.0.0
+click==8.4.0
+distro==1.9.0
+docstring_parser==0.18.0
+fastapi==0.136.1
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.15
+iniconfig==2.3.0
+jiter==0.15.0
+packaging==26.3
+pillow==12.2.0
+pluggy==1.6.0
+ptyprocess==0.7.0
+pycparser==3.0
+pydantic==2.13.4
+pydantic_core==2.46.4
+Pygments==2.20.0
+PyNaCl==1.6.2
+pytest==9.1.1
+python-multipart==0.0.29
+sniffio==1.3.1
+starlette==1.0.0
+typing-inspection==0.4.2
+typing_extensions==4.15.0
+uvicorn==0.47.0
