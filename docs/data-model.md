@@ -100,17 +100,22 @@ One file per team: `atl-roster.csv`, `bkn-roster.csv`, … `was-roster.csv`.
 | `TEAM` | Description shown on team page | `Own`, `from NYK`, `SAC/DAL` |
 | `TYPE` | Direction | `own` or `acquired` |
 
-`draft-picks.csv` is the master picks file used by the draft board. It has additional columns:
+`draft-picks.csv` is the permanent picks store (`PICKS_FILE`), seeded into the
+conveyance registry. **It is not what the draft board reads** — that page, and
+every other consumer reasoning about ownership, goes through `GET /api/picks`,
+which resolves the conveyance tree. Its columns:
 
 | Column | Description |
 |---|---|
-| `ORIG` | Origin team abbreviation (uppercase) |
-| `OWNER` | Current owner abbreviation |
+| `ORIG` | Origin team abbreviation (uppercase) — immutable identity, *not* a current party |
+| `OWNER` | Flat single-team owner. **Legacy and lossy**: it cannot express a protection band, a swap, or an A→B→C chain, and collapses to one team when the real answer is several. Read `leaves` off `GET /api/picks` instead |
 | `PICK` | Pick number (or blank if TBD) |
 | `PLAYER` | Slug of player who was drafted (blank until used) |
 | `PROTECTED` | Top-N protection number, or blank |
-| `SWAP_OWNER` | For swap picks: the other team |
+| `SWAP_OWNER` | For swap picks: the other team (same single-value limitation as `OWNER`) |
 | `NOTES` | Free-text notes |
+| `FROZEN` | Manual freeze flag — blocks the pick from being traded |
+| `FROZEN_REASON` | Free-text reason shown beside the freeze |
 
 ---
 
