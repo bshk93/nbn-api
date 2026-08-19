@@ -44,7 +44,21 @@ PORTED = (
     *(f"data/{t.lower()}-players.csv" for t in (
         "ATL BKN BOS CHA CHI CLE DAL DEN DET GSW HOU IND LAC LAL MEM MIA MIL "
         "MIN NOP NYK OKC ORL PHI PHX POR SAC SAS TOR UTA WAS").split()),
+    "data/franchise-records.csv",
+    "nbntv-classics/playoff-classics.csv",
+    "players/player_seasons.csv",
 )
+
+SEASON_SUMS = (("MIN", "M"), ("PTS", "P"), ("REB", "R"), ("AST", "A"), ("STL", "S"),
+               ("BLK", "B"), ("TOV", "TO"), ("PF", "PF"), ("FGM", "FGM"), ("FGA", "FGA"))
+SEASON_HIGHS = (("HIGH_P", "P"), ("HIGH_R", "R"), ("HIGH_A", "A"), ("HIGH_S", "S"),
+                ("HIGH_B", "B"), ("HIGH_3PM", "3PM"))
+SEASON_TAIL_SUMS = (("3PM", "3PM"), ("3PA", "3PA"), ("FTM", "FTM"), ("FTA", "FTA"))
+BIO_COLS = ("PHOTO_URL", "DOB", "COLLEGE", "COUNTRY", "NBN_DFT_YR", "NBN_DFT_R", "NBN_DFT_P")
+
+# Franchise record book: five deep, per team, per stat. Sorted by STAT as a
+# STRING in the output, so "3PM" leads — digits sort before letters.
+FRANCHISE_STATS = ("P", "R", "A", "S", "B", "3PM", "GMSC")
 
 # awards-history.json's keys, and the label each one carries into the CSV, in
 # the order job.R binds them -- the file is not sorted, so this order IS the
@@ -354,6 +368,168 @@ def team_players(reg: list[dict], team: str, limit: int = 100):
 
 
 # --------------------------------------------------------------------------
+# Franchise records and playoff classics
+# --------------------------------------------------------------------------
+
+FRANCHISE_COLS = ["TEAM", "STAT", "RANK", "VALUE", "PLAYER", "SLUG", "DATE",
+                  "SEASON", "OPP", "gametype"]
+
+
+def franchise_records(all_rows: list[dict], limit: int = 5):
+    """Every franchise's own top five single games, per stat.
+
+    League-wide `game-highs-*` only ever shows the same handful of superstars,
+    so a team without one never appears in it; this gives all 30 a record book.
+    """
+    rows = []
+    for col in FRANCHISE_STATS:
+        by_team: dict[str, list[tuple[float, dict]]] = defaultdict(list)
+        for r in all_rows:
+            v = game_score(r) if col == "GMSC" else _stat(r, col)
+            if v is not None:
+                by_team[r["TEAM"]].append((v, r))
+        for team, entries in by_team.items():
+            best = sorted(enumerate(entries), key=lambda e: (-e[1][0], e[1][1]["DATE"]))[:limit]
+            for rank, (_i, (value, r)) in enumerate(best, 1):
+                rows.append([team, col, rank, value, r["PLAYER"],
+                             player_slug(r["PLAYER"]), r["DATE"], r["SEASON"],
+                             r["OPP"], r["gametype"]])
+    rows.sort(key=lambda r: (r[0], r[1], r[2]))
+    return FRANCHISE_COLS, rows
+
+
+CLASSICS_COLS = ["RANK", "SEASON", "DATE", "PLAYER", "TEAM", "OPP", "ROUND", "GAME",
+                 "P", "R", "A", "S", "B", "3PM", "FGM", "FGA", "GMSC"]
+
+
+def playoff_classics(playoff_rows: list[dict], limit: int = 10):
+    """The best individual playoff performances, wins only, by game score.
+
+    Wins only is R's filter and it is a judgement about what a "classic" is,
+    not a data cleanup: a 60-point loss doesn't make the reel.
+    """
+    stats = ("P", "R", "A", "S", "B", "3PM", "FGM", "FGA")
+    grouped: dict[tuple, dict] = {}
+    for r in playoff_rows:
+        if (r.get("WL") or "").strip() != "W":
+            continue
+        key = (r["PLAYER"], r["SEASON"], r["DATE"], r["TEAM"], r["OPP"], r["ROUND"], r["GAME"])
+        agg = grouped.setdefault(key, {c: 0.0 for c in (*stats, "GMSC")})
+        for c in stats:
+            agg[c] += _stat(r, c) or 0.0
+        agg["GMSC"] += game_score(r) or 0.0
+
+    ordered = sorted(sorted(grouped.items()), key=lambda kv: -kv[1]["GMSC"])[:limit]
+    rows = []
+    for rank, (key, agg) in enumerate(ordered, 1):
+        player, season, date, team, opp, rnd, game = key
+        rows.append([rank, season, date, title_case(player), team,
+                     (opp or "").replace("@", ""), rnd, game,
+                     *(agg[c] for c in stats[:6]), agg["FGM"], agg["FGA"], agg["GMSC"]])
+    return CLASSICS_COLS, rows
+
+
+# --------------------------------------------------------------------------
+# Player seasons
+# --------------------------------------------------------------------------
+
+def load_bios(data_dir: Path) -> dict[str, dict]:
+    """player-bios.json keyed by UPPERCASE name, which is the join key.
+
+    The name is the join, not the slug: the box scores carry no slug, so a
+    bio only meets its stat lines through `LAST, FIRST`. First bio wins on a
+    duplicate name, as R's `distinct(NAME_KEY, .keep_all = TRUE)` does.
+    """
+    path = data_dir / "player-bios.json"
+    bios: dict[str, dict] = {}
+    if not path.exists():
+        return bios
+    for bio in json.loads(path.read_text()).values():
+        key = (bio.get("name") or "").upper()
+        if not key or key in bios:
+            continue
+        def _int(v):
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return None
+        bios[key] = {
+            "PHOTO_URL": bio.get("photo_url") or "",
+            "DOB": bio.get("dob"),
+            "COLLEGE": bio.get("college") or "",
+            "COUNTRY": bio.get("country") or "",
+            "NBN_DFT_YR": _int(bio.get("draft_year")),
+            "NBN_DFT_R": _int(bio.get("draft_round")),
+            "NBN_DFT_P": _int(bio.get("draft_pick")),
+        }
+    return bios
+
+
+PLAYER_SEASON_COLS = (["PLAYER", "SEASON", "TEAM", "G"]
+                      + [c for c, _ in SEASON_SUMS]
+                      + [c for c, _ in SEASON_HIGHS] + ["HIGH_GMSC"]
+                      + [c for c, _ in SEASON_TAIL_SUMS] + ["GMSC", "LAST_DATE"]
+                      + list(BIO_COLS) + ["RINGS", "SLUG"])
+
+
+def _rings(playoff_rows: list[dict]) -> dict[str, int]:
+    champions = _champion_team_seasons(playoff_rows)
+    won: dict[str, set[str]] = defaultdict(set)
+    for r in playoff_rows:
+        if (r["SEASON"], r["TEAM"]) in champions:
+            won[r["PLAYER"]].add(r["SEASON"])
+    return {player: len(seasons) for player, seasons in won.items()}
+
+
+def player_seasons(rows: list[dict], data_dir: Path, playoff_rows: list[dict]):
+    """One row per player per season per team, with a bio snapshot attached.
+
+    A *full* join with the bios, so a drafted player who has never played gets
+    a row of NAs — that is how `/players` lists this year's draft class before
+    anyone has taken the floor. The other side of the join keeps a player whose
+    bio is missing entirely, so stats are never dropped for want of a bio.
+    """
+    bios = load_bios(data_dir)
+    rings = _rings(playoff_rows)
+
+    grouped: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
+    for r in rows:
+        grouped[(r["PLAYER"], r["SEASON"], r["TEAM"])].append(r)
+
+    out = []
+    seen_players = set()
+    for (player, season, team), games in grouped.items():
+        seen_players.add(player)
+        def total(col):
+            return math.fsum(v for g in games if (v := _stat(g, col)) is not None)
+        def high(col):
+            vals = [v for g in games if (v := _stat(g, col)) is not None]
+            return max(vals) if vals else None
+        gmsc = [v for g in games if (v := game_score(g)) is not None]
+        bio = bios.get(player, {})
+        out.append([player, season, team, len(games)]
+                   + [total(src) for _c, src in SEASON_SUMS]
+                   + [high(src) for _c, src in SEASON_HIGHS]
+                   + [max(gmsc) if gmsc else None]
+                   + [total(src) for _c, src in SEASON_TAIL_SUMS]
+                   + [math.fsum(gmsc), max(g["DATE"] for g in games)]
+                   + [bio.get(c) for c in BIO_COLS]
+                   + [rings.get(player, 0), None])
+
+    # Full join: bios with no stat line at all, kept only if they were drafted.
+    for name, bio in bios.items():
+        if name not in seen_players and bio.get("NBN_DFT_YR") is not None:
+            out.append([name] + [None] * (len(PLAYER_SEASON_COLS) - len(BIO_COLS) - 3)
+                       + [bio.get(c) for c in BIO_COLS] + [rings.get(name, 0), None])
+
+    for row in out:
+        row[0] = title_case(row[0])
+        row[-1] = player_slug(row[0])
+    out.sort(key=lambda r: (r[0], r[1] is None, r[1] or "", r[26] is None, r[26] or ""))
+    return PLAYER_SEASON_COLS, out
+
+
+# --------------------------------------------------------------------------
 # Player awards
 # --------------------------------------------------------------------------
 
@@ -456,4 +632,10 @@ def build(out_dir: Path, data_dir: Path, args) -> list[str]:
     for team in teams:
         csvio.write_csv(out_dir / "data" / f"{team.lower()}-players.csv",
                         *team_players(reg_rows, team))
+
+    csvio.write_csv(out_dir / "data" / "franchise-records.csv", *franchise_records(all_rows))
+    csvio.write_csv(out_dir / "nbntv-classics" / "playoff-classics.csv",
+                    *playoff_classics(playoff_rows))
+    csvio.write_csv(out_dir / "players" / "player_seasons.csv",
+                    *player_seasons(reg_rows, data_dir, playoff_rows))
     return list(PORTED)

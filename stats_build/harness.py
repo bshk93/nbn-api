@@ -70,6 +70,22 @@ MANIFEST_NAME = "_manifest.json"
 # values are fine") would swallow a genuine off-by-one bug; this cannot, and
 # any seventh case, or any of these six moving, fails the gate and gets looked
 # at by a person.
+KNOWN_FIXES = {
+    # R writes these names wrong, and the port deliberately does not.
+    # job.R capitalises with tools::toTitleCase, a *book-title* function whose
+    # small-word list ("of", "the", "will", "so", …) is meant for prose. Three
+    # real players are first-named Will, so the live site currently shows
+    # "Barton, will". The port capitalises every name part instead.
+    # Slugs are unaffected -- they lowercase anyway -- so nothing that links by
+    # slug changes. Delete this block when R goes; then it is simply correct.
+    ("players/player_seasons.csv", "PLAYER", "Barton, will", "Barton, Will"),
+    ("players/player_seasons.csv", "PLAYER", "Richard, will", "Richard, Will"),
+    ("players/player_seasons.csv", "PLAYER", "Riley, will", "Riley, Will"),
+    ("players/player_seasons_playoffs.csv", "PLAYER", "Barton, will", "Barton, Will"),
+    ("players/player_seasons_playoffs.csv", "PLAYER", "Richard, will", "Richard, Will"),
+    ("players/player_seasons_playoffs.csv", "PLAYER", "Riley, will", "Riley, Will"),
+}
+
 KNOWN_TIES = {
     ("data/cle-players.csv", "CHRISTOPHER, JOSH", "GMSC_AVG", "1.28", "1.27"),
     ("data/cle-players.csv", "REDDISH, CAM", "GMSC_AVG", "0.58", "0.57"),
@@ -238,6 +254,7 @@ class FileDiff:
     cells_total: int = 0
     rendering_only: int = 0   # same double, readr printed it longer (see above)
     known_ties: int = 0       # listed in KNOWN_TIES: R's mean won a .xx5 tie
+    known_fixes: int = 0      # listed in KNOWN_FIXES: R is wrong, we are not
     note: str = ""
 
     @property
@@ -272,6 +289,10 @@ class Comparison:
     @property
     def known_tie_cells(self) -> int:
         return sum(d.known_ties for d in self.differing + self.quirk_only)
+
+    @property
+    def known_fix_cells(self) -> int:
+        return sum(d.known_fixes for d in self.differing + self.quirk_only)
 
     @property
     def rendering_only_cells(self) -> int:
@@ -346,6 +367,9 @@ def _diff_csv(path_a: Path, path_b: Path, rel: str, max_cells: int) -> FileDiff:
             if (rel, ra[0], col_name, va, vb) in KNOWN_TIES:
                 d.known_ties += 1
                 continue
+            if (rel, col_name, va, vb) in KNOWN_FIXES:
+                d.known_fixes += 1
+                continue
             d.cells_total += 1
             if len(d.cells) < max_cells:
                 col = head_a[j] if j < len(head_a) else f"col{j}"
@@ -375,7 +399,7 @@ def compare(dir_a: Path, dir_b: Path, max_cells: int = 5,
             identical.append(rel)
         elif rel.endswith(".csv"):
             d = _diff_csv(dir_a / rel, dir_b / rel, rel, max_cells)
-            if d.cells_total == 0 and (d.rendering_only or d.known_ties) and not d.note:
+            if d.cells_total == 0 and (d.rendering_only or d.known_ties or d.known_fixes) and not d.note:
                 quirk_only.append(d)
             else:
                 differing.append(d)
@@ -396,6 +420,8 @@ def render(cmp_: Comparison, label_a: str = "A", label_b: str = "B") -> str:
             parts.append(f"{cmp_.rendering_only_cells} readr rendering")
         if cmp_.known_tie_cells:
             parts.append(f"{cmp_.known_tie_cells} listed .xx5 tie")
+        if cmp_.known_fix_cells:
+            parts.append(f"{cmp_.known_fix_cells} listed fix to an R bug")
         lines.append(
             f"  {len(cmp_.quirk_only)} file(s) differ only by accepted cells "
             f"({', '.join(parts)}): " + ", ".join(d.path for d in cmp_.quirk_only)
