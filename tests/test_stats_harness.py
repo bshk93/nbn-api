@@ -92,6 +92,22 @@ check("fails", not c.ok)
 check("missing file named", c.only_in_a == ["players/player_seasons.csv"])
 check("extra file named", c.only_in_b == ["data/extra.csv"])
 
+print("\nreadr's double-rendering quirk — the one accepted difference")
+RTG = {"data/atl-seasons.csv": "SEASON,OFF_RTG\n25-26,1.684188779377917\n"}
+c = pair({"data/atl-seasons.csv": "SEASON,OFF_RTG\n25-26,1.6841887793779169\n"}, RTG)
+check("same double printed longer is not a defect", c.ok)
+check("but it IS reported, never silent", c.rendering_only_cells == 1 and len(c.quirk_only) == 1)
+check("render names the file and the count", "readr's double rendering" in harness.render(c))
+
+c = pair({"data/atl-seasons.csv": "SEASON,OFF_RTG\n25-26,1.684188779377918\n"}, RTG)
+check("a DIFFERENT double at the same precision still fails", not c.ok)
+
+c = pair({"data/x.csv": "A\n0.50\n"}, {"data/x.csv": "A\n0.5\n"})
+check("0.5 vs 0.50 still fails — that is a writer bug, not the quirk", not c.ok)
+
+c = pair({"data/x.csv": "A\n2790.0\n"}, {"data/x.csv": "A\n2790\n"})
+check("2790 vs 2790.0 still fails for the same reason", not c.ok)
+
 print("\nthe run manifest")
 c = pair({**BASE, harness.MANIFEST_NAME: '{"engine": "python"}'},
          {**BASE, harness.MANIFEST_NAME: '{"engine": "R"}'})

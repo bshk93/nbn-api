@@ -216,6 +216,7 @@ class FileDiff:
     rows_b: int = 0
     cells: list[CellDiff] = field(default_factory=list)
     cells_total: int = 0
+    rendering_only: int = 0   # same double, readr printed it longer (see above)
     note: str = ""
 
     @property
@@ -239,10 +240,19 @@ class Comparison:
     only_in_b: list[str]
     identical: list[str]
     differing: list[FileDiff]
+    # Files whose bytes differ ONLY by the readr rendering quirk. Reported, not
+    # failed -- every number in them is the same number.
+    quirk_only: list[FileDiff] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
         return not (self.only_in_a or self.only_in_b or self.differing)
+
+    @property
+    def rendering_only_cells(self) -> int:
+        return sum(d.rendering_only for d in self.differing) + sum(
+            d.rendering_only for d in self.quirk_only
+        )
 
 
 def _numeric_equal(a: str, b: str) -> bool:
@@ -250,6 +260,35 @@ def _numeric_equal(a: str, b: str) -> bool:
         return float(a) == float(b)
     except (TypeError, ValueError):
         return False
+
+
+def _significant_digits(text: str) -> int:
+    return len(text.lstrip("-").replace(".", "").lstrip("0"))
+
+
+def same_double_rendered_differently(a: str, b: str) -> bool:
+    """The one accepted difference: readr's digit generator, not a wrong number.
+
+    `readr`/vroom 1.6.5 does not always produce the shortest round-trip form --
+    measured, 244 of 150,000 doubles written from R carry one extra significant
+    digit (e.g. `1.6841887793779169` where the shortest form is
+    `1.684188779377917`). Both parse to the *same* IEEE double, so no computed
+    value differs; only the text does.
+
+    This is deliberately **not** a numeric tolerance. The test is exact double
+    equality, so any actually-wrong number is a different double and still
+    fails. It is further narrowed to full-precision renderings (>= 15
+    significant digits), which is the only place the quirk can occur -- so a
+    rounded column printed as `0.50` against R's `0.5` is still a writer bug
+    and still fails, as it should.
+
+    Scope, re-measured on every run by `tests/test_stats_writer.py`: exactly
+    one value, in `OFF_RTG`, in two files. If that count moves, this stops
+    being a known quirk and the writer needs the real Grisu2 algorithm.
+    """
+    if not _numeric_equal(a, b):
+        return False
+    return _significant_digits(a) >= 15 and _significant_digits(b) >= 15
 
 
 def _diff_csv(path_a: Path, path_b: Path, rel: str, max_cells: int) -> FileDiff:
@@ -275,6 +314,9 @@ def _diff_csv(path_a: Path, path_b: Path, rel: str, max_cells: int) -> FileDiff:
             vb = rb[j] if j < len(rb) else "<missing>"
             if va == vb:
                 continue
+            if same_double_rendered_differently(va, vb):
+                d.rendering_only += 1
+                continue
             d.cells_total += 1
             if len(d.cells) < max_cells:
                 col = head_a[j] if j < len(head_a) else f"col{j}"
@@ -287,22 +329,33 @@ def compare(dir_a: Path, dir_b: Path, max_cells: int = 5) -> Comparison:
     snap_a, snap_b = snapshot(dir_a), snapshot(dir_b)
     only_a = sorted(set(snap_a) - set(snap_b))
     only_b = sorted(set(snap_b) - set(snap_a))
-    identical, differing = [], []
+    identical, differing, quirk_only = [], [], []
     for rel in sorted(set(snap_a) & set(snap_b)):
         if snap_a[rel] == snap_b[rel]:
             identical.append(rel)
         elif rel.endswith(".csv"):
-            differing.append(_diff_csv(dir_a / rel, dir_b / rel, rel, max_cells))
+            d = _diff_csv(dir_a / rel, dir_b / rel, rel, max_cells)
+            if d.cells_total == 0 and d.rendering_only and not d.note:
+                quirk_only.append(d)
+            else:
+                differing.append(d)
         else:
             differing.append(FileDiff(path=rel, note="binary/non-CSV difference"))
-    return Comparison(only_a, only_b, identical, differing)
+    return Comparison(only_a, only_b, identical, differing, quirk_only)
 
 
 def render(cmp_: Comparison, label_a: str = "A", label_b: str = "B") -> str:
     lines: list[str] = []
-    total = len(cmp_.identical) + len(cmp_.differing) + len(cmp_.only_in_a) + len(cmp_.only_in_b)
+    total = (len(cmp_.identical) + len(cmp_.differing) + len(cmp_.quirk_only)
+             + len(cmp_.only_in_a) + len(cmp_.only_in_b))
     verdict = "IDENTICAL" if cmp_.ok else "DIFFERS"
     lines.append(f"{verdict}: {len(cmp_.identical)}/{total} files byte-identical  ({label_a} vs {label_b})")
+    if cmp_.quirk_only:
+        lines.append(
+            f"  {len(cmp_.quirk_only)} file(s) differ only by readr's double rendering "
+            f"({cmp_.rendering_only_cells} cell(s), same value, longer text): "
+            + ", ".join(d.path for d in cmp_.quirk_only)
+        )
     for rel in cmp_.only_in_a:
         lines.append(f"  only in {label_a}: {rel}")
     for rel in cmp_.only_in_b:
