@@ -2782,6 +2782,25 @@ def _check_bird_rights_declaration(player: str, team: str, declared: Optional[st
     if not declared and not bird_funded:
         return None
     check_name = "bird_rights_tenure"
+
+    # An unrecognised tier is refused here rather than indexed into
+    # _BIRD_TIER_RANK below, where it used to raise a bare KeyError and turn
+    # the whole request into a 500 (`bird_rights_type` is an unconstrained
+    # Optional[str] on four different request models, and is also read back off
+    # stored FA offers, so no amount of model-level typing covers every path).
+    # Refusing beats defaulting: silently treating an unknown string as "no
+    # declaration" would let a typo skip the over-declaration check entirely,
+    # which is the one thing this function exists to catch.
+    if declared and declared not in _BIRD_TIER_RANK:
+        return CheckResult(
+            check=check_name, passed=False, level="error",
+            message=(
+                f"Unrecognised Bird tier {declared!r}. § 3.8 tiers are "
+                f"{', '.join(sorted(_BIRD_TIER_RANK))} — Full Bird is QVFA (3+ seasons), "
+                f"Early Bird is EQVFA (2), otherwise Non-QVFA."
+            ),
+        )
+
     t = _bird_tenure(player, team, season, bios.get(player, {}) or {})
 
     # Bird Rights re-sign a team's OWN free agent (§ 3.8). If the ledger

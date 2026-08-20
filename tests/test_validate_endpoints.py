@@ -134,6 +134,22 @@ def draft_rights_subject():
     return None
 
 
+def bird_tenure_subject():
+    """A rostered player whose § 3.8 tenure resolves to a real tier — the only
+    shape that reaches the declared-vs-derived comparison. Every earlier return
+    in `_check_bird_rights_declaration` fires when the tier is None, so a
+    fixture picked without this check tests the guard vacuously (it did: the
+    500 this pins reproduced only against a player with derivable tenure)."""
+    bios = tx.load_player_bios()
+    team_map = tx._build_team_map()
+    season = tx._current_league_year()
+    for slug, team in sorted(team_map.items()):
+        t = tx._bird_tenure(slug, team, season, bios.get(slug, {}) or {})
+        if t.get("tier") is not None:
+            return slug, team
+    return None
+
+
 def two_way_subject():
     """A player currently on a two-way contract, plus their team — the only
     shape `/api/validate/convert_twoway` can resolve."""
@@ -150,7 +166,8 @@ def main():
     rfa = rfa_subject()
     rights = draft_rights_subject()
     twoway = two_way_subject()
-    print(f"subjects: rostered={rostered} hold={hold} rfa={rfa}")
+    bird = bird_tenure_subject()
+    print(f"subjects: rostered={rostered} hold={hold} rfa={rfa} bird={bird}")
     print(f"          draft rights={rights[:2] if rights else None} "
           f"scale={'yes' if rights and rights[2] else 'no'} two-way={twoway}")
     if not rostered:
@@ -268,6 +285,33 @@ def main():
          "assets": [{"type": "pick", "year": 2030, "round": 1, "orig": team}]}]})
     check(f"a pick-only trade is still evaluated (got {r.status_code})",
           r.status_code == 200 and is_result_shape(r.json()))
+
+    # ── a bad enum-ish value is a verdict, not a traceback ───────────────────
+    # `bird_rights_type` is an unconstrained Optional[str], so an unrecognised
+    # tier reaches _check_bird_rights_declaration and used to index
+    # _BIRD_TIER_RANK directly -> bare KeyError -> 500 on a public endpoint.
+    print("\nAn unrecognised bird_rights_type is refused, not a 500")
+    bird_slug, bird_team = bird if bird else (slug, team)
+    if not bird:
+        print("  [skip] no player with derivable § 3.8 tenure — guard untested")
+    for bad in ("full_bird", "Full Bird", "qvfa", ""):
+        r = post("/api/validate/sign",
+                 {"player": bird_slug, "team": bird_team, "contract": contract,
+                  "signing_method": "bird_rights", "bird_rights_type": bad})
+        ok = r.status_code == 200 and is_result_shape(r.json())
+        check(f"bird_rights_type={bad!r} -> {r.status_code} (not 5xx)", ok)
+        if ok and bad:
+            names = [c["check"] for c in r.json()["checks"] if not c["passed"]]
+            check(f"  and {bad!r} is reported as a failed bird_rights_tenure check",
+                  "bird_rights_tenure" in names)
+
+    # The real tiers still validate — the guard must not swallow them.
+    for good in sorted(tx._BIRD_TIER_RANK):
+        r = post("/api/validate/sign",
+                 {"player": bird_slug, "team": bird_team, "contract": contract,
+                  "signing_method": "bird_rights", "bird_rights_type": good})
+        check(f"bird_rights_type={good!r} is still evaluated (got {r.status_code})",
+              r.status_code == 200 and is_result_shape(r.json()))
 
     # ── malformed bodies are 422, not 500 ────────────────────────────────────
     print("\nMalformed bodies are rejected by the model, not by a traceback")
