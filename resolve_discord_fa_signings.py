@@ -306,9 +306,19 @@ def _season_from_date(date_str: str) -> str:
 
 # A signing clause can name more than one player: "sign Reggie Perry and
 # Immanuel Quickley", "sign Killian Tillie and Josh Hall to rookie scale
-# deals", "signing Jordan Nwora (pick 48) and Markus Howard(pick 51)".
+# deals", "signing Jordan Nwora (pick 48) and Markus Howard(pick 51)", or --
+# once TEAM_OPTION_LIST_RE started feeding this the same way -- a 3+-name
+# Oxford-comma list: "Scoot Henderson, Reed Shepard, and Stephon Castle".
+# The comma is optional only immediately before "and"/"&" (the last-item
+# join); every earlier item in a 3+ list is separated by a *bare* comma with
+# no "and" of its own, which the old pattern (comma only ever paired with
+# "and"/"&") never split on -- "A, B, and C" came out as ["A, B", "C"], the
+# first two names glued into one unresolvable raw_player. Splitting on a
+# bare comma too fixes that; the optional "and\s+" after a comma still
+# swallows the Oxford-comma case's dangling "and" rather than leaving it
+# glued to the next name.
 _PAREN_ASIDE_RE = re.compile(r"\([^)]*\)")
-_PLAYER_SPLIT_RE = re.compile(r"\s*(?:,\s*)?(?:\band\b|&)\s*", re.I)
+_PLAYER_SPLIT_RE = re.compile(r"\s*,\s*(?:and\s+)?|\s+(?:and|&)\s+", re.I)
 
 
 def _split_players(raw: str) -> list[str]:

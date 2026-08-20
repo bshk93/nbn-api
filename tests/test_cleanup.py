@@ -6,7 +6,9 @@ discord_fa gap type. Pins the properties that matter most:
   * **The submitter gets paid, never the approving admin** — cleanup.py bypasses
     players.py's PUT handler entirely so its own NB¥10 auto-reward can't fire
     and mis-credit whoever's token approved the submission.
-  * **Self-approval is blocked** even for admin.
+  * **Self-approval is allowed** (since 2026-08-20 — was blocked before that,
+    which deadlocked the real single-admin deployment: every submission by
+    the one admin had no possible reviewer).
   * **Competing submissions are allowed**; approving one supersedes the rest
     for the same gap (bio field, or Discord candidate) rather than rejecting them.
   * **A race against another write path** (the field got filled some other
