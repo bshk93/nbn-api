@@ -172,11 +172,16 @@ check("a second submitter can compete for the same gap", sub2["status"] == "pend
 gaps_after = {(g["slug"], g["field"]) for g in cu.get_gaps() if g["gap_type"] == "bio_field"}
 check("a field with a pending submission drops out of the gap list", ("test-player-one", "college") not in gaps_after)
 
-# ── self-approval blocked ────────────────────────────────────────────────────
+# ── self-approval allowed ─────────────────────────────────────────────────────
+# Was blocked 2026-08-16–2026-08-20: with a single admin who is also the
+# primary submitter, the block deadlocked every one of their own submissions
+# with no possible reviewer. See the spec's decision table for the reversal.
 print("\nself-approval")
 admin_sub = cu.create_submission(cu.SubmissionCreate(slug="test-player-one", field="photo_url", value="https://example.com/p.jpg"), ADMIN)
-raises("admin cannot approve their own submission", 403,
-       lambda: cu.approve_submission(admin_sub["id"], ADMIN))
+self_approved = cu.approve_submission(admin_sub["id"], ADMIN)
+check("admin can approve their own submission", self_approved["status"] == "approved")
+check("reviewer stamped as the same admin", self_approved["reviewed_by"] == "root")
+check("bio actually written on self-approval", saved_bios_calls[-1]["test-player-one"]["photo_url"] == "https://example.com/p.jpg")
 
 # ── approval: writes the field, credits the submitter, supersedes the rest ──
 print("\napproval")

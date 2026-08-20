@@ -371,8 +371,6 @@ def approve_submission(sub_id: int, info: dict = Depends(require_admin)):
         sub = store["items"][idx]
         if sub["status"] != "pending":
             raise HTTPException(status_code=409, detail=f"Submission is already {sub['status']}")
-        if sub["submitted_by"] == info["name"]:
-            raise HTTPException(status_code=403, detail="Cannot approve your own submission")
 
         if sub["gap_type"] == "discord_fa":
             row = _find_discord_fa_candidate(sub["discord_id"], sub["candidate_index"])
