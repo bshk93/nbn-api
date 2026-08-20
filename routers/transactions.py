@@ -1830,12 +1830,21 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
     cur_season = _season_for_date(txn_date)
     _validation_bios = load_player_bios()
     _cap_levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
-    outgoing_sal, incoming_sal, out_players_map, _ = _trade_flows(details, _validation_bios, cur_season)
+    outgoing_sal, incoming_sal, out_players_map, in_players_map = _trade_flows(details, _validation_bios, cur_season)
+    # § 4.2 minimum contract exception — mirrors _validate_trade's
+    # matching_incoming dict so the contagion this actually sets in
+    # team-state can never drift from what the validator judged legal.
+    matching_incoming_sal = dict(incoming_sal)
+    for _team, _slugs in in_players_map.items():
+        for _slug in _slugs:
+            if _is_exempt_minimum_contract(_slug, cur_season, _validation_bios):
+                _sal = _parse_dollar((_validation_bios.get(_slug, {}).get("salaries") or {}).get(cur_season, ""))
+                matching_incoming_sal[_team] = matching_incoming_sal.get(_team, 0) - _sal
     contagion_teams = []
     for aggr_team, slugs in out_players_map.items():
-        if len(slugs) < 2 or incoming_sal.get(aggr_team, 0) <= 0:
+        if len(slugs) < 2 or matching_incoming_sal.get(aggr_team, 0) <= 0:
             continue
-        inc = incoming_sal[aggr_team]
+        inc = matching_incoming_sal[aggr_team]
         team_current = _compute_team_salary(aggr_team, _validation_bios, cur_season)
         team_current_ex_holds = _compute_team_salary_ex_holds(aggr_team, _validation_bios, cur_season)
         needs_aggregation = any(
@@ -1880,18 +1889,22 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
     apron1_contagion_teams = []
     if apron1 is not None:
         exception_teams = {t.upper() for t in (details.exceptions or {})} | {t.upper() for t in (details.tpe_usage or {})}
-        for team, inc in incoming_sal.items():
+        for team, match_inc in matching_incoming_sal.items():
             if team in exception_teams:
                 continue
             out = outgoing_sal.get(team, 0)
-            if inc <= out + 250_000:
+            if match_inc <= out + 250_000:
                 continue
             # Rosters were already written above, so this figure is post-trade;
             # § 4.3 keys on where the team stood *before* it ("a team currently
-            # below the First Apron"). Back the trade out to recover that.
+            # below the First Apron"). Back the trade out to recover that —
+            # using the real incoming salary, not the matching-adjusted
+            # figure above: the reconstruction has to match what actually
+            # landed on the team's books.
             # Without this, the team the rule most targets — one that starts
             # below the apron and vaults over it by taking on salary — reads as
             # already-above and escapes the contagion lock entirely.
+            inc = incoming_sal.get(team, 0)
             post = _compute_team_salary_ex_holds(team, _validation_bios, cur_season)
             if post + out - inc < apron1:
                 post_with_holds = _compute_team_salary(team, _validation_bios, cur_season)
@@ -4948,6 +4961,27 @@ def _validate_guarantee(details: GuaranteeDetails, ctx: dict) -> list[CheckResul
     return []
 
 
+def _is_exempt_minimum_contract(slug: str, season: str, bios: dict) -> bool:
+    """§ 4.2: a player on a minimum contract of 2 seasons or fewer doesn't
+    count as incoming salary for trade matching purposes. A minimum contract
+    of more than 2 seasons does count.
+
+    Derived from the player's own `contracts` ledger entry (signing_method +
+    the count of salaried years on that specific deal) rather than a stored
+    tag, so it can never drift from the deal that was actually signed — the
+    same "denormalized copy" trap this repo already got burned by once (the
+    old roster-CSV OVR column, never kept in sync and always empty). Only
+    available for players signed through this system — a historical/
+    backfilled deal has no `contracts` entry, so it's conservatively treated
+    as non-exempt (no regression from before this existed).
+    """
+    for entry in (bios.get(slug, {}).get("contracts") or []):
+        salaries = entry.get("salaries") or {}
+        if season in salaries and entry.get("signing_method") == "minimum":
+            return len(salaries) <= 2
+    return False
+
+
 def _trade_flows(details, bios: dict, season: str) -> tuple[dict, dict, dict, dict]:
     """Per-team salary and player-slug flows for a trade.
 
@@ -5244,12 +5278,33 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
                                   f"not the full new salary ${new_sal:,}."),
                     ))
 
+    # ── Minimum contract exception (§ 4.2) ──────────────────────────────────────
+    # A player on a minimum contract of 2 seasons or fewer doesn't count as
+    # incoming salary for matching purposes — real cap/hard-cap accounting
+    # below (the `inc` used for the hard-cap delta) still uses the true
+    # salary, since that's what actually lands on the acquiring team's books.
+    # Kept as a separate dict, same pattern as `matching_outgoing` (BYC)
+    # above, so the two uses never get conflated.
+    matching_incoming = dict(incoming)
+    for team, slugs in in_players.items():
+        for slug in slugs:
+            if _is_exempt_minimum_contract(slug, season, bios):
+                sal = _parse_dollar((bios.get(slug, {}).get("salaries") or {}).get(season, ""))
+                if sal:
+                    matching_incoming[team] = matching_incoming.get(team, 0) - sal
+                    checks.append(CheckResult(
+                        check=f"min_contract_exempt_{slug}", passed=True,
+                        message=(f"{team}: {slug}'s minimum contract (≤ 2 seasons) doesn't count "
+                                 f"as incoming salary for matching purposes (§ 4.2) — ${sal:,} excluded."),
+                    ))
+
     # ── Salary matching (§ 4.2 / § 4.3) + hard cap ─────────────────────────────
     charge_decisive: dict[str, bool] = {}
     for team in teams:
         out = outgoing.get(team, 0)
         match_out = matching_outgoing.get(team, 0)
         inc = incoming.get(team, 0)
+        match_inc = matching_incoming.get(team, 0)
         current = _compute_team_salary(team, bios, season)
         current_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
         delta = inc - out
@@ -5297,12 +5352,12 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
                               "in the same trade (§ 4.1a)."),
                 ))
             elif tpe_id:
-                checks.append(_check_tpe_absorption(team, inc, out, tpe_id,
+                checks.append(_check_tpe_absorption(team, match_inc, out, tpe_id,
                                                     ctx.get("trade_exceptions", {}), season))
             else:
                 sm = None
                 absorbed, matched_inc, split_err = _exception_absorption_split(
-                    details, team, inc, in_players, bios, season)
+                    details, team, match_inc, in_players, bios, season)
                 if split_err:
                     checks.append(CheckResult(
                         check=f"salary_matching_{team.lower()}", passed=False,
@@ -5326,12 +5381,12 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
                                  f"${match_out:,} (§ 4.2/4.3); ${absorbed:,} absorbed separately."),
                     ))
                 else:
-                    sm = _check_salary_matching(team, match_out, inc, current, ctx["cap_levels"], season,
+                    sm = _check_salary_matching(team, match_out, match_inc, current, ctx["cap_levels"], season,
                                                  exception_type=exc_type, team_state=ctx.get("team_state"),
                                                  team_salary_ex_holds_before=current_ex_holds, bios=bios)
                     checks.append(sm or CheckResult(
                         check=f"salary_matching_{team.lower()}", passed=True,
-                        message=f"{team}: incoming ${inc:,} matches outgoing ${match_out:,} (§ 4.2/4.3).",
+                        message=f"{team}: incoming ${match_inc:,} matches outgoing ${match_out:,} (§ 4.2/4.3).",
                     ))
 
                 # § 4.3 contagion (below First Apron, any trade — not just
@@ -5348,13 +5403,13 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
                 if not exc_type and not split_err and (sm is None or sm.passed):
                     apron1 = ctx["cap_levels"].get(season, {}).get("apron1")
                     cap = ctx["cap_levels"].get(season, {}).get("cap")
-                    if (apron1 is not None and current_ex_holds < apron1 and inc > match_out + 250_000
-                            and not _cap_room_absorbed(current, match_out, inc, cap)):
-                        over = inc - match_out - 250_000
+                    if (apron1 is not None and current_ex_holds < apron1 and match_inc > match_out + 250_000
+                            and not _cap_room_absorbed(current, match_out, match_inc, cap)):
+                        over = match_inc - match_out - 250_000
                         checks.append(CheckResult(
                             check=f"apron1_contagion_{team.lower()}", passed=False, level="warning",
                             message=(f"{team} is below the First Apron (${current_ex_holds:,} < ${apron1:,}) "
-                                     f"but incoming ${inc:,} exceeds outgoing + $250K "
+                                     f"but incoming ${match_inc:,} exceeds outgoing + $250K "
                                      f"(${match_out + 250_000:,}) by ${over:,} — legal under standard tiered "
                                      "matching (§ 4.2), but triggers a First Apron hard cap for the rest of "
                                      "the season (§ 1.4, § 4.3 contagion) once submitted."),
@@ -5373,14 +5428,14 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
         # legal now but triggers a Second Apron hard cap for the rest of the
         # season (§ 1.4, § 4.4 contagion) — flagged as a warning here.
         out_slugs = out_players.get(team, [])
-        if inc > 0 and len(out_slugs) >= 2:
+        if match_inc > 0 and len(out_slugs) >= 2:
             leg_salaries = {
                 slug: _parse_dollar((bios.get(slug, {}).get("salaries") or {}).get(season, ""))
                 for slug in out_slugs
             }
             failing = sorted(
                 slug for slug, sal in leg_salaries.items()
-                if (lc := _check_salary_matching(team, sal, inc, current, ctx["cap_levels"], season,
+                if (lc := _check_salary_matching(team, sal, match_inc, current, ctx["cap_levels"], season,
                                                   team_state=ctx.get("team_state"),
                                                   team_salary_ex_holds_before=current_ex_holds)) is not None
                 and not lc.passed
@@ -5392,14 +5447,14 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
                 checks.append(CheckResult(
                     check=f"apron2_aggregation_{team.lower()}", passed=False, level="error",
                     message=(f"{team} is at/above the 2nd apron (${current_ex_holds:,} ≥ ${apron2:,}) and is "
-                             f"aggregating {len(out_slugs)} outgoing salaries to match ${inc:,} incoming "
+                             f"aggregating {len(out_slugs)} outgoing salaries to match ${match_inc:,} incoming "
                              f"(§ 4.4) — combining salaries is prohibited above the 2nd apron, and "
                              f"{', '.join(failing)} would not independently clear the match."),
                 ))
             elif failing:
                 checks.append(CheckResult(
                     check=f"apron2_aggregation_{team.lower()}", passed=False, level="warning",
-                    message=(f"{team} is aggregating {len(out_slugs)} outgoing salaries to match ${inc:,} "
+                    message=(f"{team} is aggregating {len(out_slugs)} outgoing salaries to match ${match_inc:,} "
                              "incoming — legal below the 2nd apron, but triggers a Second Apron hard cap "
                              "for the rest of the season (§ 1.4, § 4.4 contagion) once submitted."),
                 ))
