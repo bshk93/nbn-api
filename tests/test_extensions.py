@@ -142,6 +142,20 @@ def main():
     c = named(checks, "extension_eligibility")
     check("5-year deal, Year 4 of 5 -> accepted", c and c.passed)
 
+    print("\ntrade_floor basis must warn-and-allow, never confirm ineligibility "
+          "(regression: Tyler Herro + 31 others read as ineligible off a 2-year "
+          "floor whose real start was invisible, caught 2026-08-21)")
+    # A trade with no earlier record on file: the ledger can see the player
+    # arriving in 24-25, but the real tenure could easily predate that — the
+    # acquiring team inherits accrual the ledger never recorded, same as § 3.8.
+    bio, cur = deal("24-25", "25-26", "26-27")  # reads as a 2-year deal, already ended
+    checks, _ = extend(bio, {"type": "player", "salaries": {"27-28": "$6,000,000"}, "cap_holds": {}},
+                       cur_season=cur, events=(("2024-08-01", "trade", "XXX"),))
+    c = named(checks, "extension_eligibility")
+    check("a short derived length on trade_floor basis still PASSES (can't confirm, not disproven)",
+          c and c.passed)
+    check("...but at warning severity, not silently green", c and c.level == "warning")
+
     print("\nextension_start_season (rule 10)")
     bio, cur = deal("24-25", "26-27", "26-27")
     checks, _ = extend(bio, {"type": "player", "salaries": {"27-28": "$6,000,000", "28-29": "$6,300,000"},

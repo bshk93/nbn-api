@@ -5930,7 +5930,7 @@ def _extension_eligibility_check(player: str, frame: dict, cur_season: str,
     is_final_year = cur_season == frame["contract_end"]
     is_year4_of_5 = frame["contract_length"] == 5 and frame["position_in_deal"] == 4
     position_ok = is_final_year or is_year4_of_5
-    level = "error" if frame["start_basis"] in ("ledger", "draft") else "warning"
+    definite = frame["start_basis"] in ("ledger", "draft")
     if length_ok and position_ok:
         return CheckResult(
             check="extension_eligibility", passed=True,
@@ -5949,9 +5949,32 @@ def _extension_eligibility_check(player: str, frame: dict, cur_season: str,
             f"currently Year {frame['position_in_deal']} of {frame['contract_length']}, "
             f"not the final year or Year 4 of a 5-year deal"
         )
+    if definite:
+        return CheckResult(
+            check="extension_eligibility", passed=False, level="error",
+            message=f"§ 6.2 rules 1-2: {'; '.join(reason)} (basis: {frame['start_basis']}).",
+        )
+    # `trade_floor` (or any other non-definite basis): `contract_start` is a
+    # LOWER BOUND — the real start can only be the same or earlier, never
+    # later, since the acquiring team inherits accrual from before the
+    # earliest event on file. A longer real start means a longer real
+    # contract_length and a later real position_in_deal than what was just
+    # computed, so a *failing* derived check here is not evidence of
+    # ineligibility, only of a floor that isn't long enough to prove
+    # eligibility either. Must warn-and-allow, matching § 3.8's identical
+    # asymmetry for the same basis (nbn-api/CLAUDE.md, "Only over-declaration
+    # errors, and only from a definite basis") — this was the actual bug
+    # behind Tyler Herro (and 31 other real rostered players, checked
+    # 2026-08-21) reading as ineligible off a 2-year floor that was really
+    # "at least 2 years, true length unknown."
     return CheckResult(
-        check="extension_eligibility", passed=False, level=level,
-        message=f"§ 6.2 rules 1-2: {'; '.join(reason)} (basis: {frame['start_basis']}).",
+        check="extension_eligibility", passed=True, level="warning",
+        message=(
+            f"§ 6.2 rules 1-2: can't confirm — {'; '.join(reason)}, but the start season "
+            f"is a lower bound (basis: {frame['start_basis']}), so the real contract could "
+            f"be longer and further along than what's visible. A floor here can only make "
+            f"a legal extension look ineligible, never the reverse."
+        ),
     )
 
 
