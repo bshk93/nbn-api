@@ -2616,12 +2616,24 @@ def _player_acquisition_index() -> dict[str, list[tuple]]:
     """Per-player acquisition timeline built from the transaction ledger, as
     ``{slug: [(date, kind, team), ...]}`` sorted by date, where `kind` is
     "sign" (starts a new tenure clock), "trade" (carries the clock to a new
-    team) or "release" (breaks it).
+    team), "release" (breaks it) or "extension" (§ 4.5 trade-freeze lookup
+    only — see below).
 
     Cached against the ledger file's (mtime, size): the simulator revalidates
     on a 250ms debounce while the user types, and re-parsing a ~2MB
     transactions.json per keystroke is pure waste. Any write to the ledger
     changes mtime and invalidates this on the next read.
+
+    `extension` entries are carried here *only* for
+    `_check_extension_trade_restriction` (§ 4.5) to read — the spec's own
+    recommendation is to extend this index rather than add a second ledger
+    scan. This is safe for § 3.8 Bird tenure despite `extension` deliberately
+    NOT being an acquisition event: `_bird_tenure`'s walk below branches only
+    on "sign"/"draft"/"trade"/"release" and has no `else`, so an "extension"
+    tuple sitting in the list is a complete no-op for it. Same for the D15
+    attestation-contradiction scan in `_extension_frame`, which only matches
+    "trade"/"release"/"sign". Verified by tests/test_bird_rights_tenure.py
+    and tests/test_extensions.py, both green with this entry present.
     """
     try:
         st = TRANSACTIONS_FILE.stat()
@@ -2688,13 +2700,28 @@ def _player_acquisition_index() -> dict[str, list[tuple]]:
                     # same terminal team as continuous). Not matched: a signing
                     # with a different team, which resets it. Both are "sign".
                     index.setdefault(player, []).append((date, "sign", signing_team))
-        # `extension` is deliberately NOT an acquisition event. An extension
-        # adds years to a live contract; the player never reaches free agency,
-        # so § 3.8 tenure keeps accruing uninterrupted. Committee-confirmed
-        # 2026-08-07. Adding it here "for completeness" would reset the Bird
-        # clock on every extended player and silently downgrade their tier —
-        # see docs/extensions.md. Same reasoning for `option`, `guarantee`
-        # and `convert_twoway`: none of them break continuous service.
+        elif ttype == "extension":
+            # Carried only for § 4.5's trade-freeze lookup (see this
+            # function's docstring) — an "extension" kind is never a "sign",
+            # so it cannot itself start, continue or reset a § 3.8 Bird
+            # clock; every walker of this index still branches on
+            # "sign"/"draft"/"trade"/"release" alone. `announced_date` is
+            # what § 4.5's six-month clock actually runs from (not the
+            # transaction date, which _apply_extension already treats as the
+            # default when no separate announced_date was given).
+            if details.get("player"):
+                index.setdefault(details["player"], []).append(
+                    (details.get("announced_date") or date, "extension", (details.get("team") or "").upper()))
+        # `extension` deliberately never becomes a "sign"/"trade"/"release"
+        # entry: it adds years to a live contract, the player never reaches
+        # free agency, so § 3.8 tenure keeps accruing uninterrupted.
+        # Committee-confirmed 2026-08-07. Treating it as one of those three
+        # kinds "for completeness" would reset the Bird clock on every
+        # extended player and silently downgrade their tier — see
+        # docs/extensions.md. Same reasoning for `option`, `guarantee` and
+        # `convert_twoway`: none of them break continuous service, and none
+        # of them are carried in this index at all (only `extension` needed
+        # a reason to be present here).
 
     for events in index.values():
         events.sort(key=lambda e: e[0])
@@ -5230,6 +5257,66 @@ def _check_pick_advance_limit(details: TradeIn, cur_season: str) -> list[CheckRe
     return checks
 
 
+def _add_months(d: datetime, months: int) -> datetime:
+    """Calendar-correct month addition — no `dateutil` in this project, and
+    a fixed day-count (182/183?) is exactly the kind of rounding a real
+    six-month legal deadline shouldn't run on. Clamps the day for a target
+    month shorter than the source (Aug 31 + 6mo -> Feb 28/29, not Mar 3)."""
+    month_index = d.month - 1 + months
+    year = d.year + month_index // 12
+    month = month_index % 12 + 1
+    days_in_month = [31, 29 if (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)) else 28,
+                     31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    day = min(d.day, days_in_month[month - 1])
+    return d.replace(year=year, month=month, day=day)
+
+
+def _check_extension_trade_restriction(details: TradeIn, ctx: dict) -> list[CheckResult]:
+    """§ 4.5 / § 6.2 rule 11: a player may not be traded for six months from
+    the announcement date of an extension they signed. A trade-side check by
+    design (extensions.md § 6) — it belongs here, not in `_validate_extension`,
+    because it validates the *trade*, not the extension that came before it.
+
+    Reads the "extension" entries `_player_acquisition_index` carries
+    specifically for this (see that function's docstring) rather than a
+    second ledger scan. Only the *latest* extension per player matters — an
+    older, already-cleared one can't re-freeze a player a second extension
+    already superseded.
+    """
+    checks: list[CheckResult] = []
+    txn_date_str = ctx.get("txn_date") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        trade_date = datetime.strptime(txn_date_str, "%Y-%m-%d")
+    except ValueError:
+        trade_date = datetime.now(timezone.utc)
+    index = _player_acquisition_index()
+    players = sorted({a.slug for xfer in details.transfers for a in xfer.assets
+                      if a.type == "player" and a.slug})
+    for slug in players:
+        ext_dates = [d for d, kind, _ in index.get(slug, []) if kind == "extension" and d]
+        if not ext_dates:
+            continue
+        last = max(ext_dates)
+        try:
+            announced = datetime.strptime(last, "%Y-%m-%d")
+        except ValueError:
+            continue
+        freeze_until = _add_months(announced, 6)
+        check_id = f"extension_trade_freeze_{slug}"
+        if trade_date < freeze_until:
+            checks.append(CheckResult(
+                check=check_id, passed=False, level="error",
+                message=(f"{slug} extended on {last} — may not be traded until "
+                         f"{freeze_until.date().isoformat()} (§ 4.5 / § 6.2 rule 11, six months)."),
+            ))
+        else:
+            checks.append(CheckResult(
+                check=check_id, passed=True,
+                message=f"{slug}'s extension ({last}) is more than six months old — clear to trade under § 4.5.",
+            ))
+    return checks
+
+
 def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
     """Canonical trade validation, shared verbatim by the submit endpoint
     (``POST /api/transactions``) and the simulator (``POST /api/validate/trade``).
@@ -5262,6 +5349,9 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
                               swap/ladder legs are left to manual review)
       • 7-year advance limit — § 7.2 (a pick may not be traded more than 7 years ahead
                               of the current league year; any round)
+      • Extension trade freeze — § 4.5 / § 6.2 rule 11 (a player may not be traded
+                              for six months from the announcement date of an
+                              extension they signed)
     """
     checks = []
     bios = ctx["bios"]; season = ctx["cur_season"]
@@ -5730,6 +5820,9 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
 
     # ── 7-year advance limit (§ 7.2) ────────────────────────────────────────────
     checks.extend(_check_pick_advance_limit(details, season))
+
+    # ── Extension trade freeze (§ 4.5 / § 6.2 rule 11) ──────────────────────────
+    checks.extend(_check_extension_trade_restriction(details, ctx))
 
     return checks
 

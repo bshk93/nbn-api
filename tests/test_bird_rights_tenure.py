@@ -117,24 +117,33 @@ def main():
 
     # Committee-confirmed 2026-08-07: an extension does NOT reset Bird tenure.
     # The player never reaches free agency, so service accrues uninterrupted.
-    # Pinned by building the index from a ledger that contains an extension:
-    # if someone ever adds "extension" to _player_acquisition_index as an
-    # acquisition event, every extended player's clock resets and their tier
-    # silently downgrades. See docs/extensions.md.
+    #
+    # 2026-08-21: "extension" entries were deliberately added to this index
+    # (as their own distinct kind) so § 4.5's trade-freeze check could reuse
+    # it instead of a second ledger scan — see that function's docstring.
+    # This test now pins the real invariant that matters: an "extension"
+    # entry is never treated as "sign"/"trade"/"release", so it can sit in
+    # the list without resetting or continuing anything. If someone ever
+    # folds "extension" into one of those three kinds instead of keeping it
+    # separate, every extended player's clock resets and their tier silently
+    # downgrades — that's what this still catches. "option" is unrelated to
+    # § 4.5 and stays absent from the index entirely, as before.
     orig_load = T._load_transactions
     T._load_transactions = lambda: [
         {"type": "sign",      "date": "2022-08-01", "details": {"player": "p", "team": "BOS"}},
-        {"type": "extension", "date": "2025-09-01", "details": {"player": "p", "team": "BOS"}},
+        {"type": "extension", "date": "2025-09-01", "details": {"player": "p", "team": "BOS", "announced_date": "2025-09-01"}},
         {"type": "option",    "date": "2025-10-01", "details": {"player": "p", "team": "BOS"}},
     ]
     try:
         T._BIRD_LEDGER_CACHE.update({"key": None, "index": {}})
         events = T._player_acquisition_index().get("p", [])
-        check("an extension is not recorded as an acquisition event",
-              all(kind != "extension" for _d, kind, _t in events))
+        check("an extension entry is carried (for § 4.5), but never as sign/trade/release",
+              any(kind == "extension" for _d, kind, _t in events)
+              and all(kind != "sign" or _d != "2025-09-01" for _d, kind, _t in events))
         check("...so tenure still runs from the original signing (QVFA)",
               T._bird_tenure("p", "BOS", SEASON, {})["tier"] == "QVFA")
-        check("neither is an option exercise", len(events) == 1)
+        check("option exercise is still absent from the index entirely",
+              all(kind != "option" for _d, kind, _t in events) and len(events) == 2)
     finally:
         T._load_transactions = orig_load
         T._BIRD_LEDGER_CACHE.update({"key": None, "index": {}})
