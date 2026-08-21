@@ -1,48 +1,54 @@
 """Discord announcements for the PDC extension pipeline (§ 6.2/6.3).
 
-Reuses the **same** private channel free agency already posts to
-(`DISCORD_PDC_CHANNEL`, `pdc-alerts`) rather than adding a second env var —
-per nbn-today/docs/poext-extension-pipeline.md D12, that channel is the
-shared committee alert feed, extensions included, not an FA-only one. No
-public channel: unlike free agency's `fa-news`, an extension proposal names
-a team and a dollar figure on every event including the ones a rival never
-gets to see in FA (there's only one proposer here in the first place), so
-there is nothing in this pipeline that belongs in front of the public. D9's
-"public gets accept only" is deferred — see the module docstring's final
-paragraph.
+Three channels, two different appetites:
 
-Same no-op-without-config rule as fa_notify/discord_notify: with
-DISCORD_PDC_CHANNEL unset this module is inert. Delivery is
-discord_transport's shared paced queue — one burst budget for the whole
-pdc-alerts channel, split between this module and fa_notify's own PDC_MAX_BURST
-so the two can't collectively exceed what one channel can take (see
-POEXT_MAX_BURST below).
+* **`pdc-alerts`** (`DISCORD_PDC_CHANNEL`) — private, committee-only, full
+  detail. Reuses the **same** channel free agency already posts to rather
+  than adding a second env var — per
+  nbn-today/docs/poext-extension-pipeline.md D12, that channel is the shared
+  committee alert feed, extensions included, not an FA-only one. Gets
+  submitted/remanded/voided/restored/finalized — everything.
+* **`fa-news`** (`DISCORD_FA_NEWS_CHANNEL`) and **`#roster-log`**
+  (`DISCORD_ROSTER_LOG_CHANNEL`) — public, and **`agreed`-only** (D9: "public
+  gets accept only"). A submitted, remanded or rejected proposal never
+  reaches either — only the committee's final yes. `#roster-log` gets the
+  full picture (team, contract shorthand — that channel already carries this
+  much detail for every real transaction); `fa-news` gets the same
+  name-only, no-team, no-dollar treatment `fa_notify._news()` already
+  enforces for free agency, via its own choke point below (`_news()`) rather
+  than importing that module's — the "one function can reach the public
+  channel" discipline has to be a property of *this* module too, not
+  borrowed from a different one that happens to write to the same host.
+
+Same no-op-without-config rule as fa_notify/discord_notify: each channel is
+independently inert without its own env var. Delivery is discord_transport's
+shared paced queue — pdc-alerts' burst budget is split with fa_notify's own
+PDC_MAX_BURST so the two can't collectively exceed what one channel can take
+(see POEXT_MAX_BURST below); fa-news is its own budget, split the same way
+against fa_notify's NEWS_MAX_BURST.
 
 Every function here is best-effort and never raises: the proposal, remand or
 finalize it describes has already been written, and Discord must not be able
 to fail it.
-
-Not yet built: a public announcement on `agreed` (D9's "public gets accept
-only"). Free agency's public channel exists because free agency has a public
-half to announce (who signed). An accepted extension is exactly that same
-kind of public news, but there's no public feed for it today, and this
-module deliberately doesn't invent one on its own — that's a call for
-whoever wires DISCORD_FA_NEWS_CHANNEL-equivalent scope here, not something to
-default into being active. File as a follow-up if wanted.
 """
 from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Optional
 
 from . import discord_transport as transport
+from . import roster_log_relay
 from .discord_notify import SITE, _contract_breakdown, _contract_str, _player_name
 from .players import load_player_bios
 
 logger = logging.getLogger(__name__)
 
 DISCORD_PDC_CHANNEL = os.environ.get("DISCORD_PDC_CHANNEL", "").strip()
+# Deliberately the same env var fa_notify.py reads — one public news feed,
+# not a second channel for extensions to announce into.
+DISCORD_FA_NEWS_CHANNEL = os.environ.get("DISCORD_FA_NEWS_CHANNEL", "").strip()
 
 PDC_SITE = "https://pdc.nbn.today"
 
@@ -55,6 +61,13 @@ PDC_SITE = "https://pdc.nbn.today"
 # figure was.
 POEXT_MAX_BURST = 60
 POEXT_BURST_WINDOW = 900
+
+# fa-news half: same reasoning as POEXT_MAX_BURST above, against fa_notify's
+# NEWS_MAX_BURST (60/900s) rather than PDC_MAX_BURST — this only ever posts
+# on `agreed`, so real volume is a fraction of the ~32-player eligible pool,
+# not every proposal event.
+NEWS_MAX_BURST = 30
+NEWS_BURST_WINDOW = 900
 
 COLOR_SUBMIT = 0x60A5FA
 COLOR_REMAND = 0xFB923C
@@ -89,6 +102,50 @@ def _alert(embed_fn) -> bool:
                               max_burst=POEXT_MAX_BURST, burst_window=POEXT_BURST_WINDOW)
     except Exception as exc:
         logger.warning("PO-EXT alert failed: %s", exc)
+        return False
+
+
+_TEAM_ABBRS = ["ATL", "BKN", "BOS", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW",
+              "HOU", "IND", "LAC", "LAL", "MEM", "MIA", "MIL", "MIN", "NOP", "NYK",
+              "OKC", "ORL", "PHI", "PHX", "POR", "SAC", "SAS", "TOR", "UTA", "WAS"]
+_ABBR_RE = re.compile(r"\b(" + "|".join(_TEAM_ABBRS) + r")\b")
+
+
+def _news(slug: str, text: str) -> bool:
+    """Post to the **public** `fa-news` channel.
+
+    This is the only function in this module that can reach it, and it takes
+    a player and a finished string — never a proposal, never a team, never a
+    figure — the same signature discipline `fa_notify._news` uses for the
+    same reason (§ 9.2 there; D9 here). Belt-and-braces: also asserted at
+    the call site by construction (nothing built into `text` ever includes
+    team/dollar data) and by tests/test_poext_notify.py scanning rendered
+    output, but the signature is what makes a future caller unable to hand
+    this a team or a contract even by accident.
+    """
+    if not transport.configured(DISCORD_FA_NEWS_CHANNEL):
+        return False
+    try:
+        return transport.send(DISCORD_FA_NEWS_CHANNEL, {"content": text},
+                              max_burst=NEWS_MAX_BURST, burst_window=NEWS_BURST_WINDOW)
+    except Exception as exc:
+        logger.warning("PO-EXT news post failed for %s: %s", slug, exc)
+        return False
+
+
+def _roster_log(text: str) -> bool:
+    """Post to `#roster-log`, reusing `roster_log_relay._send` — an agreed
+    extension is exactly the same shape of entry the relay itself produces
+    (a bare description-only card, same color, same mention suppression),
+    not a new format, so this calls straight into it rather than keeping a
+    second copy of that embed shape. Unlike everything the relay itself
+    posts, this isn't relaying an existing Discord message — PO-EXT
+    finalizing a proposal is a new event this module is the source of, so it
+    calls `_send` directly rather than going through the poll cycle."""
+    try:
+        return roster_log_relay._send(text)
+    except Exception as exc:
+        logger.warning("PO-EXT roster-log post failed: %s", exc)
         return False
 
 
@@ -164,9 +221,18 @@ def notify_proposal_restored(p: dict) -> None:
     _alert(build)
 
 
-def notify_player_finalized(slug: str, team: str, final: dict) -> None:
-    """The committee's decision. Neutral title either way — `outcome` and the
-    tally are what carry the news, not a winner/loser framing."""
+def notify_player_finalized(slug: str, proposal: dict, final: dict) -> None:
+    """The committee's decision — always to `pdc-alerts`; on `agreed` only,
+    also to the two public channels (D9: "public gets accept only"). A
+    submitted, remanded or rejected proposal never reaches either public
+    channel — only the yes.
+
+    `proposal` (not just `team`) so the public `#roster-log` post can carry
+    the contract shorthand, the same level of detail that channel already
+    carries for every real transaction — a rejection or an in-progress
+    negotiation never gets that treatment, only the decided deal.
+    """
+    team = proposal["team"]
     outcome = final["outcome"]
     color = COLOR_AGREED if outcome == "agreed" else COLOR_REJECTED
     exhausted_note = ""
@@ -186,3 +252,22 @@ def notify_player_finalized(slug: str, team: str, final: dict) -> None:
             embed["footer"] = {"text": "Not applied automatically — enter the extension on /transactions by hand."}
         return {"embeds": [embed]}
     _alert(build)
+
+    if outcome != "agreed":
+        return
+
+    # #roster-log: full detail, same as any other entry there. Worded as a
+    # committee decision pending entry, not as an applied contract change —
+    # the actual transaction is still typed into /transactions by hand
+    # afterward (same manual hand-off as an accepted FA offer), and
+    # #roster-log otherwise only ever carries transactions that already
+    # happened.
+    shorthand = _contract_str(proposal.get("contract") or {})
+    _roster_log(
+        f"**{team}** — PO-EXT approved an extension for **{_name(slug)}**"
+        + (f" ({shorthand})" if shorthand else "") + " — pending entry on /transactions."
+    )
+
+    # fa-news: same no-team-no-dollar discipline fa_notify._news() enforces,
+    # via this module's own choke point.
+    _news(slug, f"{_name(slug)} has agreed to a contract extension.")

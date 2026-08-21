@@ -849,7 +849,7 @@ def finalize_player(slug: str, info: dict = Depends(require_role("poext_head")))
         _save_votes(votes)
         _save_state(state)
     log_write(info, f"POST poext/players/{slug}/finalize — {outcome}")
-    poext_notify.notify_player_finalized(slug, live["team"], node["final"])
+    poext_notify.notify_player_finalized(slug, live, node["final"])
     recipient = live.get("submitted_by") or live.get("created_by")
     if recipient:
         tail = (" — no further extension opportunities arise (§ 6.3)" if outcome == "rejected" and exhausted else "")
