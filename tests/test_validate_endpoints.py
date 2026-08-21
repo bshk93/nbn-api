@@ -66,6 +66,7 @@ VALIDATE_PATHS = [
     "/api/validate/renounce",
     "/api/validate/sign_pick",
     "/api/validate/convert_twoway",
+    "/api/validate/extension",
 ]
 
 
@@ -208,6 +209,14 @@ def main():
         "/api/validate/convert_twoway": {
             "player": twoway[0] if twoway else slug,
             "contract": contract},
+        # An extension's contract is future money, not the current-season
+        # figure the other bodies use — any season string works for a shape
+        # test, since legality isn't what's being asserted here.
+        "/api/validate/extension": {
+            "player": slug, "team": team,
+            "contract": {"type": "player",
+                        "salaries": {tx._season_shift(tx._current_league_year(), 2): "$10,000,000"},
+                        "cap_holds": {}}},
     }
     for path in VALIDATE_PATHS:
         r = post(path, bodies[path])
@@ -249,6 +258,10 @@ def main():
          {"player": "nobody-atall", "contract": contract}),
         ("/api/validate/convert_twoway",
          {"player": "nobody-atall", "contract": contract}),
+        ("/api/validate/extension",
+         {"player": "nobody-atall", "team": team, "contract": contract}),
+        ("/api/validate/extension",
+         {"player": slug, "team": "ZZZ", "contract": contract}),
     ]
     for path, body in unknown_cases:
         r = post(path, body)

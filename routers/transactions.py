@@ -319,6 +319,29 @@ class SignDetails(BaseModel):
     eaps_assumption: Optional[str] = None
 
 
+class ExtensionDetails(BaseModel):
+    """§ 6.2 / § 6.3. `contract` is the EXTENDED TERM only — never the live
+    years still on the books; those are carried forward untouched and the
+    extension's own years are laid on top starting the season after the
+    existing deal's final guaranteed year (§ 6.2 rule 10). See
+    nbn-today/docs/poext-extension-pipeline.md for the full design."""
+    player: str
+    team: str
+    contract: ContractIn
+    kind: str = "veteran"  # "rookie_scale" | "veteran" | "extend_and_trade"
+    bird_rights_type: Optional[str] = None
+    eaps_assumption: Optional[str] = None
+    # § 4.5 six-month trade-freeze clock; defaults to the transaction date.
+    announced_date: Optional[str] = None
+    # Season string. Required by the UI (not the schema) only when the player
+    # has no ledger acquisition record — see _extension_frame / D15
+    # (nbn-today/docs/poext-extension-pipeline.md § 2.3a). Never trusted as a
+    # definite basis: always warn-severity unless it contradicts other partial
+    # ledger history the player does have, which promotes to error. Not
+    # persisted anywhere — re-asked on every proposal, deliberately.
+    attested_contract_start: Optional[str] = None
+
+
 class PickIn(BaseModel):
     year: int
     round: int
@@ -3418,6 +3441,7 @@ def _salary_match_limit(outgoing: int) -> int:
 def _check_contract_raises(
     contract: ContractIn, bird_pct: bool, cur_season: str,
     bio: Optional[dict] = None, cap_levels: Optional[dict] = None,
+    pct: Optional[float] = None,
 ) -> Optional[CheckResult]:
     """§ 3.9 / § 3.13: no year-over-year change above 5% (8% with Full Bird)
     of Year 1.
@@ -3429,12 +3453,18 @@ def _check_contract_raises(
     rejected a contract the rulebook explicitly prescribes. Pass `bio` and
     `cap_levels` to enable the exemption; without them the ladder applies to
     every year (the old behaviour), since there is no scale to compare against.
+
+    `pct` overrides the `bird_pct`-derived figure outright — § 6.2 rule 8 uses
+    the same ladder but with its own ceilings (8% normal, 5% extend-and-trade),
+    the inverse of a signing's 5%/8% split, so `bird_pct` alone can't express
+    it. Leave unset for the signing path's existing behaviour.
     """
     if contract.type == "two-way":
         return None
 
-    pct = 0.08 if bird_pct else 0.05
-    pct_label = "8%" if bird_pct else "5%"
+    if pct is None:
+        pct = 0.08 if bird_pct else 0.05
+    pct_label = f"{pct * 100:.0f}%"
 
     _HOLD_TYPES = {"UFA", "RFA", "PLAYER_OPT", "TEAM_OPT"}
     hold_years = {yr for yr, ht in (contract.cap_holds or {}).items() if ht in _HOLD_TYPES}
@@ -5759,6 +5789,447 @@ def _validate_convert_twoway(details: ConvertTwoWayDetails, ctx: dict) -> list[C
     return checks
 
 
+def _extension_contract_years(bio: dict) -> list[str]:
+    """Real contract years on the bio, sorted — the trailing UFA/RFA hold
+    season is not a contract year (§ 6.2 step 0 in extensions.md § 4): it
+    carries a salary figure (auto-filled by _autofill_fa_hold_amounts) that
+    would otherwise read as one more year of the deal."""
+    salaries = bio.get("salaries") or {}
+    cap_holds = bio.get("cap_holds") or {}
+    return sorted(
+        (s for s in salaries if _YEAR_RE_TXN.match(s) and cap_holds.get(s) not in _FA_HOLD_TYPES),
+        key=_season_start,
+    )
+
+
+def _final_guaranteed_year(bio: dict) -> Optional[str]:
+    """§ 6.2 rule 10 / extensions.md § 4: the last season of the existing
+    contract the extension's new money starts after.
+
+    Rule 1: where `guaranteed` explicitly marks a season as fully guaranteed
+    (guaranteed[s] >= salaries[s]), the last such season wins.
+    Rule 2 (the one that actually fires — `guaranteed` is populated for a
+    sliver of bios): every remaining contract year is treated as guaranteed
+    **except** NON_GTD/PLAYER_OPT/TEAM_OPT years, ratified 2026-08-18
+    (poext-extension-pipeline.md D11/D2 in extensions.md § 9) — an option
+    year is treated as declined outright by the act of extending, so it never
+    counts as "guaranteed" and the extension supersedes it rather than
+    colliding with it.
+    """
+    contract_years = _extension_contract_years(bio)
+    if not contract_years:
+        return None
+    guaranteed = bio.get("guaranteed") or {}
+    fully_gtd = [
+        s for s in contract_years
+        if guaranteed.get(s) and _parse_dollar(guaranteed[s]) >= _parse_dollar((bio.get("salaries") or {}).get(s))
+    ]
+    if fully_gtd:
+        return max(fully_gtd, key=_season_start)
+    cap_holds = bio.get("cap_holds") or {}
+    non_gtd_types = {"NON_GTD", "PLAYER_OPT", "TEAM_OPT"}
+    candidate = [s for s in contract_years if cap_holds.get(s) not in non_gtd_types]
+    if candidate:
+        return max(candidate, key=_season_start)
+    return None
+
+
+def _extension_frame(slug: str, team: str, bio: dict, cur_season: str,
+                     attested_contract_start: Optional[str] = None) -> dict:
+    """The derived facts every extension check and the fact sheet are built
+    from — computed once so a check and the sheet beside it can never
+    disagree (nbn-today/docs/poext-extension-pipeline.md § 5.2).
+
+    Returns {contract_start, start_basis, start_evidence, contract_end,
+    contract_length, position_in_deal, final_gtd_year, first_extended_season,
+    prior_salary, attestation_contradicted}.
+
+    Contract start reuses `_bird_tenure`'s ledger walk verbatim, including its
+    synthetic draft-event seed — the same mechanism that already resolves
+    § 3.8 Bird tenure for a player with no signing record but a known draft
+    year (poext-extension-pipeline.md § 2.3a: this is what makes the planned
+    ledger backfill unnecessary rather than a prerequisite).
+    """
+    team = team.upper()
+    tenure = _bird_tenure(slug, team, cur_season, bio)
+    start_basis = tenure["basis"]
+    start_evidence = tenure["evidence"]
+    # _bird_tenure only returns a `seasons` count when terminal == team (i.e.
+    # the ledger resolves this player to this team right now); re-derive the
+    # season string it was counting back from, the same arithmetic it used.
+    start_season = _season_shift(cur_season, -tenure["seasons"]) if tenure["seasons"] is not None else None
+    attestation_contradicted = False
+    if start_season is None and attested_contract_start:
+        # D15: an attestation is never trusted as a definite basis, but it IS
+        # checked against whatever partial ledger history the player has (a
+        # trade, a release) that bounds when the current spell could have
+        # begun — that's the one case promoted to error.
+        events = _player_acquisition_index().get(slug, [])
+        bound = None
+        for date, kind, ev_team in sorted(events, key=lambda e: e[0]):
+            if kind in ("trade", "release") or (kind == "sign" and ev_team != team):
+                bound = _season_start_of(date)
+        if bound and _season_start(attested_contract_start) < _season_start(bound):
+            attestation_contradicted = True
+        start_season = attested_contract_start
+        start_basis = "attested"
+        start_evidence = f"submitting team attests the deal began {attested_contract_start}"
+
+    contract_years = _extension_contract_years(bio)
+    contract_end = contract_years[-1] if contract_years else None
+    contract_length = None
+    position_in_deal = None
+    if start_season and contract_end:
+        contract_length = _season_start(contract_end) - _season_start(start_season) + 1
+        position_in_deal = _season_start(cur_season) - _season_start(start_season) + 1
+
+    final_gtd_year = _final_guaranteed_year(bio)
+    first_extended_season = _season_shift(final_gtd_year, 1) if final_gtd_year else None
+    prior_salary = _parse_dollar((bio.get("salaries") or {}).get(contract_end, "")) if contract_end else 0
+
+    return {
+        "contract_start": start_season,
+        "start_basis": start_basis,
+        "start_evidence": start_evidence,
+        "attestation_contradicted": attestation_contradicted,
+        "contract_end": contract_end,
+        "contract_length": contract_length,
+        "position_in_deal": position_in_deal,
+        "final_gtd_year": final_gtd_year,
+        "first_extended_season": first_extended_season,
+        "prior_salary": prior_salary,
+    }
+
+
+def _validate_extension(details: ExtensionDetails, ctx: dict) -> list[CheckResult]:
+    """§ 6.2 / § 6.3. See nbn-today/docs/poext-extension-pipeline.md § 5 for
+    the full information flow this mirrors.
+
+    Deliberately does NOT reuse `_validate_sign`: an extension adds years to
+    a live contract rather than replacing a current-season figure, and every
+    cap figure in `_validate_sign` is built around replacement (measured
+    against production 2026-08-07: that shape reported a team $18.9M
+    *cheaper* for extending a player). No roster-count check and no
+    existing-hold backout — this consumes neither (§ 2.10)."""
+    checks: list[CheckResult] = []
+    bios = ctx["bios"]
+    team = details.team.upper()
+    player = details.player
+    bio = bios.get(player) or {}
+    cur_season = ctx["cur_season"]
+    cap_levels = ctx["cap_levels"]
+
+    if not details.contract.salaries:
+        checks.append(CheckResult(
+            check="contract_has_salary_years", passed=False, level="error",
+            message="This extension has no salary years — nothing would actually be signed. Add at least one season.",
+        ))
+        return checks
+
+    frame = _extension_frame(player, team, bio, cur_season, details.attested_contract_start)
+
+    # ── extension_eligibility (rules 1-2) ───────────────────────────────────
+    if frame["attestation_contradicted"]:
+        checks.append(CheckResult(
+            check="extension_eligibility", passed=False, level="error",
+            message=(
+                f"The attested start ({details.attested_contract_start}) is earlier than a "
+                f"real event on file for {player} with a different team — the attestation "
+                f"can't be right."
+            ),
+        ))
+    elif frame["contract_start"] is None or frame["contract_end"] is None:
+        checks.append(CheckResult(
+            check="extension_eligibility", passed=True, level="warning",
+            message=(
+                f"No acquisition record on file for {player} and no attested start date — "
+                f"contract length and position in the deal can't be verified (§ 6.2 rules 1-2). "
+                f"A gap here can only make a legal extension look ineligible, never the reverse."
+            ),
+        ))
+    else:
+        length_ok = frame["contract_length"] is not None and frame["contract_length"] >= 3
+        is_final_year = cur_season == frame["contract_end"]
+        is_year4_of_5 = frame["contract_length"] == 5 and frame["position_in_deal"] == 4
+        position_ok = is_final_year or is_year4_of_5
+        level = "error" if frame["start_basis"] in ("ledger", "draft") else "warning"
+        if length_ok and position_ok:
+            checks.append(CheckResult(
+                check="extension_eligibility", passed=True,
+                message=(
+                    f"{frame['contract_length']}-year contract ({frame['contract_start']}–"
+                    f"{frame['contract_end']}), extending from "
+                    f"{'the final year' if is_final_year else 'Year 4 of 5'} "
+                    f"(basis: {frame['start_basis']})."
+                ),
+            ))
+        else:
+            reason = []
+            if not length_ok:
+                reason.append(f"contract length is {frame['contract_length']} years, needs ≥ 3")
+            if not position_ok:
+                reason.append(
+                    f"currently Year {frame['position_in_deal']} of {frame['contract_length']}, "
+                    f"not the final year or Year 4 of a 5-year deal"
+                )
+            checks.append(CheckResult(
+                check="extension_eligibility", passed=False, level=level,
+                message=f"§ 6.2 rules 1-2: {'; '.join(reason)} (basis: {frame['start_basis']}).",
+            ))
+
+    # ── extension_service (rule 3) ──────────────────────────────────────────
+    tenure = _bird_tenure(player, team, cur_season, bio)
+    if tenure["terminal_team"] != team:
+        checks.append(CheckResult(
+            check="extension_service", passed=True, level="warning",
+            message=f"Can't confirm {player}'s service time with {team} from the ledger — {tenure['evidence']}.",
+        ))
+    elif tenure["seasons"] is not None and tenure["seasons"] >= 2:
+        level = "error" if tenure["basis"] in ("ledger", "draft") else "warning"
+        checks.append(CheckResult(
+            check="extension_service", passed=True, level=level,
+            message=f"{tenure['seasons']} seasons of service with {team} (basis: {tenure['basis']})."
+            if level == "error" else
+            f"Likely {tenure['seasons']}+ seasons of service with {team}, but basis is {tenure['basis']} — flagged, not blocking.",
+        ))
+    else:
+        level = "error" if tenure["basis"] in ("ledger", "draft") else "warning"
+        checks.append(CheckResult(
+            check="extension_service", passed=False, level=level,
+            message=f"§ 6.2 rule 3 needs ≥ 2 years of service with {team} (or Bird via trade); "
+                    f"ledger shows {tenure['seasons']} (basis: {tenure['basis']}).",
+        ))
+
+    # ── extension_not_minimum (rule 4) ──────────────────────────────────────
+    r = _check_minimum_salary(details.contract, player, bios, cur_season, cap_levels,
+                              txn_date=ctx.get("txn_date"), signing_method=None)
+    if r:
+        checks.append(CheckResult(**{**r.model_dump(), "check": "extension_not_minimum"}))
+
+    # ── extension_min_length (rule 6: >= 2 guaranteed years) ────────────────
+    hold_years = {yr for yr, ht in (details.contract.cap_holds or {}).items() if ht in _FA_HOLD_TYPES}
+    real_years = [y for y in details.contract.salaries if y not in hold_years]
+    if len(real_years) < 2:
+        checks.append(CheckResult(
+            check="extension_min_length", passed=False, level="error",
+            message=f"§ 6.2 rule 6 needs at least 2 guaranteed years; this extension has {len(real_years)}.",
+        ))
+    else:
+        checks.append(CheckResult(check="extension_min_length", passed=True,
+                                  message=f"{len(real_years)} years extended."))
+
+    # ── extension_start_season (rule 10) ────────────────────────────────────
+    submitted_first = min(details.contract.salaries, key=_season_start) if details.contract.salaries else None
+    if frame["first_extended_season"] and submitted_first and submitted_first != frame["first_extended_season"]:
+        checks.append(CheckResult(
+            check="extension_start_season", passed=False, level="error",
+            message=(
+                f"§ 6.2 rule 10: new money should start {frame['first_extended_season']} "
+                f"(the season after {player}'s final guaranteed year, {frame['final_gtd_year']}), "
+                f"not {submitted_first} — putting money in the wrong league year corrupts every "
+                f"downstream cap figure."
+            ),
+        ))
+    elif frame["first_extended_season"]:
+        checks.append(CheckResult(check="extension_start_season", passed=True,
+                                  message=f"Starts {frame['first_extended_season']}, as § 6.2 rule 10 prescribes."))
+    else:
+        checks.append(CheckResult(
+            check="extension_start_season", passed=True, level="warning",
+            message=f"Can't determine {player}'s final guaranteed year from the bio — start season not verified.",
+        ))
+
+    # ── extension_max_year1 (rule 7: <= 140% of prior salary or EAPS) ───────
+    yr1_season = frame["first_extended_season"] or submitted_first
+    yr1_salary = _parse_dollar(details.contract.salaries.get(yr1_season, "")) if yr1_season else 0
+    if frame["prior_salary"]:
+        ceiling = round(frame["prior_salary"] * 1.4)
+        if yr1_salary > ceiling:
+            checks.append(CheckResult(
+                check="extension_max_year1", passed=False, level="error",
+                message=(
+                    f"§ 6.2 rule 7: Year 1 (${yr1_salary:,}) exceeds 140% of prior salary "
+                    f"(${frame['prior_salary']:,} → ${ceiling:,})."
+                ),
+            ))
+        else:
+            checks.append(CheckResult(
+                check="extension_max_year1", passed=True,
+                message=f"Year 1 (${yr1_salary:,}) is within 140% of prior salary (${ceiling:,} ceiling).",
+            ))
+    else:
+        eaps = (cap_levels.get(yr1_season, {}) if yr1_season else {}).get("eaps")
+        checks.append(CheckResult(
+            check="extension_max_year1", passed=True, level="warning",
+            message=(
+                "No prior-salary figure on file to check the 140% ceiling against"
+                + (f", and EAPS for {yr1_season} is unset" if not eaps else f"; EAPS ceiling would be ${round(eaps * 1.4):,}")
+                + "."
+            ),
+        ))
+
+    # ── extension_raises (rule 8: <= 8%, or 5% for extend-and-trade) ────────
+    pct = 0.05 if details.kind == "extend_and_trade" else 0.08
+    r = _check_contract_raises(details.contract, bird_pct=False, cur_season=yr1_season or cur_season,
+                               bio=bio, cap_levels=cap_levels, pct=pct)
+    if r:
+        checks.append(CheckResult(**{**r.model_dump(), "check": "extension_raises"}))
+
+    # ── extension_cap_position (rule 5) ─────────────────────────────────────
+    if yr1_season:
+        cl = cap_levels.get(yr1_season, {})
+        threshold = cl.get("hard_cap") or cl.get("cap")
+        if not threshold:
+            checks.append(CheckResult(
+                check="extension_cap_position", passed=True, level="warning",
+                message=(
+                    f"Cap thresholds for {yr1_season} are unset (${'0'}) in Cap Settings — "
+                    f"cannot evaluate the hard-cap/apron position for this extension until "
+                    f"the committee enters real figures for that season."
+                ),
+            ))
+        else:
+            team_salary = _compute_team_salary(team, bios, yr1_season)
+            projected = team_salary + yr1_salary
+            over_cap = cl.get("cap") and projected > cl["cap"]
+            over_hard = cl.get("hard_cap") and projected > cl["hard_cap"]
+            if over_hard:
+                checks.append(CheckResult(
+                    check="extension_cap_position", passed=False, level="error",
+                    message=f"{team} projects to ${projected:,} in {yr1_season}, over the league Hard Cap (${cl['hard_cap']:,}).",
+                ))
+            else:
+                checks.append(CheckResult(
+                    check="extension_cap_position", passed=True,
+                    message=f"{team} projects to ${projected:,} in {yr1_season}"
+                            + (f" (Cap: ${cl['cap']:,})" if cl.get("cap") else "") + ".",
+                ))
+    else:
+        checks.append(CheckResult(
+            check="extension_cap_position", passed=True, level="warning",
+            message="First extended season unknown — cap position not verified.",
+        ))
+
+    # ── extension_window (§ 6.3) ────────────────────────────────────────────
+    if details.kind != "rookie_scale" and frame["contract_end"] and cur_season == frame["contract_end"]:
+        # Expiring veteran: hard June 30 deadline, a real calendar date.
+        as_of = details.announced_date or ctx.get("txn_date") or ""
+        deadline_year = _season_start(cur_season) + 2000 + 1
+        deadline = f"{deadline_year}-06-30"
+        if as_of and as_of > deadline:
+            checks.append(CheckResult(
+                check="extension_window", passed=False, level="error",
+                message=f"§ 6.3: expiring-veteran extensions must be submitted by {deadline}; this is dated {as_of}.",
+            ))
+        else:
+            checks.append(CheckResult(check="extension_window", passed=True,
+                                      message=f"Within the § 6.3 expiring-veteran window (by {deadline})."))
+    else:
+        checks.append(CheckResult(
+            check="extension_window", passed=True, level="warning",
+            message="§ 6.3's rookie-scale/non-expiring-veteran windows key off the regular-season "
+                    "start date, which isn't tracked yet — not verified.",
+        ))
+
+    return checks
+
+
+def _extension_fact_sheet(details: ExtensionDetails, ctx: dict) -> dict:
+    """Keyed on the first extended season, not the current one — see
+    nbn-today/docs/poext-extension-pipeline.md § 5.4. Never does its own cap
+    math: every figure here is read off the same helpers/frame the validator
+    used."""
+    bios = ctx["bios"]
+    team = details.team.upper()
+    player = details.player
+    bio = bios.get(player) or {}
+    frame = _extension_frame(player, team, bio, ctx["cur_season"], details.attested_contract_start)
+    yr1_season = frame["first_extended_season"] or (
+        min(details.contract.salaries, key=_season_start) if details.contract.salaries else None)
+    cl = ctx["cap_levels"].get(yr1_season, {}) if yr1_season else {}
+    team_salary = _compute_team_salary(team, bios, yr1_season) if yr1_season else None
+    return {
+        "player": player,
+        "player_name": bio.get("name") or player,
+        "team": team,
+        "existing_contract": {
+            "start": frame["contract_start"],
+            "end": frame["contract_end"],
+            "final_guaranteed_year": frame["final_gtd_year"],
+            "salaries": {y: (bio.get("salaries") or {}).get(y) for y in _extension_contract_years(bio)},
+            "basis": frame["start_basis"],
+            "evidence": frame["start_evidence"],
+        },
+        "extended_term": {
+            "first_season": yr1_season,
+            "salaries": details.contract.salaries,
+            "cap_holds": details.contract.cap_holds,
+        },
+        "prior_salary": frame["prior_salary"],
+        "max_year1_ceiling": round(frame["prior_salary"] * 1.4) if frame["prior_salary"] else None,
+        "eaps": cl.get("eaps"),
+        "team_salary_first_extended_season": team_salary,
+        "cap_first_extended_season": cl.get("cap") or None,
+        "hard_cap_first_extended_season": cl.get("hard_cap") or None,
+        "cap_position_evaluable": bool(cl.get("cap") or cl.get("hard_cap")),
+    }
+
+
+def _apply_extension(details: ExtensionDetails, txn_date: str, info: dict,
+                     txn_id: Optional[str] = None) -> str:
+    """Adds the extended term on top of the live contract. No roster, no
+    team-state write (D7: a live proposal/extension holds no cap room and
+    consumes no roster spot — § 2.10), and — critically — no replacement of
+    current-season salary the way `_apply_sign` does. Returns the team."""
+    bios = load_player_bios()
+    if details.player not in bios:
+        raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
+    team = details.team.upper()
+    if team not in VALID_TEAMS:
+        raise HTTPException(status_code=422, detail=f"Unknown team: {team!r}")
+    if not details.contract.salaries:
+        raise HTTPException(status_code=422, detail="Extension contract must include at least one season of salary.")
+
+    bio = bios[details.player]
+    final_gtd = _final_guaranteed_year(bio)
+    cutoff = _season_shift(final_gtd, 1) if final_gtd else min(details.contract.salaries, key=_season_start)
+
+    past, past_gtd, past_gtd_dates, past_gtd_sched = _retained_history(bio, _season_shift(cutoff, -1))
+    bio["salaries"] = {**past, **details.contract.salaries}
+    bio["cap_holds"] = {**{k: v for k, v in (bio.get("cap_holds") or {}).items() if k < cutoff},
+                        **details.contract.cap_holds}
+    bio["guaranteed"] = {**past_gtd, **details.contract.guaranteed}
+    bio["guarantee_dates"] = {**past_gtd_dates, **details.contract.guarantee_dates}
+    bio["guarantee_schedule"] = {**past_gtd_sched, **details.contract.guarantee_schedule}
+
+    bio["contracts"] = (bio.get("contracts") or []) + [{
+        "team": team,
+        "date": txn_date,
+        "kind": "extension",
+        "extension_kind": details.kind,
+        "bird_rights_type": details.bird_rights_type,
+        "salaries": details.contract.salaries,
+        "guaranteed": details.contract.guaranteed,
+        "guarantee_dates": details.contract.guarantee_dates,
+        "guarantee_schedule": details.contract.guarantee_schedule,
+        "cap_holds": details.contract.cap_holds,
+        "txn_id": txn_id,
+    }]
+
+    cap_levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
+    hold_notes = _autofill_fa_hold_amounts(
+        bio, team, details.contract.cap_holds, details.contract.salaries, cap_levels,
+        bird_rights_type=details.bird_rights_type, eaps_assumption=details.eaps_assumption,
+        slug=details.player,
+    )
+    if hold_notes:
+        bio["cap_hold_notes"] = {**bio.get("cap_hold_notes", {}), **hold_notes}
+
+    save_player_bios(bios)
+    log_write(info, f"TXN extension — {details.player} ({team}), new money from {cutoff}")
+    return team
+
+
 def _validate_sign_pick(details: SignPickDetails, ctx: dict) -> list[CheckResult]:
     """Article VII pick signing.
 
@@ -5890,6 +6361,7 @@ _VALIDATORS = {
     "convert_twoway": _validate_convert_twoway,
     "offer_sheet":    _validate_offer_sheet,
     "offer_sheet_decision": _validate_offer_sheet_decision,
+    "extension":      _validate_extension,
 }
 
 
@@ -5967,7 +6439,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid date; use YYYY-MM-DD")
 
-    if body.type not in ("sign", "pick", "option", "guarantee", "release", "renounce", "rescind_renounce", "trade", "convert_twoway", "sign_pick", "void_player", "set_hard_cap_level", "offer_sheet", "offer_sheet_decision"):
+    if body.type not in ("sign", "pick", "option", "guarantee", "release", "renounce", "rescind_renounce", "trade", "convert_twoway", "sign_pick", "void_player", "set_hard_cap_level", "offer_sheet", "offer_sheet_decision", "extension"):
         raise HTTPException(status_code=422, detail=f"Unsupported transaction type: {body.type!r}")
 
     if body.historical and body.type not in ("trade", "sign", "option"):
@@ -5988,6 +6460,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
         "set_hard_cap_level": (SetHardCapDetails, "Invalid set_hard_cap_level details"),
         "offer_sheet":       (OfferSheetDetails,  "Invalid offer_sheet details"),
         "offer_sheet_decision": (OfferSheetDecisionDetails, "Invalid offer_sheet_decision details"),
+        "extension":      (ExtensionDetails,        "Invalid extension details"),
     }
     model_cls, err_prefix = _detail_models[body.type]
     try:
@@ -6094,6 +6567,14 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             resolved = _apply_offer_sheet_decision(details, body.date, info, txn_id=txn_id)
             stored_details = details.model_dump()
             stored_details.update(resolved)
+        elif body.type == "extension":
+            team = _apply_extension(details, body.date, info, txn_id=txn_id)
+            stored_details = details.model_dump()
+            stored_details["team"] = team
+            # § 4.5's six-month trade freeze must be stamped by the write that
+            # records the agreement, not by anything that could fail/retry/replay
+            # (a Discord post) — see poext-extension-pipeline.md § 2.7.
+            stored_details["announced_date"] = details.announced_date or body.date
 
         forced_checks = [c.check for c in failed] if (body.force and failed) else None
         if forced_checks:
@@ -6570,6 +7051,22 @@ def validate_convert_twoway(body: ConvertTwoWayDetails):
         eaps_assumption=body.eaps_assumption,
     )
     return _validation_result(_validate_convert_twoway(body, ctx), fact_sheet)
+
+
+@router.post("/api/validate/extension")
+def validate_extension(body: ExtensionDetails):
+    """Non-mutating § 6.2 / § 6.3 check of a contract extension. Shares
+    `_validate_extension` with `POST /api/transactions`, so a "legal" verdict
+    here is what the office accepts — but this endpoint never writes, no
+    auth, same terms as every other `/api/validate/*` endpoint.
+
+    The team is taken from the request (unlike sign_pick/convert_twoway)
+    because an extension proposal can legitimately be modeled before the
+    player's own roster entry settles who's asking — same as `/validate/sign`."""
+    ctx = _validation_ctx()
+    _require_validatable(body.team, body.player, ctx)
+    fact_sheet = _extension_fact_sheet(body, ctx)
+    return _validation_result(_validate_extension(body, ctx), fact_sheet)
 
 
 @router.get("/api/rookie-scale/contract/{slug}")
