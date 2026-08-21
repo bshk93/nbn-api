@@ -48,7 +48,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from routers import discord_transport as transport   # noqa: E402
-from routers.storage import _current_season_str      # noqa: E402
+from routers.storage import _current_league_year     # noqa: E402
 
 DISCORD_ALERT_CHANNEL = os.environ.get("DISCORD_ALERT_CHANNEL", "").strip()
 DISCORD_ADMIN_ID = os.environ.get("DISCORD_ADMIN_ID", "").strip()
@@ -79,10 +79,11 @@ def _live_files(season: str, names) -> set[str]:
     """The files still legitimately being appended to. Everything else is closed
     and must not change at all.
 
-    Two seasons can qualify, and deliberately so. The stats clock rolls over on
-    **July 1** (`_current_season_str`), while a playoff run can finish well after
-    it — the 25-26 finals were played 2026-06-18, and a slower postseason would
-    have landed in July against a clock already reading 26-27. Freezing last
+    Two seasons can qualify, and deliberately so. The season clock rolls over on
+    **July 1** by default (`_current_league_year`, settable via league-state.json),
+    while a playoff run can finish well after it — the 25-26 finals were played
+    2026-06-18, and a slower postseason would have landed in July against a clock
+    already reading 26-27. Freezing last
     season the moment the calendar turned would alert on a real game. So the
     newest season on disk is live alongside the current one; every season behind
     it is frozen, which is the property that matters.
@@ -198,7 +199,7 @@ def main() -> int:
 
     stored = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
     previous = stored.get("files", {})
-    season = _current_season_str()
+    season = _current_league_year()
 
     violations, notes = compare(current, previous, season)
     if args.accept:

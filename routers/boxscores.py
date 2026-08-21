@@ -17,7 +17,7 @@ from .constants import (
     DATA_DIR, PLAYER_BIOS_FILE, PENDING_BOXSCORES_DIR, MANUAL_QUEUE_FILE,
     BUILD_STATUS_FILE, BUILD_SCRIPT, VALID_TEAMS, _manual_queue_lock, logger,
 )
-from .storage import read_csv, log_write, _current_season_str
+from .storage import read_csv, log_write, _current_league_year
 from .allstats_guard import write_allstats, AllstatsGuardError
 from .boxscore_provenance import record_commit
 from .auth import require_any_role
@@ -491,7 +491,7 @@ def commit_boxscore(body: BoxscoreCommitRequest, info: dict = Depends(require_an
 @router.get("/api/boxscores/dates")
 def get_boxscore_dates(season: str = Query(default=None)):
     if season is None:
-        season = _current_season_str()
+        season = _current_league_year()
     reg_path = allstats_path(season, "REG")
     po_path = allstats_path(season, "PLAYOFF")
     dates: set[str] = set()
@@ -612,7 +612,7 @@ def _boxscore_player_row(r: dict) -> dict:
 @router.get("/api/boxscores")
 def get_boxscores(date: str = Query(...), season: str = Query(default=None)):
     if season is None:
-        season = _current_season_str()
+        season = _current_league_year()
     reg_path = allstats_path(season, "REG")
     po_path = allstats_path(season, "PLAYOFF")
 

@@ -33,7 +33,7 @@ from stats_build.buildargs import DATA_DIR, OUT_DIR, BuildArgs
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="stats_build", description="Rebuild every derived stats CSV.")
-    ap.add_argument("--season", help="e.g. 25-26 (default: today's, on a Sep 30 cutoff)")
+    ap.add_argument("--season", help="e.g. 25-26 (default: today's, July 1 cutoff — see season_clock.py)")
     ap.add_argument("--through", help="pin the through date (nothing reads it; recorded only)")
     ap.add_argument("--data-dir", type=Path, default=DATA_DIR, help=f"default {DATA_DIR}")
     ap.add_argument("--out", type=Path, default=OUT_DIR, help=f"default {OUT_DIR}")

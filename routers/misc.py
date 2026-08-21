@@ -21,7 +21,7 @@ from .constants import (
     JOIN_SUBMISSIONS_FILE, JOIN_BLACKLIST_FILE, MEMBER_SEEN_FILE,
     VALID_TEAMS, logger,
 )
-from .storage import _load_json, _save_json, log_write, _current_season_str, _current_league_year
+from .storage import _load_json, _save_json, log_write, _current_league_year
 from .auth import (
     get_token_info, has_role, require_role, require_admin,
     load_tokens, _resolve_token,
@@ -72,11 +72,11 @@ def put_cap_level(season: str, body: CapLevel, info: dict = Depends(require_role
     return levels[season]
 
 
-# ── League year (cap/contract clock) ───────────────────────────────────────────
-# The league year is derived from today's date plus any rollover overrides stored
-# in league-state.json. BOD sets a season's effective start date to roll the league
-# year over on a date other than the default July 1 (e.g. start it early). The stats
-# clock (box scores / R build) is unaffected — that stays on _current_season_str.
+# ── League year (the one season clock — cap/contracts, box scores, and the build) ──
+# The season is derived from today's date plus any rollover overrides stored in
+# league-state.json (season_clock.py). BOD sets a season's effective start date to
+# roll it over on a date other than the default July 1 (e.g. start it early). Box
+# scores and the stats build read this same clock — see season_clock.py's docstring.
 
 class LeagueRollover(BaseModel):
     effective: str  # YYYY-MM-DD

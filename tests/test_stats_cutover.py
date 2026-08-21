@@ -33,9 +33,11 @@ def check(name, cond):
 print("one season resolver, shared by the entry point and the harness")
 from stats_build import buildargs, harness  # noqa: E402
 
-check("Sep 30 is still last season (the Sep 30 cutoff)",
-      buildargs.resolve_season(date(2026, 9, 30)) == "25-26")
-check("Oct 1 rolls over", buildargs.resolve_season(date(2026, 10, 1)) == "26-27")
+check("June 30 is still last season (the July 1 default cutoff)",
+      buildargs.resolve_season(date(2026, 6, 30)) == "25-26")
+check("July 1 rolls over", buildargs.resolve_season(date(2026, 7, 1)) == "26-27")
+check("Sep 30 no longer its own cutoff — same season July 1 already rolled to",
+      buildargs.resolve_season(date(2026, 9, 30)) == "26-27")
 check("the harness uses that one, not a copy of it",
       harness.resolve_season is buildargs.resolve_season)
 check("and the same BuildArgs", harness.BuildArgs is buildargs.BuildArgs)

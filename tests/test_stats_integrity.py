@@ -66,7 +66,7 @@ def manifest(tmp: Path) -> dict:
     return json.loads((tmp / ci.MANIFEST_NAME).read_text())["files"]
 
 
-ci._current_season_str = lambda: SEASON
+ci._current_league_year = lambda: SEASON
 
 with tempfile.TemporaryDirectory() as td:
     tmp = Path(td)

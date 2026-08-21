@@ -5,6 +5,14 @@ and `harness.py` re-derived it in Python so it could pin one. Both now call
 `resolve_season` here, so the two can no longer disagree about which season a
 build is for.
 
+`resolve_season` used to have its *own* rule (a Sep-30 America/New_York
+cutoff), independent of the one `routers/storage.py` used for box scores and
+cap/contract logic (July 1 UTC) -- so the build and the rest of the API could
+resolve a given date into two different seasons. As of 2026-08-21 both go
+through `season_clock.py`, the one shared definition (July 1 default,
+overridable per-season via league-state.json). See its docstring for the
+full history.
+
 Only `season` reaches the aggregation. `playoffs_from` and `through` are kept
 because `job.R` still takes three positional arguments and R is retained,
 dormant, for a season -- but note what reading `job.R` shows: it parses both,
@@ -22,8 +30,10 @@ from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-# The league runs on Eastern time and the box runs on UTC. Inferring the
-# season from the host clock would roll it over at 8pm ET on Sep 30.
+import season_clock
+
+# Used only for the `through` timestamp label below -- season resolution
+# itself is UTC, via season_clock.
 LEAGUE_TZ = ZoneInfo("America/New_York")
 
 DATA_DIR = Path(os.environ.get("NBS_DATA_DIR", "/var/lib/nothing-but-stats"))
@@ -37,13 +47,11 @@ BUILD_DIR = Path(os.environ.get("NBN_BUILD_DIR", REPO_ROOT / "build"))
 
 
 def resolve_season(today: date | None = None) -> str:
-    """The current season, on a Sep 30 cutoff, in league time."""
-    today = today or datetime.now(LEAGUE_TZ).date()
-    if today.month <= 9:
-        y1, y2 = today.year - 1, today.year
-    else:
-        y1, y2 = today.year, today.year + 1
-    return f"{y1 % 100:02d}-{y2 % 100:02d}"
+    """The current season, honoring league-state.json rollover overrides.
+    Defaults to a July 1 boundary -- see season_clock.py."""
+    if today is None:
+        return season_clock.current_season()
+    return season_clock.season_for_date(today.isoformat())
 
 
 def resolve_playoffs_from(season: str) -> str:

@@ -129,8 +129,9 @@ c = pair({**BASE, harness.MANIFEST_NAME: '{"engine": "python"}'},
 check("excluded from the comparison — it records how a run was made", c.ok)
 
 print("\nbuild arguments")
-check("Sep 30 is still last season (build.sh's cutoff)", harness.resolve_season(date(2026, 9, 30)) == "25-26")
-check("Oct 1 rolls over", harness.resolve_season(date(2026, 10, 1)) == "26-27")
+check("June 30 is still last season (the July 1 default cutoff)",
+      harness.resolve_season(date(2026, 6, 30)) == "25-26")
+check("July 1 rolls over", harness.resolve_season(date(2026, 7, 1)) == "26-27")
 check("mid-season resolves back", harness.resolve_season(date(2027, 1, 4)) == "26-27")
 args = harness.BuildArgs.resolve(season="25-26", through="2026-05-10")
 check("through is pinned, not left to job.R's Sys.Date()", args.through == "2026-05-10")

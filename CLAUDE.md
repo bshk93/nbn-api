@@ -382,11 +382,12 @@ Two things about it that are load-bearing:
   again. Re-baselining on sight would report each corruption once and then treat
   it as the new floor. `--accept` re-baselines deliberately, once a human has
   resolved the finding.
-- **The newest season on disk is live alongside the current one.** The stats
-  clock rolls over July 1 (`_current_season_str`) but a playoff run can finish
-  after it — the 25-26 finals were 2026-06-18, and a slower postseason would
-  have landed in July against a clock already reading 26-27. Freezing last
-  season the moment the calendar turns would alert on a real game.
+- **The newest season on disk is live alongside the current one.** The season
+  clock rolls over July 1 by default (`_current_league_year`, `season_clock.py`)
+  but a playoff run can finish after it — the 25-26 finals were 2026-06-18, and
+  a slower postseason would have landed in July against a clock already reading
+  26-27. Freezing last season the moment the calendar turns would alert on a
+  real game.
 
 Alerts go to `DISCORD_ALERT_CHANNEL` (inert if unset, like every other feed
 here) **and** the unit exits non-zero, so a violation is visible in
@@ -445,7 +446,7 @@ playoffs), run `harness port` and confirm R agrees.
 | | |
 |---|---|
 | `__main__.py` | the entry point: `python3 -m stats_build`. Resolves the season, refuses to run without the raw box scores, writes 86 files into `NBN_OUT_DIR` |
-| `buildargs.py` | the season rule (Sep 30 cutoff, league time), in one place — the entry point and the harness both import it |
+| `buildargs.py` | resolves build arguments; the season itself comes from `season_clock.py` (the one clock shared with box scores and cap/contract logic — July 1 default, settable via league-state.json) — the entry point and the harness both import it |
 | `pipeline.py` | every aggregation |
 | `csvio.py` | `readr::write_csv`, byte for byte |
 | `rmath.py` | R's `round()` and `mean()` |

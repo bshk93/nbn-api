@@ -12,7 +12,7 @@ from .constants import (
     TEAM_STATE_FILE, TRADE_EXCEPTIONS_FILE, _rules_lock, _picks_lock, _state_lock,
     _deadcap_lock, _trade_exc_lock,
 )
-from .storage import read_csv, write_csv, _load_json, _save_json, log_write, _current_season_str, _current_league_year, _season_start
+from .storage import read_csv, write_csv, _load_json, _save_json, log_write, _current_league_year, _season_start
 from .auth import get_token_info, has_role, require_role
 from . import tradeblock_notify
 
