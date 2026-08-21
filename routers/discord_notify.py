@@ -33,6 +33,8 @@ from typing import Optional
 
 from . import discord_transport as transport
 from .players import load_player_bios, _display_name
+from .roster_picks import load_team_state, get_season_state
+from .storage import _season_for_date
 
 logger = logging.getLogger(__name__)
 
@@ -380,6 +382,28 @@ def build_embed(txn: dict, forced_checks: Optional[list[str]] = None,
             "value": ", ".join(f"`{c}`" for c in forced_checks),
             "inline": False,
         })
+
+    # Surface a hard-cap consequence in plain language, not just the raw check
+    # slug above. Keyed off hard_cap_txn_id (not a team's current hard_cap)
+    # so a team that was *already* hard-capped before this transaction —
+    # unaffected by it — doesn't get credited with a lock it already had.
+    # Skipped for set_hard_cap_level itself: its own description line above
+    # already states the level and reason for that one directly.
+    if t != "set_hard_cap_level":
+        season = _season_for_date(txn.get("date", ""))
+        state = load_team_state()
+        cap_lines = [
+            f"**{team}** → {LEVEL_LABELS.get(ts['hard_cap'], ts['hard_cap'])}"
+            for team in teams
+            for ts in [get_season_state(state, team, season)]
+            if ts.get("hard_cap") and ts.get("hard_cap_txn_id") == txn.get("id")
+        ]
+        if cap_lines:
+            fields.append({
+                "name": "🔒 Hard cap triggered",
+                "value": "\n".join(cap_lines),
+                "inline": False,
+            })
 
     who = txn.get("created_by") or "unknown"
     if d.get("_source") == "owner_self_serve":
