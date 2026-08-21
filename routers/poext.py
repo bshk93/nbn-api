@@ -253,6 +253,36 @@ def _stage(state: dict, slug: str, cycle: Optional[str], has_live: bool, decided
     return "open"
 
 
+@router.get("/api/poext/proposals")
+def list_proposals(player: Optional[str] = None, team: Optional[str] = None,
+                   status: Optional[str] = None, info: dict = Depends(get_token_info)):
+    """Scoped per § 6.1's spirit — a member with no relevant standing gets an
+    empty list, not a 403, mirroring free_agency.list_offers. A draft is
+    visible only to the proposing team (+ admin) since a team hasn't chosen
+    to show anyone yet; anything submitted or further along is visible to any
+    committee holder (agent/poext/poext_head) as well as the proposing team,
+    since that's the queue this endpoint exists to back."""
+    proposals = _load_proposals()
+    if player:
+        proposals = [p for p in proposals if p["player"] == player]
+    if team:
+        proposals = [p for p in proposals if p["team"] == team.upper()]
+    if status:
+        proposals = [p for p in proposals if p["status"] == status]
+
+    is_committee = _is_head(info) or has_role(info, "poext") or has_role(info, "agent")
+    my_teams = _member_teams(info.get("name") or "")
+
+    def visible(p):
+        if p["team"] in my_teams:
+            return True
+        if p["status"] == "draft":
+            return False
+        return is_committee
+
+    return [p for p in proposals if visible(p)]
+
+
 # ── proposals ─────────────────────────────────────────────────────────────────
 
 class ProposalContract(BaseModel):

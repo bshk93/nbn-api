@@ -297,6 +297,23 @@ check("1 rejection recorded", STATE["players"]["unlockee"]["rejections"] == 1)
 poext.unlock_player("unlockee", HEAD)
 check("unlock rolled the rejection back", STATE["players"]["unlockee"]["rejections"] == 0)
 
+print("\nlist_proposals visibility")
+reset()
+p = make_proposal(SAS)
+draft_visible_to_sas = poext.list_proposals(info=SAS)
+check("SAS sees its own draft", any(x["id"] == p["id"] for x in draft_visible_to_sas))
+draft_visible_to_bkn = poext.list_proposals(info=BKN)
+check("BKN can't see SAS's draft", not any(x["id"] == p["id"] for x in draft_visible_to_bkn))
+draft_visible_to_agent = poext.list_proposals(info=AGENT)
+check("an agent can't see a draft either — nobody's chosen to show it yet",
+      not any(x["id"] == p["id"] for x in draft_visible_to_agent))
+poext.submit_proposal(p["id"], SAS)
+submitted_visible_to_agent = poext.list_proposals(info=AGENT)
+check("once submitted, any agent can see it in the queue",
+      any(x["id"] == p["id"] for x in submitted_visible_to_agent))
+submitted_visible_to_bkn = poext.list_proposals(info=BKN)
+check("...but a team with no committee role still can't", not any(x["id"] == p["id"] for x in submitted_visible_to_bkn))
+
 print("\n" + ("=" * 40))
 if FAILS:
     print(f"FAILED: {FAILS}")
