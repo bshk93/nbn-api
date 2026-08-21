@@ -1,14 +1,24 @@
 # Contract Extensions (§ 6.2 / § 6.3) — design spec
 
-**Status: SPEC ONLY — nothing described here is built.** Written 2026-08-07.
-There is no `extension` transaction type: it is absent from `_VALIDATORS`, from
-the `create_transaction` type whitelist, and from `_detail_models`. § 6.2 and
-§ 6.3 are both badged 👁 manual review in the rulebook, correctly.
+**Status: Phase A + E LIVE, deployed 2026-08-21.** `"extension"` is in
+`_VALIDATORS`, the `create_transaction` type whitelist, and `_detail_models`.
+`POST /api/validate/extension` and `POST /api/transactions` (type=`extension`)
+both work against real production data. § 6.2 and § 6.3 checks run as
+described in § 5 below, with the corrections listed in
+`nbn-today/docs/poext-extension-pipeline.md` § 11 already applied in code.
 
-When this ships, update this header first — `docs/picks-conveyance.md` spent
-four days claiming to be a spec after it was live, and became actively
-misleading. Ground truth for "is this live" should be the presence of
-`"extension"` in `_VALIDATORS`, not this sentence.
+**Not yet built:** the `/api/poext/*` committee pipeline (Phase C — claim,
+negotiate, ballot, finalize), the `/extensions` team-facing page (Phase D),
+and the § 4.5 six-month trade-freeze check in `_validate_trade` (Phase F). A
+real extension today goes through the same manual hand-off free agency
+already uses: the committee decides, the office enters it via `/transactions`
+(or the transaction simulator), and the validator here is what tells them
+whether it's legal. § 6.2 and § 6.3's rulebook badges should move from 👁 to
+🔒+👁 to reflect this (see § 12 below).
+
+Ground truth for "is this live" is the presence of `"extension"` in
+`_VALIDATORS`, not this sentence — `docs/picks-conveyance.md` spent four days
+claiming to be a spec after it was live, and became actively misleading.
 
 ---
 
