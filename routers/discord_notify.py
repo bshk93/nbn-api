@@ -54,7 +54,7 @@ TYPE_LABELS = {
     "release": "Release", "renounce": "Renounce",
     "rescind_renounce": "Renounce Rescinded", "trade": "Trade",
     "convert_twoway": "Two-Way Conversion", "void_player": "Void Player",
-    "set_hard_cap_level": "Hard Cap",
+    "set_hard_cap_level": "Hard Cap", "extension": "Extension",
 }
 
 # Mirrors the badge colours on /transactions so the channel reads the same way
@@ -66,6 +66,10 @@ TYPE_COLORS = {
     "convert_twoway": 0xA8A29E, "void_player": 0x9CA3AF,
     "set_hard_cap_level": 0xD4AF37, "offer_sheet": 0xA5B4FC,
     "offer_sheet_decision": 0xA5B4FC,
+    # Same blue as .badge-extension in transactions/index.html and
+    # poext_notify's COLOR_SUBMIT — one color for "extension" everywhere it
+    # shows up, not three independently-chosen ones.
+    "extension": 0x60A5FA,
 }
 
 METHOD_LABELS = {
@@ -243,6 +247,16 @@ def _describe(txn: dict, bios: dict) -> str:
             s += _method_str(d)
         return s
 
+    if t == "extension":
+        # d["contract"] is the extended term ONLY (new money on top of a live
+        # deal, per ExtensionDetails) — _contract_str renders exactly that
+        # shape correctly on its own, same as it does for a sign's full deal.
+        s = _contract_str(d.get("contract") or {})
+        kind = d.get("kind")
+        if kind and kind != "veteran":
+            s += f" · {'rookie scale' if kind == 'rookie_scale' else 'extend-and-trade'}"
+        return s
+
     if t == "option":
         label = "Player Opt" if d.get("option_type") == "PLAYER_OPT" else "Team Opt"
         if d.get("decision") == "accept":
@@ -364,7 +378,7 @@ def build_embed(txn: dict, forced_checks: Optional[list[str]] = None,
     # Year-by-year figures for anything carrying a contract. The headline gives
     # the shape ("2+1 PO · $25.0M"); this is where the actual numbers and which
     # years are optional get checked.
-    if t in ("sign", "offer_sheet", "offer_sheet_decision", "sign_pick", "convert_twoway", "pick"):
+    if t in ("sign", "offer_sheet", "offer_sheet_decision", "sign_pick", "convert_twoway", "pick", "extension"):
         breakdown = _contract_breakdown(d.get("contract") or {})
         if breakdown:
             fields.append({"name": "Year by year", "value": breakdown, "inline": False})

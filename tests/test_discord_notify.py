@@ -438,6 +438,29 @@ check("...while still draining a draft day in a couple of minutes",
       f"{DRAFT_DAY_EXPECTED * tp.SEND_INTERVAL:.0f}s for {DRAFT_DAY_EXPECTED}")
 
 
+# ── extension: a real applied type had no case at all, until it was found by
+# eye rather than by a test — this is that test, so it can't happen again ──────
+print("\nextension — a contract-carrying type, same as sign/sign_pick")
+ext_txn = {
+    "id": "ext1", "type": "extension", "date": "2026-08-08",
+    "created_by": "tester", "created_at": now_stamp(),
+    "description": "", "details": {
+        "player": "curry-stephen", "team": "GSW", "kind": "veteran",
+        "contract": {"salaries": {"27-28": "$40,000,000", "28-29": "$42,000,000"}, "cap_holds": {}},
+    },
+}
+embed = dn.build_embed(ext_txn)
+check("title says 'Extension', not the raw type string", "Extension" in embed["title"], embed["title"])
+check("title leads with the team", embed["title"].startswith("GSW"), embed["title"])
+check("description isn't blank (contract shorthand present)", bool(embed["description"]), embed)
+check("has a real color, not the generic fallback", embed["color"] == dn.TYPE_COLORS["extension"])
+check("carries a Year by year field, same as a signing does",
+      any(f["name"] == "Year by year" for f in embed["fields"]), embed["fields"])
+
+ext_kind_txn = {**ext_txn, "details": {**ext_txn["details"], "kind": "extend_and_trade"}}
+embed2 = dn.build_embed(ext_kind_txn)
+check("a non-veteran kind is named in the description", "extend-and-trade" in embed2["description"], embed2["description"])
+
 print()
 if FAILS:
     print(f"FAILED: {FAILS}")
