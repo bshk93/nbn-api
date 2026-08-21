@@ -67,6 +67,15 @@ SUGGESTIONS_FILE = DATA_DIR / "suggestions.json"
 FA_STATE_FILE   = DATA_DIR / "fa-state.json"    # mode, rounds, per-player status + sub-committees
 FA_OFFERS_FILE  = DATA_DIR / "fa-offers.json"   # the offers themselves
 FA_BALLOTS_FILE = DATA_DIR / "fa-ballots.json"  # {player: {round_id: {ballots, final}}}
+# PDC extensions (§ 6.2/6.3) — see nbn-today/docs/poext-extension-pipeline.md
+# § 3-4. Deliberately separate files from the FA ones above even though the
+# object shapes are close cousins: no round_id/mode concept, one proposal
+# live per player rather than N competing offers, and — per that doc's D14 —
+# claim state must never be shared across the two pipelines for the same
+# player, which is trivially true when they're not even in the same file.
+POEXT_PROPOSALS_FILE = DATA_DIR / "poext-proposals.json"  # the proposals themselves
+POEXT_STATE_FILE     = DATA_DIR / "poext-state.json"      # per-player: agent claim, subcommittee, rejection counter
+POEXT_VOTES_FILE     = DATA_DIR / "poext-votes.json"      # {proposal_id: {member: {vote, note, at}}}
 # Opaque browser sessions ({id: {member, created_at, expires_at, ua_hint}}) — the
 # cookie that makes a member signed in across *.nbn.today without a second paste
 # of their token. See auth.py and the spec's § 3.3.

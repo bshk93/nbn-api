@@ -5901,6 +5901,60 @@ def _extension_frame(slug: str, team: str, bio: dict, cur_season: str,
     }
 
 
+def _extension_eligibility_check(player: str, frame: dict, cur_season: str,
+                                 attested_contract_start: Optional[str] = None) -> CheckResult:
+    """§ 6.2 rules 1-2, split out of `_validate_extension` so `GET
+    /api/poext/eligible` (routers/poext.py) can answer "who can we extend?"
+    off the exact same logic the validator runs — two copies of this is
+    precisely the kind of drift that made the ledger-vs-bio confusion in § 3.8
+    Bird tenure real in the first place."""
+    if frame["attestation_contradicted"]:
+        return CheckResult(
+            check="extension_eligibility", passed=False, level="error",
+            message=(
+                f"The attested start ({attested_contract_start}) is earlier than a "
+                f"real event on file for {player} with a different team — the attestation "
+                f"can't be right."
+            ),
+        )
+    if frame["contract_start"] is None or frame["contract_end"] is None:
+        return CheckResult(
+            check="extension_eligibility", passed=True, level="warning",
+            message=(
+                f"No acquisition record on file for {player} and no attested start date — "
+                f"contract length and position in the deal can't be verified (§ 6.2 rules 1-2). "
+                f"A gap here can only make a legal extension look ineligible, never the reverse."
+            ),
+        )
+    length_ok = frame["contract_length"] is not None and frame["contract_length"] >= 3
+    is_final_year = cur_season == frame["contract_end"]
+    is_year4_of_5 = frame["contract_length"] == 5 and frame["position_in_deal"] == 4
+    position_ok = is_final_year or is_year4_of_5
+    level = "error" if frame["start_basis"] in ("ledger", "draft") else "warning"
+    if length_ok and position_ok:
+        return CheckResult(
+            check="extension_eligibility", passed=True,
+            message=(
+                f"{frame['contract_length']}-year contract ({frame['contract_start']}–"
+                f"{frame['contract_end']}), extending from "
+                f"{'the final year' if is_final_year else 'Year 4 of 5'} "
+                f"(basis: {frame['start_basis']})."
+            ),
+        )
+    reason = []
+    if not length_ok:
+        reason.append(f"contract length is {frame['contract_length']} years, needs ≥ 3")
+    if not position_ok:
+        reason.append(
+            f"currently Year {frame['position_in_deal']} of {frame['contract_length']}, "
+            f"not the final year or Year 4 of a 5-year deal"
+        )
+    return CheckResult(
+        check="extension_eligibility", passed=False, level=level,
+        message=f"§ 6.2 rules 1-2: {'; '.join(reason)} (basis: {frame['start_basis']}).",
+    )
+
+
 def _validate_extension(details: ExtensionDetails, ctx: dict) -> list[CheckResult]:
     """§ 6.2 / § 6.3. See nbn-today/docs/poext-extension-pipeline.md § 5 for
     the full information flow this mirrors.
@@ -5927,55 +5981,7 @@ def _validate_extension(details: ExtensionDetails, ctx: dict) -> list[CheckResul
         return checks
 
     frame = _extension_frame(player, team, bio, cur_season, details.attested_contract_start)
-
-    # ── extension_eligibility (rules 1-2) ───────────────────────────────────
-    if frame["attestation_contradicted"]:
-        checks.append(CheckResult(
-            check="extension_eligibility", passed=False, level="error",
-            message=(
-                f"The attested start ({details.attested_contract_start}) is earlier than a "
-                f"real event on file for {player} with a different team — the attestation "
-                f"can't be right."
-            ),
-        ))
-    elif frame["contract_start"] is None or frame["contract_end"] is None:
-        checks.append(CheckResult(
-            check="extension_eligibility", passed=True, level="warning",
-            message=(
-                f"No acquisition record on file for {player} and no attested start date — "
-                f"contract length and position in the deal can't be verified (§ 6.2 rules 1-2). "
-                f"A gap here can only make a legal extension look ineligible, never the reverse."
-            ),
-        ))
-    else:
-        length_ok = frame["contract_length"] is not None and frame["contract_length"] >= 3
-        is_final_year = cur_season == frame["contract_end"]
-        is_year4_of_5 = frame["contract_length"] == 5 and frame["position_in_deal"] == 4
-        position_ok = is_final_year or is_year4_of_5
-        level = "error" if frame["start_basis"] in ("ledger", "draft") else "warning"
-        if length_ok and position_ok:
-            checks.append(CheckResult(
-                check="extension_eligibility", passed=True,
-                message=(
-                    f"{frame['contract_length']}-year contract ({frame['contract_start']}–"
-                    f"{frame['contract_end']}), extending from "
-                    f"{'the final year' if is_final_year else 'Year 4 of 5'} "
-                    f"(basis: {frame['start_basis']})."
-                ),
-            ))
-        else:
-            reason = []
-            if not length_ok:
-                reason.append(f"contract length is {frame['contract_length']} years, needs ≥ 3")
-            if not position_ok:
-                reason.append(
-                    f"currently Year {frame['position_in_deal']} of {frame['contract_length']}, "
-                    f"not the final year or Year 4 of a 5-year deal"
-                )
-            checks.append(CheckResult(
-                check="extension_eligibility", passed=False, level=level,
-                message=f"§ 6.2 rules 1-2: {'; '.join(reason)} (basis: {frame['start_basis']}).",
-            ))
+    checks.append(_extension_eligibility_check(player, frame, cur_season, details.attested_contract_start))
 
     # ── extension_service (rule 3) ──────────────────────────────────────────
     tenure = _bird_tenure(player, team, cur_season, bio)

@@ -70,6 +70,16 @@ def notify_team(team: str, text: str, link: Optional[str] = None) -> None:
             notify_member(name, text, link)
 
 
+def notify_role(role: str, text: str, link: Optional[str] = None) -> None:
+    """Same as notify_team, generalized to any role — a committee-wide event
+    (e.g. an extension proposal reaching the queue, scoped to `poext` holders
+    per nbn-today/docs/poext-extension-pipeline.md D13) that's every holder of
+    that role's business, not one team's or one member's."""
+    for name, m in load_members().items():
+        if role in (m.get("roles") or []):
+            notify_member(name, text, link)
+
+
 @router.get("/api/inbox")
 def get_inbox(info: dict = Depends(get_token_info)):
     with _inbox_lock:
