@@ -158,10 +158,19 @@ def save_picks(picks: list[dict]):
     _pc_resync.resync()
 
 
+def _pick_year_horizon(season: str) -> int:
+    """The farthest draft year a pick may be traded through, or the picks
+    ledger should carry a row for, given a league year: that season's start
+    calendar year plus § 7.2's 7-year advance limit. Parameterized on season
+    (rather than always "today") so a validator can check a transaction
+    against the league year it's actually dated in, same as everything else
+    in transactions.py does."""
+    return 2000 + _season_start(season) + 7
+
+
 def picks_horizon_target_year() -> int:
-    """The farthest draft year the picks ledger should currently cover: the
-    current league year's start calendar year, plus a fixed 7-year horizon."""
-    return 2000 + _season_start(_current_league_year()) + 7
+    """The farthest draft year the picks ledger should currently cover."""
+    return _pick_year_horizon(_current_league_year())
 
 
 def ensure_picks_horizon() -> list[int]:

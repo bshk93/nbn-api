@@ -26,7 +26,7 @@ from .discord_notify import notify_transaction
 from . import inbox
 from .players import load_player_bios, save_player_bios, _build_team_map, _scrub_trading_block
 from .roster_picks import (
-    load_picks, save_picks, _all_picks_flat,
+    load_picks, save_picks, _all_picks_flat, _pick_year_horizon,
     load_team_state, save_team_state, get_season_state,
     DEFAULT_SEASON_STATE, _maybe_set_hard_cap, _bae_available,
     load_trade_exceptions, save_trade_exceptions,
@@ -5154,6 +5154,52 @@ def _check_stepien_rule(details: TradeIn, all_picks: list[dict] | None = None) -
     return checks
 
 
+def _check_pick_advance_limit(details: TradeIn, cur_season: str) -> list[CheckResult]:
+    """§ 7.2 seven-year advance limit: a draft pick may only be traded up to
+    7 years ahead of the current league year. Same horizon the picks ledger
+    itself is kept populated through (`roster_picks._pick_year_horizon`) — a
+    pick further out than that has no real conveyance row to trade in the
+    first place, so this is really "the horizon, stated as a rule" rather
+    than an independent number that could drift from it.
+
+    Every pick asset in the trade is checked, any round — unlike the Stepien
+    Rule this isn't limited to first-rounders. A pick offered only as ladder
+    compensation (`ladder_fallback`) is left to manual review, same as the
+    Stepien Rule leaves it (see that function's docstring): it's a
+    contingent claim, not a pick this trade is itself conveying.
+    """
+    horizon = _pick_year_horizon(cur_season)
+    checks: list[CheckResult] = []
+    seen: set[tuple] = set()
+    for xfer in details.transfers:
+        for asset in xfer.assets:
+            if asset.type != "pick" or asset.year is None:
+                continue
+            key = (asset.year, asset.round, (asset.orig or "").upper())
+            if key in seen:
+                continue
+            seen.add(key)
+            label = f"{asset.year} round {asset.round} ({asset.orig or '?'})"
+            check_id = f"pick_advance_limit_{asset.year}_{(asset.orig or '?').lower()}"
+            if asset.year > horizon:
+                checks.append(CheckResult(
+                    check=check_id, passed=False, level="error",
+                    message=(f"The {label} pick is {asset.year - horizon} year(s) beyond the 7-year "
+                             f"advance limit (§ 7.2) — picks may only be traded through {horizon}."),
+                ))
+            else:
+                checks.append(CheckResult(
+                    check=check_id, passed=True,
+                    message=f"The {label} pick is within the 7-year advance limit (§ 7.2, through {horizon}).",
+                ))
+    if not checks:
+        checks.append(CheckResult(
+            check="pick_advance_limit", passed=True,
+            message="No draft picks in this trade — § 7.2's 7-year advance limit doesn't apply.",
+        ))
+    return checks
+
+
 def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
     """Canonical trade validation, shared verbatim by the submit endpoint
     (``POST /api/transactions``) and the simulator (``POST /api/validate/trade``).
@@ -5184,6 +5230,8 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
       • Stepien Rule       — § 7.2 (no first-round pick in 2+ consecutive draft years,
                               own or acquired; unconditional pick retrades only — protected/
                               swap/ladder legs are left to manual review)
+      • 7-year advance limit — § 7.2 (a pick may not be traded more than 7 years ahead
+                              of the current league year; any round)
     """
     checks = []
     bios = ctx["bios"]; season = ctx["cur_season"]
@@ -5649,6 +5697,9 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
 
     # ── Stepien Rule (§ 7.2) ────────────────────────────────────────────────────
     checks.extend(_check_stepien_rule(details))
+
+    # ── 7-year advance limit (§ 7.2) ────────────────────────────────────────────
+    checks.extend(_check_pick_advance_limit(details, season))
 
     return checks
 

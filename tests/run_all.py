@@ -5,7 +5,7 @@
 import subprocess
 import sys
 
-MODULES = ["test_stepien_rule", "test_picks_matching", "test_tpe_and_hardcap",
+MODULES = ["test_stepien_rule", "test_pick_advance_limit", "test_picks_matching", "test_tpe_and_hardcap",
            "test_cap_room_contagion",
            "test_signing_method_funding", "test_two_way_slots",
            "test_two_way_hard_cap",
