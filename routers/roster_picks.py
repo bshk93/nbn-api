@@ -528,7 +528,8 @@ def delete_trading_block_player(team: str, slug: str, info: dict = Depends(get_t
 # ── Team State ────────────────────────────────────────────────────────────────
 
 DEFAULT_SEASON_STATE: dict = {
-    "hard_cap": None, "hard_cap_reason": "", "mle_used": 0, "bae_used": False, "mle_type": None,
+    "hard_cap": None, "hard_cap_reason": "", "hard_cap_txn_id": None,
+    "mle_used": 0, "bae_used": False, "mle_type": None,
 }
 
 # Ranked by actual restrictiveness (dollar ceiling), not apron number — First
@@ -563,15 +564,17 @@ def _bae_available(state: dict, team: str, cur_season: str) -> bool:
     return not state[team][prior[-1]].get("bae_used", False)
 
 
-def _maybe_set_hard_cap(ts: dict, new_cap: str, reason: str):
+def _maybe_set_hard_cap(ts: dict, new_cap: str, reason: str, txn_id: Optional[str] = None):
     if CAP_RANK.get(new_cap, 0) > CAP_RANK.get(ts.get("hard_cap"), 0):
         ts["hard_cap"] = new_cap
         ts["hard_cap_reason"] = reason
+        ts["hard_cap_txn_id"] = txn_id
 
 
 class TeamSeasonState(BaseModel):
     hard_cap: Optional[str] = None
     hard_cap_reason: str = ""
+    hard_cap_txn_id: Optional[str] = None
     mle_used: int = 0
     bae_used: bool = False
     mle_type: Optional[str] = None

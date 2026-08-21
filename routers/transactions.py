@@ -1200,7 +1200,7 @@ def _apply_void_player(details: VoidPlayerDetails, txn_date: str, info: dict) ->
     return team
 
 
-def _apply_set_hard_cap(details: SetHardCapDetails, txn_date: str, info: dict) -> str:
+def _apply_set_hard_cap(details: SetHardCapDetails, txn_date: str, info: dict, txn_id: Optional[str] = None) -> str:
     """Manually sets or clears a team's hard-cap level for the season, through
     the transaction log instead of the silent PUT /api/team-state side door
     (which leaves no reason/author trail). Unlike _maybe_set_hard_cap — the
@@ -1220,6 +1220,11 @@ def _apply_set_hard_cap(details: SetHardCapDetails, txn_date: str, info: dict) -
         ts = state.get(team, {}).get(cur_season, dict(DEFAULT_SEASON_STATE))
         ts["hard_cap"] = new_cap
         ts["hard_cap_reason"] = details.reason
+        # An explicit override always restamps the pointer — even to None on a
+        # "default" clear — since this is the one path where the "reason" is
+        # itself the override's own txn, not something to leave attributed to
+        # whatever auto-trigger set it before.
+        ts["hard_cap_txn_id"] = txn_id if new_cap else None
         state.setdefault(team, {})[cur_season] = ts
         save_team_state(state)
 
@@ -1325,13 +1330,13 @@ def _apply_convert_twoway(details: ConvertTwoWayDetails, txn_date: str, info: di
                 # signing_method would otherwise stamp here.
                 ts["mle_type"] = "room" if resolved == "room_exception" else resolved
                 if resolved == "ntmle":
-                    _maybe_set_hard_cap(ts, "first_apron", f"NTMLE two-way conversion: {details.player}")
+                    _maybe_set_hard_cap(ts, "first_apron", f"NTMLE two-way conversion: {details.player}", txn_id=txn_id)
                 elif resolved == "tmle":
-                    _maybe_set_hard_cap(ts, "second_apron", f"TMLE two-way conversion: {details.player}")
+                    _maybe_set_hard_cap(ts, "second_apron", f"TMLE two-way conversion: {details.player}", txn_id=txn_id)
 
             elif details.signing_method == "bae":
                 ts["bae_used"] = True
-                _maybe_set_hard_cap(ts, "first_apron", f"BAE two-way conversion: {details.player}")
+                _maybe_set_hard_cap(ts, "first_apron", f"BAE two-way conversion: {details.player}", txn_id=txn_id)
 
             state[team][cur_season] = ts
             save_team_state(state)
@@ -1555,13 +1560,13 @@ def _apply_sign(details: SignDetails, txn_date: str, info: dict, txn_id: Optiona
                 # signing_method would otherwise stamp here.
                 ts["mle_type"] = "room" if resolved == "room_exception" else resolved
                 if resolved == "ntmle":
-                    _maybe_set_hard_cap(ts, "first_apron", f"NTMLE signing: {details.player}")
+                    _maybe_set_hard_cap(ts, "first_apron", f"NTMLE signing: {details.player}", txn_id=txn_id)
                 elif resolved == "tmle":
-                    _maybe_set_hard_cap(ts, "second_apron", f"TMLE signing: {details.player}")
+                    _maybe_set_hard_cap(ts, "second_apron", f"TMLE signing: {details.player}", txn_id=txn_id)
 
             elif details.signing_method == "bae":
                 ts["bae_used"] = True
-                _maybe_set_hard_cap(ts, "first_apron", f"BAE signing: {details.player}")
+                _maybe_set_hard_cap(ts, "first_apron", f"BAE signing: {details.player}", txn_id=txn_id)
 
             state[team][cur] = ts
             save_team_state(state)
@@ -1586,6 +1591,7 @@ def _apply_sign(details: SignDetails, txn_date: str, info: dict, txn_id: Optiona
                 ts, "first_apron",
                 f"Mid-season buyout signing above NTMLE: {details.player} "
                 f"(terminated contract ${buyout_salary:,}, § 1.4 Row D)",
+                txn_id=txn_id,
             )
             state[team][cur_season] = ts
             save_team_state(state)
@@ -1866,7 +1872,7 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
                 if aggr_team not in state:
                     state[aggr_team] = {}
                 ts = state[aggr_team].get(cur_season, dict(DEFAULT_SEASON_STATE))
-                _maybe_set_hard_cap(ts, "second_apron", f"Salary aggregation in trade (§ 4.4 contagion, {txn_date})")
+                _maybe_set_hard_cap(ts, "second_apron", f"Salary aggregation in trade (§ 4.4 contagion, {txn_date})", txn_id=txn_id)
                 state[aggr_team][cur_season] = ts
             save_team_state(state)
 
@@ -1920,7 +1926,7 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
                 if team not in state:
                     state[team] = {}
                 ts = state[team].get(cur_season, dict(DEFAULT_SEASON_STATE))
-                _maybe_set_hard_cap(ts, "first_apron", f"Trade incoming exceeds outgoing +$250K (§ 4.3 contagion, {txn_date})")
+                _maybe_set_hard_cap(ts, "first_apron", f"Trade incoming exceeds outgoing +$250K (§ 4.3 contagion, {txn_date})", txn_id=txn_id)
                 state[team][cur_season] = ts
             save_team_state(state)
 
@@ -1954,7 +1960,7 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
                         # TMLE/Room — mirrors the BAE-signing bookkeeping in
                         # _apply_sign (§ 3.5), just triggered from a trade.
                         ts["bae_used"] = True
-                        _maybe_set_hard_cap(ts, "first_apron", f"BAE trade absorption ({txn_date})")
+                        _maybe_set_hard_cap(ts, "first_apron", f"BAE trade absorption ({txn_date})", txn_id=txn_id)
                     else:
                         ts["mle_used"] = ts.get("mle_used", 0) + inc
                         # team_state stores the short form "room" — that's what
@@ -1964,9 +1970,9 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
                         # every `== "room"` comparison then missed.
                         ts["mle_type"] = "room" if exc_type == "room_exception" else exc_type
                         if exc_type == "ntmle":
-                            _maybe_set_hard_cap(ts, "first_apron", f"NTMLE trade absorption ({txn_date})")
+                            _maybe_set_hard_cap(ts, "first_apron", f"NTMLE trade absorption ({txn_date})", txn_id=txn_id)
                         elif exc_type == "tmle":
-                            _maybe_set_hard_cap(ts, "second_apron", f"TMLE trade absorption ({txn_date})")
+                            _maybe_set_hard_cap(ts, "second_apron", f"TMLE trade absorption ({txn_date})", txn_id=txn_id)
                     state[team][cur_season] = ts
                 save_team_state(state)
 
@@ -2007,7 +2013,7 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
                 if team not in state:
                     state[team] = {}
                 ts = state[team].get(cur_season, dict(DEFAULT_SEASON_STATE))
-                _maybe_set_hard_cap(ts, "first_apron", reason)
+                _maybe_set_hard_cap(ts, "first_apron", reason, txn_id=txn_id)
                 state[team][cur_season] = ts
             save_team_state(state)
 
@@ -6021,7 +6027,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             stored_details = details.model_dump()
             stored_details["team"] = team
         elif body.type == "set_hard_cap_level":
-            team = _apply_set_hard_cap(details, body.date, info)
+            team = _apply_set_hard_cap(details, body.date, info, txn_id=txn_id)
             stored_details = details.model_dump()
             stored_details["team"] = team
         elif body.type == "offer_sheet":
