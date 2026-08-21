@@ -35,6 +35,9 @@ def check(name, cond):
         FAILS.append(name)
 
 
+_REAL_BUILD_TEAM_MAP = T._build_team_map
+
+
 def pin_ledger(events):
     st = T.TRANSACTIONS_FILE.stat()
     T._BIRD_LEDGER_CACHE.update({"key": (st.st_mtime, st.st_size), "index": {"p": list(events)}})
@@ -52,8 +55,14 @@ def make_ctx(bio, cur_season="26-27", cap_levels=None, txn_date=None):
 
 
 def extend(bio, contract, team="XXX", cur_season="26-27", cap_levels=None,
-          kind="veteran", events=(("2020-08-01", "sign", "XXX"),)):
+          kind="veteran", events=(("2020-08-01", "sign", "XXX"),), holder=None):
     pin_ledger(events)
+    # _validate_extension checks the player is actually on `team`'s roster
+    # (§ 2.4) — "p" is a synthetic test player with no real roster entry, so
+    # this has to be faked the same way the ledger above is. `holder`
+    # defaults to `team` (the common case: the request names the real
+    # holder) but can be overridden to deliberately construct a mismatch.
+    T._build_team_map = lambda: {"p": holder if holder is not None else team}
     details = T.ExtensionDetails(player="p", team=team, contract=T.ContractIn(**contract), kind=kind)
     ctx = make_ctx(bio, cur_season=cur_season, cap_levels=cap_levels)
     return T._validate_extension(details, ctx), ctx
@@ -102,8 +111,6 @@ def main():
     check("the trailing FA hold season is discarded before rule 2 even runs",
           T._final_guaranteed_year(bio4) == "25-26")
 
-    print("\neligibility boundaries (§ 6.2 rules 1-2)")
-
     def deal(start, end, cur, extra_cap_holds=None):
         salaries = {}
         y = start
@@ -113,6 +120,17 @@ def main():
                 break
             y = T._season_shift(y, 1)
         return {"salaries": salaries, "guaranteed": {}, "cap_holds": extra_cap_holds or {}}, cur
+
+    print("\nextension_team_match (§ 2.4 — only the incumbent may extend)")
+    bio, cur = deal("24-25", "26-27", "26-27")
+    checks, _ = extend(bio, {"type": "player", "salaries": {"27-28": "$6,000,000"}, "cap_holds": {}},
+                       team="ZZZ", holder="XXX", cur_season=cur, events=(("2024-08-01", "sign", "XXX"),))
+    c = named(checks, "extension_team_match")
+    check("a team that doesn't hold the player is refused outright", c and not c.passed)
+    check("...and it's the ONLY check that ran (no point scoring eligibility for the wrong team)",
+          len(checks) == 1)
+
+    print("\neligibility boundaries (§ 6.2 rules 1-2)")
 
     bio, cur = deal("25-26", "26-27", "26-27")  # 2-year contract, final year
     checks, _ = extend(bio, {"type": "player", "salaries": {"27-28": "$6,000,000", "28-29": "$6,300,000"},
@@ -270,8 +288,10 @@ def main():
     # Every fixture above pinned _BIRD_LEDGER_CACHE to a synthetic one-player
     # index keyed to the real ledger file's (mtime, size) — since that key
     # hasn't changed, _player_acquisition_index would keep serving the stale
-    # synthetic index instead of reloading. Force a real reload.
+    # synthetic index instead of reloading. Force a real reload. Same story
+    # for _build_team_map, patched by extend() to a synthetic {"p": team}.
     T._BIRD_LEDGER_CACHE.update({"key": None, "index": {}})
+    T._build_team_map = _REAL_BUILD_TEAM_MAP
     bios = T.load_player_bios()
     team_map = T._build_team_map()
     cur_season = T._current_league_year()

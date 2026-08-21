@@ -29,6 +29,7 @@ BIOS: dict = {}
 tx.load_player_bios = lambda: BIOS
 tx.save_player_bios = lambda b: None
 tx.CAP_LEVELS_FILE = Path("/nonexistent/cap-levels.json")  # .exists() -> False -> {} cap_levels
+tx._build_team_map = lambda: {"p": "BOS"}  # every fixture below extends "p" on "BOS"
 INFO = {"name": "tester"}
 
 
@@ -94,6 +95,20 @@ bio = BIOS["p"]
 check("the 28-29 UFA hold got priced, not left as a placeholder",
       "28-29" in bio["salaries"] and bio["salaries"]["28-29"] not in (None, "", "$0"))
 check("28-29 carries the UFA tag", bio["cap_holds"].get("28-29") == "UFA")
+
+print("\n§ 2.4: the stated team must actually hold the player (regression — this "
+      "guard didn't exist until it was noticed missing, 2026-08-21)")
+reset({"salaries": {"26-27": "$5,000,000"}, "cap_holds": {}, "guaranteed": {},
+      "guarantee_dates": {}, "guarantee_schedule": {}, "contracts": []})
+try:
+    tx._apply_extension(
+        tx.ExtensionDetails(player="p", team="LAL", contract=contract({"27-28": "$6,000,000"})),
+        "2026-08-21", INFO)
+    check("wrong-team extension raises", False)
+except Exception as e:
+    check("wrong-team extension raises (422), names who actually holds the player",
+          getattr(e, "status_code", None) == 422 and "BOS" in str(e.detail))
+check("bio untouched by the refused call", BIOS["p"]["salaries"] == {"26-27": "$5,000,000"})
 
 print("\nempty contract is refused before anything is written")
 reset({"salaries": {"26-27": "$5,000,000"}, "cap_holds": {}, "guaranteed": {},

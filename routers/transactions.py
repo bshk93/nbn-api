@@ -6089,6 +6089,21 @@ def _validate_extension(details: ExtensionDetails, ctx: dict) -> list[CheckResul
     cur_season = ctx["cur_season"]
     cap_levels = ctx["cap_levels"]
 
+    # § 2.4: only the incumbent may extend — checked here too, not just in
+    # _apply_extension, so a team mismatch shows up in the live rubric before
+    # submit rather than as a 422 surprise after. See _apply_extension's
+    # docstring for why this is a match check (team is real client input for
+    # this type) rather than the sign_pick/convert_twoway pattern of never
+    # accepting one.
+    holder = _build_team_map().get(player)
+    if holder != team:
+        checks.append(CheckResult(
+            check="extension_team_match", passed=False, level="error",
+            message=f"{player} is on {holder or 'no roster'}, not {team} — an extension can only "
+                    f"be entered for the player's actual current team.",
+        ))
+        return checks
+
     if not details.contract.salaries:
         checks.append(CheckResult(
             check="contract_has_salary_years", passed=False, level="error",
@@ -6321,6 +6336,21 @@ def _apply_extension(details: ExtensionDetails, txn_date: str, info: dict,
     team = details.team.upper()
     if team not in VALID_TEAMS:
         raise HTTPException(status_code=422, detail=f"Unknown team: {team!r}")
+    # § 2.4: only the incumbent may extend. Unlike sign_pick/convert_twoway,
+    # which never accept a team from the client at all (deriving it from the
+    # roster instead, "the player is already on exactly one roster"),
+    # ExtensionDetails.team is real client input — the poext pipeline, the
+    # office form and transaction-sim all pass it explicitly. So the guard
+    # has to be a match check rather than a derivation, but the invariant is
+    # the same one _apply_sign enforces for a real conflict (raises 409
+    # rather than silently reassigning a player already under contract
+    # elsewhere): a mistaken or stale `team` must not silently write real
+    # contract money onto the wrong team's books.
+    holder = _build_team_map().get(details.player)
+    if holder != team:
+        raise HTTPException(status_code=422,
+                            detail=f"{details.player!r} is on {holder or 'no roster'}, not {team} — "
+                                   f"an extension can only be entered for the player's actual current team.")
     if not details.contract.salaries:
         raise HTTPException(status_code=422, detail="Extension contract must include at least one season of salary.")
 
