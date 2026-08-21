@@ -36,7 +36,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from . import inbox
+from . import inbox, poext_notify
 from .auth import get_token_info, has_role, load_members, require_role
 from .constants import (POEXT_PROPOSALS_FILE, POEXT_STATE_FILE,
                         POEXT_VOTES_FILE, VALID_TEAMS)
@@ -466,6 +466,9 @@ def submit_proposal(proposal_id: str, info: dict = Depends(get_token_info)):
         proposals[idx] = p
         _save_proposals(proposals)
     log_write(info, f"POST poext/proposals/{proposal_id}/submit — v{p['version']}")
+    # Both the first submission and a resubmission after a remand post here —
+    # one endpoint, one announcement path, same as fa_notify.notify_offer_submitted.
+    poext_notify.notify_proposal_submitted(p)
     if not resubmit:
         # D13: scoped to poext holders, not the wider committee ecosystem —
         # mirrors the public/private Discord split at the individual level.
@@ -507,6 +510,7 @@ def remand_proposal(proposal_id: str, body: dict, info: dict = Depends(get_token
         proposals[idx] = p
         _save_proposals(proposals)
     log_write(info, f"POST poext/proposals/{proposal_id}/remand")
+    poext_notify.notify_proposal_remanded(p, entry)
     recipient = p.get("submitted_by") or p.get("created_by")
     if recipient:
         inbox.notify_member(recipient, f"Your extension proposal for {p['player']} was sent back: {note}",
@@ -539,6 +543,7 @@ def void_proposal(proposal_id: str, body: dict, info: dict = Depends(get_token_i
         proposals[idx] = p
         _save_proposals(proposals)
     log_write(info, f"POST poext/proposals/{proposal_id}/void")
+    poext_notify.notify_proposal_voided(p)
     recipient = p.get("submitted_by") or p.get("created_by")
     if recipient:
         inbox.notify_member(recipient, f"Your extension proposal for {p['player']} was voided: {reason}",
@@ -569,6 +574,7 @@ def restore_proposal(proposal_id: str, info: dict = Depends(get_token_info)):
         proposals[idx] = p
         _save_proposals(proposals)
     log_write(info, f"POST poext/proposals/{proposal_id}/restore")
+    poext_notify.notify_proposal_restored(p)
     recipient = p.get("submitted_by") or p.get("created_by")
     if recipient:
         inbox.notify_member(recipient, f"Your extension proposal for {p['player']} was restored — it's live again",
@@ -843,6 +849,7 @@ def finalize_player(slug: str, info: dict = Depends(require_role("poext_head")))
         _save_votes(votes)
         _save_state(state)
     log_write(info, f"POST poext/players/{slug}/finalize — {outcome}")
+    poext_notify.notify_player_finalized(slug, live["team"], node["final"])
     recipient = live.get("submitted_by") or live.get("created_by")
     if recipient:
         tail = (" — no further extension opportunities arise (§ 6.3)" if outcome == "rejected" and exhausted else "")
