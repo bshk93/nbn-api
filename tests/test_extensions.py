@@ -216,6 +216,23 @@ def main():
     check("trade_floor basis (no earlier record) still passes, but flagged as a warning",
           c and c.passed and c.level == "warning")
 
+    print("\n_extension_fact_sheet's trailing_hold — the office form's EAPS field reads this")
+    bio, cur = deal("24-25", "26-27", "26-27")
+    pin_ledger((("2024-08-01", "sign", "XXX"),))
+    details = T.ExtensionDetails(
+        player="p", team="XXX",
+        contract=T.ContractIn(type="player", salaries={"27-28": "$5,000,000", "28-29": "$5,300,000"},
+                              cap_holds={"29-30": "UFA"}),
+        bird_rights_type="QVFA",
+    )
+    ctx = make_ctx(bio, cur_season=cur)
+    fs = T._extension_fact_sheet(details, ctx)
+    th = fs.get("trailing_hold")
+    check("a trailing UFA/RFA hold in the extension's own cap_holds is priced, not omitted",
+          th is not None and th["season"] == "29-30")
+    check("Full Bird with no EAPS on file -> needs_eaps, not a silent guess",
+          th and th["needs_eaps"] is True)
+
     print("\nextension_cap_position (rule 5), first extended season not the current one")
     bio, cur = deal("24-25", "26-27", "26-27")
     contract = {"type": "player", "salaries": {"27-28": "$6,000,000"}, "cap_holds": {}}

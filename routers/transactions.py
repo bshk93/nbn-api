@@ -6148,6 +6148,17 @@ def _extension_fact_sheet(details: ExtensionDetails, ctx: dict) -> dict:
         min(details.contract.salaries, key=_season_start) if details.contract.salaries else None)
     cl = ctx["cap_levels"].get(yr1_season, {}) if yr1_season else {}
     team_salary = _compute_team_salary(team, bios, yr1_season) if yr1_season else None
+    # Same helper `_signing_fact_sheet` uses — an extension's trailing UFA/RFA
+    # hold is auto-priced by `_apply_extension` through the same
+    # `_autofill_fa_hold_amounts` a signing goes through, so the office needs
+    # to see it (and the needs_eaps case) before submit, not discover a 422
+    # asking for `eaps_assumption` afterward. Same bug class fixed for
+    # sign_pick/convert_twoway 2026-08-11/12.
+    trailing_hold = _preview_fa_hold(
+        bio, team, details.contract, ctx["cap_levels"],
+        bird_rights_type=details.bird_rights_type, eaps_assumption=details.eaps_assumption,
+        slug=player,
+    )
     return {
         "player": player,
         "player_name": bio.get("name") or player,
@@ -6165,6 +6176,7 @@ def _extension_fact_sheet(details: ExtensionDetails, ctx: dict) -> dict:
             "salaries": details.contract.salaries,
             "cap_holds": details.contract.cap_holds,
         },
+        "trailing_hold": trailing_hold,
         "prior_salary": frame["prior_salary"],
         "max_year1_ceiling": round(frame["prior_salary"] * 1.4) if frame["prior_salary"] else None,
         "eaps": cl.get("eaps"),
