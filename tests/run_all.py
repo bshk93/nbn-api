@@ -16,6 +16,7 @@ MODULES = ["test_stepien_rule", "test_pick_advance_limit", "test_picks_matching"
            "test_offer_sheets", "test_suggestions", "test_fa_pool",
            "test_fa_offers", "test_fa_notify", "test_auth_session",
            "test_contract_shorthand", "test_validate_endpoints",
+           "test_themes",
            "test_roster_log_relay",
            "test_minimum_contract_trade_exception",
            "test_minimum_contract_raises", "test_second_round_scale",

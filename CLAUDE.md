@@ -104,6 +104,39 @@ otherwise mint another row. `POST /api/auth/session/logout` deletes the row and
 clears both; it is deliberately unauthenticated, since it only ever destroys the
 caller's own cookie. `tests/test_auth_session.py` pins all of the above.
 
+## NB¥ sinks (`routers/themes.py`, and the two in `auth.py`)
+
+Three things members spend NB¥ on. All three take `_balances_lock`, refuse
+with a **402 naming the price and the balance**, and append a ledger row —
+the ledger is the only receipt any of them produces.
+
+| Sink | Price | Where |
+|---|---|---|
+| Cosmetics (name colour, status text) | 500 | `_COSMETIC_COST` — `auth.py` |
+| Avatar upload | 5,000 | `_AVATAR_COST` — `auth.py` |
+| Theme unlock | 1,000 flat | `THEME_PRICE` — `themes.py` |
+
+`themes.py` sells the site's non-default themes (Lavender Rose plus one per
+team) into `members[name]["cosmetics"]["themes"]`, which rides back out on
+`/api/members/me`. Three things it does that the older two do not, and each is
+pinned by `tests/test_themes.py`:
+
+- **The whole operation is under one lock**, because the "already owned" check
+  and the charge have to be atomic — a double-clicked menu item must not pay
+  twice for one theme. A repeat purchase returns `already_owned: true` and
+  charges nothing.
+- **A failed grant refunds**, with the reversal as its own ledger row. Charging
+  for a theme the member does not end up owning is the one outcome they have no
+  way back from.
+- **`LIVE_TEAM_THEMES` is a gate, not a list of teams.** A team belongs there
+  only once `css/theme.css` in nbn-today actually has its block; listing one
+  early sells 1,000 NB¥ of nothing. `build/check_theme_catalog.sh` over
+  there checks the two repos agree.
+
+Entitlement is server-side, selection is not — the browser keeps the chosen
+theme in `localStorage` so `nav.js` can paint before any fetch resolves. Full
+rationale in nbn-today's CLAUDE.md § "Unlockable themes".
+
 ## PDC free agency (`routers/free_agency.py`)
 
 Owner-submitted FA offers reviewed by the Free Agency Committee. The design

@@ -1,0 +1,158 @@
+"""Unlockable site themes, bought with NB¥.
+
+The site ships two free themes (the dark "NBN Today" and its light twin);
+everything else — Lavender Rose, and one theme per team — is unlocked once,
+permanently, for a flat price.
+
+**Entitlement is server-side; selection is not.** This API is the only thing
+that decides who has paid for what. Which theme a browser is *currently*
+showing stays in localStorage, because nav.js applies the theme at the top of
+the file, before any fetch, to avoid a flash of the wrong colours on every
+page load — waiting on this endpoint to paint would be a visible regression
+on every page for every visitor, in exchange for guarding a palette. The CSS
+for every theme is public either way. So: money only moves through here, and
+the page is trusted to render honestly.
+
+Ownership lives in `members[name]["cosmetics"]["themes"]`, beside the name
+colour and status text bought through PATCH /api/members/me/cosmetics, and
+rides along on the /api/members/me response the picker already fetches. No
+new file.
+
+The catalog below is the single source of truth for what exists and what it
+costs. nav.js hardcodes only the two free themes (so a picker still renders
+if this API is unreachable) and builds the rest from GET /api/themes —
+prices are never written in the page. Every id here needs a matching
+`:root[data-theme="<id>"]` block in nbn-today/css/theme.css or the purchase
+buys nothing visible; build/check_theme_catalog.sh in that repo checks the
+two agree.
+"""
+import threading
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException
+
+from .auth import get_token_info, load_members, save_members
+from .storage import log_write
+
+router = APIRouter()
+
+# One flat price for every unlockable theme, including a team's own owner
+# buying their own team's — decided 2026-08-23. Anchors: a cosmetics update
+# is 500 and an avatar 5,000, the median balance is ~2,250, and a Poeltl win
+# is 50/day.
+THEME_PRICE = 1000.0
+
+TEAM_NAMES = {
+    "ATL": "Hawks", "BKN": "Nets", "BOS": "Celtics", "CHA": "Hornets",
+    "CHI": "Bulls", "CLE": "Cavaliers", "DAL": "Mavericks", "DEN": "Nuggets",
+    "DET": "Pistons", "GSW": "Warriors", "HOU": "Rockets", "IND": "Pacers",
+    "LAC": "Clippers", "LAL": "Lakers", "MEM": "Grizzlies", "MIA": "Heat",
+    "MIL": "Bucks", "MIN": "Timberwolves", "NOP": "Pelicans", "NYK": "Knicks",
+    "OKC": "Thunder", "ORL": "Magic", "PHI": "76ers", "PHX": "Suns",
+    "POR": "Trail Blazers", "SAC": "Kings", "SAS": "Spurs", "TOR": "Raptors",
+    "UTA": "Jazz", "WAS": "Wizards",
+}
+
+# Teams whose theme block exists in css/theme.css. Rolled out a few at a time
+# rather than all 30 at once: each one has to clear build/contrast_audit.sh
+# before it is listed here, and listing a team with no CSS block sells a
+# theme that does nothing.
+LIVE_TEAM_THEMES = ["PHX"]
+
+FREE_THEMES = [
+    {"id": "nbn-today",       "label": "NBN Today",       "icon": "🌙"},
+    {"id": "nbn-today-light", "label": "NBN Today Light", "icon": "☀️"},
+]
+
+_PAID_THEMES = [
+    {"id": "lavender-rose", "label": "Lavender Rose", "icon": "🌹"},
+] + [
+    {"id": f"team-{abbr.lower()}", "label": TEAM_NAMES[abbr], "icon": "🏀", "team": abbr}
+    for abbr in LIVE_TEAM_THEMES
+]
+
+_lock = threading.Lock()
+
+
+def _catalog() -> list[dict]:
+    out = [{**t, "price": 0.0, "free": True} for t in FREE_THEMES]
+    out += [{**t, "price": THEME_PRICE, "free": False} for t in _PAID_THEMES]
+    return out
+
+
+def _owned(member: dict) -> list[str]:
+    themes = (member.get("cosmetics") or {}).get("themes") or []
+    return [t for t in themes if isinstance(t, str)]
+
+
+@router.get("/api/themes")
+def list_themes():
+    """Public: what exists and what it costs. Which of them *you* own comes
+    from /api/members/me, so this stays cacheable and needs no token."""
+    return {"themes": _catalog(), "price": THEME_PRICE}
+
+
+@router.post("/api/members/me/themes/{theme_id}")
+def unlock_theme(theme_id: str, info: dict = Depends(get_token_info)):
+    from .bets import _load_balances, _save_balances, _init_bal, _append_ledger, _balances_lock
+
+    entry = next((t for t in _catalog() if t["id"] == theme_id), None)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="No such theme")
+    if entry["free"]:
+        raise HTTPException(status_code=400, detail=f"{entry['label']} is free — no unlock needed")
+
+    name = info["name"]
+    ts = datetime.now(timezone.utc).isoformat()
+
+    # One lock across the whole operation: the check for "already owned" and
+    # the charge have to be atomic, or a double-clicked button pays twice for
+    # the same theme.
+    with _lock:
+        members = load_members()
+        if name not in members:
+            raise HTTPException(status_code=404, detail="Member not found")
+        owned = _owned(members[name])
+        if theme_id in owned:
+            balances = _load_balances()
+            return {"theme": theme_id, "owned": owned, "already_owned": True,
+                    "new_balance": balances.get(name, 0.0)}
+
+        price = entry["price"]
+        with _balances_lock:
+            balances = _load_balances()
+            _init_bal(balances, name)
+            if balances[name] < price:
+                raise HTTPException(
+                    status_code=402,
+                    detail=f"Not enough NB¥ — {entry['label']} costs {price:,.0f}, you have {balances[name]:,.0f}",
+                )
+            balances[name] = round(balances[name] - price, 2)
+            new_balance = balances[name]
+            _save_balances(balances)
+
+        try:
+            cosmetics = members[name].get("cosmetics", {})
+            owned = owned + [theme_id]
+            cosmetics["themes"] = owned
+            members[name]["cosmetics"] = cosmetics
+            save_members(members)
+        except Exception:
+            # Refund rather than leave a member charged for nothing. The
+            # ledger carries both rows, so the reversal is visible.
+            with _balances_lock:
+                balances = _load_balances()
+                _init_bal(balances, name)
+                balances[name] = round(balances[name] + price, 2)
+                _save_balances(balances)
+                refunded = balances[name]
+            _append_ledger([{"ts": ts, "member": name, "delta": price,
+                             "new_balance": refunded,
+                             "reason": f"Refund — theme unlock failed: {entry['label']}"}])
+            raise
+
+    _append_ledger([{"ts": ts, "member": name, "delta": -price,
+                     "new_balance": new_balance,
+                     "reason": f"Theme unlock: {entry['label']}"}])
+    log_write(info, f"POST members/me/themes/{theme_id} — {name!r} unlocked {entry['label']!r}")
+    return {"theme": theme_id, "owned": owned, "already_owned": False, "new_balance": new_balance}
