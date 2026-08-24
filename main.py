@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import auth, players, roster_picks, transactions, boxscores, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, discord, trade_finder, picks_preview, suggestions, google_sheets, free_agency, roster_log_relay, waivers, inbox, cleanup, poext, themes
+from routers import auth, players, roster_picks, transactions, boxscores, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, og, discord, trade_finder, picks_preview, suggestions, google_sheets, free_agency, roster_log_relay, waivers, inbox, cleanup, poext, themes
 from routers.picks_scheduler import start_picks_horizon_scheduler
 from routers.roster_log_relay import start_roster_log_relay
 
@@ -51,6 +51,7 @@ app.include_router(strikes.router)
 app.include_router(draft.router)
 app.include_router(invest.router)
 app.include_router(news.router)
+app.include_router(og.router)              # link-preview heads for the client-side per-item pages
 app.include_router(discord.router)
 app.include_router(trade_finder.router)
 app.include_router(suggestions.router)

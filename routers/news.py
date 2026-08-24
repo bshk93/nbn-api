@@ -1,4 +1,3 @@
-import html
 import re
 import secrets
 import threading
@@ -7,8 +6,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
 from .constants import NEWS_FILE, logger
@@ -438,117 +436,3 @@ def delete_article(article_id: str, info: dict = Depends(get_token_info)):
         save_articles(articles)
     log_write(info, f"DELETE news/{article_id}")
     return {"ok": True}
-
-
-# ── Link previews (Open Graph) ────────────────────────────────────────────────
-#
-# /news/view/ is a client-side page: the article arrives from GET /api/news/{id}
-# only after load, so a crawler sees nothing but the placeholder tags
-# nbn-today/build/og_tags.py bakes into the shell, and every article unfurls as
-# the same "Article — NBN News" card over the default banner.
-#
-# nginx routes /news/view/ here when the User-Agent is a known link unfurler
-# (the $nbn_unfurler map in /etc/nginx/sites-enabled/nbn.today) and serves the
-# real page to everyone else. Nothing in that map renders JavaScript or indexes
-# what it fetches, so this answers with a head-only stub rather than a copy of
-# the page — one <head> worth of tags, a canonical link home, and enough body
-# for anything that does render it to see where it landed.
-#
-# Unpublished articles fall through to the generic card on purpose: a draft's
-# title and opening lines are not for a crawler, and an unfurler that gets a
-# 404 shows no card at all, which is worse than a plain one.
-
-OG_SITE = "https://nbn.today"
-OG_DEFAULT_IMAGE = f"{OG_SITE}/og-default.png"
-OG_TAGLINE = "Nothing But Net — fantasy basketball GM simulation league"
-OG_FALLBACK_TITLE = "Article — NBN News"
-OG_FALLBACK_DESC = "An article from NBN News."
-
-
-def _og_abs(url: Optional[str]) -> Optional[str]:
-    """Absolute https URL for a cover image, or None if it can't be made one.
-
-    Cover images are member-supplied: an absolute URL, a site-relative path, or
-    something unusable. Discord silently drops a relative og:image, so anything
-    that isn't clearly resolvable becomes the default card instead."""
-    u = (url or "").strip()
-    if u.startswith(("http://", "https://")):
-        return u
-    if u.startswith("/"):
-        return OG_SITE + u
-    return None
-
-
-def _og_document(*, title: str, desc: str, url: str, image: str, image_alt: str,
-                 article: Optional[dict] = None) -> str:
-    esc = lambda s: html.escape(str(s), quote=True)
-    tags = [
-        f'<meta name="description" content="{esc(desc)}">',
-        f'<meta property="og:type" content="{"article" if article else "website"}">',
-        '<meta property="og:site_name" content="NBN">',
-        f'<meta property="og:title" content="{esc(title)}">',
-        f'<meta property="og:description" content="{esc(desc)}">',
-        f'<meta property="og:url" content="{esc(url)}">',
-        f'<meta property="og:image" content="{esc(image)}">',
-        f'<meta property="og:image:alt" content="{esc(image_alt)}">',
-        '<meta name="twitter:card" content="summary_large_image">',
-        '<meta name="theme-color" content="#111827">',
-    ]
-    if image == OG_DEFAULT_IMAGE:
-        # Only the default card has known dimensions; a member's cover image is
-        # whatever they linked, and lying about its size crops the preview.
-        tags[7:7] = ['<meta property="og:image:width" content="1200">',
-                     '<meta property="og:image:height" content="630">']
-    if article:
-        if article.get("author"):
-            tags.append(f'<meta property="article:author" content="{esc(article["author"])}">')
-        if article.get("published_at"):
-            tags.append(f'<meta property="article:published_time" content="{esc(article["published_at"])}">')
-        for tag in article.get("tags") or []:
-            tags.append(f'<meta property="article:tag" content="{esc(tag)}">')
-    head = "\n  ".join(tags)
-    return (
-        "<!DOCTYPE html>\n"
-        '<html lang="en">\n<head>\n'
-        '  <meta charset="UTF-8">\n'
-        f"  <title>{esc(title)}</title>\n"
-        f'  <link rel="canonical" href="{esc(url)}">\n'
-        f"  {head}\n"
-        "</head>\n<body>\n"
-        f"  <h1>{esc(title)}</h1>\n"
-        f"  <p>{esc(desc)}</p>\n"
-        f'  <p><a href="{esc(url)}">Read this article on NBN News</a></p>\n'
-        "</body>\n</html>\n"
-    )
-
-
-def news_og_html(article_id: str) -> str:
-    """The <head> a link unfurler should see for /news/view/?id={article_id}."""
-    article = None
-    if article_id:
-        articles = load_articles()
-        idx = _find(articles, article_id)
-        if idx is not None and articles[idx].get("status") == "published":
-            article = articles[idx]
-
-    if not article:
-        return _og_document(title=OG_FALLBACK_TITLE, desc=OG_FALLBACK_DESC,
-                            url=f"{OG_SITE}/news/view/", image=OG_DEFAULT_IMAGE,
-                            image_alt=OG_TAGLINE)
-
-    title = (article.get("title") or "Untitled").strip()
-    desc = _md_excerpt(article.get("body", ""), limit=200) or "Read the full story on NBN."
-    author = article.get("author")
-    return _og_document(
-        title=f"{title} — NBN News",
-        desc=f"By {author}. {desc}" if author else desc,
-        url=f"{OG_SITE}/news/view/?id={article['id']}",
-        image=_og_abs(article.get("cover_image")) or OG_DEFAULT_IMAGE,
-        image_alt=title,
-        article=article,
-    )
-
-
-@router.get("/api/og/news", response_class=HTMLResponse)
-def news_og(id: str = Query("")):
-    return HTMLResponse(news_og_html(id), headers={"Cache-Control": "public, max-age=300"})

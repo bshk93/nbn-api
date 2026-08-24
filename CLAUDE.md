@@ -531,29 +531,48 @@ imports at runtime, and numpy's float and NaN rendering would fight `csvio`,
 which reproduces `readr::write_csv` byte for byte (NA vs empty are different
 values; `-0` keeps its sign; a whole double loses its `.0`).
 
-## Link previews (`GET /api/og/news`)
+## Link previews (`routers/og.py`)
 
-`nbn.today/news/view/?id=…` renders client-side — the article arrives from
-`GET /api/news/{id}` after load — so a crawler fetching it sees only the
-placeholder Open Graph tags `nbn-today/build/og_tags.py` bakes into the shell.
-Every article unfurled in Discord as the same "Article — NBN News" card over the
-default banner. `GET /api/og/news?id=…` renders the real head instead: the
-headline, a 200-char plain-text excerpt of the body, the byline, the cover image
-and `article:*` tags.
+Four pages on the site are one shell serving many items, with the item fetched
+from the API after load:
 
-**It only gets used because nginx routes to it.** `/etc/nginx/sites-enabled/nbn.today`
-carries a `$nbn_unfurler` map over `$http_user_agent` and rewrites `/news/view/`
-to an internal location that proxies here; every other visitor gets the real
+| Page | Endpoint | What the card says |
+|---|---|---|
+| `/news/view/?id=` | `GET /api/og/news` | headline, byline, a 200-char excerpt, the article's cover image |
+| `/players/?p=` | `GET /api/og/player` | positions, height, age, team, OVR, career per-game line, headshot |
+| `/proposals/view/?id=` | `GET /api/og/proposal` | number, title, state or outcome, author, excerpt |
+| `/members/{name}` | `GET /api/og/member` | current team, seasons, record, championships, avatar |
+
+No link unfurler runs JavaScript, so all four fetched the shell and got the
+placeholder Open Graph tags `nbn-today/build/og_tags.py` bakes into it — every
+article unfurled in Discord as the same "Article — NBN News" card, every player
+as the same "Players — NBN" one. `routers/og.py` renders the head each item
+should have had.
+
+**They only get used because nginx routes to them.** `/etc/nginx/sites-enabled/nbn.today`
+carries a `$nbn_unfurler` map over `$http_user_agent` and rewrites those four
+paths to internal locations that proxy here; every other visitor gets the real
 page. The map is **social unfurlers only, deliberately not search engines** —
-this endpoint answers with a head-only stub, and nothing that indexes pages
-should ever be handed it. A new preview client is one entry in that map.
+these endpoints answer with a head-only stub, and nothing that indexes pages
+should ever be handed one. A new preview client is one entry in that map; a
+fifth per-item page is a builder here plus a location block there.
 
-Two things it must keep doing, both pinned by `tests/test_news_og.py`: an
-article that is not `published` falls back to the generic card (a draft's
-headline is not for a crawler, and a 404 would mean no card at all, which is
-worse than a plain one), and a cover image that can't be resolved to an absolute
-URL is dropped rather than emitted — Discord ignores a relative `og:image` and
-would show no picture.
+Three rules hold across all four, and `tests/test_og.py` pins them:
+
+- **Nothing unpublished, ever.** A draft article, a draft proposal, an unknown
+  id — all fall back to that page's own static card. A crawler that gets a 404
+  shows no card at all, which is worse than a plain one.
+- **The fallback is read from the page, not restated in Python.** `_static_head`
+  lifts the `NBN:og` block straight out of the shell under `NBN_SITE_DIR`
+  (default `/var/www/nbn.today`), so the generic card stays whatever
+  `og_tags.py` last wrote and can't drift from it.
+- **An image that can't be made absolute is dropped** for the default card.
+  Discord ignores a relative `og:image` and shows no picture at all.
+
+One thing to keep in mind when adding to a card: it is public. A proposal's
+live tally is privileged (`live_results` in `_proposal_view` is BOD-only), so
+the proposal card stops at the state — `Voting open`, or the outcome once
+decided.
 
 ## Docs discipline
 
