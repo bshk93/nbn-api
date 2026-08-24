@@ -20,7 +20,9 @@ The four rules the league settled on, which the code below is shaped around:
   * **Blind until close.** While `phase == "voting"` nobody — the author
     included — may read anyone else's ballot. `redact` enforces that; the
     author is usually a voter too, and a live peek would anchor them exactly
-    the way seeing other ballots would anchor anyone else.
+    the way seeing other ballots would anchor anyone else. A *draft* is held
+    server-side (see `save_draft`) and is blind on the same terms: the author
+    learns that someone has started, never what they have ranked.
   * **Any voter claims a team.** Blurbs are first-come: in the `blurbs` phase a
     voter claims a team, writes it, and is credited on the published page. The
     author may edit any blurb, reassign a claim, and marks each `approved` —
@@ -126,14 +128,51 @@ def validate_order(order) -> list[str]:
     return up
 
 
-def set_ballot(a: dict, name: str, order) -> dict:
+def _open_ballot(a: dict, name: str):
     if a.get("phase") != "voting":
         raise ValueError("voting is not open on this ranking")
     if not is_voter(a, name):
         raise ValueError("you are not on this ranking's voter list")
-    ballot = {"order": validate_order(order), "submitted_at": _now()}
+    return (a.get("ballots") or {}).get(name) or {}
+
+
+def set_ballot(a: dict, name: str, order) -> dict:
+    _open_ballot(a, name)
+    now = _now()
+    ballot = {"order": validate_order(order), "submitted_at": now, "saved_at": now}
     a.setdefault("ballots", {})[name] = ballot
     return ballot
+
+
+def save_draft(a: dict, name: str, order) -> dict:
+    """Store a working order without counting it.
+
+    A draft is the same shape as a submitted ballot — a full 30-team order,
+    because a voter reorders a seeded list rather than building one from
+    nothing — and differs only in a null `submitted_at`, which is precisely
+    what `submitted_ballots` filters on. So a draft reaches the server, follows
+    someone from their phone to their desk, and still never reaches the
+    average.
+
+    A ballot that has already been submitted stays submitted: this updates the
+    order in place and leaves `submitted_at` alone. The page has always told a
+    voter they may keep changing a ballot until voting closes, so autosaving
+    those changes keeps that promise rather than making a new one — and the
+    alternative, silently un-submitting someone because they nudged one row,
+    would drop them out of the count without telling them.
+    """
+    prev = _open_ballot(a, name)
+    ballot = {"order": validate_order(order),
+              "submitted_at": prev.get("submitted_at"),
+              "saved_at": _now()}
+    a.setdefault("ballots", {})[name] = ballot
+    return ballot
+
+
+def started_ballots(a: dict) -> dict:
+    """Saved but not submitted — someone is part-way through."""
+    return {n: b for n, b in (a.get("ballots") or {}).items()
+            if b.get("order") and not b.get("submitted_at")}
 
 
 def submitted_ballots(a: dict) -> dict:
@@ -398,7 +437,8 @@ def redact(a: dict, viewer: Optional[str], is_editor: bool,
     ballots = a.get("ballots") or {}
     if blind:
         out["ballots"] = {
-            n: ({"order": b.get("order"), "submitted_at": b.get("submitted_at")}
+            n: ({"order": b.get("order"), "submitted_at": b.get("submitted_at"),
+                 "saved_at": b.get("saved_at")}
                 if n == viewer else {"submitted_at": b.get("submitted_at")})
             for n, b in ballots.items()
         }
@@ -423,10 +463,17 @@ def redact(a: dict, viewer: Optional[str], is_editor: bool,
         seed = sorted(base, key=lambda t: (base[t], t))
     out["seed_order"] = seed or None
 
+    voters = set(a.get("voters") or [])
+    done = set(submitted_ballots(a))
     out["ballot_progress"] = {
-        "submitted": sorted(submitted_ballots(a).keys()),
-        "pending": sorted(set(a.get("voters") or []) - set(submitted_ballots(a).keys())),
-        "voters": len(a.get("voters") or []),
+        "submitted": sorted(done),
+        # Part-way through, and visible to the author as such. It says nothing
+        # about *what* they have ranked — blind is blind — only that they have
+        # started, which is the difference between chasing someone and leaving
+        # them alone.
+        "started": sorted(set(started_ballots(a)) & voters),
+        "pending": sorted(voters - done),
+        "voters": len(voters),
     }
     out["blurb_progress"] = blurb_progress(a)
     out["viewer_is_voter"] = is_voter(a, viewer)

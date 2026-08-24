@@ -104,6 +104,42 @@ by = {r["team"]: r for r in pr.consensus(a)}
 check("burying a team drags its mean down", by["BOS"]["avg"] > by["OKC"]["avg"])
 check("OKC now leads on the mean alone", by["OKC"]["rank"] == 1)
 
+# ── drafts ───────────────────────────────────────────────────────────────────
+# A saved draft is what lets someone start on their phone and finish at their
+# desk. It must reach the server without reaching the average.
+print("\ndrafts")
+a = new_article()
+pr.set_phase(a, "voting")
+pr.save_draft(a, "alice", ballot_from(["BOS"]))
+check("a draft is stored", a["ballots"]["alice"]["order"][0] == "BOS")
+check("a draft is not submitted", a["ballots"]["alice"]["submitted_at"] is None)
+check("a draft does not count toward the consensus", pr.consensus(a) == [])
+check("a draft leaves the author still waiting",
+      pr.redact(a, "alice", True)["ballot_progress"]["pending"] == ["alice", "bob", "carol"])
+check("but the author can see it was started",
+      pr.redact(a, "alice", True)["ballot_progress"]["started"] == ["alice"])
+check("a draft comes back to its own author across devices",
+      pr.redact(a, "alice", False)["ballots"]["alice"]["order"][0] == "BOS")
+check("nobody else sees a draft's order",
+      "order" not in pr.redact(a, "bob", False)["ballots"]["alice"])
+refuses("a draft from a stranger",
+        lambda: pr.save_draft(a, "dave", ballot_from(["BOS"])), "not on this ranking")
+refuses("a 29-team draft", lambda: pr.save_draft(a, "alice", TEAMS[:-1]), "all 30")
+
+# submitting turns the draft into a real ballot, and editing after that must
+# not quietly take it back out of the count
+pr.set_ballot(a, "alice", ballot_from(["OKC"]))
+check("submitting counts the ballot", pr.redact(a, "alice", True)["ballot_progress"]["submitted"] == ["alice"])
+pr.save_draft(a, "alice", ballot_from(["DEN"]))
+check("an edit after submitting stays submitted", a["ballots"]["alice"]["submitted_at"])
+check("and the edit is what counts", pr.consensus(a)[0]["team"] == "DEN")
+check("a submitted ballot is no longer 'started'",
+      pr.redact(a, "alice", True)["ballot_progress"]["started"] == [])
+
+closed = new_article()
+refuses("a draft before the ballot opens",
+        lambda: pr.save_draft(closed, "alice", ballot_from(["BOS"])), "voting is not open")
+
 # ── blind until close ────────────────────────────────────────────────────────
 print("\nblind until close")
 a = new_article()

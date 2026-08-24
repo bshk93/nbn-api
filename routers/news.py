@@ -711,6 +711,22 @@ def put_ranking_ballot(article_id: str, body: BallotIn,
     return out
 
 
+@router.put("/api/news/{article_id}/rankings/ballot/draft")
+def put_ranking_draft(article_id: str, body: BallotIn,
+                      info: dict = Depends(get_token_info)):
+    """Autosave your working order without submitting it.
+
+    Same auth as the ballot itself — your own, only while voting is open. It is
+    deliberately *not* written to the audit log: the page calls this on a
+    debounce as someone drags, and thirty rows of "saved a draft" would bury
+    the writes that matter.
+    """
+    def go(a, editor):
+        pr.save_draft(a, info["name"], body.order)
+
+    return _mutate_ranking(article_id, info, False, go)
+
+
 @router.put("/api/news/{article_id}/rankings/baseline")
 def put_ranking_baseline(article_id: str, body: BaselineIn,
                          info: dict = Depends(get_token_info)):

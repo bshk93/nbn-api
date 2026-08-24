@@ -119,12 +119,30 @@ news.set_ranking_phase(aid, news.PhaseIn(phase="voting"), ALICE)
 check("re-posting the phase it is already in chases nobody", inbox_since(mark) == [])
 http("an uninvited member voting", 422,
      lambda: news.put_ranking_ballot(aid, news.BallotIn(order=ballot(["BOS"])), DAVE))
+
+# a draft: stored, returned to its own author, and counted by nobody
+http("an uninvited member saving a draft", 422,
+     lambda: news.put_ranking_draft(aid, news.BallotIn(order=ballot(["BOS"])), DAVE))
+d = news.put_ranking_draft(aid, news.BallotIn(order=ballot(["MIA"])), CAROL)
+check("carol's draft comes back to her", d["ballots"]["carol"]["order"][0] == "MIA")
+check("a draft is not a submitted ballot", d["ballots"]["carol"]["submitted_at"] is None)
+check("a draft leaves her outstanding", d["ballot_progress"]["pending"] == ["alice", "bob", "carol"])
+check("the author is told she has started",
+      news.get_article(aid, "Bearer alice")["ballot_progress"]["started"] == ["carol"])
+check("a draft is blind to everyone else",
+      "order" not in news.get_article(aid, "Bearer alice")["ballots"]["carol"])
 http("a short ballot", 422,
      lambda: news.put_ranking_ballot(aid, news.BallotIn(order=TEAMS30[:-1]), BOB))
 news.put_ranking_ballot(aid, news.BallotIn(order=ballot(["BOS", "OKC"])), ALICE)
 a = news.put_ranking_ballot(aid, news.BallotIn(order=ballot(["OKC", "BOS"])), BOB)
 check("bob sees his own ballot", a["ballots"]["bob"]["order"][0] == "OKC")
 check("bob cannot see alice's", "order" not in a["ballots"]["alice"])
+
+# Put carol back to having nothing at all: the rest of the suite is written
+# around her being the one voter still outstanding. (The draft → submitted
+# transition itself is pinned in tests/test_news_rankings.py, where it is a
+# rule rather than wiring.)
+STORE[0]["ballots"].pop("carol")
 
 print("\nreading while blind")
 seen_alice = news.get_article(aid, "Bearer alice")
