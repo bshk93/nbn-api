@@ -42,6 +42,14 @@ news.log_write = lambda info, msg: None
 news.load_members = lambda: {"alice": {}, "bob": {}, "carol": {}, "dave": {}}
 news._announce_published = lambda a: None
 
+# The inbox is stubbed rather than exercised: these routes only decide *who*
+# hears about a ranking and when, and a real notify_member would write to the
+# live inbox file from a test run.
+INBOX = []
+news.inbox.notify_member = lambda name, text, link=None: INBOX.append((name, text, link))
+def inbox_since(mark): return INBOX[mark:]
+def recipients(mark): return sorted(n for n, _t, _l in INBOX[mark:])
+
 ALICE = {"name": "alice", "roles": []}     # author, no editorial role
 BOB   = {"name": "bob",   "roles": []}
 CAROL = {"name": "carol", "roles": []}
@@ -82,14 +90,33 @@ http("a non-author inviting", 403,
      lambda: news.set_ranking_voters(aid, news.VotersIn(voters=["bob"]), BOB))
 http("inviting a stranger", 422,
      lambda: news.set_ranking_voters(aid, news.VotersIn(voters=["nobody"]), ALICE))
+mark = len(INBOX)
 a = news.set_ranking_voters(aid, news.VotersIn(voters=["alice", "bob", "carol"]), ALICE)
 check("voters saved", a["voters"] == ["alice", "bob", "carol"])
+check("the two invitees get an inbox message, the inviting author does not",
+      recipients(mark) == ["bob", "carol"])
+check("the invite links to the ballot workspace",
+      all(l == f"/news/rankings/?id={aid}" for _n, _t, l in inbox_since(mark)))
+check("and says who invited them, to what",
+      all("alice invited you" in t and "Week 1 Power Rankings" in t
+          for _n, t, _l in inbox_since(mark)))
+
+mark = len(INBOX)
+news.set_ranking_voters(aid, news.VotersIn(voters=["alice", "bob", "carol"]), ALICE)
+check("re-saving the same list notifies nobody twice", inbox_since(mark) == [])
 
 print("\nvoting")
 http("voting before it opens", 422,
      lambda: news.put_ranking_ballot(aid, news.BallotIn(order=ballot(["BOS"])), BOB))
+mark = len(INBOX)
 a = news.set_ranking_phase(aid, news.PhaseIn(phase="voting"), ALICE)
 check("phase is voting", a["phase"] == "voting")
+check("opening the ballot chases the voters who owe one", recipients(mark) == ["bob", "carol"])
+check("the chase says the ballot is open",
+      all("ballot is open" in t for _n, t, _l in inbox_since(mark)))
+mark = len(INBOX)
+news.set_ranking_phase(aid, news.PhaseIn(phase="voting"), ALICE)
+check("re-posting the phase it is already in chases nobody", inbox_since(mark) == [])
 http("an uninvited member voting", 422,
      lambda: news.put_ranking_ballot(aid, news.BallotIn(order=ballot(["BOS"])), DAVE))
 http("a short ballot", 422,
@@ -138,8 +165,13 @@ a = news.put_ranking_blurb(aid, "BOS", news.BlurbIn(approved=True), ALICE)
 check("the author approves", a["blurbs"]["BOS"]["approved"] is True)
 
 print("\npublish")
+mark = len(INBOX)
 a = news.publish_article(aid, news.PublishIn(), ALICE)
 check("published with an empty intro", a["status"] == "published")
+check("the contributors hear it went live; the author who published does not",
+      recipients(mark) == ["bob"])
+check("and the message links to the published piece",
+      inbox_since(mark)[0][2] == f"/news/view/?id={aid}")
 check("edition numbered", a["edition"] == 1)
 check("order frozen", len(a["final"]) == 30)
 frozen = [r["team"] for r in a["final"]]
@@ -183,8 +215,16 @@ plain = news.create_article(news.ArticleCreate(title="A column", body="Words."),
 check("plain article has no ranking fields", "phase" not in plain and "ballots" not in plain)
 http("ranking routes refuse a plain article", 422,
      lambda: news.set_ranking_phase(plain["id"], news.PhaseIn(phase="voting"), ALICE))
+mark = len(INBOX)
 pub = news.publish_article(plain["id"], news.PublishIn(), ALICE)
 check("a plain article still publishes", pub["status"] == "published")
+check("publishing your own article does not notify you", inbox_since(mark) == [])
+
+plain2 = news.create_article(news.ArticleCreate(title="Another column", body="Words."), BOB)
+mark = len(INBOX)
+news.publish_article(plain2["id"], news.PublishIn(), CURATOR)
+check("an editor publishing someone else's article notifies its author",
+      recipients(mark) == ["bob"] and "published your article" in inbox_since(mark)[0][1])
 
 print()
 print(f"{len(FAILS)} FAILED: {FAILS}" if FAILS else "ALL PASS")

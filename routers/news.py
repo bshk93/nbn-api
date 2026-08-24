@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from .constants import NEWS_FILE, logger
 from .storage import _load_json, _save_json, log_write
 from .auth import get_token_info, has_role, require_role, _resolve_token, load_members
+from . import inbox
 from . import news_rankings as pr
 
 router = APIRouter()
@@ -97,6 +98,22 @@ def _announce_published(article: dict) -> None:
         httpx.post(NEWS_WEBHOOK, json=payload, timeout=10)
     except Exception as exc:
         logger.warning("News Discord webhook failed: %s", exc)
+
+
+def _notify_published(a: dict, actor: str) -> None:
+    """Tell everyone credited on a piece that it is live — everyone but whoever
+    just clicked publish, who does not need to be told what they did."""
+    link = f"/news/view/?id={a['id']}"
+    title = a.get("title") or "Untitled"
+    author = a.get("author")
+    for name in _credited(a):
+        if name == actor:
+            continue
+        if name == author:
+            text = f"{actor} published your article \"{title}\""
+        else:
+            text = f"The rankings you contributed to are live: \"{title}\""
+        inbox.notify_member(name, text, link=link)
 
 
 def load_articles() -> list[dict]:
@@ -186,6 +203,26 @@ def _is_editor_of(a: dict, info: Optional[dict]) -> bool:
     if not info:
         return False
     return _can_publish(info) or a.get("author") == info.get("name")
+
+
+def _credited(a: dict) -> list[str]:
+    """Everyone the published piece credits by name, author first.
+
+    A plain article is one byline. A ranking is a group piece — the members
+    whose ballots made the order and the members whose blurbs are printed under
+    their names are as much its authors as whoever called the vote — so they
+    are told when it goes live too. Deduped, order preserved.
+    """
+    names = [a.get("author")]
+    if pr.is_ranking(a):
+        names += list(pr.submitted_ballots(a).keys())
+        names += [b.get("claimed_by") for b in (a.get("blurbs") or {}).values()
+                  if (b.get("body") or "").strip()]
+    out: list[str] = []
+    for n in names:
+        if n and n not in out:
+            out.append(n)
+    return out
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
@@ -424,6 +461,7 @@ def publish_article(article_id: str, body: PublishIn, info: dict = Depends(get_t
         articles[idx] = a
         save_articles(articles)
     log_write(info, f"POST news/{article_id}/publish — by {info['name']}")
+    _notify_published(a, info["name"])
     threading.Thread(target=_announce_published, args=(dict(a),), daemon=True).start()
     return _article_detail(a, info, articles)
 
@@ -588,26 +626,67 @@ def _mutate_ranking(article_id: str, info: dict, editor_only: bool, fn):
 @router.put("/api/news/{article_id}/rankings/voters")
 def set_ranking_voters(article_id: str, body: VotersIn,
                        info: dict = Depends(get_token_info)):
-    """Replace the invite list. Names must exist in members.json."""
+    """Replace the invite list. Names must exist in members.json.
+
+    A newly invited member is told so in their inbox. Only the *new* names —
+    the list is replaced wholesale on every save, so re-notifying the whole
+    list would mean a fresh message for everyone each time one name is added."""
     known = set(load_members().keys())
+    invited: list[str] = []
+    ctx: dict = {}
 
     def go(a, editor):
+        before = set(a.get("voters") or [])
         pr.set_voters(a, body.voters, known)
+        invited.extend(n for n in a["voters"] if n not in before)
+        ctx["title"] = a.get("title") or "Untitled"
+        ctx["open"] = a.get("phase") == "voting"
 
     out = _mutate_ranking(article_id, info, True, go)
     log_write(info, f"PUT news/{article_id}/rankings/voters — {len(body.voters)} voters")
+    tail = (" — the ballot is open" if ctx.get("open")
+            else " — you'll be told when the ballot opens")
+    for name in invited:
+        if name == info["name"]:
+            continue
+        inbox.notify_member(
+            name,
+            f"{info['name']} invited you to rank teams for \"{ctx['title']}\"{tail}",
+            link=f"/news/rankings/?id={article_id}")
     return out
 
 
 @router.post("/api/news/{article_id}/rankings/phase")
 def set_ranking_phase(article_id: str, body: PhaseIn,
                       info: dict = Depends(get_token_info)):
-    """Move the ranking along: setup → voting → blurbs → final."""
+    """Move the ranking along: setup → voting → blurbs → final.
+
+    Opening the ballot notifies the voters who still owe one — an invite lands
+    during `setup`, when there is nothing yet to fill in, so this is the message
+    that actually sends someone to their ballot. It covers the reopen case
+    (blurbs → voting) the same way, which is what that move is for: chasing the
+    stragglers, and only them."""
+    pending: list[str] = []
+    ctx: dict = {}
+
     def go(a, editor):
+        was = a.get("phase")
         pr.set_phase(a, body.phase)
+        # `was != "voting"` matters: posting the phase a ranking is already in
+        # is a no-op, and must not fire a second round of chasing messages.
+        if a.get("phase") == "voting" and was != "voting":
+            done = pr.submitted_ballots(a)
+            pending.extend(n for n in (a.get("voters") or []) if n not in done)
+        ctx["title"] = a.get("title") or "Untitled"
 
     out = _mutate_ranking(article_id, info, True, go)
     log_write(info, f"POST news/{article_id}/rankings/phase — {body.phase}")
+    for name in pending:
+        if name == info["name"]:
+            continue
+        inbox.notify_member(
+            name, f"The ballot is open — rank all 30 teams for \"{ctx['title']}\"",
+            link=f"/news/rankings/?id={article_id}")
     return out
 
 
