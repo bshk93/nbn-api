@@ -129,8 +129,8 @@ check("a draft is not a submitted ballot", d["ballots"]["carol"]["submitted_at"]
 check("a draft leaves her outstanding", d["ballot_progress"]["pending"] == ["alice", "bob", "carol"])
 check("the author is told she has started",
       news.get_article(aid, "Bearer alice")["ballot_progress"]["started"] == ["carol"])
-check("a draft is blind to everyone else",
-      "order" not in news.get_article(aid, "Bearer alice")["ballots"]["carol"])
+check("a draft is blind to the other voters",
+      "order" not in news.get_article(aid, "Bearer bob")["ballots"]["carol"])
 http("a short ballot", 422,
      lambda: news.put_ranking_ballot(aid, news.BallotIn(order=TEAMS30[:-1]), BOB))
 news.put_ranking_ballot(aid, news.BallotIn(order=ballot(["BOS", "OKC"])), ALICE)
@@ -151,13 +151,20 @@ check("an invited voter can open the draft", seen_alice["id"] == aid)
 print("\nblind for the author too")
 # alice is the author AND a voter — the case the rule exists for
 a_view = news.get_article(aid, "Bearer alice")
-check("the author cannot read bob's ballot", "order" not in a_view["ballots"]["bob"])
-check("no live consensus while blind", a_view["consensus"] is None)
+check("the author reads bob's ballot", a_view["ballots"]["bob"]["order"][0] == "OKC")
+check("the author can preview the running order", len(a_view["consensus"]) == 30)
+check("marked provisional, since it is still being collected", a_view["provisional"] is True)
+check("a voter still gets no consensus",
+      news.get_article(aid, "Bearer bob")["consensus"] is None)
+# A curator is an editor here, and can close voting themselves, so the same
+# reasoning applies to them as to the author.
+check("an editor who is not the author sees it too",
+      len(news.get_article(aid, "Bearer zed")["consensus"]) == 30)
 check("the author sees who is outstanding", a_view["ballot_progress"]["pending"] == ["carol"])
 http("an outsider reading the draft", 403, lambda: news.get_article(aid, "Bearer dave"))
 check("a curator can read it", news.get_article(aid, "Bearer zed")["id"] == aid)
-check("but a curator still can't read a ballot",
-      "order" not in news.get_article(aid, "Bearer zed")["ballots"]["alice"])
+check("and so does a curator, who can close the vote just as easily",
+      news.get_article(aid, "Bearer zed")["ballots"]["alice"]["order"][0] == "BOS")
 
 print("\nlist view")
 lst = news.list_news("Bearer bob")

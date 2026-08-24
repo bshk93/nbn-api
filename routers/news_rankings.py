@@ -428,12 +428,22 @@ def redact(a: dict, viewer: Optional[str], is_editor: bool,
     submitted, at this time" — for the author too (see the module docstring).
     Once voting closes the ballots open up to everyone, including the public
     after publish: blind voting is about anchoring, not secrecy.
+
+    The **author is the exception, at every phase** (decided by the league
+    2026-08-24): they see the edition exactly as it would publish — the
+    running order, every ballot, the lot. They run the vote and can close it
+    at will, so withholding any of it from them was never really withholding
+    it, and a preview that hides half the page is not a preview of anything.
+    Blind still means blind *between voters*, which is the anchoring the phase
+    exists to prevent, and the ballot page says who can see what.
     """
     out = dict(a)
     if not is_ranking(a):
         return out
 
-    blind = a.get("phase") == "voting"
+    # Editors are never blind: the author's preview is the published page or
+    # it is not a preview. Everyone else is blind while the vote is open.
+    blind = a.get("phase") == "voting" and not is_editor
     ballots = a.get("ballots") or {}
     if blind:
         out["ballots"] = {
@@ -442,7 +452,8 @@ def redact(a: dict, viewer: Optional[str], is_editor: bool,
                 if n == viewer else {"submitted_at": b.get("submitted_at")})
             for n, b in ballots.items()
         }
-        # No live consensus while blind — it would leak the ballots it is made of.
+        # No consensus for a voter mid-vote — it is the anchor the whole
+        # phase exists to prevent, and it leaks the ballots it is made of.
         out["consensus"] = None
     else:
         out["ballots"] = ballots
@@ -465,6 +476,12 @@ def redact(a: dict, viewer: Optional[str], is_editor: bool,
 
     voters = set(a.get("voters") or [])
     done = set(submitted_ballots(a))
+    # True while the order on show is still being collected. Nothing renders a
+    # banner off it — a preview is meant to read exactly like the published
+    # page — but it is the honest answer to "is this the result yet?" for
+    # anything that needs to ask.
+    out["provisional"] = bool(out.get("consensus")) and not a.get("final")
+
     out["ballot_progress"] = {
         "submitted": sorted(done),
         # Part-way through, and visible to the author as such. It says nothing

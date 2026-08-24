@@ -151,13 +151,15 @@ seen = pr.redact(a, "bob", is_editor=False)
 check("a voter sees their own order", seen["ballots"]["bob"]["order"][0] == "OKC")
 check("a voter cannot see another's order", "order" not in seen["ballots"]["alice"])
 check("a voter can see that another has submitted", seen["ballots"]["alice"]["submitted_at"])
-check("no live consensus while blind", seen["consensus"] is None)
+check("a voter gets no live consensus while blind", seen["consensus"] is None)
 
-# alice is both the author and a voter — the case the rule exists for
+# alice is both the author and a voter. Blind is between *voters*: she runs the
+# vote and can close it at will, so she sees the edition as it would publish.
 seen_author = pr.redact(a, "alice", is_editor=True)
-check("the author cannot see another's order either",
-      "order" not in seen_author["ballots"]["bob"])
-check("the author still gets no live consensus", seen_author["consensus"] is None)
+check("the author reads every ballot", seen_author["ballots"]["bob"]["order"][0] == "OKC")
+check("the author sees the running consensus", len(seen_author["consensus"]) == 30)
+check("which is flagged as still being collected", seen_author["provisional"] is True)
+check("a voter's blind view is not", pr.redact(a, "bob", False)["provisional"] is False)
 check("the author does see who is outstanding",
       seen_author["ballot_progress"]["pending"] == ["carol"])
 check("the author sees who has submitted",
