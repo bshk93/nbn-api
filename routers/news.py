@@ -46,11 +46,35 @@ def _md_excerpt(body: str, limit: int = 280) -> str:
     return text
 
 
+def _article_teaser(a: dict, limit: int = 280) -> str:
+    """Short plain-text teaser for a Discord embed or a link preview.
+
+    A power-rankings edition can publish with no intro at all — the table *is*
+    the article — so rather than fall back to a generic line it teases its own
+    top five, which is what a reader wants from the unfurl anyway.
+    """
+    text = _md_excerpt(a.get("body", ""), limit)
+    if text:
+        return text
+    if pr.is_ranking(a) and a.get("final"):
+        return " · ".join(f"{r['rank']}. {r['team']}" for r in a["final"][:5])
+    return ""
+
+
 def _announce_published(article: dict) -> None:
     """Fire-and-forget Discord webhook announcing a freshly published article."""
     url = f"https://nbn.today/news/view/?id={article['id']}"
-    desc = _md_excerpt(article.get("body", ""))
+    desc = _article_teaser(article)
     fields = []
+    if pr.is_ranking(article) and article.get("final"):
+        rows = article["final"]
+        fields.append({
+            "name": f"Edition #{article.get('edition')}" if article.get("edition") else "Consensus",
+            "value": f"Average of {rows[0]['votes']} ballot"
+                     f"{'' if rows[0]['votes'] == 1 else 's'}"
+                     + (f" · {len(article.get('voters') or [])} voters invited" if article.get("voters") else ""),
+            "inline": False,
+        })
     tags = article.get("tags") or []
     if tags:
         fields.append({"name": "Tags", "value": ", ".join(tags), "inline": False})

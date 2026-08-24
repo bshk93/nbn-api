@@ -295,7 +295,15 @@ def freeze(a: dict, articles: list[dict]) -> list[dict]:
     Called from the publish route. After this the published order is a stored
     fact rather than a live recomputation, so a late ballot edit cannot rewrite
     an edition that has already gone out.
+
+    Publishing straight out of the `voting` phase is refused. It would freeze a
+    half-collected ranking and — because publishing makes the article public,
+    ballots and all — reveal ballots that were cast on the promise of being
+    blind until the author closed the vote. Closing voting is what turns that
+    promise off, so it has to happen first.
     """
+    if a.get("phase") in ("setup", "voting"):
+        raise ValueError("close voting before publishing — ballots are still blind")
     rows = consensus(a)
     if not rows:
         raise ValueError("cannot publish a ranking with no submitted ballots")
@@ -339,6 +347,12 @@ def redact(a: dict, viewer: Optional[str], is_editor: bool,
         # the live standing, with movement against the previous edition so the
         # author can see the shape of the piece before publishing it.
         out["consensus"] = a.get("final") or apply_movement(consensus(a), prev_final)
+
+    # Where a fresh ballot starts. The previous edition's finish is the least
+    # arbitrary starting point there is, and it saves a voter 30 drags to
+    # express "much the same as last week". The page falls back to last
+    # season's record when there is no previous edition.
+    out["seed_order"] = [r["team"] for r in (prev_final or [])] or None
 
     out["ballot_progress"] = {
         "submitted": sorted(submitted_ballots(a).keys()),

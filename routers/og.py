@@ -46,7 +46,7 @@ from .constants import DERIVED_DIR, logger
 from .storage import read_csv
 from .auth import load_members
 from .players import load_player_bios, load_ovr, _display_name, _build_team_map
-from .news import load_articles, _find as _find_article, _md_excerpt
+from .news import load_articles, _find as _find_article, _md_excerpt, _article_teaser
 from .proposals import load_proposals
 from .discord import TEAM_NAMES
 
@@ -162,7 +162,7 @@ def news_head(article_id: str) -> str:
         return _static_head("/news/view/")
 
     title = (a.get("title") or "Untitled").strip()
-    desc = _md_excerpt(a.get("body", ""), limit=200) or "Read the full story on NBN."
+    desc = _article_teaser(a, limit=200) or "Read the full story on NBN."
     author = a.get("author")
     extra = []
     if author:

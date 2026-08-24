@@ -243,6 +243,11 @@ check("while the live consensus does take the new ballot into account",
       [r["team"] for r in pr.consensus(cur)] != published_order)
 
 empty = new_article()
+pr.set_phase(empty, "voting")
+pr.set_ballot(empty, "alice", ballot_from(["BOS"]))
+refuses("publishing while voting is still open", lambda: pr.freeze(empty, []), "close voting")
+pr.set_phase(empty, "blurbs")
+empty["ballots"] = {}
 refuses("publishing with no ballots at all", lambda: pr.freeze(empty, []), "no submitted ballots")
 
 # ── redaction shape ──────────────────────────────────────────────────────────
