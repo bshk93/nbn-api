@@ -531,6 +531,30 @@ imports at runtime, and numpy's float and NaN rendering would fight `csvio`,
 which reproduces `readr::write_csv` byte for byte (NA vs empty are different
 values; `-0` keeps its sign; a whole double loses its `.0`).
 
+## Link previews (`GET /api/og/news`)
+
+`nbn.today/news/view/?id=…` renders client-side — the article arrives from
+`GET /api/news/{id}` after load — so a crawler fetching it sees only the
+placeholder Open Graph tags `nbn-today/build/og_tags.py` bakes into the shell.
+Every article unfurled in Discord as the same "Article — NBN News" card over the
+default banner. `GET /api/og/news?id=…` renders the real head instead: the
+headline, a 200-char plain-text excerpt of the body, the byline, the cover image
+and `article:*` tags.
+
+**It only gets used because nginx routes to it.** `/etc/nginx/sites-enabled/nbn.today`
+carries a `$nbn_unfurler` map over `$http_user_agent` and rewrites `/news/view/`
+to an internal location that proxies here; every other visitor gets the real
+page. The map is **social unfurlers only, deliberately not search engines** —
+this endpoint answers with a head-only stub, and nothing that indexes pages
+should ever be handed it. A new preview client is one entry in that map.
+
+Two things it must keep doing, both pinned by `tests/test_news_og.py`: an
+article that is not `published` falls back to the generic card (a draft's
+headline is not for a crawler, and a 404 would mean no card at all, which is
+worse than a plain one), and a cover image that can't be resolved to an absolute
+URL is dropped rather than emitted — Discord ignores a relative `og:image` and
+would show no picture.
+
 ## Docs discipline
 
 Keep `CLAUDE.md` and `docs/` in sync with every code change. If a change affects an endpoint, a data field, a transaction type, or any behavior described in the docs, update the relevant doc in the same commit.
