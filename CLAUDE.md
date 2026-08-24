@@ -569,6 +569,13 @@ Three rules hold across all four, and `tests/test_og.py` pins them:
 - **An image that can't be made absolute is dropped** for the default card.
   Discord ignores a relative `og:image` and shows no picture at all.
 
+One nginx detail that has already bitten once: a member name is a **path**
+segment and several contain spaces (`/members/Darth Awn`). A location's named
+capture matches on `$uri`, which nginx has already percent-decoded, and feeding
+that into `proxy_pass` puts a raw space in the upstream request line — every
+such name 400s. The name is pulled out of `$request_uri` instead, which is
+still encoded, and arrives as an ordinary query value.
+
 One thing to keep in mind when adding to a card: it is public. A proposal's
 live tally is privileged (`live_results` in `_proposal_view` is BOD-only), so
 the proposal card stops at the state — `Voting open`, or the outcome once
