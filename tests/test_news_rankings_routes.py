@@ -206,9 +206,35 @@ print("\nlink previews")
 # preview both have to fall back to the table rather than a generic line.
 pub = [x for x in STORE if x["id"] == aid][0]
 check("an intro-less edition teases its own top five",
-      news._article_teaser(pub).startswith("1. "))
+      len(news._article_teaser(pub).split(" · ")) == 5)
+check("and a shared rank teases as a tie — alice and bob split BOS/OKC 1-2",
+      news._article_teaser(pub).startswith("T-1. BOS · T-1. OKC · 3. "))
 check("a written intro still wins",
       news._article_teaser({"body": "Real prose.", "type": "power_rankings"}) == "Real prose.")
+
+print("\nbaseline")
+b = news.create_article(news.ArticleCreate(
+    title="Import: the old sheet", body="", type="power_rankings", series_id="sheet"), ALICE)
+bid = b["id"]
+SHEET = {t: i + 1 for i, t in enumerate(ballot(["OKC", "BOS"]))}
+http("a non-editor setting the baseline", 403,
+     lambda: news.put_ranking_baseline(bid, news.BaselineIn(ranks=SHEET, label="the sheet"), BOB))
+http("a baseline missing teams", 422,
+     lambda: news.put_ranking_baseline(bid, news.BaselineIn(ranks={"BOS": 1}, label="the sheet"), ALICE))
+b = news.put_ranking_baseline(bid, news.BaselineIn(ranks=SHEET, label="the January sheet"), ALICE)
+check("the baseline is stored with its label", b["baseline"]["label"] == "the January sheet")
+news.set_ranking_voters(bid, news.VotersIn(voters=["alice", "bob"]), ALICE)
+news.set_ranking_phase(bid, news.PhaseIn(phase="voting"), ALICE)
+check("a voter's ballot is seeded from the baseline",
+      news.get_article(bid, "Bearer bob")["seed_order"][0] == "OKC")
+news.put_ranking_ballot(bid, news.BallotIn(order=ballot(["BOS", "OKC"])), ALICE)
+news.put_ranking_ballot(bid, news.BallotIn(order=ballot(["BOS", "OKC"])), BOB)
+news.set_ranking_phase(bid, news.PhaseIn(phase="blurbs"), ALICE)
+b = news.publish_article(bid, news.PublishIn(), ALICE)
+first = {r["team"]: r for r in b["final"]}
+check("a first edition with a baseline still moves", first["BOS"]["prev"] == SHEET["BOS"])
+check("and the climb is measured against it",
+      first["BOS"]["move"] == SHEET["BOS"] - first["BOS"]["rank"] > 0)
 
 print("\nnon-ranking articles unaffected")
 plain = news.create_article(news.ArticleCreate(title="A column", body="Words."), ALICE)

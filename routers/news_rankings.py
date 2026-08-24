@@ -51,6 +51,7 @@ PHASE_NEXT = {
 }
 
 MAX_BLURB_LEN = 1200
+MAX_BASELINE_LABEL = 80
 MAX_VOTERS = 40
 
 
@@ -73,6 +74,7 @@ def scaffold(series_id: Optional[str], prev_id: Optional[str]) -> dict:
         "voters": [],           # member names invited to rank
         "ballots": {},          # name -> {"order": [30 abbrs], "submitted_at": iso}
         "blurbs": {},           # ABBR -> {"claimed_by", "body", "approved", "updated_at"}
+        "baseline": None,       # {"label", "ranks": {ABBR: rank}} — movement when there is no prev_id
         "final": None,          # frozen consensus rows, set once at publish
     }
 
@@ -144,10 +146,14 @@ def submitted_ballots(a: dict) -> dict:
 def consensus(a: dict) -> list[dict]:
     """Mean rank across submitted ballots, ascending — the published order.
 
-    Ties break on most first-place votes, then alphabetically by abbreviation.
-    "Pure average" still needs *some* deterministic rule when two teams draw
-    level, and one that depends only on the ballots keeps the author's hand off
-    the result; the published page states it.
+    Teams that draw level **share a rank** and the next rank skips past them
+    (…12, T-13, T-13, 15…), which is what the league's own sheets have always
+    done. The tie is judged on `avg` as rendered — the figure rounded to two
+    places — so two rows can never show the same average next to different
+    ranks. Within a tie the order is alphabetical, and nothing about it is the
+    author's to change; first-place votes are reported but no longer break a
+    tie, because a visible "T-13" that a hidden count had already decided would
+    be a lie about what happened.
     """
     ballots = submitted_ballots(a)
     if not ballots:
@@ -163,25 +169,82 @@ def consensus(a: dict) -> list[dict]:
             "lo": max(ranks),
             "votes": len(ranks),
         })
-    rows.sort(key=lambda r: (r["avg"], -r["firsts"], r["team"]))
+    rows.sort(key=lambda r: (r["avg"], r["team"]))
+    rank = 1
     for i, r in enumerate(rows, 1):
-        r["rank"] = i
+        if i > 1 and r["avg"] != rows[i - 2]["avg"]:
+            rank = i
+        r["rank"] = rank
+    counts: dict[int, int] = {}
+    for r in rows:
+        counts[r["rank"]] = counts.get(r["rank"], 0) + 1
+    for r in rows:
+        r["tied"] = counts[r["rank"]] > 1
     return rows
 
 
-def apply_movement(rows: list[dict], prev_final: Optional[list[dict]]) -> list[dict]:
+def baseline_ranks(a: dict) -> dict[str, int]:
+    """The `{team: rank}` map of an edition's baseline, or `{}` if it has none."""
+    return {t: int(n) for t, n in (((a or {}).get("baseline") or {}).get("ranks") or {}).items()}
+
+
+def apply_movement(rows: list[dict], prev_final: Optional[list[dict]],
+                   baseline: Optional[dict] = None) -> list[dict]:
     """Stamp each row with its rank in the previous edition and the delta.
 
     `move` is positive for a climb (rank 5 → 2 is +3). A team with no previous
-    rank — first edition of a series — gets `prev: None, move: None`, which the
-    page renders as "new" rather than as a zero move.
+    rank gets `prev: None, move: None`, which the page renders as "new" rather
+    than as a zero move.
+
+    Where an edition comes first in its series and so has no `prev_id` to
+    measure against, a `baseline` — a ranking that exists outside the site, a
+    league sheet from before this was built — stands in for the previous
+    edition. It is only ever a fallback: an edition chained to a real one
+    measures against that, so a baseline left on an article can never quietly
+    override the edition before it.
     """
     prev_rank = {r["team"]: r["rank"] for r in (prev_final or [])}
+    if not prev_rank:
+        prev_rank = {t: int(n) for t, n in ((baseline or {}).get("ranks") or {}).items()}
     for r in rows:
         p = prev_rank.get(r["team"])
         r["prev"] = p
         r["move"] = (p - r["rank"]) if p else None
     return rows
+
+
+def set_baseline(a: dict, ranks: Optional[dict], label: Optional[str]) -> Optional[dict]:
+    """Set (or with empty `ranks`, clear) the ranking this edition moves from.
+
+    Every team must be named, because a half-filled baseline would render as a
+    table where some rows moved and others are inexplicably "new". Ranks may
+    repeat — the source may have had its own ties — and need not be dense.
+    """
+    if not ranks:
+        a["baseline"] = None
+        return None
+    label = (label or "").strip()
+    if not label:
+        raise ValueError("a baseline needs a label — it is what the page calls it")
+    if len(label) > MAX_BASELINE_LABEL:
+        raise ValueError(f"label must be {MAX_BASELINE_LABEL} characters or fewer")
+    clean: dict[str, int] = {}
+    for team, rank in ranks.items():
+        team = str(team).strip().upper()
+        if team not in VALID_TEAMS:
+            raise ValueError(f"unknown team: {team}")
+        try:
+            rank = int(rank)
+        except (TypeError, ValueError):
+            raise ValueError(f"{team}: rank must be a number")
+        if rank < 1:
+            raise ValueError(f"{team}: rank must be 1 or more")
+        clean[team] = rank
+    missing = sorted(set(VALID_TEAMS) - set(clean))
+    if missing:
+        raise ValueError(f"baseline is missing {len(missing)} teams: {', '.join(missing)}")
+    a["baseline"] = {"label": label, "ranks": clean}
+    return a["baseline"]
 
 
 # ── Blurbs ────────────────────────────────────────────────────────────────────
@@ -308,7 +371,7 @@ def freeze(a: dict, articles: list[dict]) -> list[dict]:
     if not rows:
         raise ValueError("cannot publish a ranking with no submitted ballots")
     prev = next((p for p in articles if p.get("id") == a.get("prev_id")), None)
-    apply_movement(rows, (prev or {}).get("final"))
+    apply_movement(rows, (prev or {}).get("final"), a.get("baseline"))
     a["final"] = rows
     a["phase"] = "final"
     if not a.get("edition"):
@@ -346,13 +409,19 @@ def redact(a: dict, viewer: Optional[str], is_editor: bool,
         # A published edition shows its frozen `final`; an in-progress one shows
         # the live standing, with movement against the previous edition so the
         # author can see the shape of the piece before publishing it.
-        out["consensus"] = a.get("final") or apply_movement(consensus(a), prev_final)
+        out["consensus"] = a.get("final") or apply_movement(
+            consensus(a), prev_final, a.get("baseline"))
 
     # Where a fresh ballot starts. The previous edition's finish is the least
     # arbitrary starting point there is, and it saves a voter 30 drags to
-    # express "much the same as last week". The page falls back to last
-    # season's record when there is no previous edition.
-    out["seed_order"] = [r["team"] for r in (prev_final or [])] or None
+    # express "much the same as last week". A baseline stands in for it on a
+    # first edition; the page falls back to last season's record when there is
+    # neither.
+    seed = [r["team"] for r in (prev_final or [])]
+    if not seed:
+        base = baseline_ranks(a)
+        seed = sorted(base, key=lambda t: (base[t], t))
+    out["seed_order"] = seed or None
 
     out["ballot_progress"] = {
         "submitted": sorted(submitted_ballots(a).keys()),

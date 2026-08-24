@@ -58,7 +58,8 @@ def _article_teaser(a: dict, limit: int = 280) -> str:
     if text:
         return text
     if pr.is_ranking(a) and a.get("final"):
-        return " · ".join(f"{r['rank']}. {r['team']}" for r in a["final"][:5])
+        return " · ".join(f"{'T-' if r.get('tied') else ''}{r['rank']}. {r['team']}"
+                          for r in a["final"][:5])
     return ""
 
 
@@ -249,6 +250,12 @@ class PhaseIn(BaseModel):
 
 class BallotIn(BaseModel):
     order: list[str]
+
+
+class BaselineIn(BaseModel):
+    # {ABBR: rank}; empty clears the baseline.
+    ranks: dict[str, int] = {}
+    label: Optional[str] = None
 
 
 class BlurbIn(BaseModel):
@@ -701,6 +708,21 @@ def put_ranking_ballot(article_id: str, body: BallotIn,
 
     out = _mutate_ranking(article_id, info, False, go)
     log_write(info, f"PUT news/{article_id}/rankings/ballot — {info['name']}")
+    return out
+
+
+@router.put("/api/news/{article_id}/rankings/baseline")
+def put_ranking_baseline(article_id: str, body: BaselineIn,
+                         info: dict = Depends(get_token_info)):
+    """Set the outside ranking a first edition moves against — a league sheet
+    from before this existed, say. Editors only, and it does nothing to an
+    edition that already has a `prev_id` or that has been published: movement
+    is frozen into `final` at publish, so this is a pre-publish decision."""
+    def go(a, editor):
+        pr.set_baseline(a, body.ranks, body.label)
+
+    out = _mutate_ranking(article_id, info, True, go)
+    log_write(info, f"PUT news/{article_id}/rankings/baseline — {len(body.ranks)} teams")
     return out
 
 

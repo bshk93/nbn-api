@@ -5,8 +5,9 @@ FastAPI, no file I/O — so everything the league actually argued about is
 testable directly here, and that is what this suite pins:
 
   * **Pure average, no override.** The order is the mean rank and nothing else.
-    Ties break on first-place votes, then alphabetically — a rule that depends
-    only on the ballots, so no tie hands the author a thumb on the scale.
+    Teams that draw level share a rank and the next rank skips them (T-13,
+    T-13, 15) — nothing hidden breaks the tie, so no tie hands the author a
+    thumb on the scale.
   * **Blind until close.** While `phase == "voting"` nobody reads anyone else's
     ballot — *including the author*, who is usually a voter and would otherwise
     be the one person in the league who gets to rank last with full
@@ -86,11 +87,15 @@ by = {r["team"]: r for r in rows}
 check("BOS averages (1+2)/2 = 1.5", by["BOS"]["avg"] == 1.5)
 check("OKC averages (2+1)/2 = 1.5", by["OKC"]["avg"] == 1.5)
 check("DEN is 3rd on both ballots", by["DEN"]["avg"] == 3.0 and by["DEN"]["rank"] == 3)
-check("a 1.5/1.5 tie breaks on first-place votes, not the author",
+check("a 1.5/1.5 tie is a shared rank, not a hidden tiebreak",
+      by["BOS"]["rank"] == 1 and by["OKC"]["rank"] == 1)
+check("both sides of the tie are flagged tied", by["BOS"]["tied"] and by["OKC"]["tied"])
+check("first-place votes are reported but no longer break the tie",
       by["BOS"]["firsts"] == 1 and by["OKC"]["firsts"] == 1)
-check("an equal-firsts tie then breaks alphabetically", by["BOS"]["rank"] < by["OKC"]["rank"])
+check("the rank after a 2-way tie for 1st is 3, not 2", by["DEN"]["rank"] == 3)
+check("an untied team is not flagged tied", by["DEN"]["tied"] is False)
 check("hi/lo carry the ballot spread", by["BOS"]["hi"] == 1 and by["BOS"]["lo"] == 2)
-check("every team is ranked exactly once", sorted(r["rank"] for r in rows) == list(range(1, 31)))
+check("30 teams are ranked", len(rows) == 30 and rows[-1]["rank"] <= 30)
 check("votes counts only submitted ballots", by["BOS"]["votes"] == 2)
 
 # a third ballot that buries BOS moves it purely by the average
@@ -249,6 +254,41 @@ refuses("publishing while voting is still open", lambda: pr.freeze(empty, []), "
 pr.set_phase(empty, "blurbs")
 empty["ballots"] = {}
 refuses("publishing with no ballots at all", lambda: pr.freeze(empty, []), "no submitted ballots")
+
+# ── a baseline stands in for a previous edition ──────────────────────────────
+print("\nbaseline")
+base = new_article()
+pr.set_phase(base, "voting")
+pr.set_ballot(base, "alice", ballot_from(["BOS", "OKC"]))
+pr.set_phase(base, "blurbs")
+
+sheet = {t: i + 1 for i, t in enumerate(["OKC"] + [t for t in TEAMS if t != "OKC"])}
+pr.set_baseline(base, sheet, "the January sheet")
+check("a baseline names itself", base["baseline"]["label"] == "the January sheet")
+refuses("a baseline with no label", lambda: pr.set_baseline(base, sheet, "  "), "label")
+refuses("a baseline missing a team",
+        lambda: pr.set_baseline(base, {t: 1 for t in TEAMS[:-1]}, "partial"), "missing 1 team")
+refuses("a baseline naming a team that does not exist",
+        lambda: pr.set_baseline(base, dict(sheet, XXX=1), "typo"), "unknown team")
+refuses("a baseline rank of zero", lambda: pr.set_baseline(base, dict(sheet, BOS=0), "zero"), "1 or more")
+pr.set_baseline(base, sheet, "the January sheet")
+
+rows = pr.apply_movement(pr.consensus(base), None, base["baseline"])
+by = {r["team"]: r for r in rows}
+check("movement is measured from the baseline when there is no previous edition",
+      by["BOS"]["prev"] == sheet["BOS"] and by["BOS"]["move"] == sheet["BOS"] - by["BOS"]["rank"])
+check("no team reads as new once a baseline is set",
+      all(r["prev"] is not None for r in rows))
+
+prev_edition = [{"team": t, "rank": i + 1} for i, t in enumerate(ballot_from(["BOS"]))]
+by = {r["team"]: r for r in pr.apply_movement(pr.consensus(base), prev_edition, base["baseline"])}
+check("a real previous edition beats the baseline", by["BOS"]["prev"] == 1)
+
+check("the ballot seeds off the baseline order", pr.redact(base, "bob", False)["seed_order"][0] == "OKC")
+pr.set_baseline(base, {}, None)
+check("an empty map clears the baseline", base["baseline"] is None)
+check("and the arrows go back to new",
+      pr.apply_movement(pr.consensus(base), None, base["baseline"])[0]["prev"] is None)
 
 # ── redaction shape ──────────────────────────────────────────────────────────
 print("\nredaction shape")
