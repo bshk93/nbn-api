@@ -114,7 +114,7 @@ the ledger is the only receipt any of them produces.
 |---|---|---|
 | Cosmetics (name colour, status text) | 500 | `_COSMETIC_COST` — `auth.py` |
 | Avatar upload | 5,000 | `_AVATAR_COST` — `auth.py` |
-| Theme unlock | 1,000 flat | `THEME_PRICE` — `themes.py` |
+| Theme unlock | 5,000 flat — **your own team's is free** | `THEME_PRICE` / `own_team_theme` — `themes.py` |
 
 `themes.py` sells the site's non-default themes (Lavender Rose plus one per
 team) into `members[name]["cosmetics"]["themes"]`, which rides back out on
@@ -130,8 +130,13 @@ pinned by `tests/test_themes.py`:
   way back from.
 - **`LIVE_TEAM_THEMES` is a gate, not a list of teams.** A team belongs there
   only once `css/theme.css` in nbn-today actually has its block; listing one
-  early sells 1,000 NB¥ of nothing. `build/check_theme_catalog.sh` over
+  early sells 5,000 NB¥ of nothing. `build/check_theme_catalog.sh` over
   there checks the two repos agree.
+- **A member's own team's theme is free and is not a grant.** `own_team_theme`
+  derives it from the member's open tenure every time it is asked, so it lapses
+  when the tenure does and never enters `cosmetics.themes`; buying it is a 400.
+  It reaches the picker as `free_themes` on `/api/members/me`, because
+  `GET /api/themes` is public and cached per browser, not per member.
 
 Entitlement is server-side, selection is not — the browser keeps the chosen
 theme in `localStorage` so `nav.js` can paint before any fetch resolves. Full

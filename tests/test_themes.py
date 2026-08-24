@@ -5,9 +5,13 @@ What these pin, and why each one is here rather than assumed:
   * **The catalog is the price list.** The page never composes a price, so an
     id present in the catalog with the wrong price is a silent overcharge.
   * **Free themes cannot be bought.** They are in the catalog so the picker
-    can render them; posting one is a 400, not a 1,000 NB¥ donation.
+    can render them; posting one is a 400, not a 5,000 NB¥ donation.
   * **Buying twice charges once.** The ownership check and the charge are
     under one lock; a double-clicked button must not pay twice.
+  * **A member's own team's theme is free, and cannot be bought.** It is an
+    entitlement derived from tenure, not a grant written into the owned list —
+    so it must not be charged for, must not appear in `cosmetics.themes`, and
+    must lapse when the tenure ends.
   * **Insufficient funds is a 402 that names the shortfall**, matching the
     other two NB¥ sinks (cosmetics, avatar).
   * **The unlock is additive.** It must not clobber `name_color` /
@@ -49,12 +53,19 @@ def check(name, cond):
 RICH_TOKEN = "r" * 64
 POOR_TOKEN = "p" * 64
 
+OWNER_TOKEN = "o" * 64
+
 MEMBERS = {
     "Rich": {"token": RICH_TOKEN, "roles": [], "tenures": [],
              "cosmetics": {"name_color": "#a855f7", "status_text": "Kachow"}},
     "Poor": {"token": POOR_TOKEN, "roles": [], "tenures": []},
+    # Holds ORL today, held BOS once and left. Only the open tenure counts.
+    "Owner": {"token": OWNER_TOKEN, "roles": [], "tenures": [
+        {"team": "BOS", "start": "2020-07-01", "end": "2022-07-25", "position": "owner"},
+        {"team": "ORL", "start": "2026-04-26", "end": None, "position": "owner"},
+    ]},
 }
-BALANCES = {"Rich": 5000.0, "Poor": 250.0}
+BALANCES = {"Rich": 12000.0, "Poor": 250.0, "Owner": 12000.0}
 LEDGER = []
 
 auth.load_members = lambda: MEMBERS
@@ -78,6 +89,7 @@ def bearer(token):
 
 PAID_ID = "lavender-rose"
 TEAM_ID = "team-phx"
+OWN_TEAM_ID = "team-orl"
 
 
 # ── the catalog ───────────────────────────────────────────────────────────────
@@ -95,7 +107,7 @@ check("the two NBN Today themes are free",
 check("Lavender Rose is paid", not by_id[PAID_ID]["free"])
 check("every paid theme is the one flat price",
       all(t["price"] == themes.THEME_PRICE for t in cat if not t["free"]))
-check("the flat price is 1,000 NB¥", themes.THEME_PRICE == 1000.0)
+check("the flat price is 5,000 NB¥", themes.THEME_PRICE == 5000.0)
 check("PHX is listed and carries its abbreviation",
       by_id.get(TEAM_ID, {}).get("team") == "PHX")
 check("every listed team theme has a live CSS block",
@@ -116,12 +128,12 @@ check("unknown theme → 404", r.status_code == 404)
 
 r = c.post("/api/members/me/themes/nbn-today", headers=bearer(RICH_TOKEN))
 check("a free theme cannot be bought → 400", r.status_code == 400)
-check("...and nothing was charged for it", BALANCES["Rich"] == 5000.0)
+check("...and nothing was charged for it", BALANCES["Rich"] == 12000.0)
 
 r = c.post(f"/api/members/me/themes/{PAID_ID}", headers=bearer(RICH_TOKEN))
 check("buying a paid theme → 200", r.status_code == 200)
-check("charged exactly the price", BALANCES["Rich"] == 4000.0)
-check("the response reports the new balance", r.json()["new_balance"] == 4000.0)
+check("charged exactly the price", BALANCES["Rich"] == 7000.0)
+check("the response reports the new balance", r.json()["new_balance"] == 7000.0)
 check("the theme is owned", PAID_ID in r.json()["owned"])
 check("ownership is stored under cosmetics.themes",
       MEMBERS["Rich"]["cosmetics"]["themes"] == [PAID_ID])
@@ -129,20 +141,51 @@ check("the existing cosmetics survived the unlock",
       MEMBERS["Rich"]["cosmetics"]["name_color"] == "#a855f7"
       and MEMBERS["Rich"]["cosmetics"]["status_text"] == "Kachow")
 check("the charge is in the ledger, naming the theme",
-      LEDGER[-1]["member"] == "Rich" and LEDGER[-1]["delta"] == -1000.0
+      LEDGER[-1]["member"] == "Rich" and LEDGER[-1]["delta"] == -5000.0
       and "Lavender Rose" in LEDGER[-1]["reason"])
 
 before = len(LEDGER)
 r = c.post(f"/api/members/me/themes/{PAID_ID}", headers=bearer(RICH_TOKEN))
 check("buying the same theme again → 200, flagged already owned",
       r.status_code == 200 and r.json()["already_owned"] is True)
-check("...and is not charged a second time", BALANCES["Rich"] == 4000.0)
+check("...and is not charged a second time", BALANCES["Rich"] == 7000.0)
 check("...and writes no second ledger row", len(LEDGER) == before)
 
 r = c.post(f"/api/members/me/themes/{TEAM_ID}", headers=bearer(RICH_TOKEN))
-check("a second, different theme is charged", BALANCES["Rich"] == 3000.0)
+check("a second, different theme is charged", BALANCES["Rich"] == 2000.0)
 check("...and both are owned now",
       sorted(MEMBERS["Rich"]["cosmetics"]["themes"]) == sorted([PAID_ID, TEAM_ID]))
+
+
+# ── your own team's theme is free ─────────────────────────────────────────────
+
+print("\n-- your own team's theme --")
+
+check("the current team's theme is free", themes.own_team_theme(MEMBERS["Owner"]) == OWN_TEAM_ID)
+check("...and the team they left is not",
+      themes.free_theme_ids(MEMBERS["Owner"]) == [OWN_TEAM_ID])
+check("a member with no team gets nothing free", themes.free_theme_ids(MEMBERS["Rich"]) == [])
+check("a closed tenure alone gets nothing free",
+      themes.free_theme_ids({"tenures": [
+          {"team": "ORL", "start": "2020-07-01", "end": "2022-07-25", "position": "owner"}]}) == [])
+check("an open tenure with no position gets nothing free",
+      themes.free_theme_ids({"tenures": [
+          {"team": "ORL", "start": "2026-04-26", "end": None, "position": "none"}]}) == [])
+check("a GM's team counts the same as an owner's",
+      themes.free_theme_ids({"tenures": [
+          {"team": "SAC", "start": "2026-04-26", "end": None, "position": "gm"}]}) == ["team-sac"])
+
+before = len(LEDGER)
+r = c.post(f"/api/members/me/themes/{OWN_TEAM_ID}", headers=bearer(OWNER_TOKEN))
+check("buying your own team's theme → 400", r.status_code == 400)
+check("...and nothing was charged", BALANCES["Owner"] == 12000.0)
+check("...and nothing reached the ledger", len(LEDGER) == before)
+check("...and it was not written into the owned list",
+      "themes" not in MEMBERS["Owner"].get("cosmetics", {}))
+
+r = c.post(f"/api/members/me/themes/{TEAM_ID}", headers=bearer(OWNER_TOKEN))
+check("another team's theme is still charged in full",
+      r.status_code == 200 and BALANCES["Owner"] == 7000.0)
 
 
 # ── not enough NB¥ ────────────────────────────────────────────────────────────
@@ -153,7 +196,7 @@ before = len(LEDGER)
 r = c.post(f"/api/members/me/themes/{PAID_ID}", headers=bearer(POOR_TOKEN))
 check("too poor → 402", r.status_code == 402)
 check("the refusal names the price and the balance",
-      "1,000" in r.json()["detail"] and "250" in r.json()["detail"])
+      "5,000" in r.json()["detail"] and "250" in r.json()["detail"])
 check("nothing was charged", BALANCES["Poor"] == 250.0)
 check("nothing was granted", "themes" not in MEMBERS["Poor"].get("cosmetics", {}))
 check("nothing reached the ledger", len(LEDGER) == before)
@@ -180,7 +223,7 @@ except RuntimeError:
 check("the write failure propagates rather than being swallowed", raised)
 check("the member was refunded", BALANCES["Poor"] == 5000.0)
 check("the refund is in the ledger as its own row",
-      len(LEDGER) == before + 1 and LEDGER[-1]["delta"] == 1000.0
+      len(LEDGER) == before + 1 and LEDGER[-1]["delta"] == 5000.0
       and "Refund" in LEDGER[-1]["reason"])
 themes.save_members = auth.save_members
 BALANCES["Poor"] = before_balance

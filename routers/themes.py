@@ -2,7 +2,10 @@
 
 The site ships two free themes (the dark "NBN Today" and its light twin);
 everything else — Lavender Rose, and one theme per team — is unlocked once,
-permanently, for a flat price.
+permanently, for a flat price. One exception, and it is per member rather
+than per theme: **a member's own team's theme is free while they hold that
+team**, derived from tenure by `own_team_theme` and never charged for. It is
+not written into the owned list — see that function.
 
 **Entitlement is server-side; selection is not.** This API is the only thing
 that decides who has paid for what. Which theme a browser is *currently*
@@ -36,11 +39,14 @@ from .storage import log_write
 
 router = APIRouter()
 
-# One flat price for every unlockable theme, including a team's own owner
-# buying their own team's — decided 2026-08-23. Anchors: a cosmetics update
-# is 500 and an avatar 5,000, the median balance is ~2,250, and a Poeltl win
-# is 50/day.
-THEME_PRICE = 1000.0
+# One flat price for every unlockable theme — decided 2026-08-23, raised from
+# 1,000 on 2026-08-24 when a member's own team's theme stopped costing
+# anything. Anchors: a cosmetics update is 500 and an avatar 5,000, the median
+# balance is ~2,250, and a Poeltl win is 50/day. So a theme is now the same
+# size of decision as an avatar: something to save for, not something to
+# collect — which is the point, since the one theme a member would obviously
+# wear is the one they no longer pay for.
+THEME_PRICE = 5000.0
 
 TEAM_NAMES = {
     "ATL": "Hawks", "BKN": "Nets", "BOS": "Celtics", "CHA": "Hornets",
@@ -92,6 +98,40 @@ def _owned(member: dict) -> list[str]:
     return [t for t in themes if isinstance(t, str)]
 
 
+def own_team_theme(member: dict) -> str | None:
+    """The one theme a member gets for free: their own team's.
+
+    Derived live from tenure, and deliberately *not* granted into
+    `cosmetics.themes`. A member wearing their team's colours is wearing them
+    because they are on that team; when the tenure ends the free access ends
+    with it. A member who bought that theme outright before (or after) keeps
+    it either way, because a purchase is its own row in `cosmetics.themes` and
+    nothing here touches that list.
+
+    "Their team" is any open tenure — owner, GM or coach alike. A position of
+    "none" is the members file's way of saying "attached to no team", so it
+    grants nothing.
+    """
+    for t in member.get("tenures") or []:
+        if t.get("end"):
+            continue
+        if (t.get("position") or "none") == "none":
+            continue
+        abbr = (t.get("team") or "").upper()
+        if abbr in LIVE_TEAM_THEMES:
+            return f"team-{abbr.lower()}"
+    return None
+
+
+def free_theme_ids(member: dict) -> list[str]:
+    """Theme ids this member may use without paying, beyond the catalog's own
+    free entries. Rides along on GET /api/members/me, which the picker already
+    fetches — the catalog itself stays public and per-member-blind so it can
+    keep being cached in the browser."""
+    own = own_team_theme(member)
+    return [own] if own else []
+
+
 @router.get("/api/themes")
 def list_themes():
     """Public: what exists and what it costs. Which of them *you* own comes
@@ -119,6 +159,11 @@ def unlock_theme(theme_id: str, info: dict = Depends(get_token_info)):
         members = load_members()
         if name not in members:
             raise HTTPException(status_code=404, detail="Member not found")
+        if theme_id in free_theme_ids(members[name]):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{entry['label']} is your own team's theme — it's already yours",
+            )
         owned = _owned(members[name])
         if theme_id in owned:
             balances = _load_balances()

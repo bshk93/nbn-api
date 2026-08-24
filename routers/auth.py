@@ -486,7 +486,12 @@ def get_my_member_info(info: dict = Depends(get_token_info)):
         if not t.get("end") and t.get("position") and t["position"] != "none"
     })
     avatar_url = f"/api/members/{info['name']}/avatar" if m.get("has_avatar") else None
-    return {"name": info["name"], "roles": info.get("roles", []), "positions": current_positions, "dob": m.get("dob"), "cosmetics": m.get("cosmetics", {}), "avatar_url": avatar_url}
+    # Themes this member may use without owning them — today, their own team's
+    # (routers/themes.py). Imported here rather than at module scope because
+    # themes.py imports from this file. The picker reads it off this response,
+    # which is why the theme catalog itself can stay public and cacheable.
+    from .themes import free_theme_ids
+    return {"name": info["name"], "roles": info.get("roles", []), "positions": current_positions, "dob": m.get("dob"), "cosmetics": m.get("cosmetics", {}), "free_themes": free_theme_ids(m), "avatar_url": avatar_url}
 
 
 @router.get("/api/members/public")
