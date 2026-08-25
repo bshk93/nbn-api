@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily cap/apron snapshot for all 30 teams
+Documentation=file:///home/skim/projects/nbn-api/routers/cap_history.py
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=skim
+WorkingDirectory=/home/skim/projects/nbn-api
+ExecStart=/home/skim/projects/nbn-api/venv/bin/python /home/skim/projects/nbn-api/snapshot_cap_history.py
+StandardOutput=journal
+StandardError=journal

@@ -14,6 +14,7 @@ from .constants import (
     MEMBERS_FILE, VALID_ROLES, VALID_TEAMS, ROLE_IMPLIES,
     MEMBER_SEEN_FILE, AVATARS_DIR, SESSIONS_FILE,
 )
+from . import audit
 from .storage import _load_json, _save_json, log_write
 
 _seen_lock = threading.Lock()
@@ -190,11 +191,17 @@ def get_token_info(request: Request,
         if _cookie_accepted(request.url.path):
             info = _resolve_session(nbn_session)
             if info is not None:
+                audit.set_actor(info.get("name", ""))
                 return info
         raise HTTPException(status_code=401, detail="Missing Authorization header")
     info = _resolve_token(authorization)
     if info is None:
         raise HTTPException(status_code=403, detail="Invalid token")
+    # Name the actor for routers/audit.py. This is the one funnel every
+    # authenticated request passes through, so it is the only place that needs
+    # to know; unauthenticated writes (timers, the relay, CLI scripts) record
+    # as "system".
+    audit.set_actor(info.get("name", ""))
     return info
 
 

@@ -2,10 +2,11 @@ import logging
 import sys
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import auth, players, roster_picks, transactions, boxscores, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, og, discord, trade_finder, picks_preview, suggestions, google_sheets, free_agency, roster_log_relay, waivers, inbox, cleanup, poext, themes
+from routers import audit as audit_ctx
+from routers import auth, players, roster_picks, transactions, boxscores, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, og, discord, trade_finder, picks_preview, suggestions, google_sheets, free_agency, roster_log_relay, waivers, inbox, cleanup, poext, themes, cap_history
 from routers.picks_scheduler import start_picks_horizon_scheduler
 from routers.roster_log_relay import start_roster_log_relay
 
@@ -27,6 +28,19 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+
+@app.middleware("http")
+async def audit_context(request: Request, call_next):
+    """Open the per-request context routers/audit.py stamps onto every edit.
+
+    Set here rather than in the auth dependency because the dict must exist
+    *before* the downstream task is spawned — a child task copies the context at
+    creation, so `set()` from inside a dependency would not reach the endpoint.
+    `set_actor` mutates this dict rather than replacing it."""
+    audit_ctx.begin_request(request.method, request.url.path)
+    return await call_next(request)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -63,3 +77,4 @@ app.include_router(inbox.router)           # per-member notifications (GET /api/
 app.include_router(cleanup.router)         # "Clean Up the Poo Poo" — nbn-today/docs/clean-up-the-poopoo-spec.md
 app.include_router(themes.router)          # unlockable NB¥ site themes (GET /api/themes)
 app.include_router(poext.router)           # § 6.2/6.3 extension pipeline — nbn-today/docs/poext-extension-pipeline.md
+app.include_router(cap_history.router)     # daily cap/apron snapshot per team — the § 7.3 lookback's input

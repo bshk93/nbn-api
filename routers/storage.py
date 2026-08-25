@@ -5,6 +5,7 @@ import os
 import re
 from pathlib import Path
 
+from . import audit
 from .constants import logger
 import season_clock
 from season_clock import (
@@ -31,7 +32,13 @@ def _atomic_write(path: Path, text: str):
     # deliberately 0600, and every write would have reset them to world-readable.
     mode = (path.stat().st_mode & 0o777) if path.exists() else 0o644
     os.chmod(tmp, mode)
+    # Forensics for the writes that never reach the transaction ledger. Read the
+    # old text before the swap, record the diff after it, so a write that fails
+    # leaves nothing behind. Both calls are no-ops off audit.py's allowlist, and
+    # neither can raise. See routers/audit.py.
+    before = audit.snapshot_before(path)
     os.replace(tmp, path)
+    audit.record(path, before, text)
 
 
 def read_csv(path: Path) -> tuple[list[str], list[dict]]:

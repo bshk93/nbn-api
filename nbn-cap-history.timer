@@ -1,0 +1,15 @@
+[Unit]
+Description=Record where every team sat, once a day
+
+[Timer]
+# Late enough that the day's transactions are in, and the date the run stamps
+# is the UTC day it fires on — the same clock the API writes with.
+OnCalendar=*-*-* 23:40:00
+# A missed day is a permanent hole in a four-year lookback (§ 7.3), so catch up
+# after downtime rather than skipping. The snapshot is idempotent per date, so a
+# catch-up run that overlaps an already-recorded day is a no-op.
+Persistent=true
+RandomizedDelaySec=2min
+
+[Install]
+WantedBy=timers.target

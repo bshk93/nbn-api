@@ -594,6 +594,73 @@ live tally is privileged (`live_results` in `_proposal_view` is BOD-only), so
 the proposal card stops at the state — `Voting open`, or the outcome once
 decided.
 
+## The edit log (`routers/audit.py`)
+
+`POST /api/transactions` is audited to the dollar. The side doors that change
+the same cap state were not: `PUT /api/players/{slug}` rewrites `salaries`,
+`cap_holds`, `guaranteed` and `guarantee_dates`; `PUT /api/roster/{team}`,
+`PUT /api/deadcap/{team}` and `PUT /api/picks/...` rewrite the files those
+figures are read from. Each wrote one `log_write()` line to journald, recording
+*who touched what* and never *what it was before* — so "who moved UTA's
+Guaranteed Salary, and when" was unanswerable.
+
+Every write in the API funnels through `storage._atomic_write`, which is the
+one place this hooks: the old text is read before the `os.replace`, the diff is
+appended after it, to `edits.jsonl` in NBS_DATA_DIR. Read it at
+`GET /api/edits` (admin — `key=curry-stephen` for one player, `file=uta-roster.csv`
+for one team, `actor=` for one member).
+
+Three properties it must keep:
+
+| Property | Why |
+|---|---|
+| **Allowlist, not denylist** (`_AUDITED_NAMES` / `_AUDITED_SUFFIXES`) | `members.json`, `tokens.json` and `sessions.json` hold live credentials; a value-level diff copies bearer tokens into a plaintext log. `_NEVER` restates that as a hard guard so widening the allowlist can't undo it by accident |
+| **Bounded lines** (`_MAX_CHANGES`, `_MAX_VALUE_CHARS`, `_MAX_DIFF_BYTES`) | one entry stays appendable in a single write, and the 27MB allstats CSVs are never diffed |
+| **Never breaks a write** | every entry point swallows its own exceptions. An audit log that can 500 a roster save is worse than none |
+
+The actor is carried on a dict the middleware in `main.py` installs and
+`get_token_info` **mutates**. Don't change that to a `ContextVar.set()` inside
+the dependency: FastAPI runs a sync dependency and its endpoint as two separate
+threadpool tasks with independent copies of the context, so the endpoint would
+never see it. `tests/test_audit_log.py` exercises that path end to end because
+it is the piece that fails silently. Writes with no request behind them
+(timers, the relay, CLI scripts) record as `system`.
+
+## Cap history (`routers/cap_history.py`)
+
+A daily row per team — Team Salary on both bases, apron position, hard-cap
+level, MLE/BAE state, roster counts — appended to `cap-history.jsonl` in
+NBS_DATA_DIR by `nbn-cap-history.timer` (23:40 UTC, `Persistent=true`).
+
+It exists because every cap figure the site shows is *now*. § 7.3's
+second-apron pick freeze needs a four-year lookback, and nothing was banking
+that time: the freeze was never "blocked until 2029", it was blocked until four
+years after someone started recording. Started 2026-08-25.
+
+| Route | Auth | What |
+|---|---|---|
+| `GET /api/cap-history` | Public | the series; `team`, `since`, `until`, `limit` |
+| `GET /api/cap-history/current` | Public | what today's snapshot *would* record, computed live |
+| `POST /api/cap-history/snapshot` | `rosters` | record now; `force=true` re-records a recorded day |
+
+Two invariants:
+
+- **It does no cap math of its own.** The figures come from `_compute_team_salary`
+  and `_compute_team_salary_ex_holds` — the validators' own helpers — so the
+  history can never disagree with what the office enforced. `tests/test_cap_history.py`
+  recomputes all 30 teams both ways to pin it. Don't inline a salary sum here.
+- **A `0` threshold is unknown, not exceeded.** 27-28 onward sit in
+  `cap-levels.json` with `cap`/`apron1`/`apron2` all literally 0 (the committee
+  figures aren't entered — it's a live P1 in `nbn-today/BACKLOG.md`). Read
+  naively that puts every team over every apron, which under § 7.3 is a
+  fabricated freeze. `_cap_levels_for` normalises 0 to `None` and
+  `_apron_position` returns `None` for an unknown threshold.
+
+The snapshot is idempotent per date — a second run on a recorded day is a
+no-op, since a duplicated day double-counts in anything built off the series and
+the timer can fire twice after a reboot. Run it by hand with
+`venv/bin/python snapshot_cap_history.py` (`--dry-run`, `--date`, `--force`).
+
 ## Docs discipline
 
 Keep `CLAUDE.md` and `docs/` in sync with every code change. If a change affects an endpoint, a data field, a transaction type, or any behavior described in the docs, update the relevant doc in the same commit.

@@ -21,6 +21,7 @@ from .constants import (
     JOIN_SUBMISSIONS_FILE, JOIN_BLACKLIST_FILE, MEMBER_SEEN_FILE,
     VALID_TEAMS, logger,
 )
+from . import audit
 from .storage import _load_json, _save_json, log_write, _current_league_year
 from .auth import (
     get_token_info, has_role, require_role, require_admin,
@@ -76,6 +77,23 @@ def get_health(response: Response):
         "data_dir": data_dir_ok,
         "time": datetime.now(timezone.utc).isoformat(),
     }
+
+
+@router.get("/api/edits")
+def get_edits(limit: int = Query(200, ge=1, le=1000),
+              file: Optional[str] = None,
+              actor: Optional[str] = None,
+              key: Optional[str] = None,
+              _: dict = Depends(require_admin)):
+    """The append-only edit log for the writes that bypass the ledger.
+
+    Admin-only: a diff of `player-bios.json` is the whole league's contract
+    state, and `key` searches inside it. `file` and `actor` match exactly,
+    `key` is a substring of a diff entry's key — `key=curry-stephen` answers
+    "what has anyone changed about this player", `file=uta-roster.csv` answers
+    "who moved UTA's roster". Newest first. See routers/audit.py.
+    """
+    return {"entries": audit.read_entries(limit=limit, file=file, actor=actor, key=key)}
 
 
 @router.get("/api/cap-levels")
