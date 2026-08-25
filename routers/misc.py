@@ -10,7 +10,7 @@ from typing import Optional
 
 import httpx
 import ptyprocess
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from .constants import (
@@ -54,6 +54,28 @@ class CapLevel(BaseModel):
     room_amount: int = 0
     eaps: int = 0          # Estimated Average Player Salary — cap-hold threshold (§ 3.10)
     min_salary_scale: dict[str, int] = {}  # keyed "0".."9","10+" — years of experience (§ 2.1a, § 3.12)
+
+
+# ── Liveness ────────────────────────────────────────────────────────────────
+# Public, unauthenticated, and cheap. `Restart=always` on nbn-api.service covers
+# a crash; this covers the case it can't see — a process that is still answering
+# but has lost the data directory underneath it, at which point every roster,
+# bio and cap read returns nonsense rather than an error.
+#
+# 503 rather than 200-with-a-field when that happens, so a monitor that only
+# knows about status codes still catches it.
+
+
+@router.get("/api/health")
+def get_health(response: Response):
+    data_dir_ok = DATA_DIR.is_dir() and os.access(DATA_DIR, os.R_OK)
+    if not data_dir_ok:
+        response.status_code = 503
+    return {
+        "status": "ok" if data_dir_ok else "degraded",
+        "data_dir": data_dir_ok,
+        "time": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @router.get("/api/cap-levels")

@@ -53,7 +53,15 @@ sudo systemctl restart nbn-api
 systemctl status nbn-api
 journalctl -u nbn-api -f          # live logs
 journalctl -u nbn-api -n 50       # last 50 lines
+curl -s https://nbn.today/api/health   # liveness: 200 {"status":"ok"}
 ```
+
+`GET /api/health` is public and unauthenticated. `Restart=always` on the unit
+covers a crash; health covers the case it can't — a process still answering
+having lost `NBS_DATA_DIR` underneath it, which turns every roster, bio and cap
+read into nonsense rather than an error. It answers **503** in that case, so a
+monitor that only reads status codes catches it too. Pinned by
+`tests/test_health.py`.
 
 ## Auth
 
