@@ -439,7 +439,7 @@ def submit_article(article_id: str, info: dict = Depends(get_token_info)):
 # news/view/index.html still does for an unpublished ballot preview (where
 # there's no frozen `final` yet to read), but captured once so a published
 # edition can't silently reflect a roster that has since been traded around.
-ROSTER_STRIP_N = 5
+ROSTER_STRIP_N = 6
 
 
 def _team_roster_strip(team: str, bios: dict, ovr_current: dict) -> list[dict]:
