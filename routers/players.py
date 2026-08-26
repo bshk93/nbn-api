@@ -431,6 +431,10 @@ def get_ratings_changes(
             change["date"] = date
             change["slug"] = player_slug
             change["name"] = bios.get(player_slug, {}).get("name") or cur.get("2k_name") or player_slug
+            # Stamped by the scrape at the moment it ran (see scrape_2k_attributes.py's
+            # module docstring) -- never reconstructed here, so it's null for any
+            # snapshot taken before "team" started being recorded.
+            change["team"] = cur.get("team")
             entries.append(change)
     entries.sort(key=lambda e: e["date"], reverse=True)
     return {"count": len(entries), "entries": entries[:limit]}
