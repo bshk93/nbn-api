@@ -53,9 +53,17 @@ def seed(tmp: Path, live_rows=3, closed_rows=5):
 
 
 def run(tmp: Path, **kw) -> int:
+    """`main()` over a tmp data dir.
+
+    `--skip-values` because these fixtures are deliberately not real box scores
+    — a few stub rows sized to exercise the row-count and hash bookkeeping, with
+    blank stat cells and no legal minute totals. The value-level checks would
+    correctly flag every one of them, which says nothing about the manifest
+    logic these cases are testing. `tests/test_stats_checks.py` covers those.
+    """
     argv = sys.argv
-    sys.argv = ["check_stats_integrity.py", "--data-dir", str(tmp), "--no-alert"] + \
-               (["--accept"] if kw.get("accept") else [])
+    sys.argv = ["check_stats_integrity.py", "--data-dir", str(tmp), "--no-alert",
+                "--skip-values"] + (["--accept"] if kw.get("accept") else [])
     try:
         return ci.main()
     finally:
@@ -122,6 +130,19 @@ with tempfile.TemporaryDirectory() as td:
     quoted = tmp / "allstats-23-24.csv"
     quoted.write_text(HEADER + 'PHX,2026-01-01,"Booker\nDevin",20\n')
     check("a quoted embedded newline counts as one row", ci.scan(tmp)["allstats-23-24.csv"]["rows"] == 1)
+
+    # ── The value checks are wired in, and are on by default ──────────────────
+    # Every case above passes --skip-values, so without this the wiring could
+    # rot silently: the checks would keep passing their own tests while never
+    # actually running on the weekly timer.
+    argv = sys.argv
+    sys.argv = ["check_stats_integrity.py", "--data-dir", str(tmp), "--no-alert"]
+    try:
+        check("value checks run by default and fail the stub fixtures",
+              ci.main() == 1)
+    finally:
+        sys.argv = argv
+    check("the same run passes with --skip-values", run(tmp) == 0)
 
 # ── The July-to-October gap ───────────────────────────────────────────────────
 # The stats clock rolls to the new season on July 1, but a playoff run can finish

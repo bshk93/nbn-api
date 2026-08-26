@@ -115,6 +115,13 @@ PLAYER_FIXES = {
     "REDDISH, CAMERON": "REDDISH, CAM",
     "KILLIAN HAYES": "HAYES, KILLIAN",
     "KOBE BROWN": "BROWN, KOBE",
+    # Found 2026-08-26 by stats_build/checks.py — which exists because nothing
+    # asserted this table was complete. One GSW playoff row (2026-05-11) was
+    # minting a `riley-wendell` slug and publishing a player who does not exist
+    # into players/player_seasons_playoffs.csv. It is Will Riley: he played 63
+    # games, all for GSW, including 2026-05-09 and 2026-05-13 either side of
+    # that one, and the two names never appear in the same team-game.
+    "RILEY, WENDELL": "RILEY, WILL",
 }
 
 _SEASON_IN_FILENAME = re.compile(r"\d{2}\.")

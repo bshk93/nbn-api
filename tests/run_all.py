@@ -28,7 +28,8 @@ MODULES = ["test_stepien_rule", "test_pick_advance_limit", "test_picks_matching"
            "test_og", "test_health", "test_audit_log", "test_cap_history",
            "test_stats_harness", "test_stats_writer",
            "test_stats_pipeline", "test_stats_cutover", "test_season_clock",
-           "test_allstats_guard", "test_stats_integrity",
+           "test_allstats_guard", "test_allstats_files", "test_stats_integrity",
+           "test_stats_checks", "test_allstats_edit",
            "test_boxscore_provenance", "test_drive_backup",
            "test_data_paths"]
 

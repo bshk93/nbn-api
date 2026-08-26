@@ -27,6 +27,8 @@ import sys
 import time
 from pathlib import Path
 
+import allstats_files
+import season_clock
 from stats_build import pipeline
 from stats_build.buildargs import DATA_DIR, OUT_DIR, BuildArgs
 
@@ -43,14 +45,38 @@ def main(argv: list[str] | None = None) -> int:
     args = BuildArgs.resolve(a.season, a.through)
     print(f"season={args.season} data={a.data_dir} out={a.out}")
 
-    # Refuse rather than write an empty league. The season's raw file is the
-    # one input that cannot be rebuilt, and its absence means a wrong season
-    # was resolved or the data directory is not mounted -- either way, a run
+    # The season's raw file is the one input that cannot be rebuilt, and a run
     # that "succeeds" having aggregated nothing would overwrite 86 good files
-    # with empty ones.
-    raw = a.data_dir / f"allstats-{args.season}.csv"
-    if not raw.exists():
-        print(f"ERROR: no raw box scores for {args.season} at {raw}", file=sys.stderr)
+    # with empty ones. So its absence is still refused -- except in the one case
+    # that is not a fault at all: the season clock has rolled and this season
+    # has had no games yet. `ensure_season_file` tells that apart from an
+    # unmounted data directory by whether the PREVIOUS season's file is on
+    # disk, and creates the header-only file when it is. allstats_files.py has
+    # the full argument, including why this broke every build each July.
+    #
+    # Only for the current season. An explicit `--season 24-25` whose file is
+    # missing is a mistake or a wrong data dir, never a rollover.
+    #
+    # `--dry-run` writes nothing, this file included, so it reports what a real
+    # run would create rather than creating it.
+    is_current = args.season == season_clock.current_season()
+    raw = a.data_dir / allstats_files.season_file_name(args.season)
+    try:
+        if not is_current:
+            if not raw.exists():
+                raise allstats_files.RawFileMissing(
+                    f"no raw box scores for {args.season} at {raw}")
+        elif a.dry_run:
+            if not raw.exists():
+                allstats_files.check_can_create(a.data_dir, args.season)
+                print(f"would create {raw.name} (header only) — "
+                      f"{args.season} has no games yet")
+        else:
+            raw, created = allstats_files.ensure_season_file(a.data_dir, args.season)
+            if created:
+                print(f"created {raw.name} (header only) — {args.season} has no games yet")
+    except (allstats_files.RawFileMissing, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
     if a.dry_run:

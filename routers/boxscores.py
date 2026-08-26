@@ -13,6 +13,8 @@ import anthropic
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 
+import allstats_files
+
 from .constants import (
     DATA_DIR, PLAYER_BIOS_FILE, PENDING_BOXSCORES_DIR, MANUAL_QUEUE_FILE,
     BUILD_STATUS_FILE, BUILD_SCRIPT, VALID_TEAMS, _manual_queue_lock, logger,
@@ -427,9 +429,28 @@ def commit_boxscore(body: BoxscoreCommitRequest, info: dict = Depends(require_an
     if _game_in_data(body.date, home_team, away_team, body.season, body.game_type):
         raise HTTPException(status_code=409, detail=f"{home_team} vs {away_team} on {body.date} is already committed.")
 
+    # The first game of a season, and the first game of a postseason, arrive
+    # before their raw file exists — the season clock rolls in July and nothing
+    # else creates one. Create it here from the previous season's header rather
+    # than 404ing, which is what used to happen and which no amount of parsing
+    # on the caller's side could get past. `allstats_files` refuses if the
+    # previous season is missing too (an unmounted data dir), and only the
+    # current season is ever created: a commit against some older season whose
+    # file is absent is a mistake, not a rollover.
     path = allstats_path(body.season, body.game_type)
     if not path.exists():
-        raise HTTPException(status_code=404, detail=f"Allstats file not found: {path.name}")
+        if body.season != _current_league_year():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Allstats file not found: {path.name}. Only the current "
+                       f"season's file is created on demand.")
+        try:
+            path, created = allstats_files.ensure_season_file(
+                DATA_DIR, body.season, body.game_type)
+        except (allstats_files.RawFileMissing, ValueError) as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+        if created:
+            logger.info("Created %s for the first game of %s", path.name, body.season)
 
     headers, existing = read_csv(path)
     is_playoff = body.game_type.upper() == "PLAYOFF"

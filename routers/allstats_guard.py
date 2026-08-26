@@ -95,3 +95,70 @@ def write_allstats(path: Path, headers: list[str], rows: list[dict], *,
             )
 
     write_csv(path, headers, rows)
+
+
+def write_allstats_edit(path: Path, headers: list[str], rows: list[dict], *,
+                        expected_edits: dict[int, dict[str, tuple[str, str]]]) -> None:
+    """`write_csv` for a *targeted correction* to a raw box score file.
+
+    The append contract above cannot express this: a correction rewrites a row
+    already on disk, which `write_allstats` refuses by design and which
+    `allow_shrink=True` would wave through wholesale. That override is the wrong
+    tool here — it disables every check at once, so a script that meant to fix
+    one cell and instead rebuilt the list wrong would be committed in full.
+
+    So this is a second contract, no weaker than the first, just different: the
+    write must differ from what is on disk in **exactly** the cells named in
+    `expected_edits` and nowhere else. Keyed by row index, each entry maps a
+    column to the `(before, after)` pair the caller believes it is changing.
+    Anything else — a row count that moved, an untouched row that did not stay
+    byte-identical, a named cell whose current value is not `before`, a change
+    in a column nobody declared — raises rather than writing.
+
+    That makes the dangerous half impossible to reach by accident. A caller
+    cannot "fix one name" and silently drop a season, because dropping a season
+    is not one of the cells it declared.
+    """
+    if not path.exists():
+        raise AllstatsGuardError(f"{path.name}: cannot edit a file that does not exist")
+    if not expected_edits:
+        raise AllstatsGuardError(f"{path.name}: no edits declared — nothing to do")
+
+    old_headers, existing = read_csv(path)
+
+    lost = [c for c in old_headers if c not in headers]
+    if lost:
+        raise AllstatsGuardError(
+            f"{path.name}: edit would drop column(s) {lost} from every row.")
+
+    if len(rows) != len(existing):
+        raise AllstatsGuardError(
+            f"{path.name}: an edit must not change the row count "
+            f"({len(existing)} on disk, {len(rows)} being written). Adding or "
+            f"removing games is not what this path is for.")
+
+    for i, (old, new) in enumerate(zip(existing, rows)):
+        declared = expected_edits.get(i, {})
+        for col in old_headers:
+            before, after = (old.get(col) or ""), (new.get(col) or "")
+            if col in declared:
+                want_before, want_after = declared[col]
+                if before != want_before:
+                    raise AllstatsGuardError(
+                        f"{path.name}: row {i} column {col!r} is {before!r} on "
+                        f"disk, but the edit expected {want_before!r}. The file "
+                        f"changed since the plan was made — re-plan it.")
+                if after != want_after:
+                    raise AllstatsGuardError(
+                        f"{path.name}: row {i} column {col!r} would become "
+                        f"{after!r}, but the edit declared {want_after!r}.")
+            elif before != after:
+                raise AllstatsGuardError(
+                    f"{path.name}: row {i} column {col!r} would change from "
+                    f"{before!r} to {after!r}, which no declared edit covers. "
+                    f"Every changed cell must be declared.")
+
+    logger.warning("ALLSTATS EDIT: %s correcting %d cell(s) across %d row(s)",
+                   path.name, sum(len(v) for v in expected_edits.values()),
+                   len(expected_edits))
+    write_csv(path, headers, rows)
