@@ -9,9 +9,10 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
-from .constants import NEWS_FILE, logger
-from .storage import _load_json, _save_json, log_write
+from .constants import NEWS_FILE, DATA_DIR, logger
+from .storage import _load_json, _save_json, log_write, read_csv
 from .auth import get_token_info, has_role, require_role, _resolve_token, load_members
+from .players import load_player_bios, load_ovr
 from . import inbox
 from . import news_rankings as pr
 
@@ -432,6 +433,42 @@ def submit_article(article_id: str, info: dict = Depends(get_token_info)):
     return _article_detail(a, info, articles)
 
 
+# Top N of a team's roster by current OVR, frozen onto a power-rankings
+# article's `final` rows at publish time (see publish_article below) rather
+# than fetched live on every page view -- mirrors the client-side computation
+# news/view/index.html still does for an unpublished ballot preview (where
+# there's no frozen `final` yet to read), but captured once so a published
+# edition can't silently reflect a roster that has since been traded around.
+ROSTER_STRIP_N = 5
+
+
+def _team_roster_strip(team: str, bios: dict, ovr_current: dict) -> list[dict]:
+    path = DATA_DIR / f"{team.lower()}-roster.csv"
+    if not path.exists():
+        return []
+    _, rows = read_csv(path)
+    players = []
+    for row in rows:
+        slug = row.get("SLUG", "").strip()
+        if not slug:
+            continue
+        bio = bios.get(slug, {})
+        if bio.get("type") == "dead":
+            continue
+        last, _, _first = bio.get("name", "").partition(",")
+        name = last.strip().title()
+        if not name:
+            continue
+        players.append({
+            "slug": slug,
+            "name": name,
+            "ovr": ovr_current.get(slug, ""),
+            "photo": bio.get("photo_url", ""),
+        })
+    players.sort(key=lambda p: p["ovr"] or 0, reverse=True)
+    return players[:ROSTER_STRIP_N]
+
+
 @router.post("/api/news/{article_id}/publish")
 def publish_article(article_id: str, body: PublishIn, info: dict = Depends(get_token_info)):
     published_at = None
@@ -460,6 +497,11 @@ def publish_article(article_id: str, body: PublishIn, info: dict = Depends(get_t
                 pr.freeze(a, articles)
             except ValueError as exc:
                 raise HTTPException(status_code=422, detail=str(exc))
+            bios = load_player_bios()
+            ovr_history = load_ovr()
+            ovr_current = {slug: entries[-1]["ovr"] for slug, entries in ovr_history.items() if entries}
+            for row in a["final"]:
+                row["roster_strip"] = _team_roster_strip(row["team"], bios, ovr_current)
         now = datetime.now(timezone.utc).isoformat()
         a["status"] = "published"
         a["published_at"] = published_at or a.get("published_at") or now
