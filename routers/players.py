@@ -1,7 +1,7 @@
 import re
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from .constants import (
@@ -358,6 +358,82 @@ def get_player_attributes_history(slug: str):
     if not entries:
         raise HTTPException(status_code=404, detail="No attribute data for this player")
     return entries
+
+
+# ── Ratings changes ───────────────────────────────────────────────────────────
+# Derived, not stored: player-attributes.json is already a full append-only
+# snapshot history per player (a new entry only lands when something really
+# changed -- see the module comment above), so "who changed and by how much"
+# is just consecutive-pair diffing within each player's own list. No separate
+# log to write or keep in sync, and it surfaces every change already on
+# record rather than only ones from scrapes run after this endpoint existed.
+
+def _diff_2k_snapshots(prev: dict, cur: dict) -> dict:
+    change = {}
+    if prev.get("2k_ovr") != cur.get("2k_ovr"):
+        change["ovr"] = {"old": prev.get("2k_ovr"), "new": cur.get("2k_ovr")}
+    if prev.get("2k_pos") != cur.get("2k_pos"):
+        change["position"] = {"old": prev.get("2k_pos"), "new": cur.get("2k_pos")}
+
+    prev_attrs, cur_attrs = prev.get("attributes", {}), cur.get("attributes", {})
+    changed_attrs = {
+        k: {"old": prev_attrs.get(k), "new": v}
+        for k, v in cur_attrs.items()
+        if prev_attrs.get(k) != v
+    }
+    if changed_attrs:
+        change["attributes"] = changed_attrs
+
+    prev_badges, cur_badges = prev.get("badges", []), cur.get("badges", [])
+    if prev_badges != cur_badges:
+        prev_names = {b["name"] for b in prev_badges}
+        cur_names = {b["name"] for b in cur_badges}
+        gained = sorted(cur_names - prev_names)
+        lost = sorted(prev_names - cur_names)
+        prev_tiers = {b["name"]: b["tier"] for b in prev_badges}
+        cur_tiers = {b["name"]: b["tier"] for b in cur_badges}
+        retiered = {
+            n: {"old": prev_tiers[n], "new": cur_tiers[n]}
+            for n in (prev_names & cur_names) if prev_tiers[n] != cur_tiers[n]
+        }
+        if gained:
+            change["badges_gained"] = gained
+        if lost:
+            change["badges_lost"] = lost
+        if retiered:
+            change["badges_retiered"] = retiered
+
+    return change
+
+
+@router.get("/api/ratings-changes")
+def get_ratings_changes(
+    slug: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    limit: int = Query(2000, ge=1, le=20000),
+):
+    history = load_attributes()
+    bios = load_player_bios()
+    entries = []
+    for player_slug, snapshots in history.items():
+        if slug and player_slug != slug:
+            continue
+        for prev, cur in zip(snapshots, snapshots[1:]):
+            change = _diff_2k_snapshots(prev, cur)
+            if not change:
+                continue
+            date = cur.get("date", "")
+            if since and date < since:
+                continue
+            if until and date > until:
+                continue
+            change["date"] = date
+            change["slug"] = player_slug
+            change["name"] = bios.get(player_slug, {}).get("name") or cur.get("2k_name") or player_slug
+            entries.append(change)
+    entries.sort(key=lambda e: e["date"], reverse=True)
+    return {"count": len(entries), "entries": entries[:limit]}
 
 
 # ── Team map ──────────────────────────────────────────────────────────────────
