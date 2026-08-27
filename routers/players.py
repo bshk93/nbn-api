@@ -435,6 +435,12 @@ def get_ratings_changes(
             # module docstring) -- never reconstructed here, so it's null for any
             # snapshot taken before "team" started being recorded.
             change["team"] = cur.get("team")
+            # True when this change was a not-yet-rated stub (2K hadn't assigned
+            # the player a real rating -- see scrape_2k_attributes.py's
+            # STUB_OVR_THRESHOLD/DIVERGENCE_THRESHOLD) and so was never synced
+            # into the live OVR badge/roster tables. Absent (falsy) for any
+            # snapshot taken before this field existed, same as "team" above.
+            change["ovr_stub"] = bool(cur.get("ovr_stub"))
             entries.append(change)
     entries.sort(key=lambda e: e["date"], reverse=True)
     return {"count": len(entries), "entries": entries[:limit]}
