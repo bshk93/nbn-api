@@ -1,3 +1,4 @@
+import os
 import re
 import secrets
 import threading
@@ -30,10 +31,7 @@ REQUIRE_PUBLISH_APPROVAL = False
 MAX_TAGS = 6
 MAX_TAG_LEN = 24
 
-NEWS_WEBHOOK = (
-    "https://discord.com/api/webhooks/1518995213979488406/"
-    "Uc1p3aAUOWhIkO7ToP26P02B0NJenZXQ06uDQwAKyXlPImV6J5ZbU6664wHc2UaE3srC"
-)
+NEWS_WEBHOOK = os.environ.get("NEWS_WEBHOOK", "")
 
 
 def _md_excerpt(body: str, limit: int = 280) -> str:

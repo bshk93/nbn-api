@@ -1,4 +1,5 @@
 import json
+import os
 import secrets
 import threading
 from datetime import datetime, timezone
@@ -22,7 +23,7 @@ NBY_BOXSCORE_REWARD  = 200.0
 NBY_BIO_REWARD       = 10.0
 NBY_MAX_WAGER        = 300.0
 
-DISCORD_BETS_WEBHOOK = "https://discord.com/api/webhooks/1509022602671427695/76fqELDrhV9Pj7TAd7fvq56VQTIUMi8ZwokSwaWSN-rWq0zMlUDr4zfhFJd35_Ioocyr"
+DISCORD_BETS_WEBHOOK = os.environ.get("DISCORD_BETS_WEBHOOK", "")
 
 _bets_lock     = threading.Lock()
 _balances_lock = threading.Lock()

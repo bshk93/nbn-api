@@ -1,3 +1,4 @@
+import os
 import threading
 import time
 import uuid
@@ -26,7 +27,7 @@ _draft_lock = threading.Lock()
 # Discord webhook for live draft-pick announcements. Posted to on reveal only.
 # Kept best-effort: a failure here must never disrupt the live show (see
 # _post_draft_webhook / reveal_pick).
-DRAFT_WEBHOOK = "https://discord.com/api/webhooks/1517890636810817569/7MW228lLGQkhh7Ykx4ijABkm9xIrqfDhrLCICyE8vOtMeW_4tLdLHT3-88vAYp8k5yCj"
+DRAFT_WEBHOOK = os.environ.get("DRAFT_WEBHOOK", "")
 
 # Delay (seconds) between the presenter triggering a reveal and the pick becoming
 # public, so every reveal surface — the board, Best Available pool, event log, and

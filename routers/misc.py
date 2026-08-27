@@ -35,10 +35,7 @@ router = APIRouter()
 CLAUDE_BIN = Path("/home/skim/.local/bin/claude")
 NBN_TODAY_DIR = Path("/home/skim/projects/nbn-today")
 
-DISCORD_STANDINGS_WEBHOOK = (
-    "https://discord.com/api/webhooks/1508510341288689876/"
-    "2_KbnDbQ5HqVfT9dvXUuR2oceOLuj4gGWrJZZfqYvH3nODExFoASqsrzZ24FtP2YUyCF"
-)
+DISCORD_STANDINGS_WEBHOOK = os.environ.get("DISCORD_STANDINGS_WEBHOOK", "")
 NBN_STANDINGS_CSV = DERIVED_DIR / "standings" / "standings-history.csv"
 
 
