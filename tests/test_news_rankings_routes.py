@@ -17,7 +17,9 @@ The cases worth knowing about:
   * **An invited voter can open an unpublished article**, which the plain news
     rules would otherwise 403; that carve-out is what lets a ballot be found.
   * **Publishing freezes**, and a ballot cast afterwards must not move a
-    published order.
+    published order. That covers the *roster* each row carries as much as the
+    order: the expandable team panel renders frozen data only, so publish has
+    to stamp the whole roster rather than the six the strip shows.
   * **Plain articles are untouched** by any of it.
 
     venv/bin/python -m tests.test_news_rankings_routes
@@ -203,6 +205,21 @@ frozen = [r["team"] for r in a["final"]]
 check("first edition has no movement", all(r["prev"] is None for r in a["final"]))
 check("published article is public", news.get_article(aid, None)["id"] == aid)
 check("its ballots are public too", news.get_article(aid, None)["ballots"]["alice"]["order"][0] == "BOS")
+
+# The team panel reads only what publish froze, so what publish froze is the
+# whole contract. A top-N slice here would have left the panel live-fetching
+# the tail of the roster under a months-old ranking, which is the one thing
+# freezing the strip existed to prevent.
+bos = [r for r in a["final"] if r["team"] == "BOS"][0]
+check("publish freezes the whole roster, not a top-N slice", len(bos["roster"]) > 6)
+# `ovr` is "" for anyone with no rating history yet, so this sorts the way the
+# snapshot does (unrated last) rather than comparing "" against an int.
+_ovrs = [pl["ovr"] or 0 for pl in bos["roster"]]
+check("in OVR order", _ovrs == sorted(_ovrs, reverse=True))
+check("carrying what the panel and the lineup math need",
+      all({"slug", "name", "ovr", "pos", "age"} <= set(p) for p in bos["roster"]))
+check("and the record the ranking was argued over",
+      (bos["season_line"] or {}).get("w") not in (None, ""))
 
 print("\nedition 2 movement")
 b = news.create_article(news.ArticleCreate(

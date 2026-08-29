@@ -3,17 +3,18 @@ import re
 import secrets
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Optional
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
-from .constants import NEWS_FILE, DATA_DIR, logger
+from .constants import NEWS_FILE, DATA_DIR, DERIVED_DIR, logger
 from .storage import _load_json, _save_json, log_write, read_csv
 from .auth import get_token_info, has_role, require_role, _resolve_token, load_members
 from .players import load_player_bios, load_ovr
+from .league_time import league_today
 from . import inbox
 from . import news_rankings as pr
 
@@ -431,20 +432,39 @@ def submit_article(article_id: str, info: dict = Depends(get_token_info)):
     return _article_detail(a, info, articles)
 
 
-# Top N of a team's roster by current OVR, frozen onto a power-rankings
+# A team's whole active roster by current OVR, frozen onto a power-rankings
 # article's `final` rows at publish time (see publish_article below) rather
 # than fetched live on every page view -- mirrors the client-side computation
 # news/view/index.html still does for an unpublished ballot preview (where
 # there's no frozen `final` yet to read), but captured once so a published
 # edition can't silently reflect a roster that has since been traded around.
-ROSTER_STRIP_N = 6
+#
+# The page shows the top few as a strip and the rest inside the expandable
+# team panel, so the whole list is frozen rather than a top-N slice -- the
+# panel is a claim about the roster the ranking was voted on, and slicing here
+# would have left it live-fetching the tail under a months-old ranking. Every
+# field is one the panel reads: `pos` and `ovr` also feed the projected
+# starting five (computeStartingFive, teams/lineup.js), and `age` is the age
+# on publication day, not today's.
+#
+# Editions published before this existed carry a 6-entry `roster_strip`
+# instead; the page falls back to it and simply has a shorter panel.
+def _bio_age(dob: str, today: date) -> Optional[int]:
+    if not dob:
+        return None
+    try:
+        d = date.fromisoformat(dob)
+    except ValueError:
+        return None
+    return today.year - d.year - ((today.month, today.day) < (d.month, d.day))
 
 
-def _team_roster_strip(team: str, bios: dict, ovr_current: dict) -> list[dict]:
+def _team_roster_snapshot(team: str, bios: dict, ovr_current: dict) -> list[dict]:
     path = DATA_DIR / f"{team.lower()}-roster.csv"
     if not path.exists():
         return []
     _, rows = read_csv(path)
+    today = league_today()
     players = []
     for row in rows:
         slug = row.get("SLUG", "").strip()
@@ -453,18 +473,45 @@ def _team_roster_strip(team: str, bios: dict, ovr_current: dict) -> list[dict]:
         bio = bios.get(slug, {})
         if bio.get("type") == "dead":
             continue
-        last, _, _first = bio.get("name", "").partition(",")
+        last, _, first = bio.get("name", "").partition(",")
         name = last.strip().title()
         if not name:
             continue
         players.append({
             "slug": slug,
             "name": name,
+            "first": first.strip().title(),
             "ovr": ovr_current.get(slug, ""),
             "photo": bio.get("photo_url", ""),
+            "pos": bio.get("pos") or [],
+            "age": _bio_age(bio.get("dob", ""), today),
+            "type": bio.get("type", ""),
         })
     players.sort(key=lambda p: p["ovr"] or 0, reverse=True)
-    return players[:ROSTER_STRIP_N]
+    return players
+
+
+# The team's most recent completed season out of standings-history.csv, frozen
+# alongside the roster for the same reason: it is the record the ranking was
+# argued over. "Most recent" is the last season that has a row for this team,
+# not the current league season -- an edition published in October is arguing
+# about a season with no rows yet.
+def _team_season_line(team: str, standings: list[dict]) -> Optional[dict]:
+    rows = [r for r in standings if (r.get("TEAM") or "").upper() == team.upper()]
+    if not rows:
+        return None
+    row = max(rows, key=lambda r: r.get("SEASON") or "")
+    return {
+        "season": row.get("SEASON", ""),
+        "w": row.get("W", ""),
+        "l": row.get("L", ""),
+        "pct": row.get("PCT", ""),
+        "seed": row.get("SEED", ""),
+        "off_rtg": row.get("OFF_RTG", ""),
+        "def_rtg": row.get("DEF_RTG", ""),
+        "diff": row.get("DIFF", ""),
+        "playoff_result": row.get("PLAYOFF_RESULT", ""),
+    }
 
 
 @router.post("/api/news/{article_id}/publish")
@@ -498,8 +545,11 @@ def publish_article(article_id: str, body: PublishIn, info: dict = Depends(get_t
             bios = load_player_bios()
             ovr_history = load_ovr()
             ovr_current = {slug: entries[-1]["ovr"] for slug, entries in ovr_history.items() if entries}
+            standings_path = DERIVED_DIR / "standings" / "standings-history.csv"
+            _, standings = read_csv(standings_path) if standings_path.exists() else ("", [])
             for row in a["final"]:
-                row["roster_strip"] = _team_roster_strip(row["team"], bios, ovr_current)
+                row["roster"] = _team_roster_snapshot(row["team"], bios, ovr_current)
+                row["season_line"] = _team_season_line(row["team"], standings)
         now = datetime.now(timezone.utc).isoformat()
         a["status"] = "published"
         a["published_at"] = published_at or a.get("published_at") or now
