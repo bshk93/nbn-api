@@ -1,7 +1,4 @@
-import base64
 import json
-import os
-import re
 import shutil
 import subprocess
 import threading
@@ -9,7 +6,6 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-import anthropic
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 
@@ -115,92 +111,55 @@ def _build_allstats_row(
     return row
 
 
-def _parse_one_screenshot(
-    image_bytes: bytes, media_type: str,
-    team: str, opp: str, date: str,
-    roster_context: list[dict],
-) -> dict:
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured on server")
+# ── Screenshot formats ────────────────────────────────────────────────────────
 
-    client = anthropic.Anthropic(api_key=api_key)
-    roster_json = json.dumps(roster_context, indent=2)
-    prompt = f"""You are parsing an NBA 2K simulation game box score screenshot.
-This screenshot shows the {team} box score from a game against {opp} on {date}.
+# PNG, JPEG, GIF and WebP are what /parse-boxscores can actually read. A pending
+# screenshot in any other format is unparseable, and the failure would otherwise
+# surface mid-parse with the game already queued — so the upload is refused.
 
-Here are the known {team} players with their slugs:
-{roster_json}
 
-Extract ALL players who played (skip DNP). For minutes shown as MM:SS, convert to integer minutes (round down).
-Match each player name to the closest known player above. Set confidence:
-- "high": obvious match
-- "medium": somewhat uncertain
-- "low": best guess only
+def _sniff_image_ext(data: bytes) -> Optional[str]:
+    """Extension for the image's real format, or None if it isn't one we can read.
 
-Return ONLY valid JSON — no markdown, no explanation:
-{{
-  "team_pts": <integer or null if not visible>,
-  "opp_pts": <integer or null if not visible>,
-  "rows": [
-    {{
-      "player": "LAST, FIRST",
-      "slug": "slug-from-roster",
-      "confidence": "high|medium|low",
-      "min": <integer>,
-      "pts": <integer>,
-      "reb": <integer total>,
-      "oreb": <integer, 0 if not shown>,
-      "dreb": <integer, equals reb if not split>,
-      "ast": <integer>,
-      "stl": <integer>,
-      "blk": <integer>,
-      "tov": <integer>,
-      "pf": <integer>,
-      "fgm": <integer>,
-      "fga": <integer>,
-      "tpm": <integer 3PM>,
-      "tpa": <integer 3PA>,
-      "ftm": <integer>,
-      "fta": <integer>,
-      "concern": "<string if uncertain, else null>"
-    }}
-  ],
-  "concerns": ["<any general readability issues>"]
-}}"""
+    Sniffed from the leading bytes rather than the filename: a phone can hand us
+    a .heic named .png, and an extension we derive ourselves also can't carry
+    anything unexpected into the path we write.
+    """
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "jpg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "gif"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "webp"
+    return None
 
-    img_b64 = base64.standard_b64encode(image_bytes).decode()
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=4096,
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": img_b64}},
-                {"type": "text", "text": prompt},
-            ],
-        }],
+
+def _heif_brand(data: bytes) -> Optional[str]:
+    """The ISO-BMFF brand of a HEIC/AVIF file, so the error can name the format."""
+    if data[4:8] != b"ftyp":
+        return None
+    brand = data[8:12].decode("ascii", "replace").strip()
+    if brand in {"heic", "heix", "hevc", "hevx", "mif1", "msf1"}:
+        return "HEIC"
+    if brand in {"avif", "avis"}:
+        return "AVIF"
+    return None
+
+
+def _checked_image_ext(data: bytes, label: str) -> str:
+    """Sniffed extension, or a 415 naming what arrived and what is accepted."""
+    ext = _sniff_image_ext(data)
+    if ext:
+        return ext
+    got = _heif_brand(data) or "that format"
+    raise HTTPException(
+        status_code=415,
+        detail=f"The {label} screenshot is {got}, which cannot be read. "
+               f"Upload a PNG, JPEG, GIF or WebP — on iPhone, Settings › Camera › "
+               f"Formats › Most Compatible, or share the image rather than the file.",
     )
-    raw = response.content[0].text.strip()
-    raw = re.sub(r"^```(?:json)?\s*", "", raw)
-    raw = re.sub(r"\s*```$", "", raw)
-    return json.loads(raw)
-
-
-def _load_roster_context(team: str, bios: dict) -> list[dict]:
-    roster_path = DATA_DIR / f"{team.lower()}-roster.csv"
-    if not roster_path.exists():
-        return []
-    _, rows = read_csv(roster_path)
-    result = []
-    for r in rows:
-        slug = r.get("SLUG") or r.get("PLAYER", "")
-        if not slug:
-            continue
-        bio = bios.get(slug, {})
-        name = bio.get("name", slug)
-        result.append({"slug": slug, "name": name})
-    return result
 
 
 # ── Build status/trigger ──────────────────────────────────────────────────────
@@ -372,52 +331,6 @@ class BoxscoreQueueRequest(BaseModel):
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
-
-@router.post("/api/boxscore/parse")
-async def parse_boxscore(
-    home_image: UploadFile = File(...),
-    away_image: UploadFile = File(...),
-    date: str = Form(...),
-    home_team: str = Form(...),
-    away_team: str = Form(...),
-    season: str = Form(...),
-    game_type: str = Form(...),
-    game_num: Optional[int] = Form(None),
-    round_num: Optional[int] = Form(None),
-    info: dict = Depends(require_any_role("rosters", "stats")),
-):
-    home_team = home_team.upper()
-    away_team = away_team.upper()
-    if home_team not in VALID_TEAMS or away_team not in VALID_TEAMS:
-        raise HTTPException(status_code=422, detail="Invalid team abbreviation")
-
-    bios = json.loads(PLAYER_BIOS_FILE.read_text()) if PLAYER_BIOS_FILE.exists() else {}
-    home_roster = _load_roster_context(home_team, bios)
-    away_roster = _load_roster_context(away_team, bios)
-
-    home_bytes = await home_image.read()
-    away_bytes = await away_image.read()
-    home_mt = home_image.content_type or "image/png"
-    away_mt = away_image.content_type or "image/png"
-
-    home_result = _parse_one_screenshot(home_bytes, home_mt, home_team, away_team, date, home_roster)
-    away_result = _parse_one_screenshot(away_bytes, away_mt, away_team, home_team, date, away_roster)
-
-    home_pts = home_result.get("team_pts") or away_result.get("opp_pts")
-    away_pts = away_result.get("team_pts") or home_result.get("opp_pts")
-
-    concerns = home_result.get("concerns", []) + away_result.get("concerns", [])
-    logger.info("[%s] POST boxscore/parse — %s vs %s on %s", info.get("name"), home_team, away_team, date)
-    return {
-        "home_team": home_team,
-        "away_team": away_team,
-        "home_pts": home_pts,
-        "away_pts": away_pts,
-        "home_rows": home_result.get("rows", []),
-        "away_rows": away_result.get("rows", []),
-        "concerns": concerns,
-    }
-
 
 @router.post("/api/boxscore/commit")
 def commit_boxscore(body: BoxscoreCommitRequest, info: dict = Depends(require_any_role("rosters", "stats"))):
@@ -813,8 +726,8 @@ async def upload_boxscore(
 
     home_bytes = await home_image.read()
     away_bytes = await away_image.read()
-    home_ext = (home_image.filename or "home.png").rsplit(".", 1)[-1].lower()
-    away_ext = (away_image.filename or "away.png").rsplit(".", 1)[-1].lower()
+    home_ext = _checked_image_ext(home_bytes, "home")
+    away_ext = _checked_image_ext(away_bytes, "away")
     (item_dir / f"home.{home_ext}").write_bytes(home_bytes)
     (item_dir / f"away.{away_ext}").write_bytes(away_bytes)
 
