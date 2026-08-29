@@ -8,8 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from .constants import (
-    DATA_DIR, RULES_DIR, VALID_TEAMS, PICKS_HEADERS, PICKS_FILE, TRADING_BLOCK_FILE,
-    TEAM_STATE_FILE, TRADE_EXCEPTIONS_FILE, _rules_lock, _picks_lock, _state_lock,
+    DATA_DIR, VALID_TEAMS, PICKS_HEADERS, PICKS_FILE, TRADING_BLOCK_FILE,
+    TEAM_STATE_FILE, TRADE_EXCEPTIONS_FILE, _picks_lock, _state_lock,
     _deadcap_lock, _trade_exc_lock,
 )
 from .storage import read_csv, write_csv, _load_json, _save_json, log_write, _current_league_year, _season_start
@@ -82,61 +82,6 @@ def put_deadcap(
     with _deadcap_lock:
         write_csv(path, headers, body)
     log_write(info, f"PUT deadcap/{team} — {len(body)} rows")
-    return {"ok": True}
-
-
-# ── Rules ─────────────────────────────────────────────────────────────────────
-
-RULE_SLUGS = {
-    "overview":    "README.md",
-    "trades":      "trades.md",
-    "free-agency": "free-agency.md",
-    "extensions":  "extensions.md",
-    "options":     "options.md",
-    "releases":    "releases.md",
-    "two-way":     "two-way.md",
-    "draft":       "draft.md",
-}
-
-RULE_LABELS = {
-    "overview":    "League Overview",
-    "trades":      "Trades",
-    "free-agency": "Free Agency",
-    "extensions":  "Extensions",
-    "options":     "Options",
-    "releases":    "Releases / Waivers",
-    "two-way":     "Two-Way Contracts",
-    "draft":       "Draft Picks",
-}
-
-
-@router.get("/api/rules")
-def list_rules():
-    return [{"slug": s, "label": RULE_LABELS[s]} for s in RULE_SLUGS]
-
-
-@router.get("/api/rules/{slug}")
-def get_rule(slug: str):
-    if slug not in RULE_SLUGS:
-        raise HTTPException(status_code=404, detail="Unknown rule slug")
-    path = RULES_DIR / RULE_SLUGS[slug]
-    if not path.exists():
-        return {"slug": slug, "content": ""}
-    return {"slug": slug, "content": path.read_text()}
-
-
-class RuleUpdate(BaseModel):
-    content: str
-
-
-@router.put("/api/rules/{slug}")
-def put_rule(slug: str, body: RuleUpdate, info: dict = Depends(require_role("rosters"))):
-    if slug not in RULE_SLUGS:
-        raise HTTPException(status_code=404, detail="Unknown rule slug")
-    path = RULES_DIR / RULE_SLUGS[slug]
-    with _rules_lock:
-        path.write_text(body.content)
-    log_write(info, f"PUT rules/{slug}")
     return {"ok": True}
 
 

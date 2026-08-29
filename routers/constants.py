@@ -18,7 +18,6 @@ DATA_DIR  = Path("/var/lib/nothing-but-stats")
 # anything reading build output points here instead. League state the API owns
 # (rosters, picks, bios) stays at DATA_DIR itself.
 DERIVED_DIR = DATA_DIR / "derived"
-RULES_DIR = DATA_DIR / "rules"
 AVATARS_DIR = DATA_DIR / "avatars"
 PENDING_BOXSCORES_DIR  = DATA_DIR / "pending-boxscores"
 MANUAL_QUEUE_FILE      = DATA_DIR / "pending-manual-queue.json"
@@ -99,7 +98,6 @@ DISCORD_FA_SUBMITTED_FILE = DATA_DIR / "discord-fa-signings-submitted.json"
 
 PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PLAYER", "PROTECTED", "SWAP_OWNER", "NOTES", "FROZEN", "FROZEN_REASON"]
 
-_rules_lock         = threading.Lock()
 _picks_lock         = threading.Lock()
 _bio_rewards_lock   = threading.Lock()
 _txn_lock           = threading.Lock()
