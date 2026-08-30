@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from routers import audit as audit_ctx
-from routers import auth, players, roster_picks, transactions, boxscores, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, og, discord, trade_finder, picks_preview, suggestions, google_sheets, free_agency, roster_log_relay, waivers, inbox, cleanup, poext, themes, cap_history
+from routers import auth, players, roster_picks, transactions, boxscores, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, og, discord, trade_finder, picks_preview, suggestions, google_sheets, free_agency, roster_log_relay, waivers, inbox, cleanup, poext, themes, cap_history, poopoo
 from routers.picks_scheduler import start_picks_horizon_scheduler
 from routers.roster_log_relay import start_roster_log_relay
 
@@ -78,3 +78,4 @@ app.include_router(cleanup.router)         # "Clean Up the Poo Poo" — nbn-toda
 app.include_router(themes.router)          # unlockable NB¥ site themes (GET /api/themes)
 app.include_router(poext.router)           # § 6.2/6.3 extension pipeline — nbn-today/docs/poext-extension-pipeline.md
 app.include_router(cap_history.router)     # daily cap/apron snapshot per team — the § 7.3 lookback's input
+app.include_router(poopoo.router)          # read-only slice of build/poopoo.py's sheet-vs-site diff, for team pages
