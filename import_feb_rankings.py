@@ -157,7 +157,7 @@ def build_article(blocks: list[dict], articles: list[dict]) -> dict:
         if not body:
             continue
         a["blurbs"][b["team"]] = {"claimed_by": by, "body": body,
-                                  "approved": True, "updated_at": PUBLISHED_AT}
+                                  "updated_at": PUBLISHED_AT}
     pr.set_baseline(a, {b["team"]: b["prev"] for b in blocks}, BASELINE_LABEL)
     a["phase"] = "blurbs"
     pr.freeze(a, articles)

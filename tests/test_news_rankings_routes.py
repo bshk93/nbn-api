@@ -186,10 +186,11 @@ http("carol claiming a taken team", 422, lambda: news.claim_ranking_blurb(aid, "
 http("dave claiming anything", 422, lambda: news.claim_ranking_blurb(aid, "DEN", DAVE))
 a = news.put_ranking_blurb(aid, "BOS", news.BlurbIn(body="Still the class of the East."), BOB)
 check("the claimer's blurb is stored", a["blurbs"]["BOS"]["body"].startswith("Still"))
-http("bob approving his own", 422,
-     lambda: news.put_ranking_blurb(aid, "BOS", news.BlurbIn(approved=True), BOB))
-a = news.put_ranking_blurb(aid, "BOS", news.BlurbIn(approved=True), ALICE)
-check("the author approves", a["blurbs"]["BOS"]["approved"] is True)
+# An editor rewriting someone else's blurb is the whole of the editorial
+# control over one; there is no approval step (removed 2026-08-30).
+a = news.put_ranking_blurb(aid, "BOS", news.BlurbIn(body="Editor's cut."), ALICE)
+check("an editor can rewrite it", a["blurbs"]["BOS"]["body"] == "Editor's cut.")
+check("and the claimer keeps the credit", a["blurbs"]["BOS"]["claimed_by"] == "bob")
 
 print("\npublish")
 mark = len(INBOX)

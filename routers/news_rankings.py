@@ -25,8 +25,10 @@ The four rules the league settled on, which the code below is shaped around:
     learns that someone has started, never what they have ranked.
   * **Any voter claims a team.** Blurbs are first-come: a voter claims a team,
     writes it, and is credited on the published page. The author may edit any
-    blurb, reassign a claim, and marks each `approved` — that approval is the
-    "author finalizes" step. Open from the `voting` phase, so a voter can write
+    blurb and reassign a claim. There is no approval step — one existed until
+    2026-08-30 and gated nothing: publishing never checked it and the published
+    page never read it, so it was a checklist pretending to be a workflow.
+    Open from the `voting` phase, so a voter can write
     while the ballot is still out rather than queueing behind the close;
     unlike ballots, blurbs are **not** blind (decided by the league
     2026-08-30), so a blurb written mid-vote is readable by voters who have not
@@ -79,7 +81,7 @@ def scaffold(series_id: Optional[str], prev_id: Optional[str]) -> dict:
         "phase": "setup",
         "voters": [],           # member names invited to rank
         "ballots": {},          # name -> {"order": [30 abbrs], "submitted_at": iso}
-        "blurbs": {},           # ABBR -> {"claimed_by", "body", "approved", "updated_at"}
+        "blurbs": {},           # ABBR -> {"claimed_by", "body", "updated_at"}
         "baseline": None,       # {"label", "ranks": {ABBR: rank}} — movement when there is no prev_id
         "final": None,          # frozen consensus rows, set once at publish
     }
@@ -302,7 +304,7 @@ BLURB_PHASES = ("voting", "blurbs")
 
 def _blurb(a: dict, team: str) -> dict:
     return a.setdefault("blurbs", {}).setdefault(
-        team, {"claimed_by": None, "body": "", "approved": False, "updated_at": None})
+        team, {"claimed_by": None, "body": "", "updated_at": None})
 
 
 def claim_blurb(a: dict, team: str, name: str, is_editor: bool) -> dict:
@@ -332,8 +334,8 @@ def release_blurb(a: dict, team: str, name: str, is_editor: bool) -> dict:
 
 
 def set_blurb(a: dict, team: str, name: str, body: Optional[str],
-              approved: Optional[bool], is_editor: bool) -> dict:
-    """Write a blurb, and (editors only) mark it finalized.
+              is_editor: bool) -> dict:
+    """Write a blurb.
 
     An editor writing an unclaimed team's blurb claims it for themselves — the
     author covering a team nobody took should still be credited for it.
@@ -353,12 +355,6 @@ def set_blurb(a: dict, team: str, name: str, body: Optional[str],
         b["body"] = text
         if is_editor and not b["claimed_by"]:
             b["claimed_by"] = name
-        # An author's edit is a revision, not an approval; approving is explicit.
-        b["updated_at"] = _now()
-    if approved is not None:
-        if not is_editor:
-            raise ValueError("only the author or an editor can approve a blurb")
-        b["approved"] = bool(approved)
         b["updated_at"] = _now()
     return b
 
@@ -366,13 +362,10 @@ def set_blurb(a: dict, team: str, name: str, body: Optional[str],
 def blurb_progress(a: dict) -> dict:
     blurbs = a.get("blurbs") or {}
     written = [t for t in VALID_TEAMS if (blurbs.get(t, {}).get("body") or "").strip()]
-    approved = [t for t in written if blurbs.get(t, {}).get("approved")]
     return {
         "written": len(written),
-        "approved": len(approved),
         "total": len(VALID_TEAMS),
         "unwritten": sorted(set(VALID_TEAMS) - set(written)),
-        "unapproved": sorted(set(written) - set(approved)),
     }
 
 

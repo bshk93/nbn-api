@@ -260,7 +260,6 @@ class BaselineIn(BaseModel):
 
 class BlurbIn(BaseModel):
     body: Optional[str] = None
-    approved: Optional[bool] = None
 
 
 class ArticlePatch(BaseModel):
@@ -862,10 +861,9 @@ def release_ranking_blurb(article_id: str, team: str,
 @router.put("/api/news/{article_id}/rankings/blurbs/{team}")
 def put_ranking_blurb(article_id: str, team: str, body: BlurbIn,
                       info: dict = Depends(get_token_info)):
-    """Write a blurb (the claimer, or an editor) and approve it (editors only).
-    Approval is the author's finalize step."""
+    """Write a blurb — the claimer, or an editor."""
     def go(a, editor):
-        pr.set_blurb(a, team, info["name"], body.body, body.approved, editor)
+        pr.set_blurb(a, team, info["name"], body.body, editor)
 
     out = _mutate_ranking(article_id, info, False, go)
     log_write(info, f"PUT news/{article_id}/rankings/blurbs/{team} — {info['name']}")

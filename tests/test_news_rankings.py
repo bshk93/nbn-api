@@ -18,7 +18,9 @@ testable directly here, and that is what this suite pins:
     that has already gone out to Discord.
   * **Dropping a voter drops their ballot**, so a removed voter cannot keep
     counting toward the average from beyond the invite list.
-  * **Blurbs are first-come**, the claimer writes, and only an editor approves.
+  * **Blurbs are first-come** and the claimer writes them; an editor may rewrite
+    any of them or reassign a claim, and that is the whole of the editorial
+    control. (An `approved` flag existed until 2026-08-30 and gated nothing.)
     They open at `voting`, so writing does not queue behind the whole vote —
     and, unlike ballots, they are not blind while it runs (league decision,
     2026-08-30).
@@ -221,7 +223,7 @@ pr.set_ballot(a, "alice", ballot_from(["BOS"]))
 pr.claim_blurb(a, "POR", "bob", False)
 check("a voter can claim while the ballot is still open",
       a["blurbs"]["POR"]["claimed_by"] == "bob")
-pr.set_blurb(a, "POR", "bob", "Written mid-vote.", None, False)
+pr.set_blurb(a, "POR", "bob", "Written mid-vote.", False)
 check("and can write it there", a["blurbs"]["POR"]["body"] == "Written mid-vote.")
 
 pr.set_phase(a, "blurbs")
@@ -239,28 +241,21 @@ check("an editor can reassign a claim", a["blurbs"]["BOS"]["claimed_by"] == "ali
 
 pr.claim_blurb(a, "DEN", "carol", False)
 refuses("writing someone else's claimed blurb",
-        lambda: pr.set_blurb(a, "DEN", "bob", "not mine", None, False), "claimed by carol")
-pr.set_blurb(a, "DEN", "carol", "Jokic is still Jokic.", None, False)
+        lambda: pr.set_blurb(a, "DEN", "bob", "not mine", False), "claimed by carol")
+pr.set_blurb(a, "DEN", "carol", "Jokic is still Jokic.", False)
 check("the claimer writes their blurb", a["blurbs"]["DEN"]["body"] == "Jokic is still Jokic.")
-check("writing is not approving", a["blurbs"]["DEN"]["approved"] is False)
-refuses("a voter approving their own blurb",
-        lambda: pr.set_blurb(a, "DEN", "carol", None, True, False), "only the author")
-pr.set_blurb(a, "DEN", "alice", None, True, True)
-check("an editor approves", a["blurbs"]["DEN"]["approved"] is True)
-pr.set_blurb(a, "DEN", "alice", "Editor's cut.", None, True)
+pr.set_blurb(a, "DEN", "alice", "Editor's cut.", True)
 check("an editor can rewrite any blurb", a["blurbs"]["DEN"]["body"] == "Editor's cut.")
 refuses("an over-long blurb",
-        lambda: pr.set_blurb(a, "MIA", "alice", "x" * (pr.MAX_BLURB_LEN + 1), None, True), "limited to")
-pr.set_blurb(a, "MIA", "alice", "Heat culture.", None, True)
+        lambda: pr.set_blurb(a, "MIA", "alice", "x" * (pr.MAX_BLURB_LEN + 1), True), "limited to")
+pr.set_blurb(a, "MIA", "alice", "Heat culture.", True)
 check("an editor writing an unclaimed team claims it for themselves",
       a["blurbs"]["MIA"]["claimed_by"] == "alice")
 # Three written by now: DEN, MIA, and POR — POR being the one written during
 # voting, which counts toward progress exactly like any other.
 prog = pr.blurb_progress(a)
 check("progress counts what is written", prog["written"] == 3)
-check("progress counts what is approved", prog["approved"] == 1)
 check("progress lists what is still unwritten", len(prog["unwritten"]) == 27)
-check("progress lists what is written but unapproved", prog["unapproved"] == ["MIA", "POR"])
 
 # ── movement and freeze ──────────────────────────────────────────────────────
 print("\nmovement and freeze")
