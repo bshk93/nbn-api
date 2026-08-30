@@ -23,10 +23,14 @@ The four rules the league settled on, which the code below is shaped around:
     the way seeing other ballots would anchor anyone else. A *draft* is held
     server-side (see `save_draft`) and is blind on the same terms: the author
     learns that someone has started, never what they have ranked.
-  * **Any voter claims a team.** Blurbs are first-come: in the `blurbs` phase a
-    voter claims a team, writes it, and is credited on the published page. The
-    author may edit any blurb, reassign a claim, and marks each `approved` —
-    that approval is the "author finalizes" step.
+  * **Any voter claims a team.** Blurbs are first-come: a voter claims a team,
+    writes it, and is credited on the published page. The author may edit any
+    blurb, reassign a claim, and marks each `approved` — that approval is the
+    "author finalizes" step. Open from the `voting` phase, so a voter can write
+    while the ballot is still out rather than queueing behind the close;
+    unlike ballots, blurbs are **not** blind (decided by the league
+    2026-08-30), so a blurb written mid-vote is readable by voters who have not
+    ranked yet.
   * **Recurring, with movement.** Editions are chained by `series_id` +
     `prev_id`, so every team carries ▲/▼ against the previous edition.
 """
@@ -288,6 +292,14 @@ def set_baseline(a: dict, ranks: Optional[dict], label: Optional[str]) -> Option
 
 # ── Blurbs ────────────────────────────────────────────────────────────────────
 
+# Claiming and writing open at `voting`, not at the close of it. Waiting for the
+# whole vote to land before anyone could start meant the blurbs were the long
+# pole on every edition. `final` is writable too (set_blurb below) so a typo in
+# a finished edition is still fixable; claiming is not, since by then every team
+# is spoken for.
+BLURB_PHASES = ("voting", "blurbs")
+
+
 def _blurb(a: dict, team: str) -> dict:
     return a.setdefault("blurbs", {}).setdefault(
         team, {"claimed_by": None, "body": "", "approved": False, "updated_at": None})
@@ -297,7 +309,7 @@ def claim_blurb(a: dict, team: str, name: str, is_editor: bool) -> dict:
     team = str(team).strip().upper()
     if team not in VALID_TEAMS:
         raise ValueError(f"unknown team: {team}")
-    if a.get("phase") != "blurbs":
+    if a.get("phase") not in BLURB_PHASES:
         raise ValueError("blurbs are not open on this ranking")
     if not is_editor and not is_voter(a, name):
         raise ValueError("only invited voters can claim a blurb")
@@ -333,7 +345,7 @@ def set_blurb(a: dict, team: str, name: str, body: Optional[str],
     if body is not None:
         if b["claimed_by"] != name and not is_editor:
             raise ValueError(f"{team} is claimed by {b['claimed_by'] or 'nobody'}")
-        if a.get("phase") not in ("blurbs", "final"):
+        if a.get("phase") not in BLURB_PHASES + ("final",):
             raise ValueError("blurbs are not open on this ranking")
         text = str(body).strip()
         if len(text) > MAX_BLURB_LEN:

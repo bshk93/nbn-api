@@ -762,7 +762,11 @@ def set_ranking_phase(article_id: str, body: PhaseIn,
     during `setup`, when there is nothing yet to fill in, so this is the message
     that actually sends someone to their ballot. It covers the reopen case
     (blurbs → voting) the same way, which is what that move is for: chasing the
-    stragglers, and only them."""
+    stragglers, and only them.
+
+    Blurbs open at `voting` too, so the message says so — the whole point of
+    opening them early is that nobody waits for the vote to close to start
+    writing, and they will not know unless they are told."""
     pending: list[str] = []
     ctx: dict = {}
 
@@ -782,7 +786,8 @@ def set_ranking_phase(article_id: str, body: PhaseIn,
         if name == info["name"]:
             continue
         inbox.notify_member(
-            name, f"The ballot is open — rank all 30 teams for \"{ctx['title']}\"",
+            name, f"The ballot is open — rank all 30 teams for \"{ctx['title']}\""
+                  " (you can claim and write blurbs now too)",
             link=f"/news/rankings/?id={article_id}")
     return out
 

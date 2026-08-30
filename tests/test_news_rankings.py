@@ -19,6 +19,9 @@ testable directly here, and that is what this suite pins:
   * **Dropping a voter drops their ballot**, so a removed voter cannot keep
     counting toward the average from beyond the invite list.
   * **Blurbs are first-come**, the claimer writes, and only an editor approves.
+    They open at `voting`, so writing does not queue behind the whole vote —
+    and, unlike ballots, they are not blind while it runs (league decision,
+    2026-08-30).
 
     venv/bin/python -m tests.test_news_rankings
 """
@@ -208,10 +211,22 @@ refuses("an invented phase", lambda: pr.set_phase(a, "counting"), "must be one o
 # ── blurbs ───────────────────────────────────────────────────────────────────
 print("\nblurbs")
 a = new_article()
+refuses("claiming in setup, before there are voters to claim",
+        lambda: pr.claim_blurb(a, "BOS", "bob", False), "not open")
 pr.set_phase(a, "voting")
 pr.set_ballot(a, "alice", ballot_from(["BOS"]))
-refuses("claiming before blurbs open", lambda: pr.claim_blurb(a, "BOS", "bob", False), "not open")
+
+# Blurbs open at `voting`, not at the close of it — a voter writes while the
+# ballot is still out instead of queueing behind everyone else's vote.
+pr.claim_blurb(a, "POR", "bob", False)
+check("a voter can claim while the ballot is still open",
+      a["blurbs"]["POR"]["claimed_by"] == "bob")
+pr.set_blurb(a, "POR", "bob", "Written mid-vote.", None, False)
+check("and can write it there", a["blurbs"]["POR"]["body"] == "Written mid-vote.")
+
 pr.set_phase(a, "blurbs")
+check("a claim made during voting survives the close",
+      a["blurbs"]["POR"]["claimed_by"] == "bob")
 pr.claim_blurb(a, "BOS", "bob", False)
 check("a voter can claim a team", a["blurbs"]["BOS"]["claimed_by"] == "bob")
 refuses("a second voter claiming the same team",
@@ -239,11 +254,13 @@ refuses("an over-long blurb",
 pr.set_blurb(a, "MIA", "alice", "Heat culture.", None, True)
 check("an editor writing an unclaimed team claims it for themselves",
       a["blurbs"]["MIA"]["claimed_by"] == "alice")
+# Three written by now: DEN, MIA, and POR — POR being the one written during
+# voting, which counts toward progress exactly like any other.
 prog = pr.blurb_progress(a)
-check("progress counts what is written", prog["written"] == 2)
+check("progress counts what is written", prog["written"] == 3)
 check("progress counts what is approved", prog["approved"] == 1)
-check("progress lists what is still unwritten", len(prog["unwritten"]) == 28)
-check("progress lists what is written but unapproved", prog["unapproved"] == ["MIA"])
+check("progress lists what is still unwritten", len(prog["unwritten"]) == 27)
+check("progress lists what is written but unapproved", prog["unapproved"] == ["MIA", "POR"])
 
 # ── movement and freeze ──────────────────────────────────────────────────────
 print("\nmovement and freeze")
