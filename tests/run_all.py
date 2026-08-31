@@ -24,7 +24,7 @@ MODULES = ["test_stepien_rule", "test_pick_advance_limit", "test_picks_matching"
            "test_tradeblock_notify",
            "test_waivers", "test_sign_requires_salary",
            "test_one_year_min_cap_hit_consistency",
-           "test_inbox", "test_inbox_wiring", "test_cleanup",
+           "test_inbox", "test_inbox_wiring", "test_cleanup", "test_schedule",
            "test_news_rankings", "test_news_rankings_routes",
            "test_og", "test_health", "test_audit_log", "test_cap_history",
            "test_poopoo_summary",

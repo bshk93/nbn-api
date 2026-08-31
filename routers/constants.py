@@ -41,6 +41,12 @@ AWARDS_CONFIG_FILE    = DATA_DIR / "awards-config.json"
 AWARDS_HISTORY_FILE   = DATA_DIR / "awards-history.json"
 CALENDAR_EVENTS_FILE  = DATA_DIR / "calendar-events.json"
 CALENDAR_GAMES_FILE   = DATA_DIR / "calendar-games.json"
+# One file per season of the league's game schedule — `schedule-26-27.json`.
+# Seeded from the real NBA schedule by nbn-today/build/load_nba_schedule.py and
+# mutable from there on (routers/schedule.py), because NBN's in-season cup does
+# not follow the NBA's: the 60 group games are ours to reassign and the NBA's
+# knockout round is not reproduced at all.
+SCHEDULE_FILE_FMT = "schedule-{season}.json"
 BETS_FILE     = DATA_DIR / "bets.json"
 BALANCES_FILE = DATA_DIR / "member-balances.json"
 LEDGER_FILE   = DATA_DIR / "bets-ledger.json"
