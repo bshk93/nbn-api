@@ -30,7 +30,7 @@ from pydantic import BaseModel
 
 from .constants import DATA_DIR, SCHEDULE_FILE_FMT, VALID_TEAMS
 from .storage import _load_json, _save_json, log_write, _current_league_year
-from .auth import require_role
+from .auth import require_role, get_token_info, has_role
 
 router = APIRouter()
 
@@ -94,6 +94,14 @@ def _resolve_season(season: str | None) -> str:
     if not SEASON_RE.match(season):
         raise HTTPException(status_code=422, detail=f"season must look like '26-27', got {season!r}")
     return season
+
+
+def _public(game: dict) -> dict:
+    """A game as the API hands it out. `streamer` is stored only once someone
+    has claimed a game — 1,200 nulls a season is noise in a file whose diffs
+    are read by hand — but it is always present on the way out, so no caller
+    has to know that."""
+    return {**game, "streamer": game.get("streamer") or None}
 
 
 def _check_team(label: str, team: str) -> str:
@@ -181,7 +189,8 @@ def get_schedule(
         games = [g for g in games if g["date"] >= from_]
     if to:
         games = [g for g in games if g["date"] <= to]
-    return {"season": season, "source": data.get("source", ""), "count": len(games), "games": games}
+    return {"season": season, "source": data.get("source", ""), "count": len(games),
+            "games": [_public(g) for g in games]}
 
 
 @router.post("/api/schedule")
@@ -216,7 +225,7 @@ def create_schedule_game(body: ScheduleGameIn, info: dict = Depends(require_role
         data["games"].append(game)
         _save(season, data)
     log_write(info, f"POST schedule — {season} {body.date} {away}@{home}")
-    return game
+    return _public(game)
 
 
 @router.patch("/api/schedule/{game_id}")
@@ -253,7 +262,71 @@ def update_schedule_game(game_id: str, body: ScheduleGamePatch, info: dict = Dep
         _save(season, data)
     log_write(info, f"PATCH schedule/{game_id} — {season} {game['date']} "
                     f"{game['away_team']}@{game['home_team']}")
-    return game
+    return _public(game)
+
+
+# ── Streamers ────────────────────────────────────────────────────────────────
+#
+# A `streamer` puts their own name on a game they intend to stream, and the
+# claim is public the moment it lands — the schedule is already a public read,
+# so nothing extra is needed to publish it.
+#
+# One streamer per game (league decision, 2026-09-01), so this is a single name
+# and not a list: a list capped at one would be a shape that disagrees with the
+# rule, and the first thing to drift from it. A second claimant gets a 409
+# naming who holds it, rather than silently joining.
+#
+# Claiming takes no member argument at all, which is what makes `streamer` a
+# role safe to hand out without board standing: its holder can write exactly
+# one name, their own. Nor does releasing take one — the claim identifies its
+# own holder, so "clear this game" is the whole operation, and who may do it
+# follows from who holds it.
+
+
+@router.post("/api/schedule/{game_id}/streamer")
+def claim_schedule_game(game_id: str, season: str | None = None,
+                        info: dict = Depends(require_role("streamer"))):
+    """Put the caller's own name on a game. Claiming one you already hold is not
+    an error — the button that calls this is the same button either way — but
+    claiming one someone else holds is a 409."""
+    preferred = _resolve_season(season)
+    with _schedule_lock:
+        found_season, data, game = _find(game_id, preferred)
+        held = game.get("streamer")
+        if held and held != info["name"]:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{held} is already streaming this game. They have to drop it first.")
+        if not held:
+            game["streamer"] = info["name"]
+            _save(found_season, data)
+    log_write(info, f"POST schedule/{game_id}/streamer — {found_season} {game['date']} "
+                    f"{game['away_team']}@{game['home_team']}")
+    return _public(game)
+
+
+@router.delete("/api/schedule/{game_id}/streamer")
+def unclaim_schedule_game(game_id: str, season: str | None = None,
+                          info: dict = Depends(get_token_info)):
+    """Clear a game's claim. Yours to drop whenever — including if your
+    `streamer` role has since been revoked, since you would otherwise be stuck
+    on a game you can no longer reach. Dropping someone *else's* is the board's
+    call, not another streamer's."""
+    preferred = _resolve_season(season)
+    with _schedule_lock:
+        found_season, data, game = _find(game_id, preferred)
+        held = game.get("streamer")
+        if not held:
+            raise HTTPException(status_code=404, detail="Nobody is streaming this game")
+        if held != info["name"] and not (has_role(info, "admin") or has_role(info, "bod")):
+            raise HTTPException(status_code=403,
+                                detail=f"{held} holds this game — only 'bod' can drop it for them")
+        # Drop the key rather than leaving a null, so a game nobody is streaming
+        # is byte-identical to one that was never claimed.
+        game.pop("streamer", None)
+        _save(found_season, data)
+    log_write(info, f"DELETE schedule/{game_id}/streamer — {found_season} {held}")
+    return _public(game)
 
 
 @router.delete("/api/schedule/{game_id}")

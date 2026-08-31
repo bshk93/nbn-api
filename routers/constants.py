@@ -138,6 +138,12 @@ VALID_ROLES = {
     # still lives on separate per-pipeline objects; sharing the role does not
     # mean sharing a claim record.
     "fac", "fac_head", "agent", "poext", "poext_head",
+    # Claims a game on the schedule as one they intend to stream. The only
+    # role whose whole grant is over its holder's *own* name on a shared
+    # object — POST /api/schedule/{id}/streamer takes no member argument, so
+    # it cannot sign anyone else up, and it is the one write here that needs
+    # no committee or board standing behind it.
+    "streamer",
 } | {t.lower() for t in VALID_TEAMS}
 
 # Roles that are implicitly granted by holding another role

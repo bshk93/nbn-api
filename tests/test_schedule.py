@@ -21,6 +21,14 @@ worth pinning:
 - **Editing never disturbs the rest of the file.** Seeded rows carry a
   `source_id` back to Basketball-Reference; a nearby edit must leave it alone,
   and the file has to stay in date/time order so its diffs stay readable.
+- **A streamer can only ever claim under their own name.** Neither the claim
+  nor the release takes a member argument — the claim identifies its own
+  holder — which is the entire reason the role is safe to hand out without
+  board standing. Dropping *someone else's* is board-gated; dropping your own
+  is not gated at all, since a revoked streamer would otherwise be stranded on
+  a game they can no longer reach.
+- **One streamer per game.** A second claimant is a 409 naming who holds it,
+  not a silent join, and re-claiming a game you already hold is not an error.
 
 Writes go to a temp directory; nothing here touches live data.
 
@@ -53,9 +61,13 @@ def check(name, cond):
 
 BOD_TOKEN  = "b" * 64
 PLAIN_TOKEN = "n" * 64
+STREAM_TOKEN  = "s" * 64
+STREAM2_TOKEN = "t" * 64
 MEMBERS = {
-    "Boss":    {"token": BOD_TOKEN,   "roles": ["bod"], "tenures": []},
-    "Nobody":  {"token": PLAIN_TOKEN, "roles": [],      "tenures": []},
+    "Boss":    {"token": BOD_TOKEN,     "roles": ["bod"],      "tenures": []},
+    "Nobody":  {"token": PLAIN_TOKEN,   "roles": [],           "tenures": []},
+    "Streamy": {"token": STREAM_TOKEN,  "roles": ["streamer"], "tenures": []},
+    "Costream": {"token": STREAM2_TOKEN, "roles": ["streamer"], "tenures": []},
 }
 auth.load_members = lambda: MEMBERS
 
@@ -68,8 +80,10 @@ app = FastAPI()
 app.include_router(sched.router)
 c = TestClient(app)
 
-BOD   = {"Authorization": "Bearer " + BOD_TOKEN}
-PLAIN = {"Authorization": "Bearer " + PLAIN_TOKEN}
+BOD    = {"Authorization": "Bearer " + BOD_TOKEN}
+PLAIN  = {"Authorization": "Bearer " + PLAIN_TOKEN}
+STREAM  = {"Authorization": "Bearer " + STREAM_TOKEN}
+STREAM2 = {"Authorization": "Bearer " + STREAM2_TOKEN}
 
 
 def seed(season, games, source="test"):
@@ -241,6 +255,65 @@ check("it is gone", "bbb" not in ids())
 check("deleting it twice is a 404", c.delete("/api/schedule/bbb", headers=BOD).status_code == 404)
 check("the rest of the season is untouched", "aaa" in ids() and "ccc" in ids())
 
+# ── streamers ─────────────────────────────────────────────────────────────────
+
+print("streamers")
+check("an unclaimed game still reports the field",
+      c.get("/api/schedule").json()["games"][0]["streamer"] is None)
+check("a member without the role cannot claim",
+      c.post("/api/schedule/aaa/streamer", headers=PLAIN).status_code == 403)
+check("no token cannot claim",
+      c.post("/api/schedule/aaa/streamer").status_code in (401, 403))
+check("dropping a claim nobody holds is a 404",
+      c.delete("/api/schedule/aaa/streamer", headers=STREAM).status_code == 404)
+
+r = c.post("/api/schedule/aaa/streamer", headers=STREAM)
+check("a streamer can claim", r.status_code == 200)
+check("under their own name", r.json()["streamer"] == "Streamy")
+check("and it is public with no token at all",
+      [x for x in games() if x["id"] == "aaa"][0]["streamer"] == "Streamy")
+check("re-claiming your own game is not an error",
+      c.post("/api/schedule/aaa/streamer", headers=STREAM).status_code == 200)
+
+r = c.post("/api/schedule/aaa/streamer", headers=STREAM2)
+check("a second streamer is a 409, not a join", r.status_code == 409)
+check("and the 409 names who holds it", "Streamy" in r.json()["detail"])
+check("the held claim is untouched",
+      [x for x in games() if x["id"] == "aaa"][0]["streamer"] == "Streamy")
+
+check("claiming a game that does not exist is a 404",
+      c.post("/api/schedule/nope/streamer", headers=STREAM).status_code == 404)
+check("a game in another season is reachable by id alone",
+      c.post("/api/schedule/old/streamer", headers=STREAM).json()["streamer"] == "Streamy")
+
+check("one streamer cannot drop another's claim",
+      c.delete("/api/schedule/aaa/streamer", headers=STREAM2).status_code == 403)
+check("nor can a member with no role at all",
+      c.delete("/api/schedule/aaa/streamer", headers=PLAIN).status_code == 403)
+check("the claim survived that",
+      [x for x in games() if x["id"] == "aaa"][0]["streamer"] == "Streamy")
+check("bod can drop someone else's claim",
+      c.delete("/api/schedule/aaa/streamer", headers=BOD).status_code == 200)
+check("and it is gone", [x for x in games() if x["id"] == "aaa"][0]["streamer"] is None)
+check("a streamer can drop their own",
+      c.post("/api/schedule/aaa/streamer", headers=STREAM).status_code == 200 and
+      c.delete("/api/schedule/aaa/streamer", headers=STREAM).json()["streamer"] is None)
+check("a claim in another season comes off too",
+      c.delete("/api/schedule/old/streamer", headers=STREAM).status_code == 200)
+check("once dropped the game is claimable by someone else",
+      c.post("/api/schedule/aaa/streamer", headers=STREAM2).json()["streamer"] == "Costream")
+c.delete("/api/schedule/aaa/streamer", headers=STREAM2)
+
+# Claim first, then revoke the role — the order the real thing happens in, and
+# the only way to reach the state the removal path exists to unstick.
+c.post("/api/schedule/ccc/streamer", headers=STREAM)
+MEMBERS["Streamy"]["roles"] = []
+check("a revoked streamer cannot claim anything new",
+      c.post("/api/schedule/aaa/streamer", headers=STREAM).status_code == 403)
+check("but is not stranded on the game they already claimed",
+      c.delete("/api/schedule/ccc/streamer", headers=STREAM).status_code == 200)
+MEMBERS["Streamy"]["roles"] = ["streamer"]
+
 # ── the file stays readable ───────────────────────────────────────────────────
 
 print("the file on disk")
@@ -254,6 +327,8 @@ check("the season and source survived every write",
 check("every game has the full shape",
       all(set(x) == {"id", "date", "time_et", "away_team", "home_team",
                      "arena", "note", "source_id"} for x in raw["games"]))
+check("an unclaimed game carries no streamer key on disk",
+      not any("streamer" in x for x in raw["games"]))
 
 print()
 if FAILS:
