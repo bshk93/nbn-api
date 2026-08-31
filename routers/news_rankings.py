@@ -58,7 +58,7 @@ PHASE_NEXT = {
     "final": {"blurbs"},
 }
 
-MAX_BLURB_LEN = 1200
+MAX_BLURB_LEN = 2500
 MAX_BASELINE_LABEL = 80
 MAX_VOTERS = 40
 
