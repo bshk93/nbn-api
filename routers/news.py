@@ -1,17 +1,19 @@
+import json
 import os
 import re
 import secrets
 import threading
 import uuid
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
-from .constants import NEWS_FILE, DATA_DIR, DERIVED_DIR, logger
-from .storage import _load_json, _save_json, log_write, read_csv
+from .constants import NEWS_DIR, DATA_DIR, DERIVED_DIR, logger
+from .storage import _save_json, log_write, read_csv
 from .auth import get_token_info, has_role, require_role, _resolve_token, load_members
 from .players import load_player_bios, load_ovr
 from .league_time import league_today
@@ -117,12 +119,37 @@ def _notify_published(a: dict, actor: str) -> None:
         inbox.notify_member(name, text, link=link)
 
 
+# One file per article (news/{id}.json), not one file for the whole archive —
+# so a write to one article never touches another, and each gets its own diff
+# in the backup repo. `load_articles` is still a directory scan and stays for
+# the handful of things that are genuinely archive-wide (the list endpoint,
+# series numbering, a previous edition's frozen `final`); everything else
+# reads or writes exactly the one file it needs via _load_article/_save_article.
+# NEWS_DIR.glob on a directory that doesn't exist yet just yields nothing, so
+# only the writer needs to create it — same lazy-mkdir convention as
+# AVATARS_DIR in auth.py.
+
+
 def load_articles() -> list[dict]:
-    return _load_json(NEWS_FILE, [])
+    return [json.loads(p.read_text()) for p in sorted(NEWS_DIR.glob("*.json"))]
 
 
-def save_articles(articles: list[dict]):
-    _save_json(NEWS_FILE, articles)
+def _article_path(article_id: str) -> Path:
+    return NEWS_DIR / f"{article_id}.json"
+
+
+def _load_article(article_id: str) -> Optional[dict]:
+    path = _article_path(article_id)
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def _save_article(a: dict):
+    NEWS_DIR.mkdir(parents=True, exist_ok=True)
+    _save_json(_article_path(a["id"]), a)
+
+
+def _delete_article(article_id: str):
+    _article_path(article_id).unlink(missing_ok=True)
 
 
 def _can_publish(info: Optional[dict]) -> bool:
@@ -182,14 +209,13 @@ def _article_view(a: dict, viewer: Optional[str] = None) -> dict:
     return out
 
 
-def _article_detail(a: dict, info: Optional[dict] = None,
-                    articles: Optional[list[dict]] = None) -> dict:
+def _article_detail(a: dict, info: Optional[dict] = None) -> dict:
     """Full article for the single-article endpoint. A ranking goes through
-    `pr.redact` so a blind ballot stays blind; `articles` is only needed to look
-    up the previous edition for movement arrows."""
+    `pr.redact` so a blind ballot stays blind; the previous edition (for movement
+    arrows) is a one-file lookup by `prev_id`, not a scan of the whole archive."""
     if pr.is_ranking(a):
         viewer = info["name"] if info else None
-        prev = next((x for x in (articles or []) if x.get("id") == a.get("prev_id")), None)
+        prev = _load_article(a["prev_id"]) if a.get("prev_id") else None
         out = pr.redact(a, viewer, _is_editor_of(a, info), (prev or {}).get("final"))
     else:
         out = dict(a)
@@ -280,11 +306,6 @@ class CommentCreate(BaseModel):
 
 # ── Editorial helpers ──────────────────────────────────────────────────────────
 
-def _find(articles: list[dict], article_id: str):
-    idx = next((i for i, a in enumerate(articles) if a["id"] == article_id), None)
-    return idx
-
-
 def _can_edit(a: dict, info: dict) -> bool:
     # Editors (curator/bod/admin) can edit anything; the author can always edit
     # their own article, including after it's published. Editing never changes
@@ -356,38 +377,32 @@ def create_article(body: ArticleCreate, info: dict = Depends(get_token_info)):
     elif body.type not in (None, "", "custom"):
         raise HTTPException(status_code=422, detail=f"unknown article type: {body.type}")
     with _news_lock:
-        articles = load_articles()
-        articles.append(article)
-        save_articles(articles)
+        _save_article(article)
     log_write(info, f"POST news — {article['id']!r} {body.title!r}")
-    return _article_detail(article, info, articles)
+    return _article_detail(article, info)
 
 
 @router.get("/api/news/{article_id}")
 def get_article(article_id: str, authorization: Optional[str] = Header(None)):
     info = _resolve_token(authorization)
-    articles = load_articles()
-    idx = _find(articles, article_id)
-    if idx is None:
+    a = _load_article(article_id)
+    if a is None:
         raise HTTPException(status_code=404, detail="Article not found")
-    a = articles[idx]
     viewer = info["name"] if info else None
     if a.get("status") != "published":
         is_author = viewer and a.get("author") == viewer
         # An invited voter has to be able to open the draft they are ranking.
         if not is_author and not _can_publish(info) and not pr.is_voter(a, viewer):
             raise HTTPException(status_code=403, detail="Not authorized to view this article")
-    return _article_detail(a, info, articles)
+    return _article_detail(a, info)
 
 
 @router.patch("/api/news/{article_id}")
 def patch_article(article_id: str, body: ArticlePatch, info: dict = Depends(get_token_info)):
     with _news_lock:
-        articles = load_articles()
-        idx = _find(articles, article_id)
-        if idx is None:
+        a = _load_article(article_id)
+        if a is None:
             raise HTTPException(status_code=404, detail="Article not found")
-        a = articles[idx]
         if not _can_edit(a, info):
             raise HTTPException(status_code=403, detail="Cannot edit this article")
         if body.title is not None:
@@ -401,20 +416,17 @@ def patch_article(article_id: str, body: ArticlePatch, info: dict = Depends(get_
         if body.tags is not None:
             a["tags"] = _clean_tags(body.tags)
         a["updated_at"] = datetime.now(timezone.utc).isoformat()
-        articles[idx] = a
-        save_articles(articles)
+        _save_article(a)
     log_write(info, f"PATCH news/{article_id}")
-    return _article_detail(a, info, articles)
+    return _article_detail(a, info)
 
 
 @router.post("/api/news/{article_id}/submit")
 def submit_article(article_id: str, info: dict = Depends(get_token_info)):
     with _news_lock:
-        articles = load_articles()
-        idx = _find(articles, article_id)
-        if idx is None:
+        a = _load_article(article_id)
+        if a is None:
             raise HTTPException(status_code=404, detail="Article not found")
-        a = articles[idx]
         if a.get("author") != info["name"] and not _can_publish(info):
             raise HTTPException(status_code=403, detail="Only the author can submit this article")
         if a.get("status") != "draft":
@@ -425,10 +437,9 @@ def submit_article(article_id: str, info: dict = Depends(get_token_info)):
         a["status"] = "submitted"
         a["submitted_at"] = now
         a["updated_at"] = now
-        articles[idx] = a
-        save_articles(articles)
+        _save_article(a)
     log_write(info, f"POST news/{article_id}/submit")
-    return _article_detail(a, info, articles)
+    return _article_detail(a, info)
 
 
 # A team's whole active roster by current OVR, frozen onto a power-rankings
@@ -523,11 +534,9 @@ def publish_article(article_id: str, body: PublishIn, info: dict = Depends(get_t
         except ValueError:
             raise HTTPException(status_code=422, detail="publish_date must be YYYY-MM-DD")
     with _news_lock:
-        articles = load_articles()
-        idx = _find(articles, article_id)
-        if idx is None:
+        a = _load_article(article_id)
+        if a is None:
             raise HTTPException(status_code=404, detail="Article not found")
-        a = articles[idx]
         if not _may_publish_article(a, info):
             raise HTTPException(status_code=403, detail="Not authorized to publish this article")
         # A ranking's article *is* the table, so it may publish without an intro;
@@ -537,6 +546,10 @@ def publish_article(article_id: str, body: PublishIn, info: dict = Depends(get_t
         if a.get("status") not in ("submitted", "draft"):
             raise HTTPException(status_code=422, detail="Only queued or draft articles can be published")
         if pr.is_ranking(a):
+            # freeze needs the whole archive — series numbering and the
+            # previous edition's final both come from a cross-article scan —
+            # so this is the one publish step that still reads the directory.
+            articles = load_articles()
             try:
                 pr.freeze(a, articles)
             except ValueError as exc:
@@ -554,51 +567,44 @@ def publish_article(article_id: str, body: PublishIn, info: dict = Depends(get_t
         a["published_at"] = published_at or a.get("published_at") or now
         a["published_by"] = info["name"]
         a["updated_at"] = now
-        articles[idx] = a
-        save_articles(articles)
+        _save_article(a)
     log_write(info, f"POST news/{article_id}/publish — by {info['name']}")
     _notify_published(a, info["name"])
     threading.Thread(target=_announce_published, args=(dict(a),), daemon=True).start()
-    return _article_detail(a, info, articles)
+    return _article_detail(a, info)
 
 
 @router.post("/api/news/{article_id}/unpublish")
 def unpublish_article(article_id: str, info: dict = Depends(require_role("curator"))):
     """Pull a published article back into the submission queue."""
     with _news_lock:
-        articles = load_articles()
-        idx = _find(articles, article_id)
-        if idx is None:
+        a = _load_article(article_id)
+        if a is None:
             raise HTTPException(status_code=404, detail="Article not found")
-        a = articles[idx]
         if a.get("status") != "published":
             raise HTTPException(status_code=422, detail="Article is not published")
         a["status"] = "submitted"
         a["updated_at"] = datetime.now(timezone.utc).isoformat()
-        articles[idx] = a
-        save_articles(articles)
+        _save_article(a)
     log_write(info, f"POST news/{article_id}/unpublish")
-    return _article_detail(a, info, articles)
+    return _article_detail(a, info)
 
 
 @router.post("/api/news/{article_id}/reject")
 def reject_article(article_id: str, info: dict = Depends(require_role("curator"))):
     """Send a queued article back to its author as a draft."""
     with _news_lock:
-        articles = load_articles()
-        idx = _find(articles, article_id)
-        if idx is None:
+        a = _load_article(article_id)
+        if a is None:
             raise HTTPException(status_code=404, detail="Article not found")
-        a = articles[idx]
         if a.get("status") != "submitted":
             raise HTTPException(status_code=422, detail="Only queued articles can be rejected")
         a["status"] = "draft"
         a["submitted_at"] = None
         a["updated_at"] = datetime.now(timezone.utc).isoformat()
-        articles[idx] = a
-        save_articles(articles)
+        _save_article(a)
     log_write(info, f"POST news/{article_id}/reject")
-    return _article_detail(a, info, articles)
+    return _article_detail(a, info)
 
 
 @router.post("/api/news/{article_id}/comments")
@@ -606,11 +612,9 @@ def add_comment(article_id: str, body: CommentCreate, info: dict = Depends(get_t
     if not body.body.strip():
         raise HTTPException(status_code=422, detail="Comment body is required")
     with _news_lock:
-        articles = load_articles()
-        idx = _find(articles, article_id)
-        if idx is None:
+        a = _load_article(article_id)
+        if a is None:
             raise HTTPException(status_code=404, detail="Article not found")
-        a = articles[idx]
         if a.get("status") != "published":
             raise HTTPException(status_code=422, detail="Can only comment on published articles")
         comment = {
@@ -620,8 +624,7 @@ def add_comment(article_id: str, body: CommentCreate, info: dict = Depends(get_t
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         a.setdefault("comments", []).append(comment)
-        articles[idx] = a
-        save_articles(articles)
+        _save_article(a)
     log_write(info, f"POST news/{article_id}/comments — {info['name']}")
     return comment
 
@@ -629,11 +632,9 @@ def add_comment(article_id: str, body: CommentCreate, info: dict = Depends(get_t
 @router.delete("/api/news/{article_id}/comments/{comment_id}")
 def delete_comment(article_id: str, comment_id: str, info: dict = Depends(get_token_info)):
     with _news_lock:
-        articles = load_articles()
-        idx = _find(articles, article_id)
-        if idx is None:
+        a = _load_article(article_id)
+        if a is None:
             raise HTTPException(status_code=404, detail="Article not found")
-        a = articles[idx]
         comments = a.get("comments", [])
         comment = next((c for c in comments if c["id"] == comment_id), None)
         if not comment:
@@ -641,8 +642,7 @@ def delete_comment(article_id: str, comment_id: str, info: dict = Depends(get_to
         if comment["author"] != info["name"] and not _can_publish(info):
             raise HTTPException(status_code=403, detail="Not authorized to delete this comment")
         a["comments"] = [c for c in comments if c["id"] != comment_id]
-        articles[idx] = a
-        save_articles(articles)
+        _save_article(a)
     log_write(info, f"DELETE news/{article_id}/comments/{comment_id}")
     return {"ok": True}
 
@@ -650,19 +650,16 @@ def delete_comment(article_id: str, comment_id: str, info: dict = Depends(get_to
 @router.delete("/api/news/{article_id}")
 def delete_article(article_id: str, info: dict = Depends(get_token_info)):
     with _news_lock:
-        articles = load_articles()
-        idx = _find(articles, article_id)
-        if idx is None:
+        a = _load_article(article_id)
+        if a is None:
             raise HTTPException(status_code=404, detail="Article not found")
-        a = articles[idx]
         is_author = a.get("author") == info["name"]
         if not is_author and not _can_publish(info):
             raise HTTPException(status_code=403, detail="Not authorized to delete this article")
         # Authors may only delete their own drafts; editors can delete anything.
         if a.get("status") != "draft" and not _can_publish(info):
             raise HTTPException(status_code=422, detail="Only editors can delete submitted or published articles")
-        articles.pop(idx)
-        save_articles(articles)
+        _delete_article(article_id)
     log_write(info, f"DELETE news/{article_id}")
     return {"ok": True}
 
@@ -698,11 +695,9 @@ def _mutate_ranking(article_id: str, info: dict, editor_only: bool, fn):
     422 — so they are written once here rather than six times below.
     """
     with _news_lock:
-        articles = load_articles()
-        idx = _find(articles, article_id)
-        if idx is None:
+        a = _load_article(article_id)
+        if a is None:
             raise HTTPException(status_code=404, detail="Article not found")
-        a = articles[idx]
         if not pr.is_ranking(a):
             raise HTTPException(status_code=422, detail="Not a power-rankings article")
         editor = _is_editor_of(a, info)
@@ -714,9 +709,8 @@ def _mutate_ranking(article_id: str, info: dict, editor_only: bool, fn):
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
         a["updated_at"] = datetime.now(timezone.utc).isoformat()
-        articles[idx] = a
-        save_articles(articles)
-    return _article_detail(a, info, articles)
+        _save_article(a)
+    return _article_detail(a, info)
 
 
 @router.put("/api/news/{article_id}/rankings/voters")

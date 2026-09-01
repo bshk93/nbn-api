@@ -89,7 +89,7 @@ ARTICLES = [
     {"id": "a4", "status": "published", "title": 'Quote "trouble" & <script>',
      "body": "Body.", "author": "bryn", "tags": [], "cover_image": "img/relative.png"},
 ]
-og.load_articles = lambda: [dict(a) for a in ARTICLES]
+og._load_article = lambda aid: next((dict(a) for a in ARTICLES if a["id"] == aid), None)
 
 print("\nnews — published article")
 doc = og.news_head("a1")

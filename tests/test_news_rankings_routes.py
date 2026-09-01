@@ -36,10 +36,19 @@ import routers.news as news  # noqa: E402
 
 STORE = []
 news.load_articles = lambda: STORE
-def _save(arts):
-    global STORE
-    STORE = arts
-news.save_articles = _save
+def _load_one(article_id):
+    return next((a for a in STORE if a.get("id") == article_id), None)
+news._load_article = _load_one
+def _save_one(a):
+    idx = next((i for i, x in enumerate(STORE) if x.get("id") == a["id"]), None)
+    if idx is None:
+        STORE.append(a)
+    else:
+        STORE[idx] = a
+news._save_article = _save_one
+def _delete_one(article_id):
+    STORE[:] = [a for a in STORE if a.get("id") != article_id]
+news._delete_article = _delete_one
 news.log_write = lambda info, msg: None
 news.load_members = lambda: {"alice": {}, "bob": {}, "carol": {}, "dave": {}}
 news._announce_published = lambda a: None

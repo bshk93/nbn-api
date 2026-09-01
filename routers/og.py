@@ -46,7 +46,7 @@ from .constants import DERIVED_DIR, logger
 from .storage import read_csv
 from .auth import load_members
 from .players import load_player_bios, load_ovr, _display_name, _build_team_map
-from .news import load_articles, _find as _find_article, _md_excerpt, _article_teaser
+from .news import _load_article, _md_excerpt, _article_teaser
 from .proposals import load_proposals
 from .discord import TEAM_NAMES
 
@@ -155,9 +155,7 @@ def _static_head(page_path: str) -> str:
 # ── News ──────────────────────────────────────────────────────────────────────
 
 def news_head(article_id: str) -> str:
-    articles = load_articles() if article_id else []
-    idx = _find_article(articles, article_id) if articles else None
-    a = articles[idx] if idx is not None else None
+    a = _load_article(article_id) if article_id else None
     if not a or a.get("status") != "published":
         return _static_head("/news/view/")
 

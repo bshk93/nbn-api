@@ -17,14 +17,13 @@ is where it would show, instead of in a table that quietly disagrees with the
 one people remember reading.
 
     ./venv/bin/python3 import_feb_rankings.py            # dry run, prints everything
-    ./venv/bin/python3 import_feb_rankings.py --apply    # writes news.json
+    ./venv/bin/python3 import_feb_rankings.py --apply    # writes news/{id}.json
 """
 from __future__ import annotations
 
 import argparse
 import csv
 import io
-import json
 import re
 import sys
 import urllib.request
@@ -34,8 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import routers.news_rankings as pr                      # noqa: E402
-from routers.constants import NEWS_FILE                 # noqa: E402
-from routers.storage import _save_json                  # noqa: E402
+from routers.news import load_articles, _save_article   # noqa: E402
 from routers.perry import TEAM_NAMES                    # noqa: E402
 
 SHEET_CSV = ("https://docs.google.com/spreadsheets/d/e/2PACX-1vQkKoSdWlsa8MiRFAXwl32MrZX7t"
@@ -180,14 +178,14 @@ def check_against_sheet(a: dict, blocks: list[dict]) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--apply", action="store_true", help="write news.json")
+    ap.add_argument("--apply", action="store_true", help="write news/{id}.json")
     ap.add_argument("--csv", help="read the sheet from a local CSV instead of the web")
     args = ap.parse_args()
 
     blocks = parse_sheet(fetch_rows(args.csv))
-    articles = json.loads(NEWS_FILE.read_text(encoding="utf-8"))
+    articles = load_articles()
     if any(x.get("title") == TITLE for x in articles):
-        sys.exit(f"{TITLE!r} is already in news.json — nothing to do")
+        sys.exit(f"{TITLE!r} is already in the news store — nothing to do")
 
     a = build_article(blocks, articles)
     check_against_sheet(a, blocks)
@@ -213,14 +211,15 @@ def main() -> None:
         print("\ndry run — nothing written. Re-run with --apply.")
         return
 
-    articles.append(a)
+    # The API's own writers: same formatting, same atomic replace. Each
+    # article is its own file, so adding this one and re-chaining the next
+    # edition are two independent writes rather than one rewrite of everything.
+    _save_article(a)
     if chain and not chain.get("prev_id"):
         chain["prev_id"] = a["id"]
         chain["updated_at"] = datetime.now(timezone.utc).isoformat()
-    # The API's own writer: same formatting, same atomic replace, so the store
-    # comes back byte-identical apart from the article this adds.
-    _save_json(NEWS_FILE, articles)
-    print(f"\nwrote {NEWS_FILE} — {a['id']}")
+        _save_article(chain)
+    print(f"\nwrote news/{a['id']}.json")
 
 
 if __name__ == "__main__":
