@@ -29,6 +29,9 @@ worth pinning:
   a game they can no longer reach.
 - **One streamer per game.** A second claimant is a 409 naming who holds it,
   not a silent join, and re-claiming a game you already hold is not an error.
+- **The stream flag is independent of the streamer claim.** `stream` carries
+  no name and no holder — anyone with the `streamer` role can mark or unmark
+  it on any game, whether or not that game has a claimed streamer.
 
 Writes go to a temp directory; nothing here touches live data.
 
@@ -314,6 +317,39 @@ check("but is not stranded on the game they already claimed",
       c.delete("/api/schedule/ccc/streamer", headers=STREAM).status_code == 200)
 MEMBERS["Streamy"]["roles"] = ["streamer"]
 
+# ── stream flag ────────────────────────────────────────────────────────────────
+
+print("stream flag")
+check("an unflagged game still reports the field",
+      c.get("/api/schedule").json()["games"][0]["stream"] is False)
+check("a member without the role cannot mark",
+      c.post("/api/schedule/aaa/stream", headers=PLAIN).status_code == 403)
+check("no token cannot mark",
+      c.post("/api/schedule/aaa/stream").status_code in (401, 403))
+check("unmarking a game not flagged is a 404",
+      c.delete("/api/schedule/aaa/stream", headers=STREAM).status_code == 404)
+
+r = c.post("/api/schedule/aaa/stream", headers=STREAM)
+check("a streamer can mark", r.status_code == 200)
+check("the flag is set", r.json()["stream"] is True)
+check("and it is public with no token at all",
+      [x for x in games() if x["id"] == "aaa"][0]["stream"] is True)
+check("marking an already-flagged game is not an error",
+      c.post("/api/schedule/aaa/stream", headers=STREAM).status_code == 200)
+check("a *different* streamer can mark or unmark it too — no holder concept",
+      c.delete("/api/schedule/aaa/stream", headers=STREAM2).json()["stream"] is False)
+
+check("the flag is independent of who (if anyone) is the claimed streamer",
+      c.post("/api/schedule/ccc/stream", headers=STREAM2).json()["stream"] is True and
+      [x for x in games() if x["id"] == "ccc"][0]["streamer"] is None)
+c.delete("/api/schedule/ccc/stream", headers=STREAM2)
+
+check("marking a game that does not exist is a 404",
+      c.post("/api/schedule/nope/stream", headers=STREAM).status_code == 404)
+check("a game in another season is reachable by id alone",
+      c.post("/api/schedule/old/stream", headers=STREAM).json()["stream"] is True)
+c.delete("/api/schedule/old/stream", headers=STREAM)
+
 # ── the file stays readable ───────────────────────────────────────────────────
 
 print("the file on disk")
@@ -329,6 +365,8 @@ check("every game has the full shape",
                      "arena", "note", "source_id"} for x in raw["games"]))
 check("an unclaimed game carries no streamer key on disk",
       not any("streamer" in x for x in raw["games"]))
+check("an unflagged game carries no stream key on disk",
+      not any("stream" in x for x in raw["games"]))
 
 print()
 if FAILS:

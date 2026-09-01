@@ -97,11 +97,14 @@ def _resolve_season(season: str | None) -> str:
 
 
 def _public(game: dict) -> dict:
-    """A game as the API hands it out. `streamer` is stored only once someone
-    has claimed a game — 1,200 nulls a season is noise in a file whose diffs
-    are read by hand — but it is always present on the way out, so no caller
-    has to know that."""
-    return {**game, "streamer": game.get("streamer") or None}
+    """A game as the API hands it out. `streamer` (who's claimed to broadcast
+    it) and `stream` (whether the game itself is flagged as a stream) are each
+    stored only once set — 1,200 nulls/falses a season is noise in a file
+    whose diffs are read by hand — but both are always present on the way
+    out, so no caller has to know that. The two are independent: a game can
+    carry either, neither, or both."""
+    return {**game, "streamer": game.get("streamer") or None,
+            "stream": bool(game.get("stream"))}
 
 
 def _check_team(label: str, team: str) -> str:
@@ -326,6 +329,45 @@ def unclaim_schedule_game(game_id: str, season: str | None = None,
         game.pop("streamer", None)
         _save(found_season, data)
     log_write(info, f"DELETE schedule/{game_id}/streamer — {found_season} {held}")
+    return _public(game)
+
+
+# ── Stream flag ────────────────────────────────────────────────────────────
+#
+# Independent of `streamer` above: `stream` is a plain yes/no marking that the
+# game itself is a stream. It carries no name and no "holder" concept, so
+# unlike a claim it isn't gated by who set it — anyone holding the `streamer`
+# role can mark or unmark it, the same as they could mark a different game.
+
+
+@router.post("/api/schedule/{game_id}/stream")
+def mark_schedule_game_stream(game_id: str, season: str | None = None,
+                              info: dict = Depends(require_role("streamer"))):
+    """Flag a game as a stream. Marking one already flagged is not an error."""
+    preferred = _resolve_season(season)
+    with _schedule_lock:
+        found_season, data, game = _find(game_id, preferred)
+        game["stream"] = True
+        _save(found_season, data)
+    log_write(info, f"POST schedule/{game_id}/stream — {found_season} {game['date']} "
+                    f"{game['away_team']}@{game['home_team']}")
+    return _public(game)
+
+
+@router.delete("/api/schedule/{game_id}/stream")
+def unmark_schedule_game_stream(game_id: str, season: str | None = None,
+                                info: dict = Depends(require_role("streamer"))):
+    """Clear a game's stream flag."""
+    preferred = _resolve_season(season)
+    with _schedule_lock:
+        found_season, data, game = _find(game_id, preferred)
+        if not game.get("stream"):
+            raise HTTPException(status_code=404, detail="This game isn't flagged as a stream")
+        # Drop the key rather than leaving False, matching `streamer`'s shape.
+        game.pop("stream", None)
+        _save(found_season, data)
+    log_write(info, f"DELETE schedule/{game_id}/stream — {found_season} {game['date']} "
+                    f"{game['away_team']}@{game['home_team']}")
     return _public(game)
 
 
