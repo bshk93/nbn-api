@@ -607,8 +607,12 @@ Guaranteed Salary, and when" was unanswerable.
 Every write in the API funnels through `storage._atomic_write`, which is the
 one place this hooks: the old text is read before the `os.replace`, the diff is
 appended after it, to `edits.jsonl` in NBS_DATA_DIR. Read it at
-`GET /api/edits` (admin — `key=curry-stephen` for one player, `file=uta-roster.csv`
-for one team, `actor=` for one member).
+`GET /api/edits` — **public since 2026-09-01** (`key=curry-stephen` for one
+player, `file=uta-roster.csv` for one team, `actor=` for one member). The
+player page's Edit History section calls it unauthenticated, scoped with
+`key=<slug>` so a visitor only ever pulls diffs mentioning that one player —
+nothing there renders the endpoint with no `key`, which is the query that
+would dump the whole league's contract-diff history at once.
 
 Three properties it must keep:
 

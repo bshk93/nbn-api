@@ -80,15 +80,16 @@ def get_health(response: Response):
 def get_edits(limit: int = Query(200, ge=1, le=1000),
               file: Optional[str] = None,
               actor: Optional[str] = None,
-              key: Optional[str] = None,
-              _: dict = Depends(require_admin)):
+              key: Optional[str] = None):
     """The append-only edit log for the writes that bypass the ledger.
 
-    Admin-only: a diff of `player-bios.json` is the whole league's contract
-    state, and `key` searches inside it. `file` and `actor` match exactly,
-    `key` is a substring of a diff entry's key — `key=curry-stephen` answers
-    "what has anyone changed about this player", `file=uta-roster.csv` answers
-    "who moved UTA's roster". Newest first. See routers/audit.py.
+    Public (made so 2026-09-01, was admin-only) — the player page's Edit
+    History section calls this unauthenticated, scoped with `key=<slug>` so a
+    visitor only ever sees diffs mentioning that one player. `file` and
+    `actor` match exactly, `key` is a substring of a diff entry's key —
+    `key=curry-stephen` answers "what has anyone changed about this player",
+    `file=uta-roster.csv` answers "who moved UTA's roster". Newest first. See
+    routers/audit.py.
     """
     return {"entries": audit.read_entries(limit=limit, file=file, actor=actor, key=key)}
 
