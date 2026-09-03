@@ -102,6 +102,9 @@ CLEANUP_SUBMISSIONS_FILE = DATA_DIR / "cleanup-submissions.json"
 # same candidate as a duplicate transaction.
 DISCORD_FA_RESOLVED_FILE  = DATA_DIR / "discord-fa-signings-resolved.json"
 DISCORD_FA_SUBMITTED_FILE = DATA_DIR / "discord-fa-signings-submitted.json"
+# Per-team 2K coach profile, submitted by the team's own role and entered into
+# the game by a streamer. Keyed by team abbr — see routers/coaching_settings.py.
+COACHING_SETTINGS_FILE = DATA_DIR / "coaching-settings.json"
 
 PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PLAYER", "PROTECTED", "SWAP_OWNER", "NOTES", "FROZEN", "FROZEN_REASON"]
 
@@ -116,6 +119,7 @@ _trade_exc_lock = threading.Lock()
 _cleanup_lock   = threading.Lock()
 _invest_lock   = threading.Lock()
 _market_lock   = threading.Lock()
+_coaching_lock = threading.Lock()
 
 VALID_TEAMS = {
     "ATL", "BKN", "BOS", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW",
