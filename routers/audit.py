@@ -50,6 +50,7 @@ _AUDITED_NAMES = {
     "ovr-history.json",
     "draft-picks.csv",
     "coaching-settings.json",
+    "streaming-days.json",
 }
 _AUDITED_SUFFIXES = ("-roster.csv", "-deadcap.csv", "-picks.csv")
 

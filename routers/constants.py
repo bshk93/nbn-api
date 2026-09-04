@@ -105,6 +105,9 @@ DISCORD_FA_SUBMITTED_FILE = DATA_DIR / "discord-fa-signings-submitted.json"
 # Per-team 2K coach profile, submitted by the team's own role and entered into
 # the game by a streamer. Keyed by team abbr — see routers/coaching_settings.py.
 COACHING_SETTINGS_FILE = DATA_DIR / "coaching-settings.json"
+# Per-date streaming status — a day of games marked done, and its YouTube VOD
+# link. Keyed by date — see routers/streaming_days.py.
+STREAMING_DAYS_FILE = DATA_DIR / "streaming-days.json"
 
 PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PLAYER", "PROTECTED", "SWAP_OWNER", "NOTES", "FROZEN", "FROZEN_REASON"]
 
@@ -120,6 +123,7 @@ _cleanup_lock   = threading.Lock()
 _invest_lock   = threading.Lock()
 _market_lock   = threading.Lock()
 _coaching_lock = threading.Lock()
+_streaming_days_lock = threading.Lock()
 
 VALID_TEAMS = {
     "ATL", "BKN", "BOS", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW",
