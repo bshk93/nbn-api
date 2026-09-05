@@ -92,6 +92,31 @@ check("holds is the difference between the two bases",
       all(r["holds"] == r["salary"] - r["salary_ex_holds"] for r in rows))
 check("roster counts are plausible", all(0 <= r["roster"] <= 25 for r in rows))
 
+print("roster counts exempt draft-rights and dead, not just two-way")
+# A held, unsigned draft pick or a dead-cap entry is a roster CSV row but
+# occupies no standard slot (_is_standard_roster_slot, routers/transactions.py)
+# — a team page's own roster count already knows this. This snapshot's count
+# silently didn't, and counted a draft-rights row as a live body (a 15-man
+# roster with one held pick read as 16/15 on the homepage).
+synth_dir = TMP / "synth-data"
+synth_dir.mkdir()
+(synth_dir / "zzz-roster.csv").write_text("SLUG\na\nb\nc\nd\ne\n")
+synth_bios = {
+    "a": {"type": "player"},
+    "b": {"type": "two-way"},
+    "c": {"type": "draft-rights"},
+    "d": {"type": "dead"},
+    "e": {"type": ""},
+}
+real_data_dir = ch.DATA_DIR
+try:
+    ch.DATA_DIR = synth_dir
+    synth_counts = ch._roster_counts("zzz", synth_bios)
+finally:
+    ch.DATA_DIR = real_data_dir
+check("draft-rights and dead are excluded from the standard count", synth_counts["roster"] == 2)
+check("two-way is still counted separately", synth_counts["two_way"] == 1)
+
 print("the figures are the validators' own, not a second implementation")
 bios = _load_json(DATA_DIR / "player-bios.json", {})
 season = rows[0]["season"]

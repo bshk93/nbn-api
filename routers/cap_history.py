@@ -42,7 +42,8 @@ from .auth import require_role
 from .constants import CAP_LEVELS_FILE, DATA_DIR, VALID_TEAMS, logger
 from .roster_picks import get_season_state, load_team_state
 from .storage import _current_league_year, _load_json, read_csv
-from .transactions import _compute_team_salary, _compute_team_salary_ex_holds
+from .transactions import (_compute_team_salary, _compute_team_salary_ex_holds,
+                            _is_standard_roster_slot)
 
 router = APIRouter()
 
@@ -77,10 +78,15 @@ def _roster_counts(team: str, bios: dict) -> dict:
     _, rows = read_csv(path)
     standard = two_way = 0
     for row in rows:
-        bio = bios.get((row.get("SLUG") or "").strip(), {})
-        if bio.get("type") == "two-way":
+        bio_type = bios.get((row.get("SLUG") or "").strip(), {}).get("type", "")
+        if bio_type == "two-way":
             two_way += 1
-        else:
+        # draft-rights (held, unsigned pick) and dead (cap hit, no player) are
+        # roster CSV rows but occupy no standard slot — same exemption the
+        # roster page's own count uses (_is_standard_roster_slot). Missing
+        # this counted an unsigned pick's draft rights as a live body, which
+        # is how a 15-man SAS roster with one held pick showed as 16/15.
+        elif _is_standard_roster_slot(bio_type):
             standard += 1
     return {"roster": standard, "two_way": two_way}
 
