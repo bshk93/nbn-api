@@ -124,6 +124,7 @@ _invest_lock   = threading.Lock()
 _market_lock   = threading.Lock()
 _coaching_lock = threading.Lock()
 _streaming_days_lock = threading.Lock()
+_donations_lock = threading.Lock()
 
 VALID_TEAMS = {
     "ATL", "BKN", "BOS", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW",
