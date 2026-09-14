@@ -1001,6 +1001,56 @@ STATE["players"]["curry-stephen"].pop("agent", None)
 check("…and on one nobody holds at all",
       fa.void_offer(ap["id"], fa.VoidIn(reason="head cleanup"), HEAD)["status"] == "voided")
 
+# ── history endpoint (read-only, independent of the pool) ────────────────────
+# A player who has since resigned and left the pool 404s from `review` — this
+# is the one route into the same data that doesn't gate on pool membership.
+STATE["rounds"] = [{"id": "r1", "number": 1, "name": "Round 1"},
+                   {"id": "r2", "number": 2, "name": "Round 2"}]
+OFFERS.extend([
+    {"id": "hoff1", "number": 501, "player": "gone-fa", "team": "BKN", "round_id": "r1",
+     "status": "voided", "version": 1, "submitted_at": "2025-07-01T00:00:00Z",
+     "submitted_by": "bknOwner", "created_by": "bknOwner", "archived_at": "2025-07-05T00:00:00Z",
+     "void": {"at": "2025-07-03T00:00:00Z", "by": "facHead", "reason": "duplicate",
+              "from_status": "submitted"},
+     "offer": {"contract": {}}},
+    {"id": "hoff2", "number": 502, "player": "gone-fa", "team": "PHX", "round_id": "r2",
+     "status": "submitted", "version": 1, "submitted_at": "2025-08-01T00:00:00Z",
+     "submitted_by": "phxOwner", "created_by": "phxOwner", "archived_at": "2025-08-05T00:00:00Z",
+     "void": None, "offer": {"contract": {}}},
+    # Never archived — the round it's in was never finalized. Must stay hidden
+    # even from a role that would otherwise pass the gate (§ 4.5's opacity for
+    # a round genuinely still in play, not just the pool gate).
+    {"id": "hoff3a", "number": 503, "player": "gone-fa", "team": "MIA", "round_id": "r2",
+     "status": "submitted", "version": 1, "submitted_at": "2025-08-02T00:00:00Z",
+     "submitted_by": "miaOwner", "created_by": "miaOwner", "archived_at": None,
+     "void": None, "offer": {"contract": {}}},
+    {"id": "hoff3", "number": 504, "player": "gone-fa", "team": "LAL", "round_id": None,
+     "status": "draft", "version": 1, "submitted_at": None,
+     "submitted_by": None, "created_by": "lalOwner", "archived_at": None,
+     "void": None, "offer": {"contract": {}}},
+])
+BALLOTS["gone-fa"] = {"r2": {"ballots": {}, "final": {
+    "locked_at": "2025-08-05T00:00:00Z", "locked_by": "facHead",
+    "totals": {"hoff2": 1000}, "path": "committee"}}}
+
+hist = fa.player_history("gone-fa", MEM_A)
+check("history covers every round the player was ever in",
+      [r["round_id"] for r in hist["rounds"]] == ["r2", "r1"])
+check("drafts never appear, even in history",
+      all(o["id"] != "hoff3" for r in hist["rounds"] for o in r["offers"]))
+check("neither does an offer whose round was never finalized",
+      all(o["id"] != "hoff3a" for r in hist["rounds"] for o in r["offers"]))
+check("a voided offer stays on the record",
+      any(o["id"] == "hoff1" for r in hist["rounds"] for o in r["offers"]))
+r2 = next(r for r in hist["rounds"] if r["round_id"] == "r2")
+check("the locked ballot totals come back with the round",
+      r2["final"]["totals"] == {"hoff2": 1000})
+r1 = next(r for r in hist["rounds"] if r["round_id"] == "r1")
+check("a round with no lock reports none", r1["final"] is None)
+
+check("any FAC/agent/head role can read it, whether or not they're assigned",
+      fa.player_history("gone-fa", AGENT_B)["player"] == "gone-fa")
+
 print("\n" + ("=" * 40))
 if FAILS:
     print(f"FAILURES: {FAILS}")

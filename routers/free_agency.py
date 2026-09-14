@@ -1885,6 +1885,50 @@ def review_player(slug: str, info: dict = Depends(get_token_info)):
     }
 
 
+@router.get("/api/fa/history/{slug}")
+def player_history(slug: str,
+                   info: dict = Depends(require_any_role("fac", "fac_head", "agent"))):
+    """Every offer this player has drawn and every ballot locked on him, across
+    every round he's ever been through — including one he has since resigned
+    out of and left the pool. `review_player` 404s there (it gates on current
+    pool membership); this is the one route into the same data that doesn't,
+    since a closed round has nothing left to protect by staying opaque. Without
+    it, that history was readable only by scrolling Discord.
+
+    Drafts stay excluded even here — a draft never left the team's own scratch
+    pad while live, and going stale doesn't make it committee business. Same
+    reasoning extends to anything not yet archived: an offer only archives at
+    its round's finalize (§ 4.2), so requiring it keeps a round that's still
+    genuinely in progress just as opaque here as `_require_reviewer` keeps it
+    on `review` — this route retires the pool gate, not the § 4.5 one. Because
+    a slug drops out of the pool exactly when its cap hold resolves, and that
+    only happens after the round that resolved it is finalized (finalize
+    records the outcome; the actual signing on `/transactions` comes after),
+    a real "gone from the pool" player has nothing left unarchived to filter
+    anyway — this is a belt-and-suspenders bound, not one expected to bite.
+    """
+    offers = [o for o in _load_offers() if o["player"] == slug and o["status"] != "draft"
+             and o.get("archived_at") is not None]
+    ballots = _load_ballots().get(slug, {})
+    round_meta = {r["id"]: r for r in _load_state().get("rounds", [])}
+    # A round only contributes if it has an archived offer or a locked ballot —
+    # an in-progress ballot on a round with nothing archived yet would otherwise
+    # surface as an empty row with no offers and no result to show for it.
+    round_ids = ({o["round_id"] for o in offers if o["round_id"]}
+                | {rid for rid, node in ballots.items() if node.get("final")})
+    rounds = sorted(
+        ({"round_id": rid,
+          "round_name": round_meta.get(rid, {}).get("name", rid),
+          "offers": sorted((o for o in offers if o["round_id"] == rid),
+                           key=lambda o: o["number"]),
+          "final": (ballots.get(rid) or {}).get("final")}
+         for rid in round_ids),
+        key=lambda r: round_meta.get(r["round_id"], {}).get("number", 0),
+        reverse=True,
+    )
+    return {"player": slug, "rounds": rounds}
+
+
 def _assignable(slug: str, offers: list[dict]) -> list[dict]:
     """The sub-committee picker's roster, with conflicts already resolved.
 
