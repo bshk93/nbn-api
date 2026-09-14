@@ -1294,6 +1294,7 @@ def _apply_convert_twoway(details: ConvertTwoWayDetails, txn_date: str, info: di
         "guarantee_dates": details.contract.guarantee_dates,
         "guarantee_schedule": details.contract.guarantee_schedule,
         "cap_holds": details.contract.cap_holds,
+        "years_experience": details.contract.years_experience,
         "txn_id": txn_id,
     }]
 
@@ -1533,6 +1534,7 @@ def _apply_sign(details: SignDetails, txn_date: str, info: dict, txn_id: Optiona
         "guarantee_dates": details.contract.guarantee_dates,
         "guarantee_schedule": details.contract.guarantee_schedule,
         "cap_holds": details.contract.cap_holds,
+        "years_experience": details.contract.years_experience,
         "txn_id": txn_id,
     }]
 
