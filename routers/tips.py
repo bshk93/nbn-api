@@ -20,6 +20,7 @@ class TipIn(BaseModel):
     to: str
     amount: float
     message: str = ""
+    context: str | None = None
 
 
 class TipError(ValueError):
@@ -27,7 +28,8 @@ class TipError(ValueError):
     member, insufficient funds). Callers map this to their own error shape."""
 
 
-def perform_tip(sender: str, to: str, amount: float, message: str = "") -> dict:
+def perform_tip(sender: str, to: str, amount: float, message: str = "",
+                 context: str | None = None) -> dict:
     """Move NB¥ from `sender` to `to`, record the tip + ledger entries, and
     return balances. The single source of truth for tipping — used by both the
     HTTP endpoint and the Discord /tip command. Raises TipError on rejection."""
@@ -63,6 +65,8 @@ def perform_tip(sender: str, to: str, amount: float, message: str = "") -> dict:
             "message": msg,
             "ts":      datetime.now(timezone.utc).isoformat(),
         }
+        if context:
+            tip["context"] = context
         tips.append(tip)
         _save_json(TIPS_FILE, tips)
 
@@ -78,7 +82,7 @@ def perform_tip(sender: str, to: str, amount: float, message: str = "") -> dict:
 @router.post("/api/tips")
 def send_tip(body: TipIn, info: dict = Depends(get_token_info)):
     try:
-        result = perform_tip(info["name"], body.to, body.amount, body.message)
+        result = perform_tip(info["name"], body.to, body.amount, body.message, body.context)
     except TipError as e:
         code = 404 if "not found" in str(e) else 422
         raise HTTPException(status_code=code, detail=str(e))
@@ -95,6 +99,27 @@ def get_tip_totals():
     for t in tips:
         totals[t["to"]] = round(totals.get(t["to"], 0.0) + t["amount"], 2)
     return totals
+
+
+@router.get("/api/tips/context/{context}")
+def get_context_tips(context: str):
+    """Tips sent against one piece of content (e.g. an article — context is
+    `"article:{id}"`) rather than a member's whole history, for display on
+    that content's own page. Declared before /{member} for the same reason
+    /totals is — 'context' isn't a member name."""
+    tips = _load_json(TIPS_FILE, [])
+    result = []
+    total = 0.0
+    for t in tips:
+        if t.get("context") != context:
+            continue
+        total = round(total + t["amount"], 2)
+        entry = {"id": t["id"], "from": t["from"], "to": t["to"], "amount": t["amount"], "ts": t["ts"]}
+        if t["amount"] >= TIP_MESSAGE_THRESHOLD and t.get("message"):
+            entry["message"] = t["message"]
+        result.append(entry)
+    result.sort(key=lambda x: x["ts"], reverse=True)
+    return {"total": round(total, 2), "tips": result}
 
 
 @router.get("/api/tips/{member}")
