@@ -27,6 +27,7 @@ MODULES = ["test_stepien_rule", "test_pick_advance_limit", "test_picks_matching"
            "test_inbox", "test_inbox_wiring", "test_cleanup", "test_schedule",
            "test_coaching_settings", "test_streaming_days", "test_donations",
            "test_news_rankings", "test_news_rankings_routes", "test_tips",
+           "test_news_credited",
            "test_og", "test_health", "test_audit_log", "test_cap_history",
            "test_poopoo_summary",
            "test_stats_harness", "test_stats_writer",

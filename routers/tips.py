@@ -23,6 +23,13 @@ class TipIn(BaseModel):
     context: str | None = None
 
 
+class TipMultiIn(BaseModel):
+    to: list[str]
+    amount: float
+    message: str = ""
+    context: str | None = None
+
+
 class TipError(ValueError):
     """Raised by perform_tip on a rejected tip (bad amount, self, unknown
     member, insufficient funds). Callers map this to their own error shape."""
@@ -79,6 +86,62 @@ def perform_tip(sender: str, to: str, amount: float, message: str = "",
     return {"sender_bal": sender_bal, "recipient_bal": recipient_bal, "tip": tip}
 
 
+def perform_tip_multi(sender: str, to: list[str], amount: float, message: str = "",
+                       context: str | None = None) -> dict:
+    """Tip several recipients the same amount each in one all-or-nothing
+    transfer — for a piece with more than one credited author (a power
+    rankings edition's voters and blurb writers), where "any or all of them"
+    needs the whole cost checked up front rather than draining the sender
+    partway through a loop of single perform_tip() calls."""
+    to = list(dict.fromkeys(to))  # dedupe, preserve order
+    if not to:
+        raise TipError("Pick at least one recipient")
+    if amount <= 0:
+        raise TipError("amount must be positive")
+    if sender in to:
+        raise TipError("Cannot tip yourself")
+    all_members = load_members()
+    if sender not in all_members:
+        raise TipError(f"Member '{sender}' not found")
+    unknown = [m for m in to if m not in all_members]
+    if unknown:
+        raise TipError(f"Member(s) not found: {', '.join(unknown)}")
+
+    total = round(amount * len(to), 2)
+    with _tips_lock, _balances_lock:
+        balances = _load_balances()
+        _init_bal(balances, sender)
+        for m in to:
+            _init_bal(balances, m)
+        if balances[sender] < total:
+            raise TipError(f"Insufficient balance — NB¥{balances[sender]:.2f} available, "
+                            f"need NB¥{total:.2f} for {len(to)} recipients")
+        balances[sender] = round(balances[sender] - total, 2)
+        sender_bal = balances[sender]
+
+        ts = datetime.now(timezone.utc).isoformat()
+        msg = message.strip() if amount >= TIP_MESSAGE_THRESHOLD else ""
+        tips = _load_json(TIPS_FILE, [])
+        new_tips = []
+        ledger = [{"ts": ts, "member": sender, "delta": -total, "balance": sender_bal,
+                   "reason": f"Tip to {', '.join(to)}"}]
+        for m in to:
+            balances[m] = round(balances[m] + amount, 2)
+            tip = {"id": secrets.token_hex(6), "from": sender, "to": m,
+                   "amount": amount, "message": msg, "ts": ts}
+            if context:
+                tip["context"] = context
+            new_tips.append(tip)
+            ledger.append({"ts": ts, "member": m, "delta": amount,
+                            "balance": balances[m], "reason": f"Tip from {sender}"})
+        tips.extend(new_tips)
+        _save_json(TIPS_FILE, tips)
+        _save_balances(balances)
+
+    _append_ledger(ledger)
+    return {"sender_bal": sender_bal, "tips": new_tips}
+
+
 @router.post("/api/tips")
 def send_tip(body: TipIn, info: dict = Depends(get_token_info)):
     try:
@@ -88,6 +151,17 @@ def send_tip(body: TipIn, info: dict = Depends(get_token_info)):
         raise HTTPException(status_code=code, detail=str(e))
     log_write(info, f"POST tips — NB¥{body.amount} to {body.to}")
     return {"ok": True, "new_balance": result["sender_bal"]}
+
+
+@router.post("/api/tips/multi")
+def send_tip_multi(body: TipMultiIn, info: dict = Depends(get_token_info)):
+    try:
+        result = perform_tip_multi(info["name"], body.to, body.amount, body.message, body.context)
+    except TipError as e:
+        code = 404 if "not found" in str(e) else 422
+        raise HTTPException(status_code=code, detail=str(e))
+    log_write(info, f"POST tips/multi — NB¥{body.amount} each to {', '.join(body.to)}")
+    return {"ok": True, "new_balance": result["sender_bal"], "tips": result["tips"]}
 
 
 @router.get("/api/tips/totals")

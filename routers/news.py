@@ -220,6 +220,9 @@ def _article_detail(a: dict, info: Optional[dict] = None) -> dict:
     else:
         out = dict(a)
     out["comment_count"] = len(a.get("comments", []))
+    # Only once published — pre-publish this would leak who has submitted a
+    # ballot while voting is supposed to be blind (see _article_view above).
+    out["credited"] = _credited(a) if a.get("status") == "published" else []
     return out
 
 
