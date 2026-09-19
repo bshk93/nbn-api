@@ -35,9 +35,23 @@ experience tier, mirroring how a general § 3.12 minimum contract already
 works (a declared experience figure is fixed for the life of the deal; only
 that season's own scale value moves the dollar amount). Confirmed against
 Otega Oweh's real submission (pick 45, 2026): all three years priced at flat
-tier 1 — $2,185,116 / $2,571,895 / $2,791,275 for 26-27/27-28/28-29 — which
-only reads as a raise because the season's own scale is growing, not because
-the tier climbed.
+tier 1 for 26-27/27-28/28-29, which only reads as a raise because the season's
+own scale is growing, not because the tier climbed.
+
+Fourth bug, found 2026-09-19 — in this file, not in the code. The three
+figures used to be written out here as literals. On **2026-09-10** the minimum
+salary scale for 27-28 onward was corrected: every tier from that season on was
+shifted one index, the old table having carried no real 0-years row at all (its
+"0" was the 1-year figure, ~$2.29M where the rookie minimum is ~$1.43M). 25-26
+and 26-27 were always right. The literals then described a table that no longer
+existed, and this file failed for nine days while the code under it was
+correct. Everything is derived from `cap-levels.json` now — see `tier()`.
+
+That correction also left three second-round contracts on the books priced off
+the retired table (Oweh, Jefferson, Sanders — 27-28 onward only; every 26-27
+year is right). Re-pricing an executed contract is the office's call, not this
+file's, so they are recorded in `nbn-today/BACKLOG.md` rather than quietly
+fixed here.
 
     venv/bin/python -m tests.test_second_round_scale
 """
@@ -64,47 +78,86 @@ CAP_LEVELS = json.loads(Path("/var/lib/nothing-but-stats/cap-levels.json").read_
 BIO = {"draft_year": 2026, "draft_round": 2, "draft_pick": 45}
 
 
+def tier(season: str, t: str) -> str:
+    """That season's own scale value at experience tier `t`, formatted the way
+    a contract carries it.
+
+    Derived, never hardcoded. This test originally pinned Otega Oweh's three
+    figures literally, and on 2026-09-10 the minimum salary scale for 27-28
+    onward was corrected — every tier from 27-28 on was shifted one index, the
+    old table having had no real 0-years row at all (its "0" was the 1-year
+    figure). The literals then described a table that no longer existed and the
+    test failed for nine days while the code was right. A figure that comes out
+    of `cap-levels.json` belongs in an assertion only by reference."""
+    return f"${CAP_LEVELS[season]['min_salary_scale'][t]:,}"
+
+
 def main():
     print("3-year deal, flat tier 1 (Otega Oweh's real submission)")
     correct3 = ContractIn(
         type="player",
-        salaries={"26-27": "$2,185,116", "27-28": "$2,571,895", "28-29": "$2,791,275"},
+        salaries={"26-27": tier("26-27", "1"), "27-28": tier("27-28", "1"),
+                  "28-29": tier("28-29", "1")},
         cap_holds={"27-28": "NON_GTD", "28-29": "TEAM_OPT"},
     )
     r = tx._check_second_round_scale_terms(correct3, BIO, CAP_LEVELS)
     check("scored by the exact-match check, not None", r is not None)
     check("passes", r is not None and r.passed)
-    scale = CAP_LEVELS["26-27"]["min_salary_scale"], CAP_LEVELS["27-28"]["min_salary_scale"], \
-        CAP_LEVELS["28-29"]["min_salary_scale"]
-    check("all three years are literally tier \"1\" of their own season's scale",
-          correct3.salaries["26-27"] == f"${scale[0]['1']:,}"
-          and correct3.salaries["27-28"] == f"${scale[1]['1']:,}"
-          and correct3.salaries["28-29"] == f"${scale[2]['1']:,}")
-    # For reference: the raw ladder still rejects this contract on its own
-    # (the tier-1 figure grows season over season by more than 5%) —
-    # `_validate_sign_pick` never lets it reach that check for a recognized
-    # 3-/4-year shape, since `_check_second_round_scale_terms` runs first.
-    ladder = tx._check_contract_raises(correct3, bird_pct=False, cur_season="26-27",
-                                        bio=BIO, cap_levels=CAP_LEVELS)
-    check("ladder alone would still reject this (confirms the fix routes around it, "
-          "not that the ladder itself changed)", ladder is not None and not ladder.passed)
+    check("all three years are literally tier \"1\" of their own season's scale, "
+          "and none of them is that season's tier 0 or tier 2",
+          all(correct3.salaries[s] == tier(s, "1")
+              and correct3.salaries[s] not in (tier(s, "0"), tier(s, "2"))
+              for s in ("26-27", "27-28", "28-29")))
+    # The point of the fix is the *routing*: `_validate_sign_pick` consults
+    # `_check_second_round_scale_terms` first and only falls back to the § 3.9
+    # ladder when the shape isn't a recognized 3-/4-year one, so a contract
+    # priced exactly to § 7.1 is never judged by the ladder.
+    #
+    # That used to be shown by pointing the ladder at the real contract and
+    # watching it reject — the old (pre-2026-09-10) scale grew tier 1 by 11.9%
+    # from 26-27 to 27-28, well past the ladder's 5%. The corrected scale grows
+    # it by exactly 5.0%, so the ladder now accepts the real contract and that
+    # demonstration proves nothing. Worse, it proved nothing *quietly*: it kept
+    # passing on data that had changed underneath it.
+    #
+    # Shown against a synthetic scale instead, so it tests the routing and not
+    # whichever growth rate the committee last entered.
+    steep = {s: {"min_salary_scale": {"0": 1_000_000, "1": 2_000_000, "2": 2_200_000}}
+             for s in ("26-27", "27-28", "28-29")}
+    steep["27-28"]["min_salary_scale"]["1"] = 3_000_000   # +50% on Year 1
+    steep["28-29"]["min_salary_scale"]["1"] = 4_500_000   # +50% again
+    steep3 = ContractIn(
+        type="player",
+        salaries={"26-27": "$2,000,000", "27-28": "$3,000,000", "28-29": "$4,500,000"},
+        cap_holds={"27-28": "NON_GTD", "28-29": "TEAM_OPT"},
+    )
+    ladder = tx._check_contract_raises(steep3, bird_pct=False, cur_season="26-27",
+                                        bio=BIO, cap_levels=steep)
+    check("a scale that outruns § 3.9 is rejected by the ladder alone",
+          ladder is not None and not ladder.passed)
+    routed = tx._check_second_round_scale_terms(steep3, BIO, steep)
+    check("but passes § 7.1's exact-match check, which is what runs first",
+          routed is not None and routed.passed)
 
     print("\na genuinely mispriced Year 2 (escalated to tier 2 instead of staying flat)")
     mispriced = ContractIn(
         type="player",
-        salaries={"26-27": "$2,185,116", "27-28": "$2,664,401", "28-29": "$2,791,275"},
+        salaries={"26-27": tier("26-27", "1"), "27-28": tier("27-28", "2"),
+                  "28-29": tier("28-29", "1")},
         cap_holds={"27-28": "NON_GTD", "28-29": "TEAM_OPT"},
     )
     r2 = tx._check_second_round_scale_terms(mispriced, BIO, CAP_LEVELS)
     check("flagged", r2 is not None and not r2.passed)
     check("names the correct (flat tier-1) Year 2 figure",
-          r2 is not None and "$2,571,895" in r2.message)
+          r2 is not None and tier("27-28", "1") in r2.message)
 
     print("\nsame 3-year deal PLUS the trailing § 3.10 RFA hold (a live 4th "
           "salary entry for the hold season, tagged RFA)")
     with_trailing_hold = ContractIn(
         type="player",
-        salaries={**correct3.salaries, "29-30": "$5,303,423"},  # auto-priced hold; not scored here
+        # An auto-priced § 3.10 hold, not scored here — a deliberately off-scale
+        # figure, so the check is that it is skipped rather than matched.
+        salaries={**correct3.salaries, "29-30": "$5,303,423"},
         cap_holds={"27-28": "NON_GTD", "28-29": "TEAM_OPT", "29-30": "RFA"},
     )
     r3 = tx._check_second_round_scale_terms(with_trailing_hold, BIO, CAP_LEVELS)
