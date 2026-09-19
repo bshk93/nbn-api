@@ -91,15 +91,14 @@ JOIN_BLACKLIST_FILE   = DATA_DIR / "join-blacklist.json"
 MEMBER_SEEN_FILE      = DATA_DIR / "member-seen.json"
 # Per-member notifications: { "<member>": [{id, ts, text, link, read}] }
 INBOX_FILE = DATA_DIR / "inboxes.json"
-# "Clean Up the Poo Poo" — member-submitted bio-gap fills, admin-reviewed.
-# See nbn-today/docs/clean-up-the-poopoo-spec.md. Deliberately separate from
-# BIO_REWARDS_FILE/the curator direct-edit path (players.py) — this is the
-# open-submission-with-review path for members who aren't curators.
-CLEANUP_SUBMISSIONS_FILE = DATA_DIR / "cleanup-submissions.json"
-# Read by the discord_fa gap type (nbn-api/docs/discord-transaction-backfill.md):
-# the flagged bucket is the question bank, the submitted-state file is written
-# to on approval so the standalone backfill scripts can't later re-submit the
-# same candidate as a duplicate transaction.
+# Discord FA-signing backfill state — see
+# nbn-api/docs/discord-transaction-backfill.md. The flagged bucket is the set of
+# candidates a human still has to judge; the submitted-state file is written on
+# submission so the standalone backfill scripts can't later re-submit the same
+# candidate as a duplicate transaction. These were also the question bank for
+# the "Clean Up the Poo Poo" member game's discord_fa gap type, which was
+# retired 2026-09-19 — nothing serves them over HTTP now, and the scripts are
+# the only remaining reader.
 DISCORD_FA_RESOLVED_FILE  = DATA_DIR / "discord-fa-signings-resolved.json"
 DISCORD_FA_SUBMITTED_FILE = DATA_DIR / "discord-fa-signings-submitted.json"
 # Per-team 2K coach profile, submitted by the team's own role and entered into
@@ -119,7 +118,6 @@ _ovr_lock      = threading.Lock()
 _state_lock    = threading.Lock()
 _deadcap_lock  = threading.Lock()
 _trade_exc_lock = threading.Lock()
-_cleanup_lock   = threading.Lock()
 _invest_lock   = threading.Lock()
 _market_lock   = threading.Lock()
 _coaching_lock = threading.Lock()
