@@ -43,7 +43,7 @@ from .constants import CAP_LEVELS_FILE, DATA_DIR, VALID_TEAMS, logger
 from .roster_picks import get_season_state, load_team_state
 from .storage import _current_league_year, _load_json, read_csv
 from .transactions import (_compute_team_salary, _compute_team_salary_ex_holds,
-                            _is_standard_roster_slot)
+                            _is_standard_roster_slot, _real_empty_roster_charge)
 
 router = APIRouter()
 
@@ -98,13 +98,30 @@ def build_rows(on_date: Optional[str] = None, season: Optional[str] = None) -> l
     bios = _load_json(DATA_DIR / "player-bios.json", {})
     state = load_team_state()
     levels = _cap_levels_for(season)
+    # The full record, not the three thresholds `_cap_levels_for` narrows to —
+    # the Empty Roster Charge is priced off `min_salary_scale`.
+    all_levels = _load_json(CAP_LEVELS_FILE, {})
 
     rows = []
     for team in sorted(VALID_TEAMS):
-        salary = _compute_team_salary(team, bios, season)
-        ex_holds = _compute_team_salary_ex_holds(team, bios, season)
+        raw = _compute_team_salary(team, bios, season)
+        raw_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
         ts = get_season_state(state, team, season)
         counts = _roster_counts(team, bios)
+        # § 2.1a: a team below 12 standard players carries a real charge that
+        # "counts toward the team's real guaranteed salary — including Hard Cap
+        # and apron comparisons — exactly as a real player contract would". So
+        # it belongs in both figures here, which are this team's actual books on
+        # this date and not a projection of anything. Until 2026-09-19 it was in
+        # neither, and a short-handed team's row read low by it; rows written
+        # before that date are raw and cannot be corrected after the fact, which
+        # is what `empty_roster_charge` below is for — it says how much of this
+        # row's salary is the charge, so an old row is recognisable by its
+        # absence rather than by silently differing.
+        erc_deficiency, erc_charge = _real_empty_roster_charge(
+            counts["roster"], season, all_levels)
+        salary = raw + erc_charge
+        ex_holds = raw_ex_holds + erc_charge
         rows.append({
             "date": on_date,
             "season": season,
@@ -113,8 +130,11 @@ def build_rows(on_date: Optional[str] = None, season: Optional[str] = None) -> l
             "salary_ex_holds": ex_holds,
             # The holds are the difference, and they are exactly what makes the
             # two figures diverge during free agency — worth storing resolved so
-            # a reader never has to know which basis a chart is on.
-            "holds": salary - ex_holds,
+            # a reader never has to know which basis a chart is on. The charge
+            # is in both and so cancels; taken off the raw pair to say that.
+            "holds": raw - raw_ex_holds,
+            "empty_roster_charge": erc_charge,
+            "empty_roster_deficiency": erc_deficiency,
             "cap": levels["cap"],
             "apron1": levels["apron1"],
             "apron2": levels["apron2"],

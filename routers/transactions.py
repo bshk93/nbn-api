@@ -2109,8 +2109,14 @@ def _is_standard_roster_slot(bio_type: str) -> bool:
     return bio_type not in _ROSTER_EXEMPT_TYPES
 
 
-def _count_standard_roster(team: str, excluding: Optional[str] = None) -> int:
+def _count_standard_roster(team: str, excluding: Optional[str] = None,
+                           bios: Optional[dict] = None) -> int:
     """Standard bodies on `team`'s roster, optionally net of one player.
+
+    `bios` is an optional hand-in of the bios the caller already has, purely to
+    save a re-parse — `player-bios.json` is ~700KB and `load_player_bios()` is
+    uncached, so calling this in a per-team loop without it costs a full parse
+    per team (~9ms each, ~280ms over 30).
 
     `excluding` exists because a team's own free agent **stays on the roster CSV
     with `type: "player"`** — a cap hold is still a roster row. So re-signing him
@@ -2128,7 +2134,8 @@ def _count_standard_roster(team: str, excluding: Optional[str] = None) -> int:
     if not path.exists():
         return 0
     _, rows = read_csv(path)
-    bios = load_player_bios()
+    if bios is None:
+        bios = load_player_bios()
     return sum(
         1 for r in rows
         if r.get("SLUG", "").strip()
@@ -3171,6 +3178,33 @@ def _empty_roster_charge(standard_count_after: int, season: str, cap_levels: dic
     return deficiency, deficiency * _rookie_min_salary(season, cap_levels)
 
 
+def _real_empty_roster_charge(standard_count: int, season: str, cap_levels: dict) -> tuple[int, int]:
+    """Returns (deficiency, charge) for the REAL Empty Roster Charge a team is
+    carrying right now — § 2.1a's narrow 12-player floor, not the 14-player
+    trade-legality mock in `_empty_roster_charge` above.
+
+    The difference between the two matters and they are not interchangeable:
+    this one is a team's actual books ("what does this roster cost today"), the
+    other is a hypothetical the trade validator folds into a *projection*
+    ("what would this roster cost if every slot up to 14 were filled"). A team
+    at 13 carries a mock of one slot and a real charge of zero.
+
+    `standard_count` is the caller's own count so this does not re-read the
+    roster CSV — every caller already has it. It is the count as the books
+    stand, never a post-transaction one: the charge on a projection has to be
+    recomputed from the count *after* the move, since a signing that fills the
+    slot erases the charge it was carrying.
+
+    This is the Python twin of `computeEmptyRosterCharge` in team.js, which is
+    what puts the same charge on the team page as a roster line item and into
+    the Cap Health card's Team Salary. Keep the two in step.
+    """
+    deficiency = max(0, ROSTER_CHARGE_MIN - standard_count)
+    if deficiency == 0:
+        return 0, 0
+    return deficiency, deficiency * _rookie_min_salary(season, cap_levels)
+
+
 def _pending_offer_hold(team: str, season: str) -> int:
     """§ 3.15: "The offering team has a cap hold equal to the offer sheet value
     placed on their books until the matching period concludes."
@@ -3194,7 +3228,15 @@ def _pending_offer_hold(team: str, season: str) -> int:
 
 def _compute_team_salary(team: str, bios: dict, season: str) -> int:
     """Sum all active salary + dead cap for a team in a given season, plus any
-    § 3.15 hold from an offer sheet this team currently has outstanding."""
+    § 3.15 hold from an offer sheet this team currently has outstanding.
+
+    Deliberately does NOT include the § 2.1a Empty Roster Charge. Most callers
+    use this as the *baseline* of a projection and then apply their own charge
+    for the roster count the transaction leaves behind — folding a charge in
+    here would have every one of those double-count it against a stale count.
+    A caller that wants the team's real current books adds
+    `_real_empty_roster_charge` itself; `cap_history.build_rows` is the
+    reference example."""
     total = 0
     path = DATA_DIR / f"{team.lower()}-roster.csv"
     if path.exists():

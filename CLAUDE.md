@@ -650,9 +650,20 @@ years after someone started recording. Started 2026-08-25.
 Two invariants:
 
 - **It does no cap math of its own.** The figures come from `_compute_team_salary`
-  and `_compute_team_salary_ex_holds` — the validators' own helpers — so the
-  history can never disagree with what the office enforced. `tests/test_cap_history.py`
-  recomputes all 30 teams both ways to pin it. Don't inline a salary sum here.
+  and `_compute_team_salary_ex_holds` — the validators' own helpers — plus
+  `_real_empty_roster_charge` on top of both, which is § 2.1a's real charge for
+  a roster under **12** standard players (not `_empty_roster_charge`, the wider
+  14-player mock the trade validator folds into a *projection*). The charge
+  belongs here because these rows are a team's actual books on a date, and
+  § 2.1a counts it toward real guaranteed salary, hard cap and aprons included;
+  it was missing until 2026-09-19, and a short-handed team's row read low by it
+  while the team's own page — which has always charged it, via
+  `computeEmptyRosterCharge` in `nbn-today/teams/team.js` — read high. The row
+  reports it separately as `empty_roster_charge`, which is what lets
+  `/committees/rosters` name the amount without a second implementation, and
+  what makes a pre-2026-09-19 row recognisable rather than silently different.
+  `tests/test_cap_history.py` recomputes all 30 teams both ways to pin it.
+  Don't inline a salary sum here.
 - **A `0` threshold is unknown, not exceeded.** 27-28 onward sit in
   `cap-levels.json` with `cap`/`apron1`/`apron2` all literally 0 (the committee
   figures aren't entered — it's a live P1 in `nbn-today/BACKLOG.md`). Read

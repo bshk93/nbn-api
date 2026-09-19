@@ -37,7 +37,8 @@ from .proposals import _member_current_team
 from .storage import (_current_league_year, _load_json, _parse_dollar,
                       _save_json, log_write)
 from .transactions import (ContractIn, SignDetails, _compute_team_salary,
-                           _min_salary_for, _require_validatable,
+                           _count_standard_roster, _min_salary_for,
+                           _real_empty_roster_charge, _require_validatable,
                            _rfa_eligibility, _signee_existing_hold,
                            _signing_fact_sheet, _validate_sign, _validation_ctx)
 
@@ -1773,7 +1774,17 @@ def _team_commitment(team: str, offers: list[dict], ctx: dict) -> dict:
     season = ctx["cur_season"]
     bios = ctx["bios"]
     cap = (ctx["cap_levels"].get(season) or {}).get("cap")
-    salary = _compute_team_salary(team, bios, season)
+    # § 2.1a's Empty Roster Charge is real guaranteed salary and so eats real
+    # room — the same figure the team's own page shows in its Team Salary.
+    # It is slightly conservative here and deliberately so: each of these
+    # offers, if it converts, fills a slot and abates one slot of the charge,
+    # so a short-handed team's true room is up to `charge` higher than this.
+    # Netting that out would mean guessing which offers land, and the error
+    # runs in the safe direction — a team that cannot quite fund its book hears
+    # about it, rather than finding out after the ballot.
+    erc_deficiency, erc_charge = _real_empty_roster_charge(
+        _count_standard_roster(team, bios=bios), season, ctx["cap_levels"])
+    salary = _compute_team_salary(team, bios, season) + erc_charge
     live = [o for o in offers if o["team"] == team and _is_live(o) and o["status"] != "draft"]
     committed = sum(_parse_dollar((o["offer"]["contract"].get("salaries") or {}).get(season, ""))
                     for o in live)
@@ -1791,6 +1802,10 @@ def _team_commitment(team: str, offers: list[dict], ctx: dict) -> dict:
         "live_offers": len(live),
         "committed_year1": committed,
         "room": room,
+        # Named separately so the form can explain a room figure that does not
+        # match the roster's contracts added up.
+        "empty_roster_charge": erc_charge,
+        "empty_roster_deficiency": erc_deficiency,
         # Overcommitted means *bidding* more than you can fund. A team with
         # nothing out is not overcommitted no matter how far over the cap it
         # sits — `committed > room` alone flagged every over-cap team with zero

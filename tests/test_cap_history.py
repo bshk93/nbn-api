@@ -30,6 +30,7 @@ from routers.constants import DATA_DIR, VALID_TEAMS  # noqa: E402
 from routers.storage import _load_json  # noqa: E402
 from routers.transactions import (  # noqa: E402
     _compute_team_salary, _compute_team_salary_ex_holds,
+    _empty_roster_charge, _real_empty_roster_charge,
 )
 
 FAILS = []
@@ -86,7 +87,11 @@ check("every team is present", {r["team"] for r in rows} == VALID_TEAMS)
 check("all rows carry the given date", all(r["date"] == "2026-01-01" for r in rows))
 required = {"date", "season", "team", "salary", "salary_ex_holds", "holds", "cap",
             "apron1", "apron2", "apron_position", "hard_cap", "mle_used",
-            "mle_type", "bae_used", "roster", "two_way"}
+            "mle_type", "bae_used", "roster", "two_way",
+            # /committees/rosters reads these to price a § 2.1a charge rather
+            # than recomputing one — dropping them puts the board back to
+            # naming the floor with no number.
+            "empty_roster_charge", "empty_roster_deficiency"}
 check("every row carries the full shape", all(required <= set(r) for r in rows))
 check("holds is the difference between the two bases",
       all(r["holds"] == r["salary"] - r["salary_ex_holds"] for r in rows))
@@ -122,12 +127,49 @@ bios = _load_json(DATA_DIR / "player-bios.json", {})
 season = rows[0]["season"]
 mismatched = []
 for row in rows:
-    if row["salary"] != _compute_team_salary(row["team"], bios, season):
+    # The helpers are the raw books; § 2.1a's Empty Roster Charge is the one
+    # thing this module adds on top, and it adds it to both bases equally.
+    erc = row["empty_roster_charge"]
+    if row["salary"] != _compute_team_salary(row["team"], bios, season) + erc:
         mismatched.append(f"{row['team']} salary")
-    if row["salary_ex_holds"] != _compute_team_salary_ex_holds(row["team"], bios, season):
+    if row["salary_ex_holds"] != _compute_team_salary_ex_holds(row["team"], bios, season) + erc:
         mismatched.append(f"{row['team']} ex_holds")
 check(f"all 30 teams match the helpers ({', '.join(mismatched) or 'none differ'})",
       not mismatched)
+
+print("§ 2.1a's Empty Roster Charge is on the books, not left off them")
+bad_holds = [r["team"] for r in rows
+             if r["holds"] != r["salary"] - r["salary_ex_holds"]]
+check(f"the charge cancels out of `holds` ({', '.join(bad_holds) or 'all 30 agree'})",
+      not bad_holds)
+rookie_min = (_load_json(ch.CAP_LEVELS_FILE, {}).get(season, {})
+              .get("min_salary_scale") or {}).get("0", 0)
+wrong_charge = [
+    r["team"] for r in rows
+    if r["empty_roster_deficiency"] != max(0, 12 - r["roster"])
+    or r["empty_roster_charge"] != max(0, 12 - r["roster"]) * rookie_min
+]
+check(f"priced at the rookie minimum per slot below 12 ({', '.join(wrong_charge) or 'all 30 agree'})",
+      not wrong_charge)
+check("a team at or above 12 carries none",
+      all(r["empty_roster_charge"] == 0 for r in rows if r["roster"] >= 12))
+short = [r for r in rows if r["roster"] < 12]
+check(f"a team below 12 carries one ({len(short)} short-handed now)",
+      all(r["empty_roster_charge"] > 0 for r in short) or not rookie_min)
+
+print("the real charge and the trade mock are two floors, not one")
+levels = {"99-00": {"min_salary_scale": {"0": 1_000_000}}}
+check("13 players: no real charge, one slot of trade mock",
+      _real_empty_roster_charge(13, "99-00", levels) == (0, 0)
+      and _empty_roster_charge(13, "99-00", levels) == (1, 1_000_000))
+check("11 players: one slot real, three slots of trade mock",
+      _real_empty_roster_charge(11, "99-00", levels) == (1, 1_000_000)
+      and _empty_roster_charge(11, "99-00", levels) == (3, 3_000_000))
+check("a full roster carries neither",
+      _real_empty_roster_charge(15, "99-00", levels) == (0, 0)
+      and _empty_roster_charge(15, "99-00", levels) == (0, 0))
+check("a season with no minimum scale on file prices nothing",
+      _real_empty_roster_charge(9, "99-00", {}) == (3, 0))
 
 print("one row per team per day, never two")
 result = ch.snapshot(on_date="2026-01-02")
