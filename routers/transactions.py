@@ -4708,7 +4708,79 @@ def _check_max_salary(details: SignDetails, bios: dict, season: str,
 
 
 def _validate_release(details: ReleaseDetails, ctx: dict) -> list[CheckResult]:
-    return []
+    """§ 5.1 release checks. Real content mirrors renounce's shape: an
+    eligibility test (error) plus the same roster-count consequence
+    (warning) — release removes a player from the active roster exactly
+    like renounce does, just for someone actually under contract.
+
+    Only two of § 5.1's three payment methods exist in `_apply_release`:
+    the original payment schedule (the default) and the stretch provision
+    (`stretch_years`). The buyout-with-cap-space method has no
+    implementation anywhere in the API — there is nothing for this
+    validator to check it against, so it is not offered here or anywhere
+    else. No hard-cap check either: dead cap is always derived from
+    salary/guarantee amounts already on the books, so a release can only
+    hold a team's cap number flat or lower it, never raise it.
+    """
+    checks: list[CheckResult] = []
+    bios = ctx["bios"]
+    bio = bios.get(details.player) or {}
+    name = bio.get("name") or details.player
+
+    team = _build_team_map().get(details.player)
+    if not team:
+        checks.append(CheckResult(
+            check="release_eligible", passed=False, level="error",
+            message=f"{name} is not on any roster.",
+        ))
+        return checks
+
+    cur_season = ctx["cur_season"]
+    holds = bio.get("cap_holds") or {}
+    salaries = bio.get("salaries") or {}
+    # A player whose every remaining season is a bare UFA/RFA/TEAM_OPT hold
+    # (or who has no salaries at all) carries no real contract to release —
+    # they're renounceable instead (§ 3.10), and releasing them would just
+    # ceremonially reproduce a renounce through the wrong transaction.
+    real_contract_years = [
+        s for s, sal in salaries.items()
+        if s >= cur_season and holds.get(s) not in ("UFA", "RFA", "TEAM_OPT") and _parse_dollar(sal)
+    ]
+    if not real_contract_years:
+        checks.append(CheckResult(
+            check="release_eligible", passed=False, level="error",
+            message=f"{name} has no real contract years left to release — renounce instead (§ 3.10).",
+        ))
+        return checks
+    checks.append(CheckResult(
+        check="release_eligible", passed=True,
+        message=f"{name} is under contract through {max(real_contract_years)} — releasable under § 5.1.",
+    ))
+
+    after = _count_standard_roster(team) - 1
+    if after < ROSTER_CHARGE_MIN:
+        short = ROSTER_CHARGE_MIN - after
+        per = _rookie_min_salary(cur_season, ctx["cap_levels"])
+        checks.append(CheckResult(
+            check="roster_minimum", passed=False, level="warning",
+            message=(f"This leaves {team} with {after} standard players, below the {ROSTER_CHARGE_MIN}-player "
+                     f"floor — an Empty Roster Charge of ${per:,} per open slot "
+                     f"(${per * short:,} total) applies immediately and counts toward hard cap "
+                     f"and apron comparisons (§ 2.1a)."),
+        ))
+    elif after < ROSTER_MIN:
+        checks.append(CheckResult(
+            check="roster_minimum", passed=False, level="warning",
+            message=(f"This leaves {team} with {after} standard players, below the {ROSTER_MIN}-player "
+                     f"minimum. No dollar charge applies above {ROSTER_CHARGE_MIN}, but every FO member "
+                     f"takes an activity strike if the shortfall lasts a week (§ 2.1)."),
+        ))
+    else:
+        checks.append(CheckResult(
+            check="roster_minimum", passed=True,
+            message=f"{team} is left with {after} standard players, at or above the {ROSTER_MIN}-player minimum.",
+        ))
+    return checks
 
 
 def _validate_renounce(details: RenounceDetails, ctx: dict) -> list[CheckResult]:
@@ -7860,6 +7932,101 @@ def self_option(body: SelfOptionIn, info: dict = Depends(get_token_info)):
         }
         _append_transaction(txn)
     notify_transaction(txn)
+    return {"ok": True, "transaction": txn, "checks": [c.model_dump() for c in checks]}
+
+
+@router.post("/api/validate/release")
+def validate_release(body: ReleaseDetails):
+    """Non-mutating § 5.1 check of a release. Shares `_validate_release` with
+    `POST /api/transactions` and `POST /api/self/release`. Public, no auth,
+    same terms as `/api/validate/renounce`. No fact sheet: dead cap can only
+    hold a team's cap number flat or lower it, so there's no cap-room
+    figure that would tell a different story than the check messages do."""
+    ctx = _validation_ctx()
+    if body.player not in ctx["bios"]:
+        raise HTTPException(400, f"Unknown player '{body.player}'.")
+    return _validation_result(_validate_release(body, ctx), {})
+
+
+class SelfReleaseIn(BaseModel):
+    player: str
+    stretch_years: Optional[int] = None
+    description: str = ""
+
+
+@router.post("/api/self/release")
+def self_release(body: SelfReleaseIn, info: dict = Depends(get_token_info)):
+    """Owner-initiated release from their own team's roster page (§ 5.1).
+
+    Only the two payment methods `_apply_release` actually implements are
+    reachable here: the original payment schedule (the default — omit
+    `stretch_years`) and the stretch provision. The rulebook's third method,
+    buying out with cap space, has no implementation anywhere in the API to
+    call — it isn't offered here, on the office form, or anywhere else.
+
+    Same three safety properties as `self_renounce`: the team is derived
+    from the player's own roster row, never supplied; no force, a real
+    error is always fatal; the date is server-stamped. Also mirrors the
+    office path's waiver-wire behavior — a successful release with a real
+    snapshot opens the § 5.1 48-hour claim window exactly as
+    `create_transaction`'s release branch does.
+    """
+    player = body.player
+    bios = load_player_bios()
+    if player not in bios:
+        raise HTTPException(status_code=404, detail=f"Unknown player '{player}'.")
+
+    team = _build_team_map().get(player)
+    if not team:
+        raise HTTPException(status_code=422, detail=f"{player!r} is not on any roster.")
+    if not is_team_owner(info, team):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Only {team}'s owner can release {team} players.",
+        )
+
+    txn_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    details = ReleaseDetails(player=player, stretch_years=body.stretch_years)
+    ctx = {
+        "bios":       bios,
+        "team_state": load_team_state(),
+        "cap_levels": json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {},
+        "cur_season": _season_for_date(txn_date),
+        "txn_date":   txn_date,
+        "trade_exceptions": load_trade_exceptions(),
+    }
+    checks = _validate_release(details, ctx)
+    if any(not c.passed and c.level == "error" for c in checks):
+        raise HTTPException(status_code=422, detail={
+            "validation": True,
+            "checks": [c.model_dump() for c in checks],
+            "can_force": False,
+        })
+
+    txn_id = secrets.token_hex(8)
+    with _txn_lock:
+        applied_team, dead_cap, terminated_salary, snapshot = _apply_release(details, txn_date, info)
+        txn = {
+            "id": txn_id,
+            "type": "release",
+            "date": txn_date,
+            "created_by": info.get("name", "unknown"),
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "description": body.description or f"{applied_team} release",
+            "details": {
+                **details.model_dump(),
+                "team": applied_team,
+                "dead_cap": dead_cap,
+                "terminated_salary": terminated_salary,
+                "_snapshot": snapshot,
+                "_source": "owner_self_serve",
+            },
+        }
+        _append_transaction(txn)
+    notify_transaction(txn)
+    if snapshot:
+        from .waiver_notify import notify_waived
+        notify_waived(player, applied_team)
     return {"ok": True, "transaction": txn, "checks": [c.model_dump() for c in checks]}
 
 

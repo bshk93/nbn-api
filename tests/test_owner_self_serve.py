@@ -33,6 +33,7 @@ from routers.auth import is_team_owner  # noqa: E402
 from routers.transactions import (  # noqa: E402
     _renounce_eligibility, _validate_renounce, _RENOUNCE_SNAPSHOT_FIELDS,
     RenounceDetails, _validate_option, OptionDetails,
+    _validate_release, ReleaseDetails,
 )
 
 FAILS = []
@@ -250,6 +251,47 @@ check("declining down to 13 warns about the § 2.1 minimum",
 
 r = validate_option({NEXT: "TEAM_OPT"}, 12, decision="decline")
 check("declining down to 11 warns about the § 2.1a charge",
+      "Empty Roster Charge" in find(r, "roster_minimum").message)
+
+
+# ── _validate_release ─────────────────────────────────────────────────────────
+print("\n_validate_release — real contract only, renounce covers the rest")
+
+
+def validate_release(salaries, holds, roster_count, stretch_years=None):
+    txn._build_team_map = lambda: {"p": "PHX"}
+    txn._count_standard_roster = lambda team: roster_count
+    bios = {"p": {"name": "TEST, PLAYER", "cap_holds": holds, "salaries": salaries}}
+    ctx = {"bios": bios, "cur_season": SEASON, "cap_levels": CAP_LEVELS,
+           "team_state": {}, "txn_date": TODAY, "trade_exceptions": {}}
+    details = ReleaseDetails(player="p", stretch_years=stretch_years)
+    return _validate_release(details, ctx)
+
+
+r = validate_release({}, {}, 15)
+check("a player on nobody's roster is an error",
+      find(r, "release_eligible").level == "error" and not find(r, "release_eligible").passed)
+check("...and nothing else is scored off an unevaluatable release", len(r) == 1)
+
+r = validate_release({NEXT: "$10,000,000"}, {NEXT: "UFA"}, 15)
+check("a player with only a UFA hold left has nothing real to release",
+      not find(r, "release_eligible").passed)
+check("...and points at renounce instead", "renounce" in find(r, "release_eligible").message.lower())
+
+r = validate_release({}, {}, 15)
+check("no salaries at all is likewise ineligible", not find(r, "release_eligible").passed)
+
+r = validate_release({NEXT: "$10,000,000", "28-29": "UFA"}, {"28-29": "UFA"}, 15)
+check("a real contract year plus a trailing FA hold is releasable",
+      find(r, "release_eligible").passed)
+check("a roster of 15 leaves 14 and passes the minimum", find(r, "roster_minimum").passed)
+
+r = validate_release({NEXT: "$10,000,000"}, {}, 14)
+check("dropping to 13 warns about the § 2.1 minimum",
+      not find(r, "roster_minimum").passed and find(r, "roster_minimum").level == "warning")
+
+r = validate_release({NEXT: "$10,000,000"}, {}, 12)
+check("dropping to 11 warns about the § 2.1a charge",
       "Empty Roster Charge" in find(r, "roster_minimum").message)
 
 

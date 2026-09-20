@@ -99,6 +99,7 @@ CHECK_SECTIONS: dict[str, tuple[str, ...]] = {
     # cites § 3.12 only to name the minimum-scale exemption; the rule is § 3.9,
     # and § 3.13 is where the 8% Full Bird ceiling lives.
     "raise_limit":                ("3.9", "3.13"),
+    "release_eligible":           ("5.1",),
     "renounce_eligible":          ("3.10",),
     "rescind_cap_restriction":    ("3.10",),
     "rookie_scale":               ("7.1",),
@@ -169,8 +170,10 @@ SECTION_REVIEW: dict[str, str] = {
     "4.5":  "only the extension trade freeze is checked; the rest of § 4.5 is "
             "read by a human",
     "4.6":  "the Touch Rule is not modeled — multi-team trades are reviewed",
-    "5.1":  "the apron restriction on a claim is checked; release legality "
-            "itself is not, and the waiver window is run by hand",
+    "5.1":  "the apron restriction on a claim is checked, as is a release's own "
+            "eligibility and roster-count consequence; the buyout-with-cap-space "
+            "payment method has no implementation to check at all, and the "
+            "waiver window itself is run by hand",
     "6.1":  "a TEAM_OPT decision is checked for eligibility and roster-count "
             "consequences; a PLAYER_OPT decision is PDC's own judgment call "
             "and has no automated check at all",

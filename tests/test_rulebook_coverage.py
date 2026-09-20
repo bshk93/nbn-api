@@ -98,14 +98,16 @@ def test_notes_are_not_blank():
 def test_stub_validators_stay_known():
     print("\n-- a validator silently losing all its checks is caught --")
     # Documented in nbn-today/CLAUDE.md: these are deliberate stubs, and
-    # `guarantee` has never had checks. `option` moved out 2026-09-20 — it now
-    # has real content for TEAM_OPT (roster-count on decline, eligibility on
-    # either), gated to that branch since PLAYER_OPT stays PDC's own judgment
-    # call and this validator has no visibility into that process. Anything
-    # else changing here is a regression.
+    # `guarantee` has never had checks. `option` and `release` moved out
+    # 2026-09-20, both for the same reason: real self-serve content
+    # (eligibility + renounce's roster-count shape), gated to exactly the
+    # branch each validator can actually judge — TEAM_OPT for options,
+    # since a PLAYER_OPT decision is PDC's own call; the two implemented
+    # payment methods for release, since the buyout method doesn't exist in
+    # the API to check against. Anything else changing here is a regression.
     check("stub set unchanged",
-          MANIFEST["stub_types"] == ["guarantee", "pick", "release"])
-    if MANIFEST["stub_types"] != ["guarantee", "pick", "release"]:
+          MANIFEST["stub_types"] == ["guarantee", "pick"])
+    if MANIFEST["stub_types"] != ["guarantee", "pick"]:
         print("      now: " + ", ".join(MANIFEST["stub_types"]))
 
 
