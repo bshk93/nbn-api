@@ -93,6 +93,7 @@ CHECK_SECTIONS: dict[str, tuple[str, ...]] = {
     "offer_sheet_own_player":     ("3.15",),
     "offer_sheet_resolvable":     ("3.15",),
     "offer_sheet_rfa":            ("3.15",),
+    "option_eligible":            ("6.1",),
     "pick_advance_limit":         ("7.2",),
     "pick_advance_limit_{}_{}":   ("7.2",),
     # cites § 3.12 only to name the minimum-scale exemption; the rule is § 3.9,
@@ -170,7 +171,9 @@ SECTION_REVIEW: dict[str, str] = {
     "4.6":  "the Touch Rule is not modeled — multi-team trades are reviewed",
     "5.1":  "the apron restriction on a claim is checked; release legality "
             "itself is not, and the waiver window is run by hand",
-    "6.1":  "options are applied as submitted, with no eligibility check",
+    "6.1":  "a TEAM_OPT decision is checked for eligibility and roster-count "
+            "consequences; a PLAYER_OPT decision is PDC's own judgment call "
+            "and has no automated check at all",
     "6.2":  "the eight extension rules are checked, but eligibility rests on an "
             "acquisition record 116 rostered players are still missing",
     "6.3":  "the window is checked; the approval process around it is human",

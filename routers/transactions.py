@@ -5896,7 +5896,69 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
 
 
 def _validate_option(details: OptionDetails, ctx: dict) -> list[CheckResult]:
-    return []
+    """§ 6.1 option decisions. Real content is TEAM_OPT-only — a PLAYER_OPT
+    decision is PDC's own judgment call (the team never even initiates it;
+    see docs/pdc-free-agency-spec.md), so this stays a no-op for that branch
+    rather than inventing a rule for a process this validator has no
+    visibility into. `_apply_option` still independently enforces the exact
+    `cap_holds[year] == option_type` match for both types regardless of what
+    runs here.
+
+    TEAM_OPT accept has nothing to check: § 1.3's callout is explicit that a
+    TEAM_OPT year's salary already counts toward Team Salary before it's
+    exercised, so accepting doesn't add a dollar or a roster spot — it only
+    clears the option tag. Decline sends the player to free agency, which is
+    exactly renounce's roster-count shape (mirrors `_validate_renounce`)."""
+    if details.option_type != "TEAM_OPT":
+        return []
+
+    checks: list[CheckResult] = []
+    bios = ctx["bios"]
+    bio = bios.get(details.player) or {}
+    holds = bio.get("cap_holds") or {}
+    name = bio.get("name") or details.player
+
+    if holds.get(details.year) != "TEAM_OPT":
+        checks.append(CheckResult(
+            check="option_eligible", passed=False, level="error",
+            message=f"{name} has no TEAM_OPT on file for {details.year!r}.",
+        ))
+        return checks
+    checks.append(CheckResult(
+        check="option_eligible", passed=True,
+        message=f"{name} carries a TEAM_OPT for {details.year} — eligible to exercise or decline.",
+    ))
+
+    if details.decision != "decline":
+        return checks
+
+    team = _build_team_map().get(details.player)
+    if not team:
+        return checks
+    after = _count_standard_roster(team) - 1
+    if after < ROSTER_CHARGE_MIN:
+        short = ROSTER_CHARGE_MIN - after
+        per = _rookie_min_salary(details.year, ctx["cap_levels"])
+        checks.append(CheckResult(
+            check="roster_minimum", passed=False, level="warning",
+            message=(f"Declining leaves {team} with {after} standard players, below the {ROSTER_CHARGE_MIN}-player "
+                     f"floor — an Empty Roster Charge of ${per:,} per open slot "
+                     f"(${per * short:,} total) applies immediately and counts toward hard cap "
+                     f"and apron comparisons (§ 2.1a)."),
+        ))
+    elif after < ROSTER_MIN:
+        checks.append(CheckResult(
+            check="roster_minimum", passed=False, level="warning",
+            message=(f"Declining leaves {team} with {after} standard players, below the {ROSTER_MIN}-player "
+                     f"minimum. No dollar charge applies above {ROSTER_CHARGE_MIN}, but every FO member "
+                     f"takes an activity strike if the shortfall lasts a week (§ 2.1)."),
+        ))
+    else:
+        checks.append(CheckResult(
+            check="roster_minimum", passed=True,
+            message=f"Declining leaves {team} with {after} standard players, at or above the {ROSTER_MIN}-player minimum.",
+        ))
+    return checks
 
 
 def _validate_pick(details: PickDetails, ctx: dict) -> list[CheckResult]:
@@ -7600,6 +7662,21 @@ def validate_offer_sheet_decision(body: OfferSheetDecisionDetails):
     )
 
 
+@router.post("/api/validate/option")
+def validate_option(body: OptionDetails):
+    """Non-mutating § 6.1 check of an option decision. Shares `_validate_option`
+    with `POST /api/transactions` and `POST /api/self/option`. Public, no auth,
+    same terms as `/api/validate/renounce` — this is what the roster page's
+    confirm dialog shows an owner before they exercise or decline a TEAM_OPT.
+    No fact sheet: neither branch moves cap dollars (§ 1.3 already counts a
+    TEAM_OPT year's salary before it's exercised), so the check messages
+    themselves are the whole story."""
+    ctx = _validation_ctx()
+    if body.player not in ctx["bios"]:
+        raise HTTPException(400, f"Unknown player '{body.player}'.")
+    return _validation_result(_validate_option(body, ctx), {})
+
+
 @router.post("/api/validate/renounce")
 def validate_renounce(body: RenounceDetails):
     """Non-mutating § 3.10 check of a renounce. Shares `_validate_renounce` and
@@ -7687,6 +7764,99 @@ def self_renounce(body: SelfRenounceIn, info: dict = Depends(get_token_info)):
                 # trigger even though created_by already names them.
                 "_source": "owner_self_serve",
             },
+        }
+        _append_transaction(txn)
+    notify_transaction(txn)
+    return {"ok": True, "transaction": txn, "checks": [c.model_dump() for c in checks]}
+
+
+class SelfOptionIn(BaseModel):
+    player: str
+    decision: str            # "accept" or "decline"
+    cap_hold_type: str = "UFA"  # only consulted on decline; "UFA" or "RFA"
+    description: str = ""
+
+
+@router.post("/api/self/option")
+def self_option(body: SelfOptionIn, info: dict = Depends(get_token_info)):
+    """Owner-initiated TEAM_OPT exercise/decline from their own team's roster
+    page (§ 6.1).
+
+    **PLAYER_OPT is rejected outright.** That decision is PDC's own judgment
+    call and the team never even initiates it (docs/pdc-free-agency-spec.md)
+    — this endpoint only ever acts on a TEAM_OPT, found automatically from
+    the player's own cap holds rather than asked for, since a player has at
+    most one live option year at a time.
+
+    Same three safety properties as `self_renounce`: the team is derived
+    from the player's own roster row, never supplied; no force, a real error
+    is always fatal; the date is server-stamped. `cap_hold_type` on decline
+    still needs the owner's own answer rather than a guess — § 3.1's
+    UFA/RFA eligibility test is itself flagged in the rulebook as "proposed,
+    pending BOD confirmation," so nothing here derives it automatically,
+    same caution `declare_winner`'s QO branch (free_agency.py) already
+    applies to the sibling § 3.9 formula.
+    """
+    player = body.player
+    if body.decision not in ("accept", "decline"):
+        raise HTTPException(status_code=422, detail="decision must be 'accept' or 'decline'")
+    if body.cap_hold_type not in ("UFA", "RFA"):
+        raise HTTPException(status_code=422, detail="cap_hold_type must be UFA or RFA")
+
+    bios = load_player_bios()
+    if player not in bios:
+        raise HTTPException(status_code=404, detail=f"Unknown player '{player}'.")
+
+    team = _build_team_map().get(player)
+    if not team:
+        raise HTTPException(status_code=422, detail=f"{player!r} is not on any roster.")
+    if not is_team_owner(info, team):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Only {team}'s owner can act on {team} players.",
+        )
+
+    holds = bios[player].get("cap_holds") or {}
+    team_opt_years = sorted((yr for yr, typ in holds.items() if typ == "TEAM_OPT"), key=_season_start)
+    if not team_opt_years:
+        if any(typ == "PLAYER_OPT" for typ in holds.values()):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{player!r} has a PLAYER_OPT, not a TEAM_OPT — that decision belongs to PDC (§ 6.1).",
+            )
+        raise HTTPException(status_code=422, detail=f"{player!r} has no team option on file.")
+    year = team_opt_years[0]
+
+    txn_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    details = OptionDetails(player=player, decision=body.decision, option_type="TEAM_OPT",
+                            year=year, cap_hold_type=body.cap_hold_type)
+    ctx = {
+        "bios":       bios,
+        "team_state": load_team_state(),
+        "cap_levels": json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {},
+        "cur_season": _season_for_date(txn_date),
+        "txn_date":   txn_date,
+        "trade_exceptions": load_trade_exceptions(),
+    }
+    checks = _validate_option(details, ctx)
+    if any(not c.passed and c.level == "error" for c in checks):
+        raise HTTPException(status_code=422, detail={
+            "validation": True,
+            "checks": [c.model_dump() for c in checks],
+            "can_force": False,
+        })
+
+    txn_id = secrets.token_hex(8)
+    with _txn_lock:
+        applied_team = _apply_option(details, info)
+        txn = {
+            "id": txn_id,
+            "type": "option",
+            "date": txn_date,
+            "created_by": info.get("name", "unknown"),
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "description": body.description or f"{applied_team} {body.decision}s {player}'s {year} team option",
+            "details": {**details.model_dump(), "team": applied_team, "_source": "owner_self_serve"},
         }
         _append_transaction(txn)
     notify_transaction(txn)

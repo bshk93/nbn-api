@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from routers.auth import is_team_owner  # noqa: E402
 from routers.transactions import (  # noqa: E402
     _renounce_eligibility, _validate_renounce, _RENOUNCE_SNAPSHOT_FIELDS,
-    RenounceDetails,
+    RenounceDetails, _validate_option, OptionDetails,
 )
 
 FAILS = []
@@ -209,6 +209,48 @@ check("unknown tenure warns rather than reading as no rights",
 r = validate({NEXT: "UFA"}, 15)
 check("a player with no rights to lose passes cleanly",
       find(r, "bird_rights_forfeited").passed)
+
+
+# ── _validate_option ──────────────────────────────────────────────────────────
+print("\n_validate_option — TEAM_OPT only, PLAYER_OPT stays a no-op")
+
+
+def validate_option(holds, roster_count, option_type="TEAM_OPT", decision="decline", year=NEXT):
+    txn._build_team_map = lambda: {"p": "PHX"}
+    txn._count_standard_roster = lambda team: roster_count
+    bios = {"p": {"name": "TEST, PLAYER", "cap_holds": holds}}
+    ctx = {"bios": bios, "cur_season": SEASON, "cap_levels": CAP_LEVELS,
+           "team_state": {}, "txn_date": TODAY, "trade_exceptions": {}}
+    details = OptionDetails(player="p", decision=decision, option_type=option_type,
+                            year=year, cap_hold_type="UFA")
+    return _validate_option(details, ctx)
+
+
+check("a PLAYER_OPT decision is a pure no-op, whatever the roster looks like — "
+      "it's PDC's judgment call, not this validator's",
+      validate_option({NEXT: "PLAYER_OPT"}, 12, option_type="PLAYER_OPT") == [])
+
+r = validate_option({"28-29": "TEAM_OPT"}, 15, year=NEXT)  # option is for a different year
+check("a TEAM_OPT for a different year than claimed is an error",
+      find(r, "option_eligible").level == "error" and not find(r, "option_eligible").passed)
+check("...and nothing else is scored off an unevaluatable option", len(r) == 1)
+
+r = validate_option({NEXT: "TEAM_OPT"}, 15, decision="accept")
+check("an eligible TEAM_OPT passes eligibility", find(r, "option_eligible").passed)
+check("accepting never scores a roster consequence — § 1.3 already counted the "
+      "salary before exercise, so nothing changes financially or on the roster",
+      find(r, "roster_minimum") is None)
+
+r = validate_option({NEXT: "TEAM_OPT"}, 15, decision="decline")
+check("declining with a healthy roster passes the minimum", find(r, "roster_minimum").passed)
+
+r = validate_option({NEXT: "TEAM_OPT"}, 14, decision="decline")
+check("declining down to 13 warns about the § 2.1 minimum",
+      not find(r, "roster_minimum").passed and find(r, "roster_minimum").level == "warning")
+
+r = validate_option({NEXT: "TEAM_OPT"}, 12, decision="decline")
+check("declining down to 11 warns about the § 2.1a charge",
+      "Empty Roster Charge" in find(r, "roster_minimum").message)
 
 
 # ── snapshot coverage ─────────────────────────────────────────────────────────
