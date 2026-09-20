@@ -1694,6 +1694,70 @@ def _apply_pick(details: PickDetails, txn_date: str, info: dict):
     log_write(info, f"TXN pick — {details.player} → {team} ({pick.year} R{pick.round} {orig} — new row)")
 
 
+def _trade_leg_ownership_problems(details: TradeIn, bios: dict, team_map: dict,
+                                  pick_index: dict, conveyance_store) -> list[str]:
+    """Every reason a leg in `details.transfers` can't actually be conveyed by
+    its stated `from_team` right now: an unknown/moved player, a pick no
+    longer owned by that team, already drafted, frozen, or blocked by
+    conveyance structure (`_check_retrade_allowed`). Pure — raises nothing, so
+    both `_apply_trade` (fail on the first entry) and TRC's live staleness
+    check (report all of them) can use it. This is deliberately NOT part of
+    `_validate_trade`/`/api/validate/trade` — that endpoint has never checked
+    current asset ownership, only cap/roster legality, and a trade whose
+    named player has since left that roster still comes back "legal" there.
+    Order matches what `_apply_trade` used to check inline before this call
+    replaced it."""
+    problems: list[str] = []
+    for xfer in details.transfers:
+        for asset in xfer.assets:
+            if asset.type == "player":
+                if asset.slug not in bios:
+                    problems.append(f"Unknown player: {asset.slug!r}")
+                    continue
+                actual_team = team_map.get(asset.slug)
+                if actual_team != xfer.from_team:
+                    problems.append(
+                        f"Player {asset.slug!r} is on {actual_team or 'no team'}, not {xfer.from_team}")
+                continue
+            key = (asset.year, asset.round, asset.orig)
+            pick_row = pick_index.get(key)
+            if not pick_row:
+                problems.append(f"Pick {asset.year} R{asset.round} {asset.orig} not found")
+                continue
+            owned_by_from_team = _check_pick_ownership(
+                key, xfer.from_team, pick_row, conveyance_store, asset.leaf_id)
+            if not owned_by_from_team:
+                problems.append(
+                    f"Pick {asset.year} R{asset.round} {asset.orig} is owned by "
+                    f"{pick_row['OWNER']}, not {xfer.from_team}")
+                continue
+            # Once a pick has been used to draft a player it's historical
+            # record, not a live asset — nothing upstream (ownership, frozen,
+            # legacy/leaf checks) inspects PLAYER, so without this a trade
+            # could "convey" an already-drafted pick: it'd pass every other
+            # check (a drafted pick still resolves to a `settled` node some
+            # team technically "owns") and write a transaction for an asset
+            # that no longer exists to trade.
+            drafted_player = (pick_row.get("PLAYER") or "").strip()
+            if drafted_player:
+                problems.append(
+                    f"Pick {asset.year} R{asset.round} {asset.orig} was already used "
+                    f"to draft {drafted_player} and can no longer be traded")
+                continue
+            if pick_row.get("FROZEN", "").strip().upper() == "TRUE":
+                reason = pick_row.get("FROZEN_REASON", "").strip()
+                detail = f"Pick {asset.year} R{asset.round} {asset.orig} is frozen and cannot be traded"
+                if reason:
+                    detail += f": {reason}"
+                problems.append(detail)
+                continue
+            try:
+                _check_retrade_allowed(key, asset, xfer.from_team, conveyance_store)
+            except HTTPException as e:
+                problems.append(str(e.detail))
+    return problems
+
+
 def _apply_trade(details: TradeIn, txn_date: str, info: dict,
                  txn_id: str | None = None) -> list[str]:
     if len(details.transfers) < 1:
@@ -1739,50 +1803,10 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
     pick_index = {(int(p["YEAR"]), int(p["ROUND"]), p["ORIG"].upper()): p for p in picks}
     conveyance_store = _load_conveyance_store_for_shadow_check()
 
-    for xfer in details.transfers:
-        for asset in xfer.assets:
-            if asset.type == "player":
-                if asset.slug not in bios:
-                    raise HTTPException(status_code=422, detail=f"Unknown player: {asset.slug!r}")
-                actual_team = team_map.get(asset.slug)
-                if actual_team != xfer.from_team:
-                    raise HTTPException(
-                        status_code=422,
-                        detail=f"Player {asset.slug!r} is on {actual_team or 'no team'}, not {xfer.from_team}",
-                    )
-            else:
-                key = (asset.year, asset.round, asset.orig)
-                pick_row = pick_index.get(key)
-                if not pick_row:
-                    raise HTTPException(status_code=422, detail=f"Pick {asset.year} R{asset.round} {asset.orig} not found")
-                owned_by_from_team = _check_pick_ownership(
-                    key, xfer.from_team, pick_row, conveyance_store, asset.leaf_id)
-                if not owned_by_from_team:
-                    raise HTTPException(
-                        status_code=422,
-                        detail=f"Pick {asset.year} R{asset.round} {asset.orig} is owned by {pick_row['OWNER']}, not {xfer.from_team}",
-                    )
-                # Once a pick has been used to draft a player it's historical
-                # record, not a live asset — nothing upstream (ownership,
-                # frozen, legacy/leaf checks) inspects PLAYER, so without this
-                # a trade could "convey" an already-drafted pick: it'd pass
-                # every other check (a drafted pick still resolves to a
-                # `settled` node some team technically "owns") and write a
-                # transaction for an asset that no longer exists to trade.
-                drafted_player = (pick_row.get("PLAYER") or "").strip()
-                if drafted_player:
-                    raise HTTPException(
-                        status_code=422,
-                        detail=f"Pick {asset.year} R{asset.round} {asset.orig} was already used "
-                               f"to draft {drafted_player} and can no longer be traded",
-                    )
-                if pick_row.get("FROZEN", "").strip().upper() == "TRUE":
-                    reason = pick_row.get("FROZEN_REASON", "").strip()
-                    detail = f"Pick {asset.year} R{asset.round} {asset.orig} is frozen and cannot be traded"
-                    if reason:
-                        detail += f": {reason}"
-                    raise HTTPException(status_code=422, detail=detail)
-                _check_retrade_allowed(key, asset, xfer.from_team, conveyance_store)
+    ownership_problems = _trade_leg_ownership_problems(
+        details, bios, team_map, pick_index, conveyance_store)
+    if ownership_problems:
+        raise HTTPException(status_code=422, detail=ownership_problems[0])
 
     roster_moves: list[tuple[str, str, dict]] = []
     for xfer in details.transfers:
@@ -6641,6 +6665,58 @@ def _create_historical_option(details: OptionDetails, body: TransactionIn, info:
 # ── Transaction routes ────────────────────────────────────────────────────────
 
 @router.post("/api/transactions")
+def apply_trade(details: TradeIn, txn_date: str, info: dict, *,
+                description: str = "", force: bool = False,
+                relay_to_roster_log: bool = False) -> dict:
+    """Validate, apply, ledger-append and announce a trade — the exact slice
+    of create_transaction's type=="trade" path, factored out so a second
+    caller (TRC's finalize, routers/trade_requests.py) can execute a real
+    trade without re-entering the HTTP layer or fabricating a fake
+    Depends(require_role(...)) call. `info` attributes the resulting ledger
+    entry to whoever is actually executing it — for TRC that's the trc_head
+    who clicked Finalize, not whoever originally proposed the trade. Trade
+    has no post-append special handling (unlike release's waiver-wire notify
+    or offer_sheet's inbox ping), so this is the whole path end to end."""
+    val_ctx = {
+        "bios":        load_player_bios(),
+        "team_state":  load_team_state(),
+        "cap_levels":  json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {},
+        "cur_season":  _season_for_date(txn_date),
+        "txn_date":    txn_date,
+        "trade_exceptions": load_trade_exceptions(),
+    }
+    checks = _run_validation("trade", details, val_ctx)
+    failed = [c for c in checks if not c.passed]
+    if failed and not force:
+        raise HTTPException(status_code=422, detail={
+            "validation": True,
+            "checks": [c.model_dump() for c in checks],
+            "can_force": True,
+        })
+
+    txn_id = secrets.token_hex(8)
+    with _txn_lock:
+        teams = _apply_trade(details, txn_date, info, txn_id=txn_id)
+        stored_details = details.model_dump()
+        stored_details["teams"] = teams
+        forced_checks = [c.check for c in failed] if (force and failed) else None
+        if forced_checks:
+            stored_details["_forced_checks"] = forced_checks
+        txn = {
+            "id": txn_id,
+            "type": "trade",
+            "date": txn_date,
+            "created_by": info.get("name", "unknown"),
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "description": description,
+            "details": stored_details,
+        }
+        _append_transaction(txn)
+
+    notify_transaction(txn, forced_checks, relay_to_roster_log=relay_to_roster_log)
+    return txn
+
+
 def create_transaction(body: TransactionIn, info: dict = Depends(require_role("rosters"))):
     try:
         datetime.strptime(body.date, "%Y-%m-%d")
@@ -6683,6 +6759,10 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             return _create_historical_sign(parsed_details, body, info)
         if body.type == "option":
             return _create_historical_option(parsed_details, body, info)
+
+    if body.type == "trade":
+        return apply_trade(parsed_details, body.date, info, description=body.description,
+                           force=body.force, relay_to_roster_log=body.relay_to_roster_log)
 
     _val_ctx = {
         "bios":        load_player_bios(),
@@ -6742,10 +6822,6 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             stored_details = details.model_dump()
             stored_details["team"] = team
             stored_details["player"] = rescinded_player
-        elif body.type == "trade":
-            teams = _apply_trade(details, body.date, info, txn_id=txn_id)
-            stored_details = details.model_dump()
-            stored_details["teams"] = teams
         elif body.type == "convert_twoway":
             team = _apply_convert_twoway(details, body.date, info, txn_id=txn_id)
             stored_details = details.model_dump()

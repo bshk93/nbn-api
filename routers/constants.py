@@ -69,6 +69,8 @@ DRAFT_LIVE_PICKS_FILE = DATA_DIR / "draft-live-picks.csv"
 # Member draft-pick grades: { "<year>": { "<slug>": { "<member>": "A" } } }
 DRAFT_GRADES_FILE = DATA_DIR / "draft-grades.json"
 SUGGESTIONS_FILE = DATA_DIR / "suggestions.json"
+# Trade Request Committee — see nbn-today/docs/trc-trade-pipeline.md.
+TRADE_REQUESTS_FILE = DATA_DIR / "trade-requests.json"
 # PDC free agency — see nbn-today/docs/pdc-free-agency-spec.md § 4.
 FA_STATE_FILE   = DATA_DIR / "fa-state.json"    # mode, rounds, per-player status + sub-committees
 FA_OFFERS_FILE  = DATA_DIR / "fa-offers.json"   # the offers themselves
@@ -159,6 +161,13 @@ VALID_ROLES = {
     # it cannot sign anyone else up, and it is the one write here that needs
     # no committee or board standing behind it.
     "streamer",
+    # Trade Request Committee — see nbn-today/docs/trc-trade-pipeline.md.
+    # `trc` reviews and ballots (fairness, not legality — that's already
+    # `_validate_trade`) on team-submitted trade requests; `trc_head` finalizes
+    # (applies the trade for real) or rejects. `trc_head` is also let through
+    # POST /api/transactions' trade branch (see create_transaction), scoped to
+    # type=="trade" only — it is not a `rosters` substitute for anything else.
+    "trc", "trc_head",
 } | {t.lower() for t in VALID_TEAMS}
 
 # Roles that are implicitly granted by holding another role
@@ -183,6 +192,10 @@ ROLE_IMPLIES: dict[str, set[str]] = {
     # disjoint people).
     "fac_head": {"fac", "agent"},
     "poext_head": {"poext", "agent"},
+    # A TRC head is also a TRC member. Deliberately not implied by `bod`,
+    # same reasoning as `fac`/`poext` above — committee membership is a
+    # specific grant, not a board-wide one.
+    "trc_head": {"trc"},
 }
 
 CURATOR_FIELDS = {
