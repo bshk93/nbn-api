@@ -39,7 +39,6 @@ import re
 from typing import Optional
 
 from . import discord_transport as transport
-from . import roster_log_relay
 from .discord_notify import SITE, _contract_breakdown, _contract_str, _player_name
 from .players import load_player_bios
 
@@ -133,22 +132,6 @@ def _news(slug: str, text: str) -> bool:
         return False
 
 
-def _roster_log(text: str) -> bool:
-    """Post to `#roster-log`, reusing `roster_log_relay._send` — an agreed
-    extension is exactly the same shape of entry the relay itself produces
-    (a bare description-only card, same color, same mention suppression),
-    not a new format, so this calls straight into it rather than keeping a
-    second copy of that embed shape. Unlike everything the relay itself
-    posts, this isn't relaying an existing Discord message — PO-EXT
-    finalizing a proposal is a new event this module is the source of, so it
-    calls `_send` directly rather than going through the poll cycle."""
-    try:
-        return roster_log_relay._send(text)
-    except Exception as exc:
-        logger.warning("PO-EXT roster-log post failed: %s", exc)
-        return False
-
-
 def _proposal_fields(p: dict) -> list[dict]:
     slug, team = p["player"], p["team"]
     contract = p.get("contract") or {}
@@ -223,14 +206,12 @@ def notify_proposal_restored(p: dict) -> None:
 
 def notify_player_finalized(slug: str, proposal: dict, final: dict) -> None:
     """The committee's decision — always to `pdc-alerts`; on `agreed` only,
-    also to the two public channels (D9: "public gets accept only"). A
-    submitted, remanded or rejected proposal never reaches either public
-    channel — only the yes.
-
-    `proposal` (not just `team`) so the public `#roster-log` post can carry
-    the contract shorthand, the same level of detail that channel already
-    carries for every real transaction — a rejection or an in-progress
-    negotiation never gets that treatment, only the decided deal.
+    also to the public `fa-news` channel (D9: "public gets accept only"). A
+    submitted, remanded or rejected proposal never reaches it — only the yes.
+    `#roster-log` gets the agreed extension too, but not from here: finalize
+    now writes a real transaction (`apply_extension`), whose own
+    `notify_transaction` post to `#transactions` the roster-log-relay poller
+    mirrors on its own — this function no longer posts there directly.
     """
     team = proposal["team"]
     outcome = final["outcome"]
@@ -249,24 +230,22 @@ def notify_player_finalized(slug: str, proposal: dict, final: dict) -> None:
             "url": _link(slug),
         }
         if outcome == "agreed":
-            embed["footer"] = {"text": "Not applied automatically — enter the extension on /transactions by hand."}
+            embed["footer"] = {"text": f"Written to the ledger — txn {final.get('txn_id', '?')}."}
         return {"embeds": [embed]}
     _alert(build)
 
     if outcome != "agreed":
         return
 
-    # #roster-log: full detail, same as any other entry there. Worded as a
-    # committee decision pending entry, not as an applied contract change —
-    # the actual transaction is still typed into /transactions by hand
-    # afterward (same manual hand-off as an accepted FA offer), and
-    # #roster-log otherwise only ever carries transactions that already
-    # happened.
-    shorthand = _contract_str(proposal.get("contract") or {})
-    _roster_log(
-        f"**{team}** — PO-EXT approved an extension for **{_name(slug)}**"
-        + (f" ({shorthand})" if shorthand else "") + " — pending entry on /transactions."
-    )
+    # No direct #roster-log post here any more. finalize now calls
+    # apply_extension for real (transactions.py), which already posts to
+    # #transactions via notify_transaction — and the roster-log-relay poller
+    # mirrors that into #roster-log on its own within 60s (discord-integrations.md
+    # "The #roster-log mirror"), same as FA's finalize has always relied on for
+    # an accepted offer. The direct post this module used to make here existed
+    # specifically because finalize produced no real transaction for the poller
+    # to find; positing one anyway once a real one exists would double the
+    # channel up, worded as "pending" beside one that already happened.
 
     # fa-news: same no-team-no-dollar discipline fa_notify._news() enforces,
     # via this module's own choke point.

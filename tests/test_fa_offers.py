@@ -174,8 +174,19 @@ APPLIED_SIGNS: list = []
 APPLIED_OFFER_SHEETS: list = []
 
 
+# Controls what the two fakes below "find" on their next call — empty means
+# everything passes. Lets the warning-confirm tests simulate exactly what a
+# real apply_sign/apply_offer_sheet failure looks like without touching real
+# cap math, mirroring the real functions' own HTTPException shape.
+PENDING_CHECKS: list = []
+
+
 def fake_apply_sign(details, txn_date, info, description="", force=False,
                     force_warnings_only=False, relay_to_roster_log=False):
+    failed = [c for c in PENDING_CHECKS if not c["passed"]]
+    blocking = [c for c in failed if c["level"] == "error"] if force_warnings_only else failed
+    if blocking:
+        raise HTTPException(422, {"validation": True, "checks": PENDING_CHECKS, "can_force": True})
     txn = {"id": f"sign{len(APPLIED_SIGNS) + 1}", "type": "sign",
            "details": details.model_dump(), "force_warnings_only": force_warnings_only}
     APPLIED_SIGNS.append(txn)
@@ -184,6 +195,10 @@ def fake_apply_sign(details, txn_date, info, description="", force=False,
 
 def fake_apply_offer_sheet(details, txn_date, info, description="", force=False,
                           force_warnings_only=False, relay_to_roster_log=False):
+    failed = [c for c in PENDING_CHECKS if not c["passed"]]
+    blocking = [c for c in failed if c["level"] == "error"] if force_warnings_only else failed
+    if blocking:
+        raise HTTPException(422, {"validation": True, "checks": PENDING_CHECKS, "can_force": True})
     txn = {"id": f"os{len(APPLIED_OFFER_SHEETS) + 1}", "type": "offer_sheet",
            "details": details.model_dump(), "force_warnings_only": force_warnings_only}
     APPLIED_OFFER_SHEETS.append(txn)
@@ -1123,8 +1138,8 @@ check("a UFA's winning offer is a plain sign, not an offer sheet",
 check("signed for the offering team, at the offer's own contract",
       APPLIED_SIGNS[0]["details"]["team"] == "PHX"
       and APPLIED_SIGNS[0]["details"]["contract"]["salaries"] == {"26-27": "$4,000,000"})
-check("warnings auto-clear, since there's no submit screen to tick force on",
-      APPLIED_SIGNS[0]["force_warnings_only"] is True)
+check("no warnings here, so nothing needed confirming",
+      APPLIED_SIGNS[0]["force_warnings_only"] is False)
 check("declare_winner's record matches the applied txn",
       won["winner"]["key"] == du_offer["id"] and won["winner"]["txn_id"] == APPLIED_SIGNS[0]["id"])
 raises("a winner can't be declared twice for the same round", 409,
@@ -1142,6 +1157,34 @@ check("a rival's offer on an RFA becomes an offer_sheet, not a completed sign",
       len(APPLIED_OFFER_SHEETS) == 1 and len(APPLIED_SIGNS) == 1)  # the 1 sign is decl-ufa's, above
 check("offer_sheet names the rival as offering_team, MIA untouched by this write",
       APPLIED_OFFER_SHEETS[0]["details"]["offering_team"] == "PHX")
+
+print("\ndeclare-winner — warning-level checks need explicit confirmation, never silent")
+fa.open_round(fa.RoundIn(name="Declare-winner warning-confirm"), HEAD)
+fa.set_player_state("decl-ufa", fa.PlayerStateIn(status="open"), HEAD)
+w_offer = fa.submit_offer(make_offer(PHX_OWNER, player="decl-ufa", y1="$5,000,000")["id"], PHX_OWNER)
+fa.finalize_player("decl-ufa", HEAD)
+PENDING_CHECKS[:] = [{"check": "sign_not_minimum", "passed": False, "level": "warning", "message": "double check"}]
+before = len(APPLIED_SIGNS)
+raises("a warning-only failure asks for confirmation instead of writing", 422,
+       lambda: fa.declare_winner("decl-ufa", fa.DeclareWinnerIn(key=w_offer["id"]), HEAD))
+check("nothing was applied on the unconfirmed attempt", len(APPLIED_SIGNS) == before)
+confirmed = fa.declare_winner("decl-ufa", fa.DeclareWinnerIn(key=w_offer["id"], confirm_warnings=True), HEAD)
+check("confirmed declare-winner actually applied it", len(APPLIED_SIGNS) == before + 1)
+check("the applied txn shows the warning was consciously cleared",
+      APPLIED_SIGNS[-1]["force_warnings_only"] is True)
+check("the winner record reflects the confirmed call", confirmed["winner"]["txn_id"] == APPLIED_SIGNS[-1]["id"])
+
+print("\ndeclare-winner — a real error is never confirmable, confirm_warnings or not")
+fa.open_round(fa.RoundIn(name="Declare-winner error-confirm"), HEAD)
+fa.set_player_state("decl-ufa", fa.PlayerStateIn(status="open"), HEAD)
+e_offer = fa.submit_offer(make_offer(PHX_OWNER, player="decl-ufa", y1="$6,000,000")["id"], PHX_OWNER)
+fa.finalize_player("decl-ufa", HEAD)
+PENDING_CHECKS[:] = [{"check": "sign_hard_cap", "passed": False, "level": "error", "message": "over the cap"}]
+before = len(APPLIED_SIGNS)
+raises("a real error blocks with no confirm_warnings escape hatch", 422,
+       lambda: fa.declare_winner("decl-ufa", fa.DeclareWinnerIn(key=e_offer["id"], confirm_warnings=True), HEAD))
+check("still nothing applied", len(APPLIED_SIGNS) == before)
+PENDING_CHECKS[:] = []
 
 print("\ndeclare-winner — RFA: QO is never auto-executed (BACKLOG.md [P1])")
 fa.open_round(fa.RoundIn(name="Declare-winner RFA QO"), HEAD)

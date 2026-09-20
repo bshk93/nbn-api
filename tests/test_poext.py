@@ -147,8 +147,19 @@ poext._validate_extension = lambda details, ctx: [FakeCheck(LEGAL["legal"])]
 APPLIED_EXTENSIONS: list = []
 
 
+# Controls what fake_apply_extension "finds" on its next call — empty means
+# everything passes. Lets the warning-confirm tests below simulate exactly
+# what a real apply_extension failure looks like without touching real cap
+# math, mirroring the real function's own HTTPException shape.
+PENDING_CHECKS: list = []
+
+
 def fake_apply_extension(details, txn_date, info, description="", force=False,
                           force_warnings_only=False, relay_to_roster_log=False):
+    failed = [c for c in PENDING_CHECKS if not c["passed"]]
+    blocking = [c for c in failed if c["level"] == "error"] if force_warnings_only else failed
+    if blocking:
+        raise HTTPException(422, {"validation": True, "checks": PENDING_CHECKS, "can_force": True})
     txn = {"id": f"txn{len(APPLIED_EXTENSIONS) + 1}", "type": "extension",
            "details": details.model_dump(), "force_warnings_only": force_warnings_only}
     APPLIED_EXTENSIONS.append(txn)
@@ -265,16 +276,54 @@ print("\nfinalize — head only, majority accept")
 # directly bypasses Depends entirely, so there is nothing to assert here
 # without going through real HTTP). What direct calls CAN and do pin is every
 # check finalize makes on its own — see finalize's other cases below.
-final = poext.finalize_player("barlow-dominick", HEAD)
+final = poext.finalize_player("barlow-dominick", poext.FinalizeBody(), HEAD)
 check("agreed, 2-0", final["outcome"] == "agreed" and final["accept"] == 2 and final["reject"] == 0)
 check("an agreed extension is applied for real, not hand-typed", len(APPLIED_EXTENSIONS) == 1)
 check("applied for the right player/team", APPLIED_EXTENSIONS[0]["details"]["player"] == "barlow-dominick"
       and APPLIED_EXTENSIONS[0]["details"]["team"] == "SAS")
-check("warnings are auto-cleared, since there's no submit screen to tick force on",
-      APPLIED_EXTENSIONS[0]["force_warnings_only"] is True)
+check("no warnings here, so nothing needed confirming",
+      APPLIED_EXTENSIONS[0]["force_warnings_only"] is False)
 check("finalize's txn_id matches the applied extension", final["txn_id"] == APPLIED_EXTENSIONS[0]["id"])
 check("proposal archived", PROPOSALS[[i for i, x in enumerate(PROPOSALS) if x["id"] == p["id"]][0]]["status"] == "agreed")
-raises("can't finalize twice", 409, lambda: poext.finalize_player("barlow-dominick", HEAD))
+raises("can't finalize twice", 409, lambda: poext.finalize_player("barlow-dominick", poext.FinalizeBody(), HEAD))
+
+print("\nfinalize — warning-level checks need explicit confirmation, never silent")
+reset()
+TEAM_MAP["warny"] = "SAS"
+p_w = make_proposal(SAS, player="warny")
+poext.submit_proposal(p_w["id"], SAS)
+poext.claim_player("warny", AGENT)
+poext.advance_player("warny", {"note": ""}, AGENT)
+poext.assign_subcommittee("warny", {"subcommittee": ["memberA", "memberB"]}, HEAD)
+poext.cast_vote("warny", poext.VoteIn(vote="accept"), MEM_A)
+poext.cast_vote("warny", poext.VoteIn(vote="accept"), MEM_B)
+PENDING_CHECKS[:] = [{"check": "extension_not_minimum", "passed": False, "level": "warning", "message": "double check"}]
+before = len(APPLIED_EXTENSIONS)
+raises("a warning-only failure asks for confirmation instead of writing", 422,
+       lambda: poext.finalize_player("warny", poext.FinalizeBody(), HEAD))
+check("nothing was applied on the unconfirmed attempt", len(APPLIED_EXTENSIONS) == before)
+check("vote isn't lost either — still finalizable", not poext.finalize_player(
+      "warny", poext.FinalizeBody(confirm_warnings=True), HEAD).get("outcome") is None)
+check("confirmed finalize actually applied it", len(APPLIED_EXTENSIONS) == before + 1)
+check("the applied txn shows the warning was consciously cleared",
+      APPLIED_EXTENSIONS[-1]["force_warnings_only"] is True)
+
+print("\nfinalize — a real error is never confirmable, confirm_warnings or not")
+reset()
+TEAM_MAP["errory"] = "SAS"
+p_e = make_proposal(SAS, player="errory")
+poext.submit_proposal(p_e["id"], SAS)
+poext.claim_player("errory", AGENT)
+poext.advance_player("errory", {"note": ""}, AGENT)
+poext.assign_subcommittee("errory", {"subcommittee": ["memberA", "memberB"]}, HEAD)
+poext.cast_vote("errory", poext.VoteIn(vote="accept"), MEM_A)
+poext.cast_vote("errory", poext.VoteIn(vote="accept"), MEM_B)
+PENDING_CHECKS[:] = [{"check": "extension_max_year1", "passed": False, "level": "error", "message": "over the cap"}]
+before = len(APPLIED_EXTENSIONS)
+raises("a real error blocks with no confirm_warnings escape hatch", 422,
+       lambda: poext.finalize_player("errory", poext.FinalizeBody(confirm_warnings=True), HEAD))
+check("still nothing applied", len(APPLIED_EXTENSIONS) == before)
+PENDING_CHECKS[:] = []
 
 # ══ rejection + the 3-strike exhaustion ══════════════════════════════════════
 
@@ -290,7 +339,7 @@ def run_one_rejected_round(slug="rejectee"):
     poext.assign_subcommittee(slug, {"subcommittee": ["memberA", "memberB"]}, HEAD)
     poext.cast_vote(slug, poext.VoteIn(vote="reject"), MEM_A)
     poext.cast_vote(slug, poext.VoteIn(vote="reject"), MEM_B)
-    return poext.finalize_player(slug, HEAD)
+    return poext.finalize_player(slug, poext.FinalizeBody(), HEAD)
 
 reset()
 f1 = run_one_rejected_round()
@@ -312,7 +361,7 @@ poext.advance_player("barlow-dominick", {"note": ""}, AGENT)
 poext.assign_subcommittee("barlow-dominick", {"subcommittee": ["memberA", "memberB"]}, HEAD)
 poext.cast_vote("barlow-dominick", poext.VoteIn(vote="accept"), MEM_A)
 poext.cast_vote("barlow-dominick", poext.VoteIn(vote="reject"), MEM_B)
-raises("1-1 tie can't finalize", 409, lambda: poext.finalize_player("barlow-dominick", HEAD))
+raises("1-1 tie can't finalize", 409, lambda: poext.finalize_player("barlow-dominick", poext.FinalizeBody(), HEAD))
 
 print("\nunlock decrements the rejection count it undid")
 reset()

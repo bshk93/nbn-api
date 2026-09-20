@@ -6664,7 +6664,6 @@ def _create_historical_option(details: OptionDetails, body: TransactionIn, info:
 
 # ── Transaction routes ────────────────────────────────────────────────────────
 
-@router.post("/api/transactions")
 def apply_sign(details: SignDetails, txn_date: str, info: dict, *,
                description: str = "", force: bool = False,
                force_warnings_only: bool = False,
@@ -6825,6 +6824,33 @@ def apply_extension(details: ExtensionDetails, txn_date: str, info: dict, *,
     return txn
 
 
+def apply_with_warning_confirm(apply_fn, *args, confirm_warnings: bool, **kwargs) -> dict:
+    """Runs one of the committee-execution appliers (`apply_sign`,
+    `apply_offer_sheet`, `apply_extension`) with
+    `force_warnings_only=confirm_warnings`, but never lets a warning clear
+    silently the way passing `force_warnings_only=True` unconditionally
+    would. A committee action has no submit screen for a human to see a
+    warning and tick force — so instead, the first call (`confirm_warnings=
+    False`) that fails on warnings alone comes back reshaped as an explicit
+    "confirm to proceed" response (`can_confirm: True`) instead of writing
+    anything, and only a second call with `confirm_warnings=True` actually
+    clears them. A real error is never confirmable — it re-raises as-is
+    regardless of `confirm_warnings`, same as every other write path here."""
+    try:
+        return apply_fn(*args, force_warnings_only=confirm_warnings, **kwargs)
+    except HTTPException as e:
+        detail = e.detail
+        if isinstance(detail, dict) and detail.get("validation") and not confirm_warnings:
+            has_error = any(not c["passed"] and c["level"] == "error" for c in detail["checks"])
+            if not has_error:
+                raise HTTPException(status_code=422, detail={
+                    "message": "This has warning-level checks — confirm to proceed anyway.",
+                    "checks": detail["checks"],
+                    "can_confirm": True,
+                }) from None
+        raise
+
+
 def apply_trade(details: TradeIn, txn_date: str, info: dict, *,
                 description: str = "", force: bool = False,
                 relay_to_roster_log: bool = False) -> dict:
@@ -6877,6 +6903,7 @@ def apply_trade(details: TradeIn, txn_date: str, info: dict, *,
     return txn
 
 
+@router.post("/api/transactions")
 def create_transaction(body: TransactionIn, info: dict = Depends(require_role("rosters"))):
     try:
         datetime.strptime(body.date, "%Y-%m-%d")

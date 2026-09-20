@@ -42,7 +42,7 @@ from .transactions import (ContractIn, OfferSheetDetails, SignDetails,
                            _require_validatable, _rfa_eligibility,
                            _signee_existing_hold, _signing_fact_sheet,
                            _validate_sign, _validation_ctx, apply_offer_sheet,
-                           apply_sign)
+                           apply_sign, apply_with_warning_confirm)
 
 router = APIRouter()
 
@@ -790,6 +790,10 @@ class BallotIn(BaseModel):
 
 class DeclareWinnerIn(BaseModel):
     key: str  # an offer id, or the synthetic QO / NO_SIGNING keys
+    # See apply_with_warning_confirm (transactions.py): a first call with
+    # this false that fails on warnings alone comes back asking for
+    # confirmation instead of writing; a real error is never confirmable.
+    confirm_warnings: bool = False
 
 
 class AdvanceIn(BaseModel):
@@ -2261,11 +2265,14 @@ def declare_winner(slug: str, body: DeclareWinnerIn, info: dict = Depends(requir
     - `"NO_SIGNING"` -> nobody signs him this round. No transaction — the
       player just stays in the pool.
 
-    The two branches that do write pass `force_warnings_only=True` — a committee action
-    has no human at a submit screen to tick the office's own force box for an
-    advisory warning (e.g. "below minimum but above the floor"), but a real
-    error still hard-blocks with no override, falling back to the manual
-    /transactions entry as before.
+    The two branches that do write go through `apply_with_warning_confirm`
+    (transactions.py): a first call with `confirm_warnings: false` that fails
+    on warnings alone comes back asking to confirm instead of writing
+    anything — there's no submit screen for a committee action to tick the
+    office's own force box, so the caller has to see the warning and
+    explicitly pass `confirm_warnings: true` before it's cleared. A real
+    error still hard-blocks with no override regardless of that flag,
+    falling back to the manual /transactions entry as before.
     """
     with _fa_lock:
         state = _load_state()
@@ -2337,13 +2344,15 @@ def declare_winner(slug: str, body: DeclareWinnerIn, info: dict = Depends(requir
             )
             description = f"FA round {round_id} — offer #{offer['number']} won the ballot"
             if is_rfa and incumbent and offering_team != incumbent.upper():
-                txn = apply_offer_sheet(
+                txn = apply_with_warning_confirm(
+                    apply_offer_sheet,
                     OfferSheetDetails(player=slug, offering_team=offering_team, contract=contract, **common_kwargs),
-                    txn_date, info, description=description, force_warnings_only=True)
+                    txn_date, info, description=description, confirm_warnings=body.confirm_warnings)
             else:
-                txn = apply_sign(
+                txn = apply_with_warning_confirm(
+                    apply_sign,
                     SignDetails(player=slug, team=offering_team, contract=contract, **common_kwargs),
-                    txn_date, info, description=description, force_warnings_only=True)
+                    txn_date, info, description=description, confirm_warnings=body.confirm_warnings)
 
         final["winner"] = {
             "key": body.key, "declared_at": _now(), "declared_by": info["name"],

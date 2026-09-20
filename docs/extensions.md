@@ -14,11 +14,20 @@ no longer ends in a manual hand-off either: on an "agreed" vote it calls
 `apply_extension` (`routers/transactions.py`, the same reusable
 validate→apply→ledger→notify slice `apply_trade`/`apply_sign` use) directly,
 stamping `announced_date` to the finalize date for the § 4.5 six-month
-trade-freeze clock. A real error still hard-blocks finalize with no override;
-a warning-level check (advisory only) is cleared automatically
-(`force_warnings_only`) since there's no submit screen for a committee action
-to tick force on. Rulebook § 6.2/§ 6.3 already carry the 🔒+👁 badges this
-implies (see § 12 below — that item was already done).
+trade-freeze clock. A real error still hard-blocks finalize with no override.
+A warning-level check (advisory only) is never cleared silently, though —
+`apply_with_warning_confirm` (`routers/transactions.py`) makes the first
+finalize call with `confirm_warnings: false` come back asking to confirm
+instead of writing, exactly when the only failures are warnings; the head
+sees them (`committees/pdc/index.html`'s Finalize button surfaces this as a
+modal) before finalizing again with `confirm_warnings: true`. Discord's
+`poext_notify.notify_player_finalized` no longer posts to `#roster-log`
+directly on an agreed outcome either — `apply_extension`'s own
+`notify_transaction` call already posts to `#transactions`, which the
+roster-log-relay poller mirrors on its own; the direct post was a
+compensation for finalize producing no real transaction, now obsolete.
+Rulebook § 6.2/§ 6.3 already carry the 🔒+👁 badges this implies (see § 12
+below — that item was already done).
 
 **Still not built:** the `/extensions` team-facing page (Phase D — a proposal
 is still created via direct API calls, not a page a team owner would find),

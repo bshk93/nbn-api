@@ -48,7 +48,8 @@ from .transactions import (ContractIn, ExtensionDetails,
                            _bird_tenure, _extension_eligibility_check,
                            _extension_fact_sheet, _extension_frame,
                            _require_validatable, _validate_extension,
-                           _validation_ctx, apply_extension)
+                           _validation_ctx, apply_extension,
+                           apply_with_warning_confirm)
 
 router = APIRouter()
 
@@ -762,6 +763,14 @@ class VoteIn(BaseModel):
     note: str = ""
 
 
+class FinalizeBody(BaseModel):
+    # See apply_with_warning_confirm (transactions.py): the first finalize
+    # call on an "agreed" vote with warning-level checks comes back asking
+    # for this instead of writing anything; a real error is never
+    # confirmable this way.
+    confirm_warnings: bool = False
+
+
 @router.put("/api/poext/players/{slug}/vote")
 def cast_vote(slug: str, body: VoteIn, info: dict = Depends(get_token_info)):
     """Own vote only, and only if assigned — never admin-waved (D6, mirrors
@@ -792,7 +801,8 @@ def cast_vote(slug: str, body: VoteIn, info: dict = Depends(get_token_info)):
 
 
 @router.post("/api/poext/players/{slug}/finalize")
-def finalize_player(slug: str, info: dict = Depends(require_role("poext_head"))):
+def finalize_player(slug: str, body: FinalizeBody = FinalizeBody(),
+                     info: dict = Depends(require_role("poext_head"))):
     """Locks the vote and records the outcome. Head-only, full stop — no
     agent-uncontested shortcut (§ 2.9a): an extension is always a single
     up-or-down merits call on one set of terms, since § 2.4 already removes
@@ -805,11 +815,15 @@ def finalize_player(slug: str, info: dict = Depends(require_role("poext_head")))
     on the proposal (`_extension_details` never sets it), so `apply_extension`
     stamps it to today — the § 4.5 trade-freeze clock starts at the moment
     the deal actually becomes real, not whenever a human might later retype
-    it. Warning-level checks (advisory notes like "below minimum but above
-    the floor — double check") are cleared automatically
-    (`force_warnings_only`) since there's no human at a submit screen to tick
-    the office's own force box for something that isn't a real rule
-    violation. A genuine error still hard-blocks with no override: if
+    it.
+
+    Warning-level checks (advisory notes like "below minimum but above the
+    floor — double check") are never cleared silently: `apply_with_warning_
+    confirm` (transactions.py) makes a first call with `confirm_warnings:
+    false` come back asking for confirmation instead of writing, exactly
+    when the only failures are warnings — the head sees them before they're
+    waived, then finalizes again with `confirm_warnings: true`. A genuine
+    error still hard-blocks with no override, regardless of that flag: if
     conditions shifted since the vote and the deal no longer validates,
     finalize raises and nothing is saved — the vote isn't lost, it just needs
     finalizing again once resolved (by hand on /transactions if the head
@@ -839,9 +853,11 @@ def finalize_player(slug: str, info: dict = Depends(require_role("poext_head")))
 
         txn = None
         if outcome == "agreed":
-            txn = apply_extension(
-                _extension_details(live), datetime.now(timezone.utc).strftime("%Y-%m-%d"), info,
-                description=f"POEXT — {slug} extension agreed", force_warnings_only=True)
+            txn = apply_with_warning_confirm(
+                apply_extension, _extension_details(live),
+                datetime.now(timezone.utc).strftime("%Y-%m-%d"), info,
+                description=f"POEXT — {slug} extension agreed",
+                confirm_warnings=body.confirm_warnings)
 
         idx = next(i for i, p in enumerate(proposals) if p["id"] == live["id"])
         live["status"] = outcome
