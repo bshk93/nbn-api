@@ -19,6 +19,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from . import inbox
 from .constants import TRADE_REQUESTS_FILE
 from .storage import _load_json, _save_json, log_write
 from .auth import get_token_info, has_role, require_role, is_team_owner
@@ -182,12 +183,26 @@ def create_trade_request(body: TradeValidateInput, info: dict = Depends(get_toke
         store["items"].append(item)
         _save_store(store)
     log_write(info, f"POST trade-requests — #{item['number']} {'/'.join(parties)}")
+
+    # Fired outside the lock, same as notify_transaction — a Discord/inbox
+    # problem must never delay or fail the write it's reporting on. Every
+    # party except the one(s) the proposer already represents — they know,
+    # they just submitted it — matching the offer_sheet precedent of
+    # notifying the other side, not the actor.
+    for p in parties:
+        if not has_role(info, p.lower()):
+            inbox.notify_team(
+                p, f"A trade involving {', '.join(parties)} has been proposed "
+                   f"(request #{item['number']}) — your team's consent is needed.",
+                link="/committees/trc/")
+
     return _public_view(item)
 
 
 @router.post("/api/trade-requests/{request_id}/consent")
 def consent_trade_request(request_id: str, info: dict = Depends(get_token_info)):
     now = _now()
+    ready_for_ballot = False
     with _trc_lock:
         store = _load_store()
         idx = _find(store, request_id)
@@ -202,9 +217,20 @@ def consent_trade_request(request_id: str, info: dict = Depends(get_token_info))
         if item["status"] == "awaiting_consent" and all(c["consented"] for c in item["consents"].values()):
             item["status"] = "balloting"
             item["history"].append({"at": now, "by": info["name"], "action": "all_consented"})
+            ready_for_ballot = True
         item["updated_at"] = now
         _save_store(store)
     log_write(info, f"POST trade-requests/{request_id}/consent")
+
+    if ready_for_ballot:
+        text = (f"Trade request #{item['number']} ({', '.join(item['parties'])}) has every "
+                f"party's consent and is ready for ballots.")
+        # Both roles, not just trc — notify_team/notify_role check a member's
+        # literal roles list, not ROLE_IMPLIES, so a trc_head-only member
+        # would otherwise never hear about it (see docs/trc-trade-pipeline.md).
+        inbox.notify_role("trc", text, link="/committees/trc/")
+        inbox.notify_role("trc_head", text, link="/committees/trc/")
+
     return _public_view(item)
 
 

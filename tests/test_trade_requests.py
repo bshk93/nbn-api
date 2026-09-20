@@ -77,6 +77,10 @@ tr._build_team_map = lambda: {}
 tr.load_picks = lambda: []
 tr._load_conveyance_store_for_shadow_check = lambda: None
 
+NOTIFICATIONS = []
+tr.inbox.notify_team = lambda team, text, link=None: NOTIFICATIONS.append(("team", team, text))
+tr.inbox.notify_role = lambda role, text, link=None: NOTIFICATIONS.append(("role", role, text))
+
 LEGAL = {"value": True}
 
 
@@ -151,6 +155,9 @@ check("starts awaiting_consent", req["status"] == "awaiting_consent")
 check("parties derived from transfers", req["parties"] == ["BOS", "PHX"])
 check("number assigned", req["number"] == 1)
 check("neither team pre-consented", not any(c["consented"] for c in req["consents"].values()))
+notified_teams = [n[1] for n in NOTIFICATIONS if n[0] == "team"]
+check("the OTHER party is notified, not the proposer's own team",
+      "BOS" in notified_teams and "PHX" not in notified_teams)
 
 req3 = tr.create_trade_request(body_3team(), GSW_OWNER)
 check("3-team request has all 3 parties", req3["parties"] == ["BOS", "GSW", "PHX"])
@@ -164,8 +171,13 @@ raises("a team-role holder who isn't the owner can't consent", 403,
 r = tr.consent_trade_request(rid, PHX_OWNER)
 check("PHX consented", r["consents"]["PHX"]["consented"] is True)
 check("still awaiting BOS", r["status"] == "awaiting_consent")
+before_notify = len(NOTIFICATIONS)
 r = tr.consent_trade_request(rid, BOS_OWNER)
 check("flips to balloting once every party has consented", r["status"] == "balloting")
+new_notifications = NOTIFICATIONS[before_notify:]
+check("trc and trc_head are both notified once it's ready for ballots",
+      ("role", "trc") in [(n[0], n[1]) for n in new_notifications]
+      and ("role", "trc_head") in [(n[0], n[1]) for n in new_notifications])
 
 # ══ ballots ═════════════════════════════════════════════════════════════════════
 
