@@ -6665,6 +6665,166 @@ def _create_historical_option(details: OptionDetails, body: TransactionIn, info:
 # ── Transaction routes ────────────────────────────────────────────────────────
 
 @router.post("/api/transactions")
+def apply_sign(details: SignDetails, txn_date: str, info: dict, *,
+               description: str = "", force: bool = False,
+               force_warnings_only: bool = False,
+               relay_to_roster_log: bool = False) -> dict:
+    """Validate, apply, ledger-append and announce a plain sign — the same
+    slice of create_transaction's type=="sign" path that apply_trade is for
+    trade, factored out so a second caller (FA's declare-winner,
+    routers/free_agency.py) can execute a real signing without re-entering
+    the HTTP layer or fabricating a fake Depends(require_role(...)) call.
+
+    `force_warnings_only`: a committee execution path has no human at a
+    submit screen to tick the office's own "force" box when a check is
+    merely advisory (level="warning", e.g. "below minimum but above the
+    floor — double check"). Passing this clears warning-level failures
+    automatically while still hard-blocking any real error, unlike plain
+    `force` which would waive both indiscriminately."""
+    val_ctx = {
+        "bios":        load_player_bios(),
+        "team_state":  load_team_state(),
+        "cap_levels":  json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {},
+        "cur_season":  _season_for_date(txn_date),
+        "txn_date":    txn_date,
+        "trade_exceptions": load_trade_exceptions(),
+    }
+    checks = _run_validation("sign", details, val_ctx)
+    failed = [c for c in checks if not c.passed]
+    blocking = [c for c in failed if c.level == "error"] if force_warnings_only else failed
+    if blocking and not force:
+        raise HTTPException(status_code=422, detail={
+            "validation": True,
+            "checks": [c.model_dump() for c in checks],
+            "can_force": True,
+        })
+
+    txn_id = secrets.token_hex(8)
+    with _txn_lock:
+        _apply_sign(details, txn_date, info, txn_id=txn_id)
+        stored_details = details.model_dump()
+        forced_checks = [c.check for c in failed] if failed else None
+        if forced_checks:
+            stored_details["_forced_checks"] = forced_checks
+        txn = {
+            "id": txn_id,
+            "type": "sign",
+            "date": txn_date,
+            "created_by": info.get("name", "unknown"),
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "description": description,
+            "details": stored_details,
+        }
+        _append_transaction(txn)
+
+    notify_transaction(txn, forced_checks, relay_to_roster_log=relay_to_roster_log)
+    return txn
+
+
+def apply_offer_sheet(details: OfferSheetDetails, txn_date: str, info: dict, *,
+                      description: str = "", force: bool = False,
+                      force_warnings_only: bool = False,
+                      relay_to_roster_log: bool = False) -> dict:
+    """Same shape as apply_sign, for offer_sheet — records the offer being
+    extended (§ 3.15); nobody is actually signed until a later, separate
+    offer_sheet_decision. Factored out for the same reason as apply_sign.
+    See apply_sign's docstring for what `force_warnings_only` does and why."""
+    val_ctx = {
+        "bios":        load_player_bios(),
+        "team_state":  load_team_state(),
+        "cap_levels":  json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {},
+        "cur_season":  _season_for_date(txn_date),
+        "txn_date":    txn_date,
+        "trade_exceptions": load_trade_exceptions(),
+    }
+    checks = _run_validation("offer_sheet", details, val_ctx)
+    failed = [c for c in checks if not c.passed]
+    blocking = [c for c in failed if c.level == "error"] if force_warnings_only else failed
+    if blocking and not force:
+        raise HTTPException(status_code=422, detail={
+            "validation": True,
+            "checks": [c.model_dump() for c in checks],
+            "can_force": True,
+        })
+
+    txn_id = secrets.token_hex(8)
+    with _txn_lock:
+        offering_team, retaining_team = _apply_offer_sheet(details, txn_date, info, txn_id=txn_id)
+        stored_details = details.model_dump()
+        stored_details["teams"] = [offering_team, retaining_team]
+        stored_details["retaining_team"] = retaining_team
+        stored_details["deadline"] = _offer_deadline(txn_date)
+        forced_checks = [c.check for c in failed] if failed else None
+        if forced_checks:
+            stored_details["_forced_checks"] = forced_checks
+        txn = {
+            "id": txn_id,
+            "type": "offer_sheet",
+            "date": txn_date,
+            "created_by": info.get("name", "unknown"),
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "description": description,
+            "details": stored_details,
+        }
+        _append_transaction(txn)
+
+    notify_transaction(txn, forced_checks, relay_to_roster_log=relay_to_roster_log)
+    return txn
+
+
+def apply_extension(details: ExtensionDetails, txn_date: str, info: dict, *,
+                    description: str = "", force: bool = False,
+                    force_warnings_only: bool = False,
+                    relay_to_roster_log: bool = False) -> dict:
+    """Same shape as apply_sign, for extension — factored out so POEXT's
+    finalize (routers/poext.py) can execute an agreed extension directly
+    instead of the manual /transactions hand-off it used before. See
+    apply_sign's docstring for what `force_warnings_only` does and why."""
+    val_ctx = {
+        "bios":        load_player_bios(),
+        "team_state":  load_team_state(),
+        "cap_levels":  json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {},
+        "cur_season":  _season_for_date(txn_date),
+        "txn_date":    txn_date,
+        "trade_exceptions": load_trade_exceptions(),
+    }
+    checks = _run_validation("extension", details, val_ctx)
+    failed = [c for c in checks if not c.passed]
+    blocking = [c for c in failed if c.level == "error"] if force_warnings_only else failed
+    if blocking and not force:
+        raise HTTPException(status_code=422, detail={
+            "validation": True,
+            "checks": [c.model_dump() for c in checks],
+            "can_force": True,
+        })
+
+    txn_id = secrets.token_hex(8)
+    with _txn_lock:
+        team = _apply_extension(details, txn_date, info, txn_id=txn_id)
+        stored_details = details.model_dump()
+        stored_details["team"] = team
+        # § 4.5's six-month trade freeze must be stamped by the write that
+        # records the agreement, not by anything that could fail/retry/replay
+        # (a Discord post) — see poext-extension-pipeline.md § 2.7.
+        stored_details["announced_date"] = details.announced_date or txn_date
+        forced_checks = [c.check for c in failed] if failed else None
+        if forced_checks:
+            stored_details["_forced_checks"] = forced_checks
+        txn = {
+            "id": txn_id,
+            "type": "extension",
+            "date": txn_date,
+            "created_by": info.get("name", "unknown"),
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "description": description,
+            "details": stored_details,
+        }
+        _append_transaction(txn)
+
+    notify_transaction(txn, forced_checks, relay_to_roster_log=relay_to_roster_log)
+    return txn
+
+
 def apply_trade(details: TradeIn, txn_date: str, info: dict, *,
                 description: str = "", force: bool = False,
                 relay_to_roster_log: bool = False) -> dict:
@@ -6763,6 +6923,15 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
     if body.type == "trade":
         return apply_trade(parsed_details, body.date, info, description=body.description,
                            force=body.force, relay_to_roster_log=body.relay_to_roster_log)
+    if body.type == "sign":
+        return apply_sign(parsed_details, body.date, info, description=body.description,
+                          force=body.force, relay_to_roster_log=body.relay_to_roster_log)
+    if body.type == "offer_sheet":
+        return apply_offer_sheet(parsed_details, body.date, info, description=body.description,
+                                 force=body.force, relay_to_roster_log=body.relay_to_roster_log)
+    if body.type == "extension":
+        return apply_extension(parsed_details, body.date, info, description=body.description,
+                               force=body.force, relay_to_roster_log=body.relay_to_roster_log)
 
     _val_ctx = {
         "bios":        load_player_bios(),
@@ -6785,10 +6954,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
     txn_id = secrets.token_hex(8)
     with _txn_lock:
         details = parsed_details
-        if body.type == "sign":
-            _apply_sign(details, body.date, info, txn_id=txn_id)
-            stored_details = details.model_dump()
-        elif body.type == "pick":
+        if body.type == "pick":
             _apply_pick(details, body.date, info)
             stored_details = details.model_dump()
         elif body.type == "option":
@@ -6838,27 +7004,10 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             team = _apply_set_hard_cap(details, body.date, info, txn_id=txn_id)
             stored_details = details.model_dump()
             stored_details["team"] = team
-        elif body.type == "offer_sheet":
-            offering_team, retaining_team = _apply_offer_sheet(details, body.date, info, txn_id=txn_id)
-            stored_details = details.model_dump()
-            stored_details["teams"] = [offering_team, retaining_team]
-            # Resolved server-side from the roster, not submitted — the incumbent
-            # is a fact about who holds the RFA rights, not a claim the offering
-            # team gets to make. _open_offer_sheets reads it back from here.
-            stored_details["retaining_team"] = retaining_team
-            stored_details["deadline"] = _offer_deadline(body.date)
         elif body.type == "offer_sheet_decision":
             resolved = _apply_offer_sheet_decision(details, body.date, info, txn_id=txn_id)
             stored_details = details.model_dump()
             stored_details.update(resolved)
-        elif body.type == "extension":
-            team = _apply_extension(details, body.date, info, txn_id=txn_id)
-            stored_details = details.model_dump()
-            stored_details["team"] = team
-            # § 4.5's six-month trade freeze must be stamped by the write that
-            # records the agreement, not by anything that could fail/retry/replay
-            # (a Discord post) — see poext-extension-pipeline.md § 2.7.
-            stored_details["announced_date"] = details.announced_date or body.date
 
         forced_checks = [c.check for c in failed] if (body.force and failed) else None
         if forced_checks:

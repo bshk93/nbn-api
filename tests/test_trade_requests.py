@@ -208,7 +208,8 @@ check("admin satisfies trc_head's gate too — same as every other head-power", 
 # ══ finalize / reject ════════════════════════════════════════════════════════════
 
 print("\nfinalize and reject")
-raises("can't finalize before it's ready", 422, lambda: tr.finalize_trade_request(req3["id"], TRC_HEAD))
+raises("can't finalize before it's ready", 422,
+       lambda: tr.finalize_trade_request(req3["id"], tr.FinalizeBody(), TRC_HEAD))
 
 stale = tr.create_trade_request(body_2team(), PHX_GM)
 tr.consent_trade_request(stale["id"], PHX_OWNER)
@@ -217,15 +218,39 @@ for who in (TRC_A, TRC_B, TRC_C):
     tr.ballot_trade_request(stale["id"], tr.BallotBody(decision="approve", note="ok"), who)
 OWNERSHIP_PROBLEMS["value"] = ["Player 'player-a' is on GSW, not PHX"]
 raises("a leg that's moved since creation blocks finalize", 422,
-       lambda: tr.finalize_trade_request(stale["id"], TRC_HEAD))
+       lambda: tr.finalize_trade_request(stale["id"], tr.FinalizeBody(), TRC_HEAD))
 check("a blocked finalize doesn't apply anything", len(APPLIED) == 0)
+raises("ownership problems block finalize even with force=True — never overrideable", 422,
+       lambda: tr.finalize_trade_request(
+           stale["id"], tr.FinalizeBody(force=True, override_reason="ship it anyway"), TRC_HEAD))
+check("the force attempt still didn't apply anything", len(APPLIED) == 0)
 OWNERSHIP_PROBLEMS["value"] = []
 
-final = tr.finalize_trade_request(rid, TRC_HEAD)
-check("finalize applies the trade for real", len(APPLIED) == 1)
+# ── force override: illegal-but-not-stale can be pushed through deliberately ──
+LEGAL["value"] = False
+illegal = tr.create_trade_request(body_2team(), PHX_GM)
+tr.consent_trade_request(illegal["id"], PHX_OWNER)
+tr.consent_trade_request(illegal["id"], BOS_OWNER)
+for who in (TRC_A, TRC_B, TRC_C):
+    tr.ballot_trade_request(illegal["id"], tr.BallotBody(decision="approve", note="ok"), who)
+raises("an illegal trade still 422s by default (no force)", 422,
+       lambda: tr.finalize_trade_request(illegal["id"], tr.FinalizeBody(), TRC_HEAD))
+raises("force=True without a reason 400s — a bare override isn't enough", 400,
+       lambda: tr.finalize_trade_request(illegal["id"], tr.FinalizeBody(force=True), TRC_HEAD))
+check("still nothing applied", len(APPLIED) == 0)
+forced = tr.finalize_trade_request(
+    illegal["id"], tr.FinalizeBody(force=True, override_reason="league approved it anyway"), TRC_HEAD)
+check("force=True + a reason finalizes an illegal trade", forced["status"] == "finalized")
+check("the override reason is recorded in history",
+      forced["history"][-1]["override_reason"] == "league approved it anyway")
+LEGAL["value"] = True
+
+final = tr.finalize_trade_request(rid, tr.FinalizeBody(), TRC_HEAD)
+check("finalize applies the trade for real", len(APPLIED) == 2)
 check("status is finalized", final["status"] == "finalized")
-check("txn_id recorded", final["finalized"]["txn_id"] == APPLIED[0]["id"])
-raises("a second finalize 409s instead of double-applying", 409, lambda: tr.finalize_trade_request(rid, TRC_HEAD))
+check("txn_id recorded", final["finalized"]["txn_id"] == APPLIED[-1]["id"])
+raises("a second finalize 409s instead of double-applying", 409,
+       lambda: tr.finalize_trade_request(rid, tr.FinalizeBody(), TRC_HEAD))
 
 r = tr.reject_trade_request(req3["id"], tr.RejectBody(reason="Too lopsided"), TRC_HEAD)
 check("trc_head can reject outright, no ballots needed", r["status"] == "rejected")

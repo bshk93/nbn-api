@@ -125,6 +125,16 @@ class RejectBody(BaseModel):
     reason: str
 
 
+class FinalizeBody(BaseModel):
+    # Default (force=False) preserves today's behavior exactly: a trade that
+    # has gone stale/illegal since consent 422s with no way through. force=True
+    # is the deliberate override — trc_head judged the deal still worth
+    # honoring — and requires a reason so there's a durable record of who
+    # overrode what and why, same as apply_trade's own `_forced_checks` stamp.
+    force: bool = False
+    override_reason: Optional[str] = None
+
+
 @router.get("/api/trade-requests")
 def list_trade_requests(team: Optional[str] = None, status: Optional[str] = None):
     items = _load_store()["items"]
@@ -309,7 +319,8 @@ def reject_trade_request(request_id: str, body: RejectBody, info: dict = Depends
 
 
 @router.post("/api/trade-requests/{request_id}/finalize")
-def finalize_trade_request(request_id: str, info: dict = Depends(require_role("trc_head"))):
+def finalize_trade_request(request_id: str, body: FinalizeBody = FinalizeBody(),
+                            info: dict = Depends(require_role("trc_head"))):
     with _trc_lock:
         store = _load_store()
         idx = _find(store, request_id)
@@ -321,22 +332,43 @@ def finalize_trade_request(request_id: str, info: dict = Depends(require_role("t
                 detail=f"Request is {item['status']}, needs {APPROVALS_NEEDED} approvals first")
 
         live = _live_check(item)
-        if not live["legal"]:
+        # Ownership problems ("this asset isn't here anymore") are never
+        # forceable, regardless of body.force: apply_trade has no ownership
+        # check of its own (see _live_check's docstring — _validate_trade
+        # never looks at current ownership), so forcing past a stale asset
+        # would let the trade execute against a pick/player it no longer
+        # actually controls, corrupting the conveyance tree rather than just
+        # breaking a league rule the office might reasonably waive.
+        if live["ownership_problems"]:
+            raise HTTPException(status_code=422, detail={
+                "message": "One or more assets in this trade are no longer where it expects them to be",
+                "ownership_problems": live["ownership_problems"],
+            })
+        if not live["legal"] and not body.force:
             raise HTTPException(status_code=422, detail={
                 "message": "Trade is no longer legal to execute",
                 "checks": live["checks"],
-                "ownership_problems": live["ownership_problems"],
+                "can_force": True,
             })
+        if body.force and not (body.override_reason or "").strip():
+            raise HTTPException(status_code=400, detail="override_reason is required to force a finalize.")
+
+        description = f"TRC request #{item['number']}"
+        if body.force:
+            description += f" (forced through — illegal per checks — override: {body.override_reason})"
 
         trade_in = TradeIn(**item["trade"])
         txn = apply_trade(
             trade_in, datetime.now(timezone.utc).strftime("%Y-%m-%d"), info,
-            description=f"TRC request #{item['number']}")
+            description=description, force=body.force)
 
         now = _now()
         item["status"] = "finalized"
         item["finalized"] = {"at": now, "by": info["name"], "txn_id": txn["id"]}
-        item["history"].append({"at": now, "by": info["name"], "action": "finalized", "txn_id": txn["id"]})
+        finalize_history = {"at": now, "by": info["name"], "action": "finalized", "txn_id": txn["id"]}
+        if body.force:
+            finalize_history["override_reason"] = body.override_reason
+        item["history"].append(finalize_history)
         item["updated_at"] = now
         _save_store(store)
     log_write(info, f"POST trade-requests/{request_id}/finalize — txn {txn['id']}")

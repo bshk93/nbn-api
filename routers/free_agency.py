@@ -36,11 +36,13 @@ from .players import load_player_bios, _build_team_map
 from .proposals import _member_current_team
 from .storage import (_current_league_year, _load_json, _parse_dollar,
                       _save_json, log_write)
-from .transactions import (ContractIn, SignDetails, _compute_team_salary,
-                           _count_standard_roster, _min_salary_for,
-                           _real_empty_roster_charge, _require_validatable,
-                           _rfa_eligibility, _signee_existing_hold,
-                           _signing_fact_sheet, _validate_sign, _validation_ctx)
+from .transactions import (ContractIn, OfferSheetDetails, SignDetails,
+                           _compute_team_salary, _count_standard_roster,
+                           _min_salary_for, _real_empty_roster_charge,
+                           _require_validatable, _rfa_eligibility,
+                           _signee_existing_hold, _signing_fact_sheet,
+                           _validate_sign, _validation_ctx, apply_offer_sheet,
+                           apply_sign)
 
 router = APIRouter()
 
@@ -784,6 +786,10 @@ class RemandIn(BaseModel):
 class BallotIn(BaseModel):
     balls: dict[str, int]
     note: str = ""
+
+
+class DeclareWinnerIn(BaseModel):
+    key: str  # an offer id, or the synthetic QO / NO_SIGNING keys
 
 
 class AdvanceIn(BaseModel):
@@ -2213,16 +2219,139 @@ def finalize_player(slug: str, info: dict = Depends(get_token_info)):
         _save_state(state)
     log_write(info, f"POST fa/players/{slug}/finalize")
     fa_notify.notify_player_finalized(slug, node["final"], live)
-    # Neutral on purpose — finalize never names a winner (the FAC enters the
-    # actual signing on /transactions by hand, same rule notify_player_finalized
-    # follows), so this tells each bidder voting closed without claiming who
-    # it favored.
+    # Neutral on purpose — finalize never names a winner (that's
+    # declare_winner, below, a separate fac_head-only step), so this tells
+    # each bidder voting closed without claiming who it favored.
     for o in live:
         recipient = o.get("submitted_by") or o.get("created_by")
         if recipient:
             inbox.notify_member(recipient, f"Voting closed on {slug} — check the result",
                                  link="/free-agency")
     return node["final"]
+
+
+@router.post("/api/fa/players/{slug}/declare-winner")
+def declare_winner(slug: str, body: DeclareWinnerIn, info: dict = Depends(require_role("fac_head"))):
+    """The step finalize deliberately doesn't take (see finalize_player's
+    docstring: "finalize never names a winner"). This is where the head names
+    the outcome the ballot actually produced and, where that means a real
+    signing, executes it — replacing the hand-typed /transactions entry that
+    otherwise followed every FA round.
+
+    `key` is one of `_ballot_options`'s three shapes for this round:
+
+    - A real offer id -> a plain `sign` if the offering team is (or becomes,
+      for a UFA/unsigned-rights player) the signing team, or an `offer_sheet`
+      if the player is RFA and the offer came from a team other than the
+      incumbent (§ 3.15 — this only extends the offer; the incumbent's match
+      decision is a separate, later offer_sheet_decision, same as every other
+      offer sheet). Getting this branch wrong in the sign direction would
+      silently let a rival sign another team's RFA with no incumbent match
+      opportunity at all — `_validate_sign` has no guard against that, so the
+      RFA/incumbent check happens here, not there.
+    - `"QO"` -> the incumbent would retain an RFA on the § 3.9 qualifying
+      offer, but this is **never auto-executed**: `BACKLOG.md`'s [P1]
+      ("Qualifying Offers don't exist in the system at all") is explicit that
+      the § 3.9 formula needs BOD ratification and a real transaction type
+      before any real dollar figure derived from it gets written to the
+      ledger. Declaring "QO" here always 422s pointing at manual
+      /transactions entry — closing this branch out the same way as the other
+      two would be exactly the "doing it the other way round" the backlog
+      item warns against.
+    - `"NO_SIGNING"` -> nobody signs him this round. No transaction — the
+      player just stays in the pool.
+
+    The two branches that do write pass `force_warnings_only=True` — a committee action
+    has no human at a submit screen to tick the office's own force box for an
+    advisory warning (e.g. "below minimum but above the floor"), but a real
+    error still hard-blocks with no override, falling back to the manual
+    /transactions entry as before.
+    """
+    with _fa_lock:
+        state = _load_state()
+        round_id = _round_id_for(state, slug)
+        if not round_id:
+            raise HTTPException(422, "This player hasn't been opened in a round yet")
+        ballots = _load_ballots()
+        node = _ballot_node(ballots, slug, round_id)
+        final = node.get("final")
+        if not final:
+            raise HTTPException(422, "Finalize the ballot before declaring a winner")
+        if final.get("winner"):
+            raise HTTPException(409, "A winner has already been declared for this round")
+
+        bios = load_player_bios()
+        if slug not in bios:
+            raise HTTPException(404, f"Unknown player {slug!r}")
+
+        # The same offers this round's ballot actually covered — matched by
+        # the exact archived_at stamp finalize gave them, not just "any offer
+        # ever made for this player" (a later round could reopen the same
+        # slug). Voided offers are excluded: they left play before the vote
+        # closed (§ 4.3b) and were never a live option to win.
+        offers = _load_offers()
+        round_offers = [o for o in offers
+                        if o["player"] == slug and o.get("archived_at") == final["locked_at"]
+                        and o["status"] in ("submitted", "returned")]
+        valid_keys = {o["id"] for o in round_offers} | {QO, NO_SIGNING}
+        if body.key not in valid_keys:
+            raise HTTPException(422, f"{body.key!r} was not an option on this round's ballot")
+
+        team_map = _build_team_map()
+        txn_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        pool = _live_pool()
+        is_rfa = pool.get(slug, {}).get("rfa", False)
+        incumbent = team_map.get(slug)
+
+        txn = None
+        if body.key == NO_SIGNING:
+            pass
+        elif body.key == QO:
+            # Deliberately NOT auto-executed. BACKLOG.md's [P1] "Qualifying
+            # Offers don't exist in the system at all" is explicit: "get BOD
+            # to ratify or amend the § 3.9 formula first, then add the
+            # transaction type and the derived amount. Doing it the other way
+            # round bakes an unratified number into the ledger." qo_amount
+            # here comes from exactly that unratified formula — writing a
+            # real sign off it is the thing the backlog item says not to do
+            # yet, however tidy it would be to close this branch out along
+            # with the other two. Leave this on the manual /transactions path
+            # until the formula is ratified and a real qualifying_offer
+            # transaction type exists to record it against.
+            raise HTTPException(
+                422, "QO retention isn't auto-executed yet — the § 3.9 formula is still "
+                     "unratified (BACKLOG.md [P1]) and there's no transaction type to record "
+                     "it against. Enter this signing by hand on /transactions.")
+        else:
+            offer = next(o for o in round_offers if o["id"] == body.key)
+            # The SignDetails-shaped payload lives under offer["offer"] (per
+            # this module's own "offer is a verbatim SignDetails" rule) — the
+            # top-level record only duplicates player/team for indexing.
+            terms = offer["offer"]
+            contract = ContractIn(**terms["contract"]) if isinstance(terms["contract"], dict) else terms["contract"]
+            offering_team = offer["team"].upper()
+            common_kwargs = dict(
+                signing_method=terms.get("signing_method"),
+                bird_rights_type=terms.get("bird_rights_type"),
+                eaps_assumption=terms.get("eaps_assumption"),
+            )
+            description = f"FA round {round_id} — offer #{offer['number']} won the ballot"
+            if is_rfa and incumbent and offering_team != incumbent.upper():
+                txn = apply_offer_sheet(
+                    OfferSheetDetails(player=slug, offering_team=offering_team, contract=contract, **common_kwargs),
+                    txn_date, info, description=description, force_warnings_only=True)
+            else:
+                txn = apply_sign(
+                    SignDetails(player=slug, team=offering_team, contract=contract, **common_kwargs),
+                    txn_date, info, description=description, force_warnings_only=True)
+
+        final["winner"] = {
+            "key": body.key, "declared_at": _now(), "declared_by": info["name"],
+            "txn_id": txn["id"] if txn else None,
+        }
+        _save_ballots(ballots)
+    log_write(info, f"POST fa/players/{slug}/declare-winner — {body.key}")
+    return final
 
 
 @router.post("/api/fa/players/{slug}/unlock")

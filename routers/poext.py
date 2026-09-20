@@ -48,7 +48,7 @@ from .transactions import (ContractIn, ExtensionDetails,
                            _bird_tenure, _extension_eligibility_check,
                            _extension_fact_sheet, _extension_frame,
                            _require_validatable, _validate_extension,
-                           _validation_ctx)
+                           _validation_ctx, apply_extension)
 
 router = APIRouter()
 
@@ -798,9 +798,22 @@ def finalize_player(slug: str, info: dict = Depends(require_role("poext_head")))
     up-or-down merits call on one set of terms, since § 2.4 already removes
     the contested/uncontested axis FA's shortcut collapses.
 
-    Does **not** write a transaction on accept, matching FA's finalize: the
-    committee types the agreed extension into /transactions by hand, checked
-    against the same POST /api/validate/extension either way.
+    On "agreed", writes the extension for real via `apply_extension` — unlike
+    FA, there's only ever one live proposal per player here (§ 2.4), so
+    there's no "which of several outcomes" ambiguity finalize would need a
+    separate declare-winner step to resolve. `announced_date` is left unset
+    on the proposal (`_extension_details` never sets it), so `apply_extension`
+    stamps it to today — the § 4.5 trade-freeze clock starts at the moment
+    the deal actually becomes real, not whenever a human might later retype
+    it. Warning-level checks (advisory notes like "below minimum but above
+    the floor — double check") are cleared automatically
+    (`force_warnings_only`) since there's no human at a submit screen to tick
+    the office's own force box for something that isn't a real rule
+    violation. A genuine error still hard-blocks with no override: if
+    conditions shifted since the vote and the deal no longer validates,
+    finalize raises and nothing is saved — the vote isn't lost, it just needs
+    finalizing again once resolved (by hand on /transactions if the head
+    decides to push it through anyway).
     """
     with _poext_lock:
         state = _load_state()
@@ -824,6 +837,12 @@ def finalize_player(slug: str, info: dict = Depends(require_role("poext_head")))
                                      f"cast more votes or resolve it manually before finalizing")
         outcome = "agreed" if accept > reject else "rejected"
 
+        txn = None
+        if outcome == "agreed":
+            txn = apply_extension(
+                _extension_details(live), datetime.now(timezone.utc).strftime("%Y-%m-%d"), info,
+                description=f"POEXT — {slug} extension agreed", force_warnings_only=True)
+
         idx = next(i for i, p in enumerate(proposals) if p["id"] == live["id"])
         live["status"] = outcome
         live["archived_at"] = _now()
@@ -844,6 +863,7 @@ def finalize_player(slug: str, info: dict = Depends(require_role("poext_head")))
             "voters": sorted(node["votes"]),
             "abstained": [m for m in assigned if m not in node["votes"]],
             "rejections_total": rejections, "exhausted": exhausted,
+            "txn_id": txn["id"] if txn else None,
         }
         _save_proposals(proposals)
         _save_votes(votes)

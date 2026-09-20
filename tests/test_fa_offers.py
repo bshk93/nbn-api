@@ -143,6 +143,56 @@ class FakeCheck:
 
 fa._validate_sign = lambda details, ctx: [FakeCheck(LEGAL["legal"])]
 
+# declare_winner needs an incumbent team for the RFA/offer_sheet branch —
+# _build_team_map is real (reads roster CSVs off disk) unless patched here the
+# same way every other dependency in this file is. "decl-ufa"/"decl-rfa" are
+# used only by the declare_winner tests at the very end of this file (kept
+# there, not interleaved here, since opening extra rounds mid-file would shift
+# the round numbering ("r1"/"r2") several later tests hardcode).
+TEAM_MAP = {"decl-rfa": "MIA"}
+fa._build_team_map = lambda: TEAM_MAP
+
+# declare_winner also confirms the player exists via load_player_bios(), the
+# real disk-backed loader — patch it too, or "decl-rfa" 404s while a slug that
+# happens to be a real NBA player already in player-bios.json (curry-stephen)
+# would silently "work" by accident.
+BIOS = {"curry-stephen": {}, "young-rfa": {}, "decl-ufa": {}, "decl-rfa": {}, "future-ufa": {}}
+fa.load_player_bios = lambda: BIOS
+
+POOL["decl-ufa"] = {"class_year": "26-27", "hold_type": "UFA",
+                    "prior_salary": 4_000_000, "rfa": False, "qo_amount": None}
+POOL["decl-rfa"] = {"class_year": "26-27", "hold_type": "RFA",
+                    "prior_salary": 4_000_000, "rfa": True, "qo_amount": 2_000_000}
+
+# apply_sign/apply_offer_sheet are transactions.py's own reusable slices (same
+# shape as apply_trade) — they run the REAL _validate_sign/_run_validation
+# dispatch internally, not this file's fa._validate_sign patch above, since
+# that dispatch is bound in transactions.py's own module namespace (same trap
+# test_poext.py hit for apply_extension). Patching fa.apply_sign/apply_offer_sheet
+# directly keeps declare_winner's tests off real cap math and real disk state.
+APPLIED_SIGNS: list = []
+APPLIED_OFFER_SHEETS: list = []
+
+
+def fake_apply_sign(details, txn_date, info, description="", force=False,
+                    force_warnings_only=False, relay_to_roster_log=False):
+    txn = {"id": f"sign{len(APPLIED_SIGNS) + 1}", "type": "sign",
+           "details": details.model_dump(), "force_warnings_only": force_warnings_only}
+    APPLIED_SIGNS.append(txn)
+    return txn
+
+
+def fake_apply_offer_sheet(details, txn_date, info, description="", force=False,
+                          force_warnings_only=False, relay_to_roster_log=False):
+    txn = {"id": f"os{len(APPLIED_OFFER_SHEETS) + 1}", "type": "offer_sheet",
+           "details": details.model_dump(), "force_warnings_only": force_warnings_only}
+    APPLIED_OFFER_SHEETS.append(txn)
+    return txn
+
+
+fa.apply_sign = fake_apply_sign
+fa.apply_offer_sheet = fake_apply_offer_sheet
+
 
 def contract(y1="$40,000,000"):
     return fa.ContractIn(type="player", salaries={"26-27": y1}, cap_holds={"27-28": "UFA"})
@@ -440,6 +490,7 @@ raises("a remand cannot follow a finalize", 409,
 raises("finalizing twice is refused", 409, lambda: fa.finalize_player("curry-stephen", HEAD))
 
 check("finalize archives the offers", all(o.get("archived_at") for o in [o1, o2]))
+
 # …which is what frees a team to bid on the same player again in a later round.
 fa.set_player_state("curry-stephen", fa.PlayerStateIn(status="open"), HEAD)
 o3 = make_offer(PHX_OWNER)
@@ -1050,6 +1101,68 @@ check("a round with no lock reports none", r1["final"] is None)
 
 check("any FAC/agent/head role can read it, whether or not they're assigned",
       fa.player_history("gone-fa", AGENT_B)["player"] == "gone-fa")
+
+# ══ declare-winner ════════════════════════════════════════════════════════════
+# finalize records ball totals but never names a winner — declare_winner is the
+# separate, fac_head-only step that does. Kept at the very end of the file,
+# self-contained on its own slugs ("decl-ufa"/"decl-rfa"), rather than
+# interleaved with the earlier curry-stephen flow: opening extra rounds
+# mid-file would shift the round numbering ("r1"/"r2") the history checks
+# just above hardcode.
+
+print("\ndeclare-winner — UFA, an offer wins")
+fa.open_round(fa.RoundIn(name="Declare-winner UFA"), HEAD)
+fa.set_player_state("decl-ufa", fa.PlayerStateIn(status="open"), HEAD)
+du_offer = fa.submit_offer(make_offer(PHX_OWNER, player="decl-ufa", y1="$4,000,000")["id"], PHX_OWNER)
+fa.finalize_player("decl-ufa", HEAD)
+raises("a key that wasn't on this round's ballot is rejected", 422,
+       lambda: fa.declare_winner("decl-ufa", fa.DeclareWinnerIn(key="not-a-real-offer"), HEAD))
+won = fa.declare_winner("decl-ufa", fa.DeclareWinnerIn(key=du_offer["id"]), HEAD)
+check("a UFA's winning offer is a plain sign, not an offer sheet",
+      len(APPLIED_SIGNS) == 1 and len(APPLIED_OFFER_SHEETS) == 0)
+check("signed for the offering team, at the offer's own contract",
+      APPLIED_SIGNS[0]["details"]["team"] == "PHX"
+      and APPLIED_SIGNS[0]["details"]["contract"]["salaries"] == {"26-27": "$4,000,000"})
+check("warnings auto-clear, since there's no submit screen to tick force on",
+      APPLIED_SIGNS[0]["force_warnings_only"] is True)
+check("declare_winner's record matches the applied txn",
+      won["winner"]["key"] == du_offer["id"] and won["winner"]["txn_id"] == APPLIED_SIGNS[0]["id"])
+raises("a winner can't be declared twice for the same round", 409,
+       lambda: fa.declare_winner("decl-ufa", fa.DeclareWinnerIn(key=du_offer["id"]), HEAD))
+raises("can't declare a winner before finalize", 422,
+       lambda: fa.declare_winner("young-rfa", fa.DeclareWinnerIn(key="QO"), HEAD))
+
+print("\ndeclare-winner — RFA: a rival offer must become an offer_sheet, never a sign")
+fa.open_round(fa.RoundIn(name="Declare-winner RFA rival"), HEAD)
+fa.set_player_state("decl-rfa", fa.PlayerStateIn(status="open"), HEAD)
+riv = fa.submit_offer(make_offer(PHX_OWNER, player="decl-rfa", y1="$3,000,000")["id"], PHX_OWNER)
+fa.finalize_player("decl-rfa", HEAD)
+won = fa.declare_winner("decl-rfa", fa.DeclareWinnerIn(key=riv["id"]), HEAD)
+check("a rival's offer on an RFA becomes an offer_sheet, not a completed sign",
+      len(APPLIED_OFFER_SHEETS) == 1 and len(APPLIED_SIGNS) == 1)  # the 1 sign is decl-ufa's, above
+check("offer_sheet names the rival as offering_team, MIA untouched by this write",
+      APPLIED_OFFER_SHEETS[0]["details"]["offering_team"] == "PHX")
+
+print("\ndeclare-winner — RFA: QO is never auto-executed (BACKLOG.md [P1])")
+fa.open_round(fa.RoundIn(name="Declare-winner RFA QO"), HEAD)
+fa.set_player_state("decl-rfa", fa.PlayerStateIn(status="open"), HEAD)
+fa.finalize_player("decl-rfa", HEAD)
+before_signs = len(APPLIED_SIGNS)
+raises("QO always 422s — the § 3.9 formula is unratified, so no real dollar "
+       "figure derived from it may reach the ledger yet", 422,
+       lambda: fa.declare_winner("decl-rfa", fa.DeclareWinnerIn(key="QO"), HEAD))
+check("nothing was applied", len(APPLIED_SIGNS) == before_signs)
+
+print("\ndeclare-winner — NO_SIGNING leaves no transaction at all")
+fa.open_round(fa.RoundIn(name="Declare-winner NO_SIGNING"), HEAD)
+fa.set_player_state("decl-rfa", fa.PlayerStateIn(status="open"), HEAD)
+fa.finalize_player("decl-rfa", HEAD)
+before_signs, before_sheets = len(APPLIED_SIGNS), len(APPLIED_OFFER_SHEETS)
+won = fa.declare_winner("decl-rfa", fa.DeclareWinnerIn(key="NO_SIGNING"), HEAD)
+check("no sign or offer_sheet gets applied", len(APPLIED_SIGNS) == before_signs
+      and len(APPLIED_OFFER_SHEETS) == before_sheets)
+check("the record still shows what was decided, with no txn_id",
+      won["winner"]["key"] == "NO_SIGNING" and won["winner"]["txn_id"] is None)
 
 print("\n" + ("=" * 40))
 if FAILS:

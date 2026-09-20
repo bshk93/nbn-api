@@ -1,20 +1,30 @@
 # Contract Extensions (§ 6.2 / § 6.3) — design spec
 
-**Status: Phase A + E LIVE, deployed 2026-08-21.** `"extension"` is in
-`_VALIDATORS`, the `create_transaction` type whitelist, and `_detail_models`.
-`POST /api/validate/extension` and `POST /api/transactions` (type=`extension`)
-both work against real production data. § 6.2 and § 6.3 checks run as
-described in § 5 below, with the corrections listed in
+**Status: Phase A + C + E LIVE.** `"extension"` is in `_VALIDATORS`, the
+`create_transaction` type whitelist, and `_detail_models`. `POST
+/api/validate/extension` and `POST /api/transactions` (type=`extension`) both
+work against real production data. § 6.2 and § 6.3 checks run as described in
+§ 5 below, with the corrections listed in
 `nbn-today/docs/poext-extension-pipeline.md` § 11 already applied in code.
 
-**Not yet built:** the `/api/poext/*` committee pipeline (Phase C — claim,
-negotiate, ballot, finalize), the `/extensions` team-facing page (Phase D),
-and the § 4.5 six-month trade-freeze check in `_validate_trade` (Phase F). A
-real extension today goes through the same manual hand-off free agency
-already uses: the committee decides, the office enters it via `/transactions`
-(or the transaction simulator), and the validator here is what tells them
-whether it's legal. § 6.2 and § 6.3's rulebook badges should move from 👁 to
-🔒+👁 to reflect this (see § 12 below).
+The `/api/poext/*` committee pipeline (Phase C — claim, negotiate, ballot,
+finalize) is built in `routers/poext.py` — this section's "not yet built"
+claim predated that build and went stale. As of this change, `finalize_player`
+no longer ends in a manual hand-off either: on an "agreed" vote it calls
+`apply_extension` (`routers/transactions.py`, the same reusable
+validate→apply→ledger→notify slice `apply_trade`/`apply_sign` use) directly,
+stamping `announced_date` to the finalize date for the § 4.5 six-month
+trade-freeze clock. A real error still hard-blocks finalize with no override;
+a warning-level check (advisory only) is cleared automatically
+(`force_warnings_only`) since there's no submit screen for a committee action
+to tick force on. Rulebook § 6.2/§ 6.3 already carry the 🔒+👁 badges this
+implies (see § 12 below — that item was already done).
+
+**Still not built:** the `/extensions` team-facing page (Phase D — a proposal
+is still created via direct API calls, not a page a team owner would find),
+and the § 4.5 six-month trade-freeze *check* in `_validate_trade` (Phase F) —
+`announced_date` is now stamped correctly, but nothing yet reads it back to
+block a trade of a recently-extended player.
 
 Ground truth for "is this live" is the presence of `"extension"` in
 `_VALIDATORS`, not this sentence — `docs/picks-conveyance.md` spent four days

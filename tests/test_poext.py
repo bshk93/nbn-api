@@ -137,6 +137,26 @@ class FakeCheck:
 
 poext._validate_extension = lambda details, ctx: [FakeCheck(LEGAL["legal"])]
 
+# apply_extension is transactions.py's own reusable, importable slice (the
+# same shape as apply_trade) — it runs the REAL _validate_extension/_run_validation
+# dispatch internally, not poext's locally-patched stub above, since that
+# dispatch is bound in transactions.py's own module namespace. Patching
+# poext.apply_extension itself (same pattern test_trade_requests.py uses for
+# tr.apply_trade) keeps this suite testing the pipeline, never real cap math
+# or real on-disk bios/team-state.
+APPLIED_EXTENSIONS: list = []
+
+
+def fake_apply_extension(details, txn_date, info, description="", force=False,
+                          force_warnings_only=False, relay_to_roster_log=False):
+    txn = {"id": f"txn{len(APPLIED_EXTENSIONS) + 1}", "type": "extension",
+           "details": details.model_dump(), "force_warnings_only": force_warnings_only}
+    APPLIED_EXTENSIONS.append(txn)
+    return txn
+
+
+poext.apply_extension = fake_apply_extension
+
 
 def contract(y1="$3,000,000", y2="$3,200,000"):
     return poext.ProposalContract(salaries={"27-28": y1, "28-29": y2}, cap_holds={})
@@ -247,7 +267,12 @@ print("\nfinalize — head only, majority accept")
 # check finalize makes on its own — see finalize's other cases below.
 final = poext.finalize_player("barlow-dominick", HEAD)
 check("agreed, 2-0", final["outcome"] == "agreed" and final["accept"] == 2 and final["reject"] == 0)
-check("no transaction applied — manual hand-off, same as FA", True)  # documented invariant, nothing to assert against
+check("an agreed extension is applied for real, not hand-typed", len(APPLIED_EXTENSIONS) == 1)
+check("applied for the right player/team", APPLIED_EXTENSIONS[0]["details"]["player"] == "barlow-dominick"
+      and APPLIED_EXTENSIONS[0]["details"]["team"] == "SAS")
+check("warnings are auto-cleared, since there's no submit screen to tick force on",
+      APPLIED_EXTENSIONS[0]["force_warnings_only"] is True)
+check("finalize's txn_id matches the applied extension", final["txn_id"] == APPLIED_EXTENSIONS[0]["id"])
 check("proposal archived", PROPOSALS[[i for i, x in enumerate(PROPOSALS) if x["id"] == p["id"]][0]]["status"] == "agreed")
 raises("can't finalize twice", 409, lambda: poext.finalize_player("barlow-dominick", HEAD))
 
