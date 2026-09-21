@@ -34,7 +34,7 @@ from routers.transactions import (  # noqa: E402
     _renounce_eligibility, _validate_renounce, _RENOUNCE_SNAPSHOT_FIELDS,
     RenounceDetails, _validate_option, OptionDetails,
     _validate_release, ReleaseDetails,
-    _self_convert_twoway_contract,
+    _self_convert_twoway_contract, _self_sign_pick_contract,
 )
 from fastapi import HTTPException  # noqa: E402
 
@@ -342,6 +342,41 @@ raises_http("a 3-year prior deal is refused — § 2.2 caps a two-way at 2", 422
 
 raises_http("no draft year on file is refused rather than guessed at", 422,
            lambda: build_contract([{"salaries": {NEXT: "$500,000"}}], draft_year=None))
+
+
+# ── _self_sign_pick_contract ──────────────────────────────────────────────────
+print("\n_self_sign_pick_contract — 1st round only, § 7.1's real generator")
+
+import json as _json  # noqa: E402
+import tempfile  # noqa: E402
+
+_scale_dir = tempfile.mkdtemp()
+_scale_path = Path(_scale_dir) / "rookie-scale.json"
+_scale_path.write_text(_json.dumps({
+    "2026": [[12000000, 12500000, 13000000, 13500000, 16000000]],  # pick 1 only
+}))
+txn.ROOKIE_SCALE_FILE = _scale_path
+
+
+def sign_pick_contract(player_type="draft-rights", draft_round=1, draft_year=2026, draft_pick=1):
+    bio = {"name": "TEST, PLAYER", "type": player_type, "draft_round": draft_round,
+          "draft_year": draft_year, "draft_pick": draft_pick}
+    return _self_sign_pick_contract(bio, "p")
+
+
+raises_http("not holding draft rights is refused", 422, lambda: sign_pick_contract(player_type="player"))
+raises_http("a 2nd-round pick is refused — no generator exists for it", 422,
+           lambda: sign_pick_contract(draft_round=2))
+raises_http("a draft year with no table on file is refused", 422,
+           lambda: sign_pick_contract(draft_year=2099))
+raises_http("a pick slot past the end of the table is refused", 422,
+           lambda: sign_pick_contract(draft_pick=2))
+
+scale = sign_pick_contract()
+check("a real 1st-round pick builds the § 7.1 schedule",
+      scale["salaries"][list(scale["salaries"])[0]] == "$12,000,000")
+check("Years 3 and 4 are tagged TEAM_OPT, the trailing year RFA",
+      list(scale["cap_holds"].values()) == ["TEAM_OPT", "TEAM_OPT", "RFA"])
 
 
 # ── snapshot coverage ─────────────────────────────────────────────────────────

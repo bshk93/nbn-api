@@ -8208,6 +8208,142 @@ def self_convert_twoway(body: SelfConvertTwoWayIn, info: dict = Depends(get_toke
     return {"ok": True, "transaction": txn, "checks": [c.model_dump() for c in checks]}
 
 
+def _self_sign_pick_contract(bio: dict, player: str) -> dict:
+    """Builds the § 7.1 rookie-scale contract a self-serve pick signing
+    would submit. Only ever a 1st-round pick: `_rookie_scale_contract` is a
+    true generator (120% of the NBA rookie scale for the slot, 4 years,
+    Years 3-4 as team options, deterministic) with a table on file for
+    every real draft year. A 2nd-round pick has no generator anywhere in
+    the API — `_second_round_scale_contract` only scores a contract someone
+    already typed in, and its own comments flag the 4-year structure's
+    Years 3-4 tier sequence as provisional, confirmed against just one real
+    signing — so a 2nd-rounder stays office-only rather than guessed at
+    here. Raises HTTPException on anything that makes this player
+    ineligible for the self-serve path at all. Shared by the endpoint and
+    its own preview.
+    """
+    if bio.get("type") != "draft-rights":
+        raise HTTPException(
+            status_code=422,
+            detail=f"{player!r} does not hold unsigned draft rights — only a drafted, unsigned player qualifies.",
+        )
+    if bio.get("draft_round") != 1:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"{player!r} is a {bio.get('draft_round') or 'unknown'}-round pick — only a "
+                    "1st-round pick can be signed here (the rookie-scale figure is deterministic); "
+                    "a 2nd-rounder still needs the office form."),
+        )
+    scale = _rookie_scale_contract(bio.get("draft_year"), bio.get("draft_round"), bio.get("draft_pick"))
+    if not scale:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"No rookie-scale table on file for {player!r}'s draft year/pick — enter this "
+                    "by hand on /transactions."),
+        )
+    return scale
+
+
+@router.get("/api/self/sign_pick/preview/{slug}")
+def preview_self_sign_pick(slug: str):
+    """Read-only preview of what `POST /api/self/sign_pick` would submit
+    for this player right now. Public, no auth, writes nothing, same terms
+    as `/api/validate/*` and `preview_self_convert_twoway`."""
+    bios = load_player_bios()
+    if slug not in bios:
+        raise HTTPException(404, f"Unknown player '{slug}'.")
+    scale = _self_sign_pick_contract(bios[slug], slug)
+    details = SignPickDetails(player=slug, contract=ContractIn(
+        type="player", salaries=scale["salaries"], cap_holds=scale["cap_holds"]))
+    ctx = {
+        "bios":       bios,
+        "team_state": load_team_state(),
+        "cap_levels": json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {},
+        "cur_season": _current_league_year(),
+        "txn_date":   datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "trade_exceptions": load_trade_exceptions(),
+    }
+    checks = _validate_sign_pick(details, ctx)
+    return {
+        "legal": not any(not c.passed and c.level == "error" for c in checks),
+        "checks": [c.model_dump() for c in checks],
+        "salaries": scale["salaries"],
+        "cap_holds": scale["cap_holds"],
+    }
+
+
+class SelfSignPickIn(BaseModel):
+    player: str
+    description: str = ""
+
+
+@router.post("/api/self/sign_pick")
+def self_sign_pick(body: SelfSignPickIn, info: dict = Depends(get_token_info)):
+    """Owner-initiated Article VII rookie-scale signing from their own
+    team's roster page, restricted to a 1st-round pick (see
+    `_self_sign_pick_contract` for why a 2nd-rounder stays office-only).
+
+    Takes no contract at all, same reasoning as `self_convert_twoway`: the
+    server builds the rookie-scale deal itself via `_rookie_scale_contract`
+    rather than asking the owner to submit dollar amounts.
+
+    Same three safety properties as `self_renounce`: the team is derived
+    from the player's own roster row, never supplied; no force, a real
+    error is always fatal; the date is server-stamped.
+    """
+    player = body.player
+    bios = load_player_bios()
+    if player not in bios:
+        raise HTTPException(status_code=404, detail=f"Unknown player '{player}'.")
+
+    team = _build_team_map().get(player)
+    if not team:
+        raise HTTPException(status_code=422, detail=f"{player!r} is not on any roster.")
+    if not is_team_owner(info, team):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Only {team}'s owner can act on {team} players.",
+        )
+
+    bio = bios[player]
+    scale = _self_sign_pick_contract(bio, player)
+
+    txn_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    details = SignPickDetails(player=player, contract=ContractIn(
+        type="player", salaries=scale["salaries"], cap_holds=scale["cap_holds"]))
+    ctx = {
+        "bios":       bios,
+        "team_state": load_team_state(),
+        "cap_levels": json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {},
+        "cur_season": _season_for_date(txn_date),
+        "txn_date":   txn_date,
+        "trade_exceptions": load_trade_exceptions(),
+    }
+    checks = _validate_sign_pick(details, ctx)
+    if any(not c.passed and c.level == "error" for c in checks):
+        raise HTTPException(status_code=422, detail={
+            "validation": True,
+            "checks": [c.model_dump() for c in checks],
+            "can_force": False,
+        })
+
+    txn_id = secrets.token_hex(8)
+    with _txn_lock:
+        applied_team = _apply_sign_pick(details, txn_date, info, txn_id=txn_id)
+        txn = {
+            "id": txn_id,
+            "type": "sign_pick",
+            "date": txn_date,
+            "created_by": info.get("name", "unknown"),
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "description": body.description or f"{applied_team} signs {player} to the rookie scale",
+            "details": {**details.model_dump(), "team": applied_team, "_source": "owner_self_serve"},
+        }
+        _append_transaction(txn)
+    notify_transaction(txn)
+    return {"ok": True, "transaction": txn, "checks": [c.model_dump() for c in checks]}
+
+
 @router.post("/api/validate/offer_sheet")
 def validate_offer_sheet(body: OfferSheetDetails):
     """Non-mutating check of an RFA offer sheet being *extended* (§ 3.15).
