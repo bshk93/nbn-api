@@ -6081,6 +6081,16 @@ def _validate_convert_twoway(details: ConvertTwoWayDetails, ctx: dict) -> list[C
     if r:
         checks.append(r)
 
+    # Missing until now — _validate_sign/_validate_offer_sheet/_validate_extension
+    # all run this, but the new standard contract a two-way conversion produces
+    # never got the same § 3.12 floor check. `contract.type` here is "player"
+    # (the standard deal being signed into), not "two-way", so the function's
+    # own two-way exemption doesn't apply — this genuinely checks the new deal.
+    r = _check_minimum_salary(details.contract, details.player, bios, season, ctx["cap_levels"],
+                              txn_date=ctx.get("txn_date"), signing_method=details.signing_method)
+    if r:
+        checks.append(r)
+
     return checks
 
 
@@ -8027,6 +8037,174 @@ def self_release(body: SelfReleaseIn, info: dict = Depends(get_token_info)):
     if snapshot:
         from .waiver_notify import notify_waived
         notify_waived(player, applied_team)
+    return {"ok": True, "transaction": txn, "checks": [c.model_dump() for c in checks]}
+
+
+def _self_convert_twoway_contract(bio: dict, player: str, cap_levels: dict, cur_season: str) -> dict[str, str]:
+    """Builds the minimum-scale standard contract a self-serve two-way
+    conversion would submit — N years (N = the player's existing two-way
+    deal's own length, § 2.2-capped at 2) at the minimum for their tier.
+    Raises HTTPException on anything that makes this player ineligible for
+    the self-serve path at all. Shared by the endpoint and its own preview,
+    so the roster page can show the exact figures that would be submitted
+    rather than a client-side re-derivation.
+
+    Each season is priced via `_min_salary_for` with no `years_experience`
+    declared on the built contract, so the figure comes from the
+    draft-year-inferred tier for *that* season specifically — deliberately
+    not the flat, declared-anchor reading `_contract_years_exp` documents
+    for an explicit declaration, since that one doesn't climb between
+    contract years at all (reversed 2026-08-13 against a real Jamison
+    Battle deal) and would misprice year 2 of a 2-year conversion.
+    """
+    if bio.get("type") != "two-way":
+        raise HTTPException(status_code=422, detail=f"{player!r} is not on a two-way contract.")
+
+    prior_contracts = bio.get("contracts") or []
+    if not prior_contracts:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"No contract history on file for {player!r} to match a like-for-like length "
+                    "against — enter this by hand on /transactions."),
+        )
+    prior_length = len(prior_contracts[-1].get("salaries") or {})
+    if prior_length not in (1, 2):
+        raise HTTPException(
+            status_code=422,
+            detail=(f"{player!r}'s existing two-way deal is {prior_length} years — § 2.2 caps a "
+                    "two-way at 2, so this doesn't look like a real length to match. Enter this by "
+                    "hand on /transactions."),
+        )
+
+    seasons = [cur_season] if prior_length == 1 else [cur_season, _season_after(cur_season)]
+    salaries: dict[str, str] = {}
+    for season in seasons:
+        expected = _min_salary_for(bio, season, cap_levels, contract=None)
+        if expected is None:
+            raise HTTPException(
+                status_code=422,
+                detail=(f"Can't confirm the minimum salary for {season} — {player}'s years of NBA "
+                        "experience can't be established (no draft year on file). Enter this by "
+                        "hand on /transactions, or use the PDC pitch-and-bid process (§ 2.2)."),
+            )
+        salaries[season] = f"${expected:,}"
+    return salaries
+
+
+@router.get("/api/self/convert_twoway/preview/{slug}")
+def preview_self_convert_twoway(slug: str):
+    """Read-only preview of what `POST /api/self/convert_twoway` would
+    submit for this player right now — the contract it would build and the
+    § 2.2/§ 3.12 checks against it. Public, no auth, writes nothing, same
+    terms as `/api/validate/*`: this is what lets the roster page show real
+    figures before the owner confirms, without re-deriving them client-side."""
+    bios = load_player_bios()
+    if slug not in bios:
+        raise HTTPException(404, f"Unknown player '{slug}'.")
+    bio = bios[slug]
+    cap_levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
+    cur_season = _current_league_year()
+    salaries = _self_convert_twoway_contract(bio, slug, cap_levels, cur_season)
+    details = ConvertTwoWayDetails(player=slug, contract=ContractIn(type="player", salaries=salaries),
+                                   signing_method="minimum")
+    ctx = {
+        "bios":       bios,
+        "team_state": load_team_state(),
+        "cap_levels": cap_levels,
+        "cur_season": cur_season,
+        "txn_date":   datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "trade_exceptions": load_trade_exceptions(),
+    }
+    checks = _validate_convert_twoway(details, ctx)
+    return {
+        "legal": not any(not c.passed and c.level == "error" for c in checks),
+        "checks": [c.model_dump() for c in checks],
+        "salaries": salaries,
+    }
+
+
+class SelfConvertTwoWayIn(BaseModel):
+    player: str
+    description: str = ""
+
+
+@router.post("/api/self/convert_twoway")
+def self_convert_twoway(body: SelfConvertTwoWayIn, info: dict = Depends(get_token_info)):
+    """Owner-initiated two-way-to-standard conversion from their own team's
+    roster page (§ 2.2), restricted to the one case that needs no PDC
+    involvement: a minimum contract matching the length of the player's
+    existing two-way deal. Anything else needs the PDC pitch-and-bid path.
+
+    Takes no contract at all — there's nothing to submit. This module's own
+    doctrine is "the page renders figures, it never derives them" (see
+    `get_rookie_scale_contract`), so `_self_convert_twoway_contract` builds
+    the deal server-side, the same helper `preview_self_convert_twoway`
+    uses to show it beforehand. `_check_minimum_salary` (now run by
+    `_validate_convert_twoway` too, added alongside this endpoint) still
+    checks the built contract as a real backstop, but it only enforces a
+    floor — the actual "is this exactly the minimum" guarantee comes from
+    generating the figure this way, not from checking a submitted one
+    against it.
+
+    Same three safety properties as `self_renounce`: the team is derived
+    from the player's own roster row, never supplied; no force, a real
+    error is always fatal; the date is server-stamped.
+    """
+    player = body.player
+    bios = load_player_bios()
+    if player not in bios:
+        raise HTTPException(status_code=404, detail=f"Unknown player '{player}'.")
+
+    team = _build_team_map().get(player)
+    if not team:
+        raise HTTPException(status_code=422, detail=f"{player!r} is not on any roster.")
+    if not is_team_owner(info, team):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Only {team}'s owner can act on {team} players.",
+        )
+
+    bio = bios[player]
+    txn_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    cap_levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
+    cur_season = _season_for_date(txn_date)
+    salaries = _self_convert_twoway_contract(bio, player, cap_levels, cur_season)
+
+    details = ConvertTwoWayDetails(
+        player=player,
+        contract=ContractIn(type="player", salaries=salaries),
+        signing_method="minimum",
+    )
+    ctx = {
+        "bios":       bios,
+        "team_state": load_team_state(),
+        "cap_levels": cap_levels,
+        "cur_season": cur_season,
+        "txn_date":   txn_date,
+        "trade_exceptions": load_trade_exceptions(),
+    }
+    checks = _validate_convert_twoway(details, ctx)
+    if any(not c.passed and c.level == "error" for c in checks):
+        raise HTTPException(status_code=422, detail={
+            "validation": True,
+            "checks": [c.model_dump() for c in checks],
+            "can_force": False,
+        })
+
+    txn_id = secrets.token_hex(8)
+    with _txn_lock:
+        applied_team = _apply_convert_twoway(details, txn_date, info, txn_id=txn_id)
+        txn = {
+            "id": txn_id,
+            "type": "convert_twoway",
+            "date": txn_date,
+            "created_by": info.get("name", "unknown"),
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "description": body.description or f"{applied_team} converts {player} to a standard contract",
+            "details": {**details.model_dump(), "team": applied_team, "_source": "owner_self_serve"},
+        }
+        _append_transaction(txn)
+    notify_transaction(txn)
     return {"ok": True, "transaction": txn, "checks": [c.model_dump() for c in checks]}
 
 

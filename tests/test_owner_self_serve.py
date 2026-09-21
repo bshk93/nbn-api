@@ -34,7 +34,9 @@ from routers.transactions import (  # noqa: E402
     _renounce_eligibility, _validate_renounce, _RENOUNCE_SNAPSHOT_FIELDS,
     RenounceDetails, _validate_option, OptionDetails,
     _validate_release, ReleaseDetails,
+    _self_convert_twoway_contract,
 )
+from fastapi import HTTPException  # noqa: E402
 
 FAILS = []
 TODAY = "2026-08-08"
@@ -293,6 +295,53 @@ check("dropping to 13 warns about the § 2.1 minimum",
 r = validate_release({NEXT: "$10,000,000"}, {}, 12)
 check("dropping to 11 warns about the § 2.1a charge",
       "Empty Roster Charge" in find(r, "roster_minimum").message)
+
+
+# ── _self_convert_twoway_contract ────────────────────────────────────────────
+print("\n_self_convert_twoway_contract — server builds the deal, never checks a submitted one")
+
+CAP_LEVELS_2YR = {
+    SEASON: {"min_salary_scale": {"0": 1357763, "1": 2185116}},
+    NEXT:   {"min_salary_scale": {"0": 1417307, "1": 2281457}},
+}
+
+
+def build_contract(contracts, draft_year=2026, cur_season=SEASON, cap_levels=None):
+    bio = {"name": "TEST, PLAYER", "type": "two-way", "contracts": contracts, "draft_year": draft_year}
+    return _self_convert_twoway_contract(bio, "p", cap_levels or CAP_LEVELS_2YR, cur_season)
+
+
+def raises_http(name, status, fn):
+    try:
+        fn()
+    except HTTPException as e:
+        check(f"{name} → {status}", e.status_code == status)
+        return
+    check(f"{name} → {status}", False)
+
+
+raises_http("no contract history at all is refused", 422,
+           lambda: build_contract([]))
+
+s = build_contract([{"salaries": {NEXT: "$500,000"}}])  # a 1-year prior two-way deal
+check("a 1-year prior deal builds a 1-year contract, this season only", list(s) == [SEASON])
+check("priced at the tier-0 minimum for a rookie (draft_year == cur_season)",
+      s[SEASON] == "$1,357,763")
+
+s2 = build_contract([{"salaries": {SEASON: "$500,000", NEXT: "$500,000"}}])  # a 2-year prior deal
+check("a 2-year prior deal builds a 2-year contract, this season plus the next",
+      list(s2) == [SEASON, NEXT])
+check("year 1 prices at the tier for this season",
+      s2[SEASON] == "$1,357,763")
+check("year 2 prices at the NEXT season's tier-1 figure — the draft-year proxy "
+      "climbs a season later, unlike a flat declared years_experience",
+      s2[NEXT] == "$2,281,457")
+
+raises_http("a 3-year prior deal is refused — § 2.2 caps a two-way at 2", 422,
+           lambda: build_contract([{"salaries": {SEASON: "$1", NEXT: "$1", "28-29": "$1"}}]))
+
+raises_http("no draft year on file is refused rather than guessed at", 422,
+           lambda: build_contract([{"salaries": {NEXT: "$500,000"}}], draft_year=None))
 
 
 # ── snapshot coverage ─────────────────────────────────────────────────────────
