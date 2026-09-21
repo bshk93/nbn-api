@@ -41,7 +41,7 @@ from .auth import get_token_info, has_role, load_members, require_role
 from .constants import (POEXT_PROPOSALS_FILE, POEXT_STATE_FILE,
                         POEXT_VOTES_FILE, VALID_TEAMS)
 from .free_agency import _member_teams
-from .players import _build_team_map, load_player_bios
+from .players import _build_team_map, _display_name, load_player_bios
 from .proposals import _member_current_team
 from .storage import _current_league_year, _load_json, _save_json, log_write
 from .transactions import (ContractIn, ExtensionDetails,
@@ -66,6 +66,13 @@ MAX_REJECTIONS = 3   # § 6.3: "no further extension opportunities arise" after 
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _player_display_name(slug: str) -> str:
+    """'barlow-dominick' -> 'Dominick Barlow', for text a human reads (the
+    ledger description, inbox notifications) — never the slug itself."""
+    bios = load_player_bios()
+    return _display_name((bios.get(slug) or {}).get("name", "")) or slug
 
 
 # ── storage ───────────────────────────────────────────────────────────────────
@@ -856,7 +863,7 @@ def finalize_player(slug: str, body: FinalizeBody = FinalizeBody(),
             txn = apply_with_warning_confirm(
                 apply_extension, _extension_details(live),
                 datetime.now(timezone.utc).strftime("%Y-%m-%d"), info,
-                description=f"POEXT — {slug} extension agreed",
+                description=f"POEXT — {_player_display_name(slug)} extension agreed",
                 confirm_warnings=body.confirm_warnings)
 
         idx = next(i for i, p in enumerate(proposals) if p["id"] == live["id"])
@@ -889,7 +896,7 @@ def finalize_player(slug: str, body: FinalizeBody = FinalizeBody(),
     recipient = live.get("submitted_by") or live.get("created_by")
     if recipient:
         tail = (" — no further extension opportunities arise (§ 6.3)" if outcome == "rejected" and exhausted else "")
-        inbox.notify_member(recipient, f"Voting closed on {slug}'s extension: {outcome}{tail}",
+        inbox.notify_member(recipient, f"Voting closed on {_player_display_name(slug)}'s extension: {outcome}{tail}",
                             link="/extensions")
     return node["final"]
 
