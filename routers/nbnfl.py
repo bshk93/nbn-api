@@ -73,8 +73,10 @@ PRIMARY_STAT = {
     "passing": "yds",
     "rushing": "yds",
     "receiving": "yds",
-    "defense": "sacks",
+    "defense": "sack",
     "kicking": "fgm",
+    "kick_returns": "yds",
+    "punt_returns": "yds",
 }
 
 
