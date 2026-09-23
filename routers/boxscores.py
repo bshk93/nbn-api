@@ -13,12 +13,13 @@ import allstats_files
 
 from .constants import (
     DATA_DIR, PLAYER_BIOS_FILE, PENDING_BOXSCORES_DIR, MANUAL_QUEUE_FILE,
-    BUILD_STATUS_FILE, BUILD_SCRIPT, VALID_TEAMS, _manual_queue_lock, logger,
+    BUILD_STATUS_FILE, BUILD_SCRIPT, VALID_TEAMS, _manual_queue_lock,
+    _build_trigger_lock, logger,
 )
 from .storage import read_csv, log_write, _current_league_year
 from .allstats_guard import write_allstats, AllstatsGuardError
 from .boxscore_provenance import record_commit
-from .auth import require_any_role
+from .auth import require_any_role, require_role
 from .players import load_player_bios
 from .bets import _award_submission_reward
 
@@ -174,12 +175,15 @@ def _read_build_status() -> dict:
 
 
 def _trigger_build():
-    status = _read_build_status()
-    if status.get("status") == "running":
-        return False
-
-    now = datetime.now(timezone.utc).isoformat()
-    BUILD_STATUS_FILE.write_text(json.dumps({"status": "running", "started_at": now}))
+    # The check and the "claim it" write have to happen as one step — two
+    # requests landing close together must not both read "not running" and
+    # both spawn a build.
+    with _build_trigger_lock:
+        status = _read_build_status()
+        if status.get("status") == "running":
+            return False
+        now = datetime.now(timezone.utc).isoformat()
+        BUILD_STATUS_FILE.write_text(json.dumps({"status": "running", "started_at": now}))
 
     def _run():
         try:
@@ -689,7 +693,7 @@ def get_build_status():
 
 
 @router.post("/api/build/trigger")
-def trigger_build(info: dict = Depends(require_any_role("rosters", "stats"))):
+def trigger_build(info: dict = Depends(require_role("stats"))):
     building = _trigger_build()
     logger.info("[%s] POST build/trigger (started=%s)", info.get("name"), building)
     return {"ok": True, "building": building}

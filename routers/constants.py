@@ -130,6 +130,7 @@ _invest_lock   = threading.Lock()
 _market_lock   = threading.Lock()
 _coaching_lock = threading.Lock()
 _streaming_days_lock = threading.Lock()
+_build_trigger_lock = threading.Lock()
 _donations_lock = threading.Lock()
 _nbnfl_lock = threading.Lock()
 
