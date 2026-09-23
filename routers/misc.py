@@ -19,6 +19,7 @@ from .constants import (
     AWARDS_HISTORY_FILE, PLAYER_BIOS_FILE, LEAGUE_STATE_FILE,
     CALENDAR_EVENTS_FILE, CALENDAR_GAMES_FILE, TRIVIA_SCORES_PATH,
     JOIN_SUBMISSIONS_FILE, JOIN_BLACKLIST_FILE, MEMBER_SEEN_FILE,
+    TRANSACTIONS_FILE,
     VALID_TEAMS, logger,
 )
 from . import audit
@@ -52,6 +53,38 @@ class CapLevel(BaseModel):
     room_amount: int = 0
     eaps: int = 0          # Estimated Average Player Salary — cap-hold threshold (§ 3.10)
     min_salary_scale: dict[str, int] = {}  # keyed "0".."9","10+" — years of experience (§ 2.1a, § 3.12)
+    # True when these figures are a projection (grown off a prior season), not
+    # the number the league has actually announced yet. Lets out-year checks
+    # (extension_cap_position, extension_max_year1's EAPS branch) score against
+    # something instead of refusing outright on cap == 0 — see BACKLOG.md's
+    # "27-28/28-29/29-30 have no cap" entry. The committee clears it when they
+    # enter the real, announced figure.
+    is_estimate: bool = False
+
+
+def _extensions_touching_season(season: str) -> list[dict]:
+    """Extension/extend-and-trade ledger entries whose contract prices `season`.
+
+    Used to flag deals that were validated against an *estimated* cap once the
+    real figure for that season lands — see `put_cap_level` below. Informational
+    only: nothing here re-validates or voids a transaction, same as every other
+    manual-review item in the rulebook.
+    """
+    txns = json.loads(TRANSACTIONS_FILE.read_text()) if TRANSACTIONS_FILE.exists() else []
+    out = []
+    for txn in txns:
+        if txn.get("type") not in ("extension", "extend_and_trade"):
+            continue
+        details = txn.get("details") or {}
+        salaries = ((details.get("contract") or {}).get("salaries")) or {}
+        if season in salaries:
+            out.append({
+                "id": txn.get("id"),
+                "team": details.get("team"),
+                "player": details.get("player"),
+                "date": txn.get("date"),
+            })
+    return out
 
 
 # ── Liveness ────────────────────────────────────────────────────────────────
@@ -104,10 +137,22 @@ def get_cap_levels():
 @router.put("/api/cap-levels/{season}")
 def put_cap_level(season: str, body: CapLevel, info: dict = Depends(require_role("rosters"))):
     levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
+    was_estimate = bool((levels.get(season) or {}).get("is_estimate"))
     levels[season] = body.model_dump()
     CAP_LEVELS_FILE.write_text(json.dumps(levels, indent=2))
-    log_write(info, f"PUT cap-levels/{season} — cap={body.cap} apron1={body.apron1} apron2={body.apron2} hard_cap={body.hard_cap} ntmle={body.ntmle_amount} tmle={body.tmle_amount} bae={body.bae_amount} room={body.room_amount} eaps={body.eaps}")
-    return levels[season]
+    log_write(info, f"PUT cap-levels/{season} — cap={body.cap} apron1={body.apron1} apron2={body.apron2} hard_cap={body.hard_cap} ntmle={body.ntmle_amount} tmle={body.tmle_amount} bae={body.bae_amount} room={body.room_amount} eaps={body.eaps} is_estimate={body.is_estimate}")
+
+    result = dict(levels[season])
+    if was_estimate and not body.is_estimate:
+        flagged = _extensions_touching_season(season)
+        if flagged:
+            logger.info(
+                "cap-levels/%s: real figures replaced an estimate — %d extension(s) priced against "
+                "the estimate need review: %s",
+                season, len(flagged), [f["id"] for f in flagged],
+            )
+        result["flagged_extensions"] = flagged
+    return result
 
 
 # ── League year (the one season clock — cap/contracts, box scores, and the build) ──

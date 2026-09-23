@@ -6407,12 +6407,15 @@ def _validate_extension(details: ExtensionDetails, ctx: dict) -> list[CheckResul
                 message=f"Year 1 (${yr1_salary:,}) is within 140% of prior salary (${ceiling:,} ceiling).",
             ))
     else:
-        eaps = (cap_levels.get(yr1_season, {}) if yr1_season else {}).get("eaps")
+        yr1_cl = cap_levels.get(yr1_season, {}) if yr1_season else {}
+        eaps = yr1_cl.get("eaps")
+        estimate_note = " (ESTIMATED — not yet finalized)" if yr1_cl.get("is_estimate") else ""
         checks.append(CheckResult(
             check="extension_max_year1", passed=True, level="warning",
             message=(
                 "No prior-salary figure on file to check the 140% ceiling against"
-                + (f", and EAPS for {yr1_season} is unset" if not eaps else f"; EAPS ceiling would be ${round(eaps * 1.4):,}")
+                + (f", and EAPS for {yr1_season} is unset" if not eaps
+                   else f"; EAPS ceiling would be ${round(eaps * 1.4):,}{estimate_note}")
                 + "."
             ),
         ))
@@ -6428,13 +6431,14 @@ def _validate_extension(details: ExtensionDetails, ctx: dict) -> list[CheckResul
     if yr1_season:
         cl = cap_levels.get(yr1_season, {})
         threshold = cl.get("hard_cap") or cl.get("cap")
+        is_estimate = bool(cl.get("is_estimate"))
         if not threshold:
             checks.append(CheckResult(
                 check="extension_cap_position", passed=True, level="warning",
                 message=(
                     f"Cap thresholds for {yr1_season} are unset (${'0'}) in Cap Settings — "
                     f"cannot evaluate the hard-cap/apron position for this extension until "
-                    f"the committee enters real figures for that season."
+                    f"the committee enters at least an estimate for that season."
                 ),
             ))
         else:
@@ -6442,16 +6446,25 @@ def _validate_extension(details: ExtensionDetails, ctx: dict) -> list[CheckResul
             projected = team_salary + yr1_salary
             over_cap = cl.get("cap") and projected > cl["cap"]
             over_hard = cl.get("hard_cap") and projected > cl["hard_cap"]
+            estimate_prefix = "ESTIMATED — not yet finalized: " if is_estimate else ""
+            estimate_suffix = " This is provisional and may change once the real figure is announced." if is_estimate else ""
             if over_hard:
                 checks.append(CheckResult(
-                    check="extension_cap_position", passed=False, level="error",
-                    message=f"{team} projects to ${projected:,} in {yr1_season}, over the league Hard Cap (${cl['hard_cap']:,}).",
+                    # An estimate never hard-blocks the extension — it's a
+                    # projection, not the league's actual announced threshold —
+                    # so it fails at "warning" severity (forceable) instead of
+                    # "error" (blocking). A real threshold still blocks outright.
+                    check="extension_cap_position", passed=False,
+                    level="warning" if is_estimate else "error",
+                    message=f"{estimate_prefix}{team} projects to ${projected:,} in {yr1_season}, "
+                            f"over the league Hard Cap (${cl['hard_cap']:,}).{estimate_suffix}",
                 ))
             else:
                 checks.append(CheckResult(
                     check="extension_cap_position", passed=True,
-                    message=f"{team} projects to ${projected:,} in {yr1_season}"
-                            + (f" (Cap: ${cl['cap']:,})" if cl.get("cap") else "") + ".",
+                    **({"level": "warning"} if is_estimate else {}),
+                    message=f"{estimate_prefix}{team} projects to ${projected:,} in {yr1_season}"
+                            + (f" (Cap: ${cl['cap']:,})" if cl.get("cap") else "") + f".{estimate_suffix}",
                 ))
     else:
         checks.append(CheckResult(
@@ -6532,7 +6545,14 @@ def _extension_fact_sheet(details: ExtensionDetails, ctx: dict) -> dict:
         "team_salary_first_extended_season": team_salary,
         "cap_first_extended_season": cl.get("cap") or None,
         "hard_cap_first_extended_season": cl.get("hard_cap") or None,
-        "cap_position_evaluable": bool(cl.get("cap") or cl.get("hard_cap")),
+        # "real": a real announced figure. "estimated": a committee projection,
+        # not yet final (see is_estimate on CapLevel, routers/misc.py). False:
+        # nothing on file at all yet, not even an estimate.
+        "cap_position_evaluable": (
+            "estimated" if cl.get("is_estimate") and (cl.get("cap") or cl.get("hard_cap"))
+            else "real" if bool(cl.get("cap") or cl.get("hard_cap"))
+            else False
+        ),
     }
 
 
