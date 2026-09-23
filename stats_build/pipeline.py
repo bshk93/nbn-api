@@ -122,6 +122,13 @@ PLAYER_FIXES = {
     # games, all for GSW, including 2026-05-09 and 2026-05-13 either side of
     # that one, and the two names never appear in the same team-game.
     "RILEY, WENDELL": "RILEY, WILL",
+    # Found 2026-09-23. Two 20-21 GSW rows (2021-05-27, 2021-05-29) spell him
+    # DIATKE. A stub bio had been created for the typo, which satisfied the
+    # unknown_player check, so his two games went to a player who does not
+    # exist and the real Mamadi Diakite (2020 draft class) was listed on
+    # /players as never having played. checks.py's near_duplicate_bio now
+    # catches that shape.
+    "DIATKE, MAMADI": "DIAKITE, MAMADI",
 }
 
 _SEASON_IN_FILENAME = re.compile(r"\d{2}\.")
