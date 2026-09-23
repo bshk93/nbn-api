@@ -196,7 +196,10 @@ def get_token_info(request: Request,
         raise HTTPException(status_code=401, detail="Missing Authorization header")
     info = _resolve_token(authorization)
     if info is None:
-        raise HTTPException(status_code=403, detail="Invalid token")
+        # 401, not 403: "who are you" failed. 403 means a real member lacking a
+        # role, and pages clear the stored token only on 401 — answering both
+        # with 403 signed members out for touching something above their role.
+        raise HTTPException(status_code=401, detail="Invalid token")
     # Name the actor for routers/audit.py. This is the one funnel every
     # authenticated request passes through, so it is the only place that needs
     # to know; unauthenticated writes (timers, the relay, CLI scripts) record

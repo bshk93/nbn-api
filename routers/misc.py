@@ -335,7 +335,7 @@ def get_team_ballot(season: str, team: str, authorization: Optional[str] = Heade
     if not revealed:
         info = _resolve_token(authorization)
         if not info:
-            raise HTTPException(status_code=403, detail="Unauthorized")
+            raise HTTPException(status_code=401, detail="Invalid token")
         roles = set(info.get("roles", []))
         if not (has_role(info, "admin") or has_role(info, "bod") or team.lower() in roles):
             raise HTTPException(status_code=403, detail="Unauthorized")
@@ -351,7 +351,7 @@ def put_team_ballot(season: str, team: str, body: dict, authorization: Optional[
         raise HTTPException(status_code=404, detail="Unknown team")
     info = _resolve_token(authorization)
     if not info:
-        raise HTTPException(status_code=403, detail="Unauthorized")
+        raise HTTPException(status_code=401, detail="Invalid token")
     roles = set(info.get("roles", []))
     if not (has_role(info, "admin") or has_role(info, "rosters") or team.lower() in roles):
         raise HTTPException(status_code=403, detail="Unauthorized")

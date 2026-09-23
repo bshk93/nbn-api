@@ -107,7 +107,7 @@ r = c.post("/api/auth/session")
 check("mint with no credentials → 401", r.status_code == 401)
 
 r = c.post("/api/auth/session", headers=bearer("deadbeef"))
-check("mint with an unknown token → 403", r.status_code == 403)
+check("mint with an unknown token → 401", r.status_code == 401)
 
 r = c.post("/api/auth/session", headers=bearer(FAC_TOKEN))
 check("mint with a valid token → 200", r.status_code == 200)
@@ -165,8 +165,8 @@ r = c.post("/api/auth/session")
 check("a session cannot mint its successor → 401", r.status_code == 401)
 
 r = c.get("/api/fa/_probe", headers=bearer("deadbeef"))
-check("a bad Authorization header is not rescued by the cookie → 403",
-      r.status_code == 403)
+check("a bad Authorization header is not rescued by the cookie → 401",
+      r.status_code == 401)
 
 check("minting did not create a second row for the same request", len(sessions_file()) == 1)
 
@@ -282,8 +282,8 @@ check("no credentials off the allowlist → 401",
       fresh.get("/api/roster/_probe").status_code == 401)
 check("no credentials on the allowlist → 401",
       fresh.get("/api/fa/_probe").status_code == 401)
-check("bad token → 403",
-      fresh.get("/api/roster/_probe", headers=bearer("nope")).status_code == 403)
+check("bad token → 401",
+      fresh.get("/api/roster/_probe", headers=bearer("nope")).status_code == 401)
 check("valid header authenticates as always",
       fresh.get("/api/roster/_probe", headers=bearer(FAC_TOKEN)).json()["name"] == "facMember")
 check("/api/auth/me with no credentials is still a 200 with an empty identity",
