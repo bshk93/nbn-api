@@ -176,14 +176,20 @@ def read_corpus(data_dir: Path) -> list[tuple[str, list[dict]]]:
     return out
 
 
-def bio_names(data_dir: Path) -> set[str] | None:
-    """Every real player's name, upper-cased. None when the bios are unreadable,
-    which skips the name check rather than reporting every player as unknown."""
+def load_bios(data_dir: Path) -> dict | None:
+    """player-bios.json, or None when unreadable — which skips the name checks
+    rather than reporting every player as unknown."""
     path = data_dir / "player-bios.json"
     try:
-        bios = json.loads(path.read_text())
+        return json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as exc:
-        print(f"  (skipping the player-name check: {exc})")
+        print(f"  (skipping the player-name checks: {exc})")
+        return None
+
+
+def bio_names(bios: dict | None) -> set[str] | None:
+    """Every real player's name, upper-cased."""
+    if bios is None:
         return None
     return {(b.get("name") or "").strip().upper()
             for b in bios.values() if b.get("name")}
@@ -198,7 +204,10 @@ def value_violations(data_dir: Path) -> list[str]:
     run and re-reported until the data is fixed, and `--accept` cannot baseline
     one away permanently.
     """
-    findings = checks.check_corpus(read_corpus(data_dir), bio_names(data_dir))
+    bios = load_bios(data_dir)
+    findings = checks.check_corpus(
+        read_corpus(data_dir), bio_names(bios),
+        checks.stub_lookalikes(bios) if bios is not None else None)
     return [str(f) for f in findings]
 
 

@@ -36,6 +36,7 @@ tested directly, which is what `tests/test_stats_checks.py` does.
 """
 from __future__ import annotations
 
+import difflib
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -214,8 +215,56 @@ def check_players(filename: str, rows: list[dict], bio_names: set[str]) -> list[
     return out
 
 
+# How close a stub bio's name must be to a full bio's to read as a typo of it.
+# At 0.88 the whole 1,037-bio set produced exactly one pair on 2026-09-23 —
+# DIATKE/DIAKITE, the real one — while real near-namesakes (Mitchell, Dillon /
+# Mitchell, Davion; Williams, Brice / Williams, Vince) stay well below it.
+LOOKALIKE_CUTOFF = 0.88
+
+
+def stub_lookalikes(bios: dict) -> dict[str, str]:
+    """Stub bio name → the full bio name it looks like a misspelling of.
+
+    A stub is a bio with no date of birth: what gets created when someone makes
+    a bio for a name seen in a box score, rather than for a player they looked
+    up. That is exactly how a typo gets past `unknown_player`.
+    """
+    full, stubs = [], []
+    for b in bios.values():
+        name = (b.get("name") or "").strip().upper()
+        if name:
+            (stubs if not (b.get("dob") or "").strip() else full).append(name)
+    out = {}
+    for name in stubs:
+        match = difflib.get_close_matches(name, full, n=1, cutoff=LOOKALIKE_CUTOFF)
+        if match and match[0] != name:
+            out[name] = match[0]
+    return out
+
+
+def check_lookalikes(filename: str, rows: list[dict],
+                     lookalikes: dict[str, str]) -> list[Finding]:
+    """No box score row may resolve to a stub bio that looks like a typo of a
+    real one. `unknown_player` passes these — the name *does* match a bio — so
+    the games go to a player who does not exist, and the real one reads as
+    never having played."""
+    seen = Counter()
+    for r in rows:
+        raw = (r.get("PLAYER") or "").strip()
+        fixed = PLAYER_FIXES.get(raw, raw).upper()
+        if fixed in lookalikes:
+            seen[fixed] += 1
+    return [Finding(
+        "lookalike_player", filename,
+        f"{name!r} ({n} row{'s' if n != 1 else ''}) resolves to a stub bio that "
+        f"looks like a misspelling of {lookalikes[name]!r}. If it is the same "
+        f"player, add it to PLAYER_FIXES in stats_build/pipeline.py.")
+        for name, n in seen.most_common()]
+
+
 def check_corpus(files: list[tuple[str, list[dict]]],
-                 bio_names: set[str] | None = None) -> list[Finding]:
+                 bio_names: set[str] | None = None,
+                 lookalikes: dict[str, str] | None = None) -> list[Finding]:
     """Every check over every file. `files` is [(filename, rows), ...]."""
     out = []
     for filename, rows in files:
@@ -223,6 +272,8 @@ def check_corpus(files: list[tuple[str, list[dict]]],
         out += check_games(filename, rows)
         if bio_names is not None:
             out += check_players(filename, rows, bio_names)
+        if lookalikes:
+            out += check_lookalikes(filename, rows, lookalikes)
     return out
 
 

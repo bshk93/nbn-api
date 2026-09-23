@@ -143,6 +143,29 @@ def main():
     check("Will Riley's alias is now in the table",
           checks.PLAYER_FIXES.get("RILEY, WENDELL") == "RILEY, WILL")
 
+    # A stub bio made for a typo satisfies unknown_player — the name matches a
+    # bio — which is how DIATKE, MAMADI's two games went to nobody for five
+    # years. lookalike_player catches that shape.
+    bios = {
+        "diakite-mamadi": {"name": "DIAKITE, MAMADI", "dob": "1997-01-21"},
+        "diatke-mamadi":  {"name": "DIATKE, MAMADI",  "dob": ""},
+        "mitchell-davion": {"name": "MITCHELL, DAVION", "dob": "1998-09-05"},
+        "mitchell-dillon": {"name": "MITCHELL, DILLON", "dob": ""},
+        "nobody-new":     {"name": "NOBODY, NEW",     "dob": ""},
+    }
+    looks = checks.stub_lookalikes(bios)
+    check("a stub one letter off a full bio is a lookalike",
+          looks.get("DIATKE, MAMADI") == "DIAKITE, MAMADI", looks)
+    check("a real near-namesake is not", "MITCHELL, DILLON" not in looks, looks)
+    check("a stub with no lookalike is not", "NOBODY, NEW" not in looks, looks)
+    found = checks.check_lookalikes("f.csv", [row("CURY, STEPHEN", 10)] * 2,
+                                    {"CURY, STEPHEN": "CURRY, STEPHEN"})
+    check("rows resolving to a lookalike stub fire",
+          cats(found) == ["lookalike_player"] and "2 rows" in found[0].detail, found)
+    check("the fix is in PLAYER_FIXES, so the live table is quiet",
+          checks.check_lookalikes("f.csv", [row("DIATKE, MAMADI", 10)],
+                                  {"DIATKE, MAMADI": "DIAKITE, MAMADI"}) == [])
+
     # --- the rest --------------------------------------------------------
     r = clean()
     for x in r:
