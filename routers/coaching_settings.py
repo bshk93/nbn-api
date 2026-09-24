@@ -25,6 +25,7 @@ from pydantic import BaseModel
 from .constants import COACHING_SETTINGS_FILE, VALID_TEAMS, _coaching_lock
 from .storage import _load_json, _save_json, log_write
 from .auth import get_token_info, has_role, require_role
+from . import game_day_notify
 
 router = APIRouter()
 
@@ -74,6 +75,7 @@ def put_coaching_settings(
     with _coaching_lock:
         data = load_coaching_settings()
         prev = data.get(team, {})
+        was_pending = bool(prev.get("pending"))
         data[team] = {
             "values": body.values,
             "minutes": body.minutes,
@@ -86,6 +88,7 @@ def put_coaching_settings(
         save_coaching_settings(data)
         rec = data[team]
     log_write(info, f"PUT coaching-settings/{team}")
+    game_day_notify.coaching_saved(team, was_pending, info.get("name"))
     return rec
 
 
@@ -105,9 +108,12 @@ def enter_coaching_settings(
             raise HTTPException(status_code=404, detail="No settings saved for this team yet")
         if body.expected_updated_at and rec.get("updated_at") != body.expected_updated_at:
             raise HTTPException(status_code=409, detail="Settings changed since you loaded them — refresh")
+        was_pending = bool(rec.get("pending"))
         rec["pending"] = False
         rec["entered_at"] = _now()
         rec["entered_by"] = info.get("name")
         save_coaching_settings(data)
     log_write(info, f"POST coaching-settings/{team}/enter")
+    if was_pending:
+        game_day_notify.coaching_entered(team, info.get("name"))
     return rec

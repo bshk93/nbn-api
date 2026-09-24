@@ -20,6 +20,7 @@ from .constants import STREAMING_DAYS_FILE, _streaming_days_lock
 from .storage import _load_json, _save_json, log_write
 from .auth import require_role, require_any_role
 from .schedule import DATE_RE
+from . import game_day_notify
 
 router = APIRouter()
 
@@ -56,12 +57,15 @@ def mark_day_done(date: str, info: dict = Depends(require_role("streamer"))):
     with _streaming_days_lock:
         data = load_streaming_days()
         rec = data.setdefault(date, {})
+        was_done = bool(rec.get("done"))
         rec["done"] = True
         rec["done_at"] = _now()
         rec["done_by"] = info.get("name")
         save_streaming_days(data)
         out = dict(rec)
     log_write(info, f"POST streaming-days/{date}/done")
+    if not was_done:
+        game_day_notify.day_done(date, info.get("name"))
     return out
 
 

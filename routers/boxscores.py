@@ -21,6 +21,7 @@ from .storage import read_csv, log_write, _current_league_year
 from .allstats_guard import write_allstats, AllstatsGuardError
 from .boxscore_provenance import record_commit
 from . import boxscore_shots as shots
+from . import game_day_notify
 from .auth import require_any_role, require_role
 from .players import load_player_bios
 from .bets import _award_submission_reward, _award_amount, NBY_BOXSCORE_REWARD
@@ -691,6 +692,19 @@ def trigger_build(info: dict = Depends(require_role("stats"))):
     return {"ok": True, "building": building}
 
 
+def _notify_if_day_ready(date: str, season: str) -> None:
+    """Tell whoever parses once every game on `date` has both sides in."""
+    try:
+        entered = [frozenset({g["home_team"], g["away_team"]})
+                   for g in get_boxscore_games(season=season, team=None) if g["date"] == date]
+        ready = [frozenset({m["home_team"], m["away_team"]})
+                 for _, m in shots._items(PENDING_BOXSCORES_DIR)
+                 if m.get("date") == date and shots.is_ready(m)]
+        game_day_notify.maybe_day_ready(date, season, entered, ready)
+    except Exception as exc:
+        logger.warning("day-ready check failed for %s: %s", date, exc)
+
+
 async def _read_image(upload: UploadFile, label: str) -> tuple[bytes, str]:
     data = await upload.read()
     if len(data) > shots.MAX_IMAGE_BYTES:
@@ -746,6 +760,7 @@ async def upload_boxscore(
 
     reward, new_bal = _award_submission_reward(info["name"])
     logger.info("[%s] POST boxscore/upload — %s vs %s on %s (id=%s, +NB¥%.2f)", info.get("name"), home_team, away_team, date, item_id, reward)
+    _notify_if_day_ready(date, season)
     return {"ok": True, "id": item_id, "nbyen_reward": reward, "nbyen_balance": new_bal}
 
 
@@ -801,6 +816,8 @@ async def upload_boxscore_side(
         reward, new_bal = _award_side_reward(info["name"])
     logger.info("[%s] POST boxscore/upload/side — %s in %s @ %s on %s (id=%s, %s, +NB¥%.2f)",
                 info.get("name"), team, away_team, home_team, date, meta["id"], fname, reward)
+    if out["ready"]:
+        _notify_if_day_ready(date, season)
     return {"ok": True, "item": out, "nbyen_reward": reward, "nbyen_balance": new_bal}
 
 
