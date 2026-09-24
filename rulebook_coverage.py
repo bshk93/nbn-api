@@ -96,6 +96,7 @@ CHECK_SECTIONS: dict[str, tuple[str, ...]] = {
     "option_eligible":            ("6.1",),
     "pick_advance_limit":         ("7.2",),
     "pick_advance_limit_{}_{}":   ("7.2",),
+    "trailing_hold":              ("3.10",),
     # cites § 3.12 only to name the minimum-scale exemption; the rule is § 3.9,
     # and § 3.13 is where the 8% Full Bird ceiling lives.
     "raise_limit":                ("3.9", "3.13"),

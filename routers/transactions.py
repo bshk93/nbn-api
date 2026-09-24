@@ -5,6 +5,7 @@ import re
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -3007,9 +3008,10 @@ def _compute_fa_hold_amount(
     figure rests on an eaps_assumption rather than a real cap number, so
     callers can flag the result as a placeholder pending real EAPS data.
 
-    Doesn't implement the rookie-scale-final-year (250%/300%) or
-    coming-off-a-minimum-contract carve-outs in § 3.10 — both still need a
-    manually-entered cap_hold_amount.
+    Doesn't implement § 3.10's rookie-scale-final-year (250%/300%) carve-out,
+    which still needs a manually-entered cap_hold_amount. The
+    coming-off-a-minimum-contract carve-out isn't a percentage at all, so it
+    lives in `_autofill_fa_hold_amounts` (`_minimum_contract_hold`).
     """
     prev = _parse_dollar(prev_salary)
     note = None
@@ -3050,6 +3052,7 @@ def _autofill_fa_hold_amounts(
     bird_rights_type: Optional[str] = None,
     eaps_assumption: Optional[str] = None,
     slug: Optional[str] = None,
+    signing_method: Optional[str] = None,
 ) -> dict:
     """Fills in a dollar figure in bio['salaries'] for any UFA/RFA season in
     `cap_holds` that `explicit_salaries` (the just-submitted contract's own
@@ -3058,15 +3061,34 @@ def _autofill_fa_hold_amounts(
     place. Returns {season: note} for any season whose figure rests on an
     eaps_assumption placeholder, for the caller to mirror into
     bio['cap_hold_notes'].
+
+    `signing_method` is the contract the hold follows. It defaults to the
+    last entry in bio['contracts'], which every apply path appends before
+    calling this. A minimum contract's hold is the minimum, not a Bird-tier
+    percentage (§ 3.10's "Coming off a minimum contract" row) — until
+    2026-09-24 it went through the percentage, which put Sam Hauser's
+    28-29 hold at $6.1M instead of $2.7M.
     """
     notes = {}
     salaries = bio.get("salaries") or {}
+    contracts = bio.get("contracts") or []
+    if signing_method is None and contracts:
+        signing_method = contracts[-1].get("signing_method")
     for season, hold_type in (cap_holds or {}).items():
         if hold_type not in ("UFA", "RFA") or season in explicit_salaries:
             continue
         prev_salary = salaries.get(_season_shift(season, -1))
         if not prev_salary:
             continue  # nothing to base a hold on — e.g. incomplete backfilled history
+        if signing_method == "minimum":
+            amount = _minimum_contract_hold(bio, season, cap_levels)
+            if amount is None:
+                salaries.pop(season, None)
+                notes[season] = (f"coming off a minimum contract — priced once {season}'s "
+                                 f"minimum salary scale is set (§ 3.10)")
+            else:
+                salaries[season] = f"${amount:,}"
+            continue
         tier = bird_rights_type or _derive_bird_tier(bio, team, season, slug)
         min_amt = _rookie_min_salary(season, cap_levels) or None
         max_amt = _max_salary(bio, season, cap_levels)
@@ -3080,6 +3102,22 @@ def _autofill_fa_hold_amounts(
     return notes
 
 
+def _minimum_contract_hold(bio: dict, season: str, cap_levels: dict) -> Optional[int]:
+    """§ 3.10: a player coming off a minimum contract carries a hold of the
+    minimum salary, capped at the 2-year veteran minimum — the same figure
+    § 3.12 charges for a 1-year minimum deal, so it is that helper's answer
+    for the hold season. Experience comes from the contract the hold follows
+    when it declared one (climbing a row per year, `_contract_years_exp`),
+    else the draft_year proxy. None when the season has no scale yet."""
+    last = (bio.get("contracts") or [None])[-1] or {}
+    contract = None
+    if last.get("years_experience") is not None:
+        contract = SimpleNamespace(years_experience=last["years_experience"],
+                                   salaries=last.get("salaries") or {},
+                                   cap_holds=last.get("cap_holds") or {})
+    return _one_year_min_cap_hit(bio, season, cap_levels, contract=contract)
+
+
 def _preview_fa_hold(
     bio: dict,
     team: str,
@@ -3088,6 +3126,7 @@ def _preview_fa_hold(
     bird_rights_type: Optional[str] = None,
     eaps_assumption: Optional[str] = None,
     slug: Optional[str] = None,
+    signing_method: Optional[str] = None,
 ) -> Optional[dict]:
     """Price the § 3.10 trailing free-agent hold a *proposed* contract rolls
     into, without applying anything — so a team building a deal can watch the
@@ -3128,7 +3167,10 @@ def _preview_fa_hold(
     season = sorted(holds)[0]
 
     probe = {**bio, "salaries": {**(bio.get("salaries") or {}), **explicit},
-              "contracts": (bio.get("contracts") or []) + [{"team": team, "salaries": explicit}]}
+              "contracts": (bio.get("contracts") or []) + [{
+                  "team": team, "salaries": explicit, "signing_method": signing_method,
+                  "cap_holds": contract.cap_holds or {},
+                  "years_experience": getattr(contract, "years_experience", None)}]}
     tier = bird_rights_type or _derive_bird_tier(probe, team, season, slug)
     out = {"season": season, "type": holds[season], "bird_tier": tier,
            "amount": None, "needs_eaps": False, "note": None}
@@ -3142,6 +3184,7 @@ def _preview_fa_hold(
         notes = _autofill_fa_hold_amounts(
             probe, team, {season: holds[season]}, explicit, cap_levels,
             bird_rights_type=bird_rights_type, eaps_assumption=eaps_assumption, slug=slug,
+            signing_method=signing_method,
         )
     except HTTPException:
         out["needs_eaps"] = True
@@ -4294,6 +4337,34 @@ def _signee_existing_hold(team: str, player: str, bios: dict, season: str) -> tu
     )
 
 
+def _check_trailing_hold(contract) -> Optional[CheckResult]:
+    """§ 3.10: a contract rolls into a free-agent hold the season after it
+    ends, carried as a UFA/RFA tag on that season. Nothing adds the tag for
+    the office — its contract helpers default to one, but a hand-built deal
+    can leave it off, and 24 of the 2026 FA wave went in that way, each
+    silently dropping a hold from its team's out-year books (2026-09-24).
+    A warning, not an error: a deal that truly ends with no hold (a
+    retirement) can be forced through."""
+    salaries = contract.salaries or {}
+    holds = contract.cap_holds or {}
+    if not salaries or contract.type == "two-way":
+        return None
+    years = [yr for yr in salaries if holds.get(yr) not in _FA_HOLD_TYPES]
+    if not years:
+        return None
+    last = max(years, key=_season_start)
+    after = _season_shift(last, 1)
+    if holds.get(after) in _FA_HOLD_TYPES:
+        return CheckResult(check="trailing_hold", passed=True, level="warning",
+                           message=f"Rolls into a {holds[after]} hold for {after} (§ 3.10).")
+    return CheckResult(
+        check="trailing_hold", passed=False, level="warning",
+        message=(f"This contract ends in {last} with no UFA or RFA hold for {after}. An expiring "
+                 f"contract rolls into a free-agent hold (§ 3.10). Add a trailing hold row, or "
+                 f"force this through only if the player won't carry one."),
+    )
+
+
 def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
     checks = []
     bios = ctx["bios"]; season = ctx["cur_season"]
@@ -4428,6 +4499,10 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
         checks.append(r)
 
     r = _check_max_salary(details, bios, season, ctx["cap_levels"])
+    if r:
+        checks.append(r)
+
+    r = _check_trailing_hold(details.contract)
     if r:
         checks.append(r)
 
@@ -5101,6 +5176,10 @@ def _validate_offer_sheet(details: OfferSheetDetails, ctx: dict) -> list[CheckRe
                                "extending an offer sheet they'd have to honour")
         if r:
             checks.append(r)
+
+    r = _check_trailing_hold(details.contract)
+    if r:
+        checks.append(r)
 
     return checks
 
@@ -6492,6 +6571,10 @@ def _validate_extension(details: ExtensionDetails, ctx: dict) -> list[CheckResul
                     "start date, which isn't tracked yet — not verified.",
         ))
 
+    r = _check_trailing_hold(details.contract)
+    if r:
+        checks.append(r)
+
     return checks
 
 
@@ -7555,7 +7638,7 @@ def _signing_fact_sheet(team: str, player: str, contract, ctx: dict, *,
     trailing_hold = _preview_fa_hold(
         bios.get(player) or {}, team, contract, ctx["cap_levels"],
         bird_rights_type=bird_rights_type, eaps_assumption=eaps_assumption,
-        slug=player,
+        slug=player, signing_method=signing_method,
     )
 
     return {

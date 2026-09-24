@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi import HTTPException  # noqa: E402
 from routers.transactions import (  # noqa: E402
     _compute_fa_hold_amount, _derive_bird_tier, _autofill_fa_hold_amounts,
-    _preview_fa_hold,
+    _preview_fa_hold, _check_trailing_hold,
 )
 
 FAILS = []
@@ -178,6 +178,81 @@ def main():
     check("and previews needs_eaps instead of silently reporting Non-QVFA/legal",
           fresh["needs_eaps"] is True)
     check("still leaves the real bio untouched", fresh_bio == {})
+
+    print("\n§ 3.10: coming off a minimum contract, the hold is the minimum")
+    # Real 27-28/28-29 scales. Sam Hauser's 1+1 PO minimum (TOR, 2026-08-17)
+    # was priced at 190% of $3,219,450 = $6,116,955 for 28-29 before this.
+    min_levels = {
+        "27-28": {"min_salary_scale": {"0": 1425651, "1": 2294372, "2": 2571892, "3": 2664402,
+                                       "6": 3219450, "10+": 4070355}},
+        "28-29": {"min_salary_scale": {"0": 1493539, "1": 2403628, "2": 2694363, "3": 2791279,
+                                       "7": 3615039, "10+": 4264182}},
+    }
+    hauser = {
+        "draft_year": 2021,
+        "salaries": {"26-27": "$2,845,883", "27-28": "$3,219,450"},
+        "contracts": [{"team": "TOR", "signing_method": "minimum",
+                       "salaries": {"26-27": "$2,845,883", "27-28": "$3,219,450"},
+                       "cap_holds": {"27-28": "PLAYER_OPT", "28-29": "UFA"}}],
+    }
+    notes = _autofill_fa_hold_amounts(hauser, "TOR", {"28-29": "UFA"}, {}, min_levels)
+    check("a veteran's minimum hold is capped at the 2-year minimum",
+          hauser["salaries"]["28-29"] == "$2,694,363" and not notes)
+
+    rookie = {
+        "draft_year": 2027,
+        "salaries": {"27-28": "$1,425,651"},
+        "contracts": [{"team": "TOR", "signing_method": "minimum",
+                       "salaries": {"27-28": "$1,425,651"}}],
+    }
+    _autofill_fa_hold_amounts(rookie, "TOR", {"28-29": "RFA"}, {}, min_levels)
+    check("a 1-year player's minimum hold is their own tier, below the cap",
+          rookie["salaries"]["28-29"] == "$2,403,628")
+
+    declared = {
+        "salaries": {"27-28": "$2,571,892"},
+        "contracts": [{"team": "TOR", "signing_method": "minimum", "years_experience": 2,
+                       "salaries": {"27-28": "$2,571,892"}}],
+    }
+    _autofill_fa_hold_amounts(declared, "TOR", {"28-29": "UFA"}, {}, min_levels)
+    check("declared experience climbs a row into the hold season (tier 3, capped at 2)",
+          declared["salaries"]["28-29"] == "$2,694,363")
+
+    far = {
+        "draft_year": 2015,
+        "salaries": {"29-30": "$3,000,000"},
+        "contracts": [{"team": "TOR", "signing_method": "minimum", "salaries": {"29-30": "$3,000,000"}}],
+    }
+    notes = _autofill_fa_hold_amounts(far, "TOR", {"30-31": "UFA"}, {}, min_levels)
+    check("no scale for the season -> left unpriced with a note, not a percentage",
+          "30-31" not in far["salaries"] and "30-31" in notes)
+
+    mle = {
+        "salaries": {"27-28": "$3,000,000"},
+        "contracts": [{"team": "TOR", "signing_method": "mle", "salaries": {"27-28": "$3,000,000"}}],
+    }
+    _autofill_fa_hold_amounts(mle, "TOR", {"28-29": "UFA"}, {}, min_levels,
+                              bird_rights_type="Non-QVFA")
+    check("a non-minimum deal still uses the Bird percentage", mle["salaries"]["28-29"] == "$3,600,000")
+
+    h = _preview_fa_hold({"draft_year": 2021}, "TOR",
+                         _C({"27-28": "$3,219,450"}, {"28-29": "UFA"}), min_levels,
+                         signing_method="minimum")
+    check("preview prices a minimum deal's hold the same way", h["amount"] == 2694363)
+
+    print("\n§ 3.10: a contract with no trailing hold is flagged")
+    r = _check_trailing_hold(_C({"26-27": "$8,000,000"}, {}))
+    check("1-year deal with no hold -> failed warning",
+          r is not None and not r.passed and r.level == "warning" and "27-28" in r.message)
+    r = _check_trailing_hold(_C({"26-27": "$15,000,000", "27-28": "$15,000,000"}, {"27-28": "PLAYER_OPT"}))
+    check("a deal ending on a player option still needs the hold after it",
+          not r.passed and "28-29" in r.message)
+    r = _check_trailing_hold(_C({"26-27": "$15,000,000", "27-28": "$15,000,000"},
+                                {"27-28": "PLAYER_OPT", "28-29": "UFA"}))
+    check("a deal with its trailing hold passes", r.passed)
+    r = _check_trailing_hold(_C({"26-27": "$1", "27-28": "$9,000,000"}, {"27-28": "UFA"}))
+    check("a hold row with an amount typed in still counts as the hold", r.passed)
+    check("two-ways aren't checked", _check_trailing_hold(_C({"26-27": "$0"}, {}, "two-way")) is None)
 
     print("\n" + ("=" * 40))
     if FAILS:
