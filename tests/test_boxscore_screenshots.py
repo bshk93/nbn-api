@@ -38,6 +38,11 @@ import routers.auth as auth  # noqa: E402
 import routers.boxscores as bx  # noqa: E402
 import routers.boxscore_shots as shots  # noqa: E402
 import routers.boxscore_provenance as bp  # noqa: E402
+# The routes under test send game-day inbox messages. Stub them: the real
+# ones read the live members.json and write the live inboxes.json.
+import routers.game_day_notify as gdn  # noqa: E402
+for _fn in ('coaching_saved', 'coaching_entered', 'day_done', 'maybe_day_ready'):
+    setattr(gdn, _fn, lambda *a, **k: None)
 
 FAILS = []
 

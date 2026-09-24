@@ -56,6 +56,11 @@ auth.load_members = lambda: MEMBERS
 TMP = Path(tempfile.mkdtemp(prefix="nbn-streaming-days-test-"))
 sd.STREAMING_DAYS_FILE = TMP / "streaming-days.json"
 sd.log_write = lambda info, msg: None
+# The routes under test send game-day inbox messages. Stub them: the real
+# ones read the live members.json and write the live inboxes.json.
+import routers.game_day_notify as gdn  # noqa: E402
+for _fn in ('coaching_saved', 'coaching_entered', 'day_done', 'maybe_day_ready'):
+    setattr(gdn, _fn, lambda *a, **k: None)
 
 app = FastAPI()
 app.include_router(sd.router)
