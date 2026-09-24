@@ -198,23 +198,8 @@ def _append_ledger(entries: list[dict]):
         LEDGER_FILE.write_text(json.dumps(ledger))
 
 
-def _award_submission_reward(name: str) -> tuple[float, float]:
-    """Award NBY_BOXSCORE_REWARD to *name* for submitting a box score.
-    Returns (reward, new_balance)."""
-    with _balances_lock:
-        balances = _load_balances()
-        _init_bal(balances, name)
-        balances[name] = round(balances[name] + NBY_BOXSCORE_REWARD, 2)
-        _save_balances(balances)
-    ts = datetime.now(timezone.utc).isoformat()
-    _append_ledger([{"ts": ts, "member": name, "delta": NBY_BOXSCORE_REWARD,
-                     "balance": balances[name], "reason": "Box score submission reward"}])
-    return NBY_BOXSCORE_REWARD, balances[name]
-
-
-def _award_bio_reward(name: str, amount: float) -> tuple[float, float]:
-    """Award *amount* to *name* for filling in player bio fields.
-    Returns (amount, new_balance)."""
+def _award_amount(name: str, amount: float, reason: str) -> tuple[float, float]:
+    """Credit *amount* to *name* with a ledger line. Returns (amount, new_balance)."""
     with _balances_lock:
         balances = _load_balances()
         _init_bal(balances, name)
@@ -222,8 +207,20 @@ def _award_bio_reward(name: str, amount: float) -> tuple[float, float]:
         _save_balances(balances)
     ts = datetime.now(timezone.utc).isoformat()
     _append_ledger([{"ts": ts, "member": name, "delta": amount,
-                     "balance": balances[name], "reason": f"Bio field reward"}])
+                     "balance": balances[name], "reason": reason}])
     return amount, balances[name]
+
+
+def _award_submission_reward(name: str) -> tuple[float, float]:
+    """Award NBY_BOXSCORE_REWARD to *name* for submitting a box score.
+    Returns (reward, new_balance)."""
+    return _award_amount(name, NBY_BOXSCORE_REWARD, "Box score submission reward")
+
+
+def _award_bio_reward(name: str, amount: float) -> tuple[float, float]:
+    """Award *amount* to *name* for filling in player bio fields.
+    Returns (amount, new_balance)."""
+    return _award_amount(name, amount, "Bio field reward")
 
 
 def _bet_summary(bet: dict) -> dict:

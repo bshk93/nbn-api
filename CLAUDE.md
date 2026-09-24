@@ -390,8 +390,8 @@ persistent token store beyond the refresh token.
 
 `allstats-{season}.csv` / `allstats-playoffs-{yy}.csv` in NBS_DATA_DIR are the
 one asset here that cannot be rebuilt — 157,430 rows over six seasons, entered
-by hand from screenshots the parser deletes after committing
-(`boxscores.py`'s `rmtree`, deliberate). Every derived CSV and every page on the
+by hand from screenshots that are kept only 14 days after committing
+(`routers/boxscore_shots.py`, deliberate). Every derived CSV and every page on the
 site is a function of them. Two defences, from `nbn-today/docs/dev-deploy-setup-spec.md`
 Phase 2:
 
@@ -444,9 +444,9 @@ would otherwise exit between the enqueue and the send.
 **3. Per-game provenance — `routers/boxscore_provenance.py`.** One JSONL line
 per committed game (`boxscore-provenance-{season}.jsonl`), recording who
 committed it, who uploaded it, the score, and the file's row count after. It
-replaces the deleted screenshots as the answer to "where did this line come
-from, and who do I ask about it?" — kilobytes a season against ~1GB/year for the
-images. It is a **log, not state**: nothing reads it to make a decision, which is
+is the lasting answer to "where did this line come from, and who do I ask about
+it?" — kilobytes a season against ~1GB/year for the images, which are kept for
+14 days after commit and then deleted (`routers/boxscore_shots.py`). It is a **log, not state**: nothing reads it to make a decision, which is
 why every failure in it is swallowed rather than raised. A provenance write must
 never be why a real box score fails to commit.
 

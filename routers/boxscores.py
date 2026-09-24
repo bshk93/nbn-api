@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 import allstats_files
@@ -19,9 +20,10 @@ from .constants import (
 from .storage import read_csv, log_write, _current_league_year
 from .allstats_guard import write_allstats, AllstatsGuardError
 from .boxscore_provenance import record_commit
+from . import boxscore_shots as shots
 from .auth import require_any_role, require_role
 from .players import load_player_bios
-from .bets import _award_submission_reward
+from .bets import _award_submission_reward, _award_amount, NBY_BOXSCORE_REWARD
 
 router = APIRouter()
 
@@ -240,20 +242,7 @@ def _game_in_data(date: str, home_team: str, away_team: str, season: str, game_t
 
 
 def _game_in_pending_screenshots(date: str, home_team: str, away_team: str) -> bool:
-    if not PENDING_BOXSCORES_DIR.exists():
-        return False
-    teams = _game_teams(home_team, away_team)
-    for item_dir in PENDING_BOXSCORES_DIR.iterdir():
-        meta_path = item_dir / "meta.json"
-        if not meta_path.exists():
-            continue
-        try:
-            meta = json.loads(meta_path.read_text())
-        except Exception:
-            continue
-        if meta.get("date") == date and _game_teams(meta.get("home_team", ""), meta.get("away_team", "")) == teams:
-            return True
-    return False
+    return shots.find_pending(date, home_team, away_team) is not None
 
 
 def _game_in_manual_queue(date: str, home_team: str, away_team: str) -> bool:
@@ -406,8 +395,8 @@ def commit_boxscore(body: BoxscoreCommitRequest, info: dict = Depends(require_an
         raise HTTPException(status_code=500, detail=str(exc))
     _remove_from_manual_queue(body.date, home_team, away_team)
 
-    # The screenshots are deleted once this returns, so this line is the only
-    # answer left to "where did this game come from?". Never raises.
+    # The screenshots are kept only 14 days after this, so this line is the
+    # lasting answer to "where did this game come from?". Never raises.
     record_commit(
         season=body.season, date=body.date, game_type=body.game_type,
         home_team=home_team, away_team=away_team,
@@ -415,6 +404,9 @@ def commit_boxscore(body: BoxscoreCommitRequest, info: dict = Depends(require_an
         rows_added=len(new_rows), file_rows_after=len(existing) + len(new_rows),
         filename=path.name, committed_by=info.get("name", "unknown"),
     )
+    # After the provenance line, which reads the pending upload to find who
+    # sent it. Moves the screenshots out of the parse queue. Never raises.
+    shots.archive_for_game(body.date, home_team, away_team)
 
     if body.skip_reward:
         reward, new_bal = 0.0, 0.0
@@ -699,6 +691,24 @@ def trigger_build(info: dict = Depends(require_role("stats"))):
     return {"ok": True, "building": building}
 
 
+async def _read_image(upload: UploadFile, label: str) -> tuple[bytes, str]:
+    data = await upload.read()
+    if len(data) > shots.MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail=f"The {label} screenshot is over 15MB.")
+    return data, _checked_image_ext(data, label)
+
+
+def _check_game_open(date: str, home_team: str, away_team: str, season: str, game_type: str):
+    if home_team not in VALID_TEAMS or away_team not in VALID_TEAMS:
+        raise HTTPException(status_code=422, detail="Invalid team abbreviation")
+    if home_team == away_team:
+        raise HTTPException(status_code=422, detail="A team cannot play itself")
+    if _game_in_data(date, home_team, away_team, season, game_type):
+        raise HTTPException(status_code=409, detail=f"{home_team} vs {away_team} on {date} is already committed.")
+    if _game_in_manual_queue(date, home_team, away_team):
+        raise HTTPException(status_code=409, detail=f"A manual entry is already queued for {home_team} vs {away_team} on {date}.")
+
+
 @router.post("/api/boxscore/upload")
 async def upload_boxscore(
     home_image: UploadFile = File(...),
@@ -712,48 +722,117 @@ async def upload_boxscore(
     round_num: Optional[int] = Form(None),
     info: dict = Depends(require_any_role("rosters", "stats")),
 ):
+    """Both sides of a game in one request — the manual submit page's form.
+    The Stats dashboard uploads a side at a time through /upload/side."""
     home_team = home_team.upper()
     away_team = away_team.upper()
-    if home_team not in VALID_TEAMS or away_team not in VALID_TEAMS:
-        raise HTTPException(status_code=422, detail="Invalid team abbreviation")
-
-    if _game_in_data(date, home_team, away_team, season, game_type):
-        raise HTTPException(status_code=409, detail=f"{home_team} vs {away_team} on {date} is already committed.")
+    _check_game_open(date, home_team, away_team, season, game_type)
     if _game_in_pending_screenshots(date, home_team, away_team):
         raise HTTPException(status_code=409, detail=f"A screenshot is already pending for {home_team} vs {away_team} on {date}.")
-    if _game_in_manual_queue(date, home_team, away_team):
-        raise HTTPException(status_code=409, detail=f"A manual entry is already queued for {home_team} vs {away_team} on {date}.")
 
-    item_id = str(uuid.uuid4())[:8]
-    item_dir = PENDING_BOXSCORES_DIR / item_id
-    item_dir.mkdir(parents=True, exist_ok=True)
+    home_bytes, home_ext = await _read_image(home_image, "home")
+    away_bytes, away_ext = await _read_image(away_image, "away")
 
-    home_bytes = await home_image.read()
-    away_bytes = await away_image.read()
-    home_ext = _checked_image_ext(home_bytes, "home")
-    away_ext = _checked_image_ext(away_bytes, "away")
-    (item_dir / f"home.{home_ext}").write_bytes(home_bytes)
-    (item_dir / f"away.{away_ext}").write_bytes(away_bytes)
-
-    meta = {
-        "id": item_id,
-        "date": date,
-        "home_team": home_team,
-        "away_team": away_team,
-        "season": season,
-        "game_type": game_type,
-        "game_num": game_num,
-        "round_num": round_num,
-        "uploaded_by": info.get("name"),
-        "uploaded_at": datetime.now(timezone.utc).isoformat(),
-        "home_image": f"home.{home_ext}",
-        "away_image": f"away.{away_ext}",
-    }
-    (item_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+    with shots.shots_lock:
+        item_dir, meta = shots.new_item(
+            date=date, home_team=home_team, away_team=away_team, season=season,
+            game_type=game_type, game_num=game_num, round_num=round_num,
+            uploaded_by=info.get("name"))
+        shots.add_image(item_dir, meta, "home", home_bytes, home_ext, info.get("name"))
+        shots.add_image(item_dir, meta, "away", away_bytes, away_ext, info.get("name"))
+        meta["rewarded"] = list(shots.SIDES)
+        shots._write_meta(item_dir, meta)
+    item_id = meta["id"]
 
     reward, new_bal = _award_submission_reward(info["name"])
     logger.info("[%s] POST boxscore/upload — %s vs %s on %s (id=%s, +NB¥%.2f)", info.get("name"), home_team, away_team, date, item_id, reward)
     return {"ok": True, "id": item_id, "nbyen_reward": reward, "nbyen_balance": new_bal}
+
+
+@router.post("/api/boxscore/upload/side")
+async def upload_boxscore_side(
+    image: UploadFile = File(...),
+    team: str = Form(...),
+    date: str = Form(...),
+    home_team: str = Form(...),
+    away_team: str = Form(...),
+    season: str = Form(...),
+    game_type: str = Form("REG"),
+    game_num: Optional[int] = Form(None),
+    round_num: Optional[int] = Form(None),
+    info: dict = Depends(require_any_role("rosters", "stats")),
+):
+    """One screenshot for one team's side of a game. The first side to arrive
+    creates the game's pending item; the other side, and any extra images for
+    a long bench, are added to it. See routers/boxscore_shots.py."""
+    team = team.upper()
+    home_team = home_team.upper()
+    away_team = away_team.upper()
+    _check_game_open(date, home_team, away_team, season, game_type)
+    if team not in (home_team, away_team):
+        raise HTTPException(status_code=422, detail=f"{team} is not in {away_team} @ {home_team}")
+    data, ext = await _read_image(image, team)
+
+    first_for_side = False
+    with shots.shots_lock:
+        found = shots.find_pending(date, home_team, away_team)
+        if found:
+            item_dir, meta = found
+        else:
+            item_dir, meta = shots.new_item(
+                date=date, home_team=home_team, away_team=away_team, season=season,
+                game_type=game_type, game_num=game_num, round_num=round_num,
+                uploaded_by=info.get("name"))
+        # The side comes from the item's own orientation, not the caller's.
+        side = "home" if team == meta["home_team"] else "away"
+        if len(shots.images_of(meta)[side]) >= shots.MAX_IMAGES_PER_SIDE:
+            raise HTTPException(status_code=409, detail=f"{team} already has {shots.MAX_IMAGES_PER_SIDE} screenshots for this game.")
+        fname = shots.add_image(item_dir, meta, side, data, ext, info.get("name"))
+        if side not in meta.get("rewarded", []):
+            meta["rewarded"] = meta.get("rewarded", []) + [side]
+            shots._write_meta(item_dir, meta)
+            first_for_side = True
+        out = shots._public(meta, "pending")
+
+    reward, new_bal = 0.0, None
+    if first_for_side:
+        # Half the per-game reward per side: a game still pays the same in
+        # total, however its two sides were split between members.
+        reward, new_bal = _award_side_reward(info["name"])
+    logger.info("[%s] POST boxscore/upload/side — %s in %s @ %s on %s (id=%s, %s, +NB¥%.2f)",
+                info.get("name"), team, away_team, home_team, date, meta["id"], fname, reward)
+    return {"ok": True, "item": out, "nbyen_reward": reward, "nbyen_balance": new_bal}
+
+
+def _award_side_reward(name: str) -> tuple[float, float]:
+    return _award_amount(name, NBY_BOXSCORE_REWARD / 2, "Box score screenshot reward")
+
+
+@router.delete("/api/boxscore/pending/{item_id}/images/{fname}")
+def delete_pending_image(item_id: str, fname: str, info: dict = Depends(require_any_role("rosters", "stats"))):
+    with shots.shots_lock:
+        try:
+            meta = shots.remove_image(item_id, fname)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Screenshot not found")
+        out = shots._public(meta, "pending") if meta else None
+    logger.info("[%s] DELETE boxscore/pending/%s/images/%s", info.get("name"), item_id, fname)
+    return {"ok": True, "item": out}
+
+
+@router.get("/api/boxscore/screenshots")
+def list_screenshots(season: Optional[str] = Query(None), date: Optional[str] = Query(None)):
+    """Every game with screenshots on file: pending (not yet parsed) and
+    committed (kept 14 days). Public."""
+    return shots.list_all(season=season, date=date)
+
+
+@router.get("/api/boxscore/screenshots/{item_id}/{fname}")
+def get_screenshot(item_id: str, fname: str):
+    path = shots.image_path(item_id, fname)
+    if not path:
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+    return FileResponse(path, headers={"Cache-Control": "public, max-age=3600"})
 
 
 @router.post("/api/boxscore/queue")
@@ -822,16 +901,23 @@ def list_pending_boxscores(info: dict = Depends(require_any_role("rosters", "sta
         if not meta_path.exists():
             continue
         meta = json.loads(meta_path.read_text())
-        items.append(meta)
+        # `images` and `ready` normalized here so /parse-boxscores reads one
+        # shape, whatever wrote the item.
+        items.append({**meta, "images": shots.images_of(meta), "ready": shots.is_ready(meta)})
     items.sort(key=lambda x: x.get("uploaded_at") or x.get("id", ""))
     return items
 
 
 @router.delete("/api/boxscore/pending/{item_id}")
 def delete_pending_boxscore(item_id: str, info: dict = Depends(require_any_role("rosters", "stats"))):
-    item_dir = PENDING_BOXSCORES_DIR / item_id
-    if not item_dir.exists():
+    # Checked against the id pattern before it goes near a path: an id of ".."
+    # would otherwise rmtree the whole data directory.
+    if not shots._ID_RE.match(item_id):
         raise HTTPException(status_code=404, detail="Pending item not found")
-    shutil.rmtree(item_dir)
+    with shots.shots_lock:
+        item_dir = PENDING_BOXSCORES_DIR / item_id
+        if not item_dir.is_dir():
+            raise HTTPException(status_code=404, detail="Pending item not found")
+        shutil.rmtree(item_dir)
     logger.info("[%s] DELETE boxscore/pending/%s", info.get("name"), item_id)
     return {"ok": True}

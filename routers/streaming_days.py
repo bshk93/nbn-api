@@ -18,7 +18,7 @@ from pydantic import BaseModel
 
 from .constants import STREAMING_DAYS_FILE, _streaming_days_lock
 from .storage import _load_json, _save_json, log_write
-from .auth import require_role
+from .auth import require_role, require_any_role
 from .schedule import DATE_RE
 
 router = APIRouter()
@@ -85,7 +85,9 @@ def unmark_day_done(date: str, info: dict = Depends(require_role("streamer"))):
 
 
 @router.put("/api/streaming-days/{date}/youtube")
-def set_day_youtube(date: str, body: YoutubeBody, info: dict = Depends(require_role("streamer"))):
+def set_day_youtube(date: str, body: YoutubeBody, info: dict = Depends(require_any_role("streamer", "stats"))):
+    """The day's VOD link. Stats links it once the video is up — the Stats
+    dashboard is where they work each day — and a streamer still can."""
     _check_date(date)
     url = (body.url or "").strip()
     if url and not (url.startswith("http://") or url.startswith("https://")):

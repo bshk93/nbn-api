@@ -44,10 +44,12 @@ def check(name, cond):
 STREAM_TOKEN  = "s" * 64
 STREAM2_TOKEN = "t" * 64
 PLAIN_TOKEN   = "n" * 64
+STATS_TOKEN   = "k" * 64
 MEMBERS = {
     "Streamy":  {"token": STREAM_TOKEN,  "roles": ["streamer"], "tenures": []},
     "Costream": {"token": STREAM2_TOKEN, "roles": ["streamer"], "tenures": []},
     "Nobody":   {"token": PLAIN_TOKEN,   "roles": [],           "tenures": []},
+    "Statsy":   {"token": STATS_TOKEN,   "roles": ["stats"],    "tenures": []},
 }
 auth.load_members = lambda: MEMBERS
 
@@ -62,6 +64,7 @@ c = TestClient(app)
 STREAM  = {"Authorization": "Bearer " + STREAM_TOKEN}
 STREAM2 = {"Authorization": "Bearer " + STREAM2_TOKEN}
 PLAIN   = {"Authorization": "Bearer " + PLAIN_TOKEN}
+STATS   = {"Authorization": "Bearer " + STATS_TOKEN}
 
 DATE = "2026-10-24"
 
@@ -114,6 +117,13 @@ check("it shows up on the public list", all_days()[DATE]["youtube_url"] == "http
 
 r4 = c.put(f"/api/streaming-days/{DATE}/youtube", json={"url": ""}, headers=STREAM)
 check("an empty url clears the link", "youtube_url" not in r4.json())
+
+# Stats links the VOD from its dashboard; marking a day done stays the streamer's.
+r5 = c.put(f"/api/streaming-days/{DATE}/youtube", json={"url": "https://youtu.be/st"}, headers=STATS)
+check("the stats role can set a link", r5.status_code == 200 and r5.json()["youtube_set_by"] == "Statsy")
+check("the stats role cannot mark a day done",
+      c.post(f"/api/streaming-days/{DATE}/done", headers=STATS).status_code == 403)
+c.put(f"/api/streaming-days/{DATE}/youtube", json={"url": ""}, headers=STATS)
 
 # ── independence ──────────────────────────────────────────────────────────────
 

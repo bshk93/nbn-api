@@ -20,6 +20,8 @@ DATA_DIR  = Path("/var/lib/nothing-but-stats")
 DERIVED_DIR = DATA_DIR / "derived"
 AVATARS_DIR = DATA_DIR / "avatars"
 PENDING_BOXSCORES_DIR  = DATA_DIR / "pending-boxscores"
+# Committed games' screenshots, kept 14 days — routers/boxscore_shots.py.
+KEPT_BOXSCORES_DIR     = DATA_DIR / "boxscore-screenshots"
 MANUAL_QUEUE_FILE      = DATA_DIR / "pending-manual-queue.json"
 BUILD_STATUS_FILE  = DATA_DIR / "build-status.json"
 BUILD_SCRIPT       = Path("/home/skim/projects/nbn-today/build/build.sh")

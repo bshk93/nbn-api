@@ -1,10 +1,12 @@
 """Per-game provenance for committed box scores (dev-deploy spec, Phase 2 item 12).
 
-The source screenshots are deleted once a game is committed, deliberately: the
-league plays 1,230 games a season, so keeping both images is ~1GB a year forever
-on a box with 19GB free, to insure against a mis-parse — which is the *recover-
-able* failure. The unrecoverable one is losing the CSVs, and the whole six-season
-dataset is 3.4MB gzipped. That trade is argued in full in the spec.
+The source screenshots are not kept forever, deliberately: the league plays
+1,230 games a season, so keeping both images is ~1GB a year forever on a box
+with 19GB free, to insure against a mis-parse — which is the *recoverable*
+failure. The unrecoverable one is losing the CSVs, and the whole six-season
+dataset is 3.4MB gzipped. That trade is argued in full in the spec. Since
+2026-09-24 they are kept 14 days after commit, compressed, for settling a
+recent question (routers/boxscore_shots.py) — then deleted.
 
 **Keep the provenance, drop the pixels.** This records what an image would
 actually be consulted for — "where did this line come from, and who do I ask
@@ -36,8 +38,7 @@ def provenance_path(season: str) -> Path:
 
 def _matching_upload(date: str, home_team: str, away_team: str) -> dict | None:
     """The pending upload this commit came from, if it is still on disk. The
-    client deletes it in a separate request after committing, so at this point
-    it normally still exists."""
+    commit route moves it out of the queue only after this has run."""
     if not PENDING_BOXSCORES_DIR.exists():
         return None
     teams = {home_team.upper(), away_team.upper()}
