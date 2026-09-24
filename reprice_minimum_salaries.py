@@ -81,7 +81,11 @@ def _contract_target(bio: dict, season: str, cap_levels: dict, entry: dict):
     `getattr(contract, "years_experience", None)` — a plain dict never has
     that attribute, so it must be wrapped or the persisted value is silently
     ignored and every contract falls through to the draft_year proxy."""
-    contract = SimpleNamespace(years_experience=entry.get("years_experience"))
+    # salaries/cap_holds too: a declared tier climbs one row per contract year
+    # from the contract's first season, so the helper needs to know which that is.
+    contract = SimpleNamespace(years_experience=entry.get("years_experience"),
+                               salaries=entry.get("salaries") or {},
+                               cap_holds=entry.get("cap_holds") or {})
     is_one_year = len(entry.get("salaries") or {}) == 1
     fn = _one_year_min_cap_hit if is_one_year else _min_salary_for
     return fn(bio, season, cap_levels, contract)

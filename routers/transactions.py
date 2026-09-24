@@ -2312,27 +2312,22 @@ def _rookie_scale_contract(draft_year: Optional[int], draft_round: Optional[int]
 # § 7.1 second-round minimum-scale structures: the tier (years-of-experience
 # key into that season's min_salary_scale) for each year of the deal.
 #
-# **Flat within each declared segment, not escalating** — same convention as
-# the general § 3.12 minimum contract (a declared experience figure is fixed
-# for the life of the deal; only that season's own scale value moves the
-# dollar amount from year to year). "Year 2: 2nd-year rookie minimum" reads
-# as "what this deal pays in its 2nd year," not "bump the experience tier" —
-# confirmed against a real 3-year second-round submission (Otega Oweh,
-# 2026-08-14): all three years priced at flat tier 1
-# ($2,185,116 / $2,571,895 / $2,791,275 for 26-27/27-28/28-29), which only
-# reads as a raise because the season's own scale is growing, not because the
-# tier climbed. An earlier cut of this table had it escalating 1/2/3, which
-# is wrong.
+# Each deal starts on a fixed tier and **climbs one tier per contract year**,
+# priced on each season's own scale -- the same rule § 3.12 states for every
+# multi-year minimum. The 3-year (2+1) deal starts at tier 1, the 4-year (3+1)
+# at tier 2. This is the league office's own published table (the "2026
+# Rookie Contracts" tab of the league sheet):
+#   2+1: $2,185,116 / $2,571,895 / $2,791,275            (tiers 1, 2, 3)
+#   3+1: $2,449,421 / $2,664,401 / $2,888,193 / $3,272,766 (tiers 2, 3, 4, 5)
+# and the commissioner's rulings in #fa-news (2026-07-17, 2026-08-28): "3+1 ...
+# starts at the 2yr vet min", "2+1 ... starts at the 1yr vet min".
 #
-# The 4-year option's Year 1 -> Year 2 step is a genuine, explicitly-stated
-# *decrease* (tier 2 down to tier 1) — the one place the deal's declared tier
-# actually changes. Years 3-4 are inferred to hold flat at that same
-# lower tier (2, 1, 1, 1), by analogy with the confirmed 3-year case; there is
-# no real 4-year second-round submission yet to check this segment against,
-# so treat it as provisional until one comes through.
+# Until 2026-09-24 this table was flat ([1, 1, 1] and [2, 1, 1, 1]), on a
+# reading of Otega Oweh's deal that took $2,571,895 for a tier-1 figure. It is
+# the tier-2 figure for 27-28 ($2,294,372 is tier 1), so Oweh's deal climbs.
 _SECOND_ROUND_SCALE_TIERS = {
-    3: [1, 1, 1],
-    4: [2, 1, 1, 1],
+    3: [1, 2, 3],
+    4: [2, 3, 4, 5],
 }
 # 1-based year index -> cap_holds tag. Year 1 (and, on the 4-year deal, Year 2)
 # carry no tag at all — they're plain guaranteed money.
@@ -2445,34 +2440,38 @@ def _min_salary_scale_tier(years_exp: int) -> str:
     return "10+" if years_exp >= 10 else str(max(0, years_exp))
 
 
-def _contract_years_exp(contract, season: str) -> Optional[int]:
-    """Years of NBA experience for pricing `season` per the contract's own
-    declaration — flat across every year of the deal, not escalating one tier
-    per contract year. `ContractIn.years_experience` is declared once, at
-    signing, and applies unchanged to every season of that same contract; the
-    raise from one contract year to the next comes entirely from that season's
-    own minimum-scale figures moving (cap growth), not from climbing a tier.
+def _contract_first_season(contract) -> Optional[str]:
+    """The first real season of a contract: its earliest salary year that
+    isn't a trailing UFA/RFA hold. None when the contract declares no years."""
+    salaries = getattr(contract, "salaries", None) or {}
+    holds = getattr(contract, "cap_holds", None) or {}
+    years = [yr for yr in salaries if holds.get(yr) not in _FA_HOLD_TYPES]
+    return min(years, key=_season_start) if years else None
 
-    This used to add one year of experience per elapsed contract year off the
-    declared anchor. Reversed 2026-08-13 against the league's own live cap
-    sheet ("NBN Rosters and Salaries 2026-27"): Jamison Battle's 2-year
-    minimum (`years_experience: 2`) is recorded there as $2,449,421 / $2,664,401
-    for 26-27 / 27-28 — both the tier-**2** figure, not tier 3. Escalating had
-    this contract, entered correctly, showing a permanent false-positive
-    warning against a tier it was never meant to reach. Real NBA references
-    (HoopsHype, Spotrac) don't agree on this either — one climbs a multi-year
-    minimum's tier per contract year, one doesn't — and the league's own
-    practice, per this contract, is the flat reading.
+
+def _contract_years_exp(contract, season: str) -> Optional[int]:
+    """Years of NBA experience for pricing `season` of a contract that declares
+    its experience. `ContractIn.years_experience` is the player's experience in
+    the contract's **first** season, and the tier climbs one row per contract
+    year after that (§ 3.12: "the tier then steps up one row per contract
+    year"). A 1-year deal never climbs.
+
+    This was flat from 2026-08-13 to 2026-09-24, on a reading of Jamison
+    Battle's deal that took $2,664,401 for his tier-2 figure in 27-28. It is
+    the tier-3 figure ($2,571,892 is tier 2), so the league sheet climbs, and
+    so does the league office's own table for minimum and second-round deals
+    (the "2026 Rookie Contracts" tab). See `_SECOND_ROUND_SCALE_TIERS`.
 
     Returns None when nothing is declared, which callers must read as "fall
-    back to the draft_year proxy" (which *does* still climb — real elapsed
-    calendar time is a different thing from a declared contract anchor), not
+    back to the draft_year proxy" (which climbs with the calendar anyway), not
     as zero experience.
     """
     declared = getattr(contract, "years_experience", None) if contract else None
     if declared is None:
         return None
-    return max(0, int(declared))
+    first = _contract_first_season(contract)
+    offset = max(0, _season_start(season) - _season_start(first)) if first else 0
+    return max(0, int(declared)) + offset
 
 
 def _max_salary_pct(years_exp: int) -> float:
@@ -8071,11 +8070,9 @@ def _self_convert_twoway_contract(bio: dict, player: str, cap_levels: dict, cur_
 
     Each season is priced via `_min_salary_for` with no `years_experience`
     declared on the built contract, so the figure comes from the
-    draft-year-inferred tier for *that* season specifically — deliberately
-    not the flat, declared-anchor reading `_contract_years_exp` documents
-    for an explicit declaration, since that one doesn't climb between
-    contract years at all (reversed 2026-08-13 against a real Jamison
-    Battle deal) and would misprice year 2 of a 2-year conversion.
+    draft-year-inferred tier for *that* season specifically, which climbs
+    with the calendar the same way a declared tier climbs per contract year
+    (`_contract_years_exp`).
     """
     if bio.get("type") != "two-way":
         raise HTTPException(status_code=422, detail=f"{player!r} is not on a two-way contract.")
