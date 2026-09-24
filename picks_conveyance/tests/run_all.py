@@ -8,7 +8,7 @@ import sys
 MODULES = ["test_projection_parity", "test_resolver", "test_ladders",
            "test_registry", "test_from_trade", "test_ownership", "test_retrade",
            "test_validation_hardening", "test_curated", "test_projection_full",
-           "test_resync"]
+           "test_resync", "test_parity"]
 
 
 def main():

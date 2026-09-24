@@ -435,6 +435,16 @@ Two things about it that are load-bearing:
   26-27. Freezing last season the moment the calendar turns would alert on a
   real game.
 
+It also checks the **draft picks** (since 2026-09-24, `picks_conveyance/parity.py`,
+`--skip-picks` to turn off): every team `draft-picks.csv` names as an owner
+must hold a claim on what `/api/picks` actually serves from the conveyance
+store. Writes go to the flat CSV and the store is regenerated from it, but a
+registry structure overrides the flat owner, so a trade the registry missed
+vanishes from the new owner's page. Three trades entered before the conveyance
+write path existed (July 2026) did exactly that and went unnoticed for two
+months. The check is one-way on purpose: the flat model is lossy, so the store
+legitimately names more parties than the CSV on every contingent pick.
+
 Alerts go to `DISCORD_ALERT_CHANNEL` (inert if unset, like every other feed
 here) **and** the unit exits non-zero, so a violation is visible in
 `systemctl status` with no channel configured at all. `discord_transport.flush()`

@@ -28,6 +28,12 @@ The first run of those found four errors months old and invisible to everything
 else: three team-games listing one player twice under another's name, and a
 misspelling the build was publishing as a real player. See `stats_build/checks.py`.
 
+Since 2026-09-24 it also checks that the draft pick store the site serves still
+agrees with the flat picks ledger every write goes to (`picks_conveyance/parity.py`).
+Not a box score check, but the same kind of failure: a silent drift nothing
+else sees, which is how three traded picks went missing from their new owners'
+pages for two months. Absolute like the value checks; `--skip-picks` turns it off.
+
 State lives in `stats-integrity.json` in the data directory, which the snapshot
 timer tracks — so the manifest's own history is off-box alongside the files it
 describes.
@@ -62,6 +68,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from routers import discord_transport as transport   # noqa: E402
 from routers.storage import _current_league_year     # noqa: E402
 from stats_build import checks                       # noqa: E402
+from picks_conveyance import parity                  # noqa: E402
 
 DISCORD_ALERT_CHANNEL = os.environ.get("DISCORD_ALERT_CHANNEL", "").strip()
 DISCORD_ADMIN_ID = os.environ.get("DISCORD_ADMIN_ID", "").strip()
@@ -211,6 +218,21 @@ def value_violations(data_dir: Path) -> list[str]:
     return [str(f) for f in findings]
 
 
+def pick_violations(data_dir: Path) -> list[str]:
+    """Flat picks ledger vs the conveyance store — see picks_conveyance/parity.py.
+    A missing or unreadable file is itself a finding: `/api/picks` 503s without
+    the store."""
+    csv_path = data_dir / "draft-picks.csv"
+    store_path = data_dir / "draft-conveyance.json"
+    try:
+        with csv_path.open(newline="") as fh:
+            rows = list(csv.DictReader(fh))
+        store = json.loads(store_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"picks: can't read the picks ledger or conveyance store: {exc}"]
+    return parity.owner_mismatches(rows, store)
+
+
 def alert(violations: list[str], data_dir: Path) -> bool:
     """Post the violations to Discord. Returns False when nothing was sent."""
     if not transport.configured(DISCORD_ALERT_CHANNEL):
@@ -222,9 +244,11 @@ def alert(violations: list[str], data_dir: Path) -> bool:
     # The two kinds of violation want opposite advice, and giving the wrong one
     # is worse than giving none: restoring from backup fixes a truncation and
     # would silently undo a hand-corrected name.
+    picks = [v for v in violations if v.startswith("picks:")]
+    box = [v for v in violations if not v.startswith("picks:")]
     structural = any(" rows" in v and ("LOST" in v or "GONE" in v or "CHANGED" in v)
-                     for v in violations)
-    advice = (
+                     for v in box)
+    advice = "" if not box else (
         "These files are append-only and unrebuildable. Restore from `nbs-backup` "
         "(`git --git-dir=/var/lib/nbs-backup.git log -- <file>`) before anything "
         "else writes over them. Re-baseline with `check_stats_integrity.py --accept` "
@@ -235,8 +259,17 @@ def alert(violations: list[str], data_dir: Path) -> bool:
         "unknown name) — do NOT restore from backup, which would discard good "
         "games alongside the bad rows."
     )
+    if picks:
+        # The flat ledger is what every write went to, so it is usually right —
+        # but not always (a stale flat row reads the same way). Check the
+        # transaction ledger before deciding which side to fix.
+        advice += ("\n" if advice else "") + (
+            "Picks: the site serves a different owner than `draft-picks.csv`. "
+            "Check the trade in `transactions.json`, then fix whichever side is "
+            "wrong — usually the entry in `draft-conveyance-registry.json`.")
+    what = "Integrity check" if picks and box else ("Draft picks check" if picks else "Box score integrity check")
     text = (
-        f"{mention}**Box score integrity check FAILED** — {len(violations)} "
+        f"{mention}**{what} FAILED** — {len(violations)} "
         f"violation(s) in `{data_dir}`\n{body}\n{advice}"
     )
     sent = transport.send(DISCORD_ALERT_CHANNEL, {"content": text[:1990]},
@@ -255,6 +288,8 @@ def main() -> int:
     ap.add_argument("--no-alert", action="store_true", help="check and report, post nothing")
     ap.add_argument("--skip-values", action="store_true",
                     help="row counts and hashes only, skip the value-level checks")
+    ap.add_argument("--skip-picks", action="store_true",
+                    help="skip the draft picks ledger vs conveyance store check")
     args = ap.parse_args()
 
     data_dir: Path = args.data_dir
@@ -296,6 +331,13 @@ def main() -> int:
             print(f"  VIOLATION  {v}")
         if not found:
             print("  values: no violations in any row, team-game, or player name")
+        violations = violations + found
+    if not args.skip_picks:
+        found = pick_violations(data_dir)
+        for v in found:
+            print(f"  VIOLATION  {v}")
+        if not found:
+            print("  picks: every owner in draft-picks.csv has a claim on the site")
         violations = violations + found
     files = dict(previous)
     for name, info in current.items():

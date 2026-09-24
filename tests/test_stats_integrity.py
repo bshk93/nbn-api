@@ -60,10 +60,12 @@ def run(tmp: Path, **kw) -> int:
     blank stat cells and no legal minute totals. The value-level checks would
     correctly flag every one of them, which says nothing about the manifest
     logic these cases are testing. `tests/test_stats_checks.py` covers those.
+    `--skip-picks` likewise: these dirs have no picks files, which the picks
+    check would rightly report. Its wiring is tested at the bottom.
     """
     argv = sys.argv
     sys.argv = ["check_stats_integrity.py", "--data-dir", str(tmp), "--no-alert",
-                "--skip-values"] + (["--accept"] if kw.get("accept") else [])
+                "--skip-values", "--skip-picks"] + (["--accept"] if kw.get("accept") else [])
     try:
         return ci.main()
     finally:
@@ -144,6 +146,26 @@ with tempfile.TemporaryDirectory() as td:
         sys.argv = argv
     check("the same run passes with --skip-values", run(tmp) == 0)
 
+    # ── The picks check is wired in, and on by default ────────────────────────
+    (tmp / "draft-picks.csv").write_text(
+        "YEAR,ROUND,ORIG,OWNER,PICK,PLAYER,PROTECTED,SWAP_OWNER,NOTES,FROZEN,FROZEN_REASON\n"
+        "2027,1,DAL,SAC,,,,,,,\n")
+    (tmp / "draft-conveyance.json").write_text(json.dumps({"picks": [{
+        "year": 2027, "round": 1, "orig": "DAL",
+        "conveyance": {"type": "settled", "team": "DAL"}}]}))
+    check("a pick the site serves to the wrong team is flagged",
+          ci.pick_violations(tmp) and "SAC has no claim" in ci.pick_violations(tmp)[0],
+          ci.pick_violations(tmp))
+    argv = sys.argv
+    sys.argv = ["check_stats_integrity.py", "--data-dir", str(tmp), "--no-alert", "--skip-values"]
+    try:
+        check("the picks check runs by default and fails the run", ci.main() == 1)
+    finally:
+        sys.argv = argv
+    (tmp / "draft-conveyance.json").unlink()
+    check("a missing store is a finding, not a crash",
+          "can't read" in (ci.pick_violations(tmp) or [""])[0])
+
 # ── The July-to-October gap ───────────────────────────────────────────────────
 # The stats clock rolls to the new season on July 1, but a playoff run can finish
 # after it — so the newest season on disk stays live until its successor exists.
@@ -181,6 +203,13 @@ check("a configured channel gets the violation", ci.alert(["x: LOST 5 rows"], Pa
 check("the message names the file and the loss",
       SENT and "x: LOST 5 rows" in SENT[0][1]["content"], SENT[0][1]["content"][:80] if SENT else "")
 check("and stays inside Discord's length limit", len(SENT[0][1]["content"]) <= 2000)
+
+SENT.clear()
+ci.alert(["picks: 2027 R1 DAL — draft-picks.csv says SAC, the site serves DAL; SAC has no claim on it"], Path("/tmp"))
+msg = SENT[0][1]["content"] if SENT else ""
+check("a picks-only alert is titled as a picks check", "Draft picks check FAILED" in msg, msg[:80])
+check("and gives no box score advice", "nbs-backup" not in msg and "PLAYER_FIXES" not in msg)
+check("and points at the registry", "draft-conveyance-registry.json" in msg)
 
 print()
 if FAILS:
