@@ -86,7 +86,13 @@ def _contract_target(bio: dict, season: str, cap_levels: dict, entry: dict):
     contract = SimpleNamespace(years_experience=entry.get("years_experience"),
                                salaries=entry.get("salaries") or {},
                                cap_holds=entry.get("cap_holds") or {})
-    is_one_year = len(entry.get("salaries") or {}) == 1
+    # A trailing UFA/RFA hold is not a contract year: a 1-year minimum that
+    # rolls into a hold is still a 1-year deal, capped at the 2-year veteran
+    # minimum (§ 3.12). Counting the hold priced Marvin Bagley's 1-year deal
+    # off his 8-year tier, $1.06M high.
+    holds = entry.get("cap_holds") or {}
+    is_one_year = len([s for s in (entry.get("salaries") or {})
+                       if holds.get(s) not in ("UFA", "RFA")]) == 1
     fn = _one_year_min_cap_hit if is_one_year else _min_salary_for
     return fn(bio, season, cap_levels, contract)
 
