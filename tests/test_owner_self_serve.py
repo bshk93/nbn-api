@@ -389,6 +389,9 @@ src = inspect.getsource(txn._apply_renounce)
 trimmed = {f for f in ("salaries", "guaranteed", "guarantee_dates",
                        "guarantee_schedule", "cap_holds", "type")
            if f'bio["{f}"]' in src}
+# A stash is dropped with `pop`, not assigned, so it's matched on that.
+if 'bio.pop("stash"' in src:
+    trimmed.add("stash")
 check("_apply_renounce writes only fields the snapshot captures",
       trimmed <= set(_RENOUNCE_SNAPSHOT_FIELDS))
 check("...and the snapshot covers every one of them",

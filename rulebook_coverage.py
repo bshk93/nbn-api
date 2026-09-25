@@ -121,6 +121,9 @@ CHECK_SECTIONS: dict[str, tuple[str, ...]] = {
     # `_check_exception_absorption` resolves the MLE bucket here, which is what
     # makes NTMLE/TMLE availability at each apron a real check.
     "signing_method_{}":          ("1.6", "3.2", "3.3", "3.4", "3.6"),
+    "stash_draft_rights":         ("7.1", "7.4"),
+    "stash_grounds":              ("7.1", "7.4"),
+    "stash_not_in_2k":            ("7.1",),
     "stepien_rule_{}":            ("7.2",),
     "trade_min_legs":             ("4.1",),
     "two_way_slots":              ("2.2",),
@@ -184,7 +187,8 @@ SECTION_REVIEW: dict[str, str] = {
     "7.1":  "the rookie scale and draft rights are checked; the rest of the "
             "draft format is run by hand",
     "7.3":  "the second-apron pick freeze is not computed",
-    "7.4":  "international rights are tracked by hand",
+    "7.4":  "a stash is checked for unsigned rights and a stated reason; the "
+            "overseas contract itself and the 30-day window are tracked by hand",
 }
 
 

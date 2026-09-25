@@ -39,6 +39,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from .auth import require_role
+from .players import _display_name
 from .constants import CAP_LEVELS_FILE, DATA_DIR, VALID_TEAMS, logger
 from .roster_picks import get_season_state, load_team_state
 from .storage import _current_league_year, _load_json, read_csv
@@ -89,6 +90,32 @@ def _roster_counts(team: str, bios: dict) -> dict:
         elif _is_standard_roster_slot(bio_type):
             standard += 1
     return {"roster": standard, "two_way": two_way}
+
+
+def _draft_rights(team: str, bios: dict) -> list[dict]:
+    """The team's unsigned draft rights, with any stash on record. Not cap
+    math — `cap-health.js` reads this to flag a pick left unsigned past the
+    § 7.1 deadline with no stash, and a § 7.1 stash from an earlier season."""
+    path = DATA_DIR / f"{team.lower()}-roster.csv"
+    if not path.exists():
+        return []
+    _, rows = read_csv(path)
+    out = []
+    for row in rows:
+        slug = (row.get("SLUG") or "").strip()
+        bio = bios.get(slug) or {}
+        if bio.get("type") != "draft-rights":
+            continue
+        stash = bio.get("stash") or None
+        out.append({
+            "slug": slug,
+            "name": _display_name(bio.get("name") or "") or slug,
+            "draft_year": bio.get("draft_year"),
+            "draft_round": bio.get("draft_round"),
+            "stash": ({"basis": stash.get("basis"), "season": stash.get("season")}
+                      if stash else None),
+        })
+    return out
 
 
 def build_rows(on_date: Optional[str] = None, season: Optional[str] = None) -> list[dict]:
@@ -144,6 +171,7 @@ def build_rows(on_date: Optional[str] = None, season: Optional[str] = None) -> l
             "mle_type": ts.get("mle_type"),
             "bae_used": ts.get("bae_used", False),
             **counts,
+            "draft_rights": _draft_rights(team, bios),
         })
     return rows
 
@@ -187,6 +215,9 @@ def snapshot(on_date: Optional[str] = None, force: bool = False) -> dict:
     rows = build_rows(on_date)
     with HISTORY_FILE.open("a") as fh:
         for row in rows:
+            # `draft_rights` is for today's compliance read, not the time
+            # series — a daily copy of every held pick's name adds nothing.
+            row = {k: v for k, v in row.items() if k != "draft_rights"}
             fh.write(json.dumps(row, separators=(",", ":")) + "\n")
     logger.info("cap-history: recorded %d teams for %s", len(rows), on_date)
     return {"date": on_date, "written": len(rows)}

@@ -317,6 +317,28 @@ Removes a player from their roster with no dead cap and no remaining obligation.
 
 ---
 
+### `stash` — Keep a pick's unsigned draft rights (§ 7.1 / § 7.4)
+
+Records that a team is keeping an unsigned pick past the § 7.1 signing deadline. `basis` is `"7.1"` (not in the current 2K, sitting out organized basketball) or `"7.4"` (under an active overseas contract). `note` is the evidence a reviewer checks, and is required. Owners can also submit it from the roster ⋯ menu via `POST /api/self/stash` (same body, plus an optional `description`). `POST /api/validate/stash` is the read-only check.
+
+**Details:**
+```json
+{
+  "player": "slug",
+  "basis": "7.4",
+  "note": "Real Madrid, contract through 2028"
+}
+```
+
+**Checks:** `stash_draft_rights` (must be unsigned draft rights on a roster), `stash_grounds` (note required), and for § 7.1 `stash_not_in_2k`, which refuses a player with ratings in `player-attributes.json`. All errors are forceable by the office; none are by an owner.
+
+**Mutates:**
+- `player-bios.json` — sets `stash: {basis, season, date, note, txn_id}`. `season` is the league year of the transaction. Nothing else changes: the player stays `draft-rights`, off the roster count, with no hold.
+
+`sign_pick`, `renounce` and `void_player` drop the field; `renounce` snapshots it, so `rescind_renounce` puts it back. `cap_history.build_rows` lists each team's `draft_rights` with their stash so `cap-health.js` can flag a pick unsigned past its deadline with no stash, and a § 7.1 stash from an earlier league year. The daily snapshot leaves that list out.
+
+---
+
 ### `set_hard_cap_level` — Manually set/clear a team's hard cap
 
 Sets a team's season hard-cap level directly, going through the transaction log instead of the silent `PUT /api/team-state/{team}` side door (which leaves no reason/author trail — see the "17 teams with empty hard_cap_reason" audit finding). Unlike the automatic trigger path (`_maybe_set_hard_cap`, used internally by `sign`/`trade` for BAE/NTMLE/TMLE absorption), this can also lower or clear the level. No automatic triggers are wired to this type yet (e.g. sign-and-trade, mid-season buyout re-sign — rulebook §1.4 rows C/D remain manual).

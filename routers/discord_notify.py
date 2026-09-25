@@ -54,6 +54,7 @@ TYPE_LABELS = {
     "release": "Release", "renounce": "Renounce",
     "rescind_renounce": "Renounce Rescinded", "trade": "Trade",
     "convert_twoway": "Two-Way Conversion", "void_player": "Void Player",
+    "stash": "Stash",
     "set_hard_cap_level": "Hard Cap", "extension": "Extension",
 }
 
@@ -63,7 +64,7 @@ TYPE_COLORS = {
     "sign": 0x22C55E, "pick": 0x60A5FA, "sign_pick": 0x60A5FA,
     "option": 0xFB923C, "guarantee": 0x2DD4BF, "release": 0xEF4444,
     "renounce": 0xFCD34D, "rescind_renounce": 0xFCD34D, "trade": 0xC084FC,
-    "convert_twoway": 0xA8A29E, "void_player": 0x9CA3AF,
+    "convert_twoway": 0xA8A29E, "void_player": 0x9CA3AF, "stash": 0x60A5FA,
     "set_hard_cap_level": 0xD4AF37, "offer_sheet": 0xA5B4FC,
     "offer_sheet_decision": 0xA5B4FC,
     # Same blue as .badge-extension in transactions/index.html and
@@ -301,6 +302,12 @@ def _describe(txn: dict, bios: dict) -> str:
         else:
             line = f"**Not matched** by {retaining} — signs with {offering}"
         return f"{head}\n{line}" if head else line
+
+    if t == "stash":
+        why = ("overseas contract" if d.get("basis") == "7.4"
+               else "not in 2K, sitting out")
+        line = f"Draft rights kept unsigned — {why} (§ {d.get('basis', '7.1')})"
+        return f"{line}\n{d['note']}" if d.get("note") else line
 
     if t == "void_player":
         return f"Voided — {d['reason']}" if d.get("reason") else "Voided — no cap hit"

@@ -6,14 +6,14 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from .constants import (
     DATA_DIR, CAP_LEVELS_FILE, TRANSACTIONS_FILE, VALID_TEAMS, ROOM_ZONE_BASELINE_FILE,
-    ROOKIE_SCALE_FILE,
+    ROOKIE_SCALE_FILE, ATTRIBUTES_FILE,
     _txn_lock, _deadcap_lock, _state_lock, _picks_lock, _trade_exc_lock,
     ROSTER_MAX, ROSTER_OFFSEASON_MAX, ROSTER_MIN, ROSTER_CHARGE_MIN, TWO_WAY_MAX,
     SALARY_MATCH_TIER1_CAP, SALARY_MATCH_TIER2_CAP,
@@ -454,6 +454,15 @@ class OfferSheetDecisionDetails(BaseModel):
 class VoidPlayerDetails(BaseModel):
     player: str
     reason: str = ""
+
+
+class StashDetails(BaseModel):
+    # Keeps an unsigned pick's rights past the § 7.1 signing deadline. "7.1":
+    # not in the current 2K and sitting out organized basketball; "7.4": under
+    # an active overseas contract. `note` is the evidence a reviewer reads.
+    player: str
+    basis: Literal["7.1", "7.4"]
+    note: str = ""
 
 
 class SetHardCapDetails(BaseModel):
@@ -919,6 +928,7 @@ def _renounce_eligibility(player: str, bios: dict, cur_season: str) -> dict:
 # Bio fields a renounce trims, and therefore exactly what a rescind restores.
 _RENOUNCE_SNAPSHOT_FIELDS = (
     "salaries", "guaranteed", "guarantee_dates", "guarantee_schedule", "cap_holds", "type",
+    "stash",
 )
 
 
@@ -957,6 +967,7 @@ def _apply_renounce(details: RenounceDetails, txn_date: str, info: dict) -> tupl
     bio["guarantee_schedule"] = {k: v for k, v in bio.get("guarantee_schedule", {}).items() if keep(k)}
     bio["cap_holds"] = {y: t for y, t in holds.items() if y > next_season}
     bio["type"] = ""
+    bio.pop("stash", None)
     save_player_bios(bios)
 
     # Remove from roster CSV
@@ -1188,6 +1199,43 @@ def _apply_offer_sheet_decision(details: "OfferSheetDecisionDetails", txn_date: 
     }
 
 
+def _apply_stash(details: StashDetails, txn_date: str, info: dict,
+                 txn_id: Optional[str] = None) -> str:
+    """Records that a team is keeping a pick's unsigned draft rights past the
+    § 7.1 signing deadline (a "stash"). Nothing about the player's status
+    changes: they stay `draft-rights`, off the 15 and with no cap hold. What
+    this adds is the record of *why*, so an unsigned pick the team chose to
+    keep reads differently from one nobody got round to signing.
+
+    The stash stands until the player is signed, renounced or voided (each of
+    those drops it). It is not renewed yearly: a § 7.1 stash from an earlier
+    league year is flagged for review on the team page instead. Returns the
+    team."""
+    bios = load_player_bios()
+    if details.player not in bios:
+        raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
+    bio = bios[details.player]
+    if bio.get("type") != "draft-rights":
+        raise HTTPException(
+            status_code=422,
+            detail=f"Player {details.player!r} does not hold unsigned draft rights — only a drafted, unsigned pick can be stashed",
+        )
+    team = _build_team_map().get(details.player)
+    if not team:
+        raise HTTPException(status_code=422, detail=f"Player {details.player!r} is not on any roster")
+
+    bio["stash"] = {
+        "basis": details.basis,
+        "season": _season_for_date(txn_date),
+        "date": txn_date,
+        "note": details.note.strip(),
+        "txn_id": txn_id,
+    }
+    save_player_bios(bios)
+    log_write(info, f"TXN stash — {details.player} ({team}, § {details.basis})")
+    return team
+
+
 def _apply_void_player(details: VoidPlayerDetails, txn_date: str, info: dict) -> str:
     """Removes a player from their roster with no dead cap and no remaining
     obligation (rulebook §5.1 void circumstances: real-life retirement, not
@@ -1212,6 +1260,7 @@ def _apply_void_player(details: VoidPlayerDetails, txn_date: str, info: dict) ->
     bio["guarantee_schedule"] = past_gtd_sched
     bio["cap_holds"] = {}
     bio["type"] = ""
+    bio.pop("stash", None)
     save_player_bios(bios)
 
     path = DATA_DIR / f"{team.lower()}-roster.csv"
@@ -1390,6 +1439,7 @@ def _apply_sign_pick(details: SignPickDetails, txn_date: str, info: dict, txn_id
 
     new_type = "two-way" if details.contract.type == "two-way" else "player"
     bio["type"] = new_type
+    bio.pop("stash", None)   # signed — the rights are no longer being held
     cur_season = _season_for_date(txn_date)
     past, past_gtd, past_gtd_dates, past_gtd_sched = _retained_history(bio, cur_season)
     bio["salaries"] = {**past, **details.contract.salaries}
@@ -6786,6 +6836,80 @@ def _validate_sign_pick(details: SignPickDetails, ctx: dict) -> list[CheckResult
     return checks
 
 
+def _in_current_2k(slug: str) -> bool:
+    """Whether the 2K ratings scrape (player-attributes.json) has this player.
+    Evidence, not proof: the scrape matches by name, so a stray match is
+    possible, which is why the check built on it can be forced by the office."""
+    return bool(_load_json(ATTRIBUTES_FILE, {}).get(slug))
+
+
+def _validate_stash(details: StashDetails, ctx: dict) -> list[CheckResult]:
+    """§ 7.1 / § 7.4: keeping a pick's unsigned rights past the deadline.
+
+    Only the player's status and the 2K half of § 7.1 can be read from our
+    data. Whether a player is sitting out, or is under an overseas contract,
+    cannot, so those are stated as what the reviewer has to confirm rather
+    than checked.
+    """
+    checks = []
+    bio = ctx["bios"].get(details.player) or {}
+    name = bio.get("name") or details.player
+    team = _build_team_map().get(details.player)
+
+    if bio.get("type") != "draft-rights":
+        checks.append(CheckResult(
+            check="stash_draft_rights", passed=False, level="error",
+            message=(f"{name} does not hold unsigned draft rights (type: "
+                     f"{bio.get('type') or 'unset'}) — only a drafted, unsigned pick "
+                     f"can be stashed (§ 7.1)."),
+        ))
+    elif not team:
+        checks.append(CheckResult(
+            check="stash_draft_rights", passed=False, level="error",
+            message=f"{name}'s draft rights are not on any roster (§ 7.1).",
+        ))
+    else:
+        prior = bio.get("stash")
+        extra = (f" Replaces the § {prior.get('basis')} stash recorded {prior.get('date')}."
+                 if prior else "")
+        checks.append(CheckResult(
+            check="stash_draft_rights", passed=True, level="info",
+            message=(f"{team} holds {name}'s unsigned draft rights. Stashing keeps "
+                     f"them with no cap hold and off the roster count (§ 7.1).{extra}"),
+        ))
+
+    if not details.note.strip():
+        what = ("the club and the contract he is on"
+                if details.basis == "7.4" else "how he is sitting out this season")
+        checks.append(CheckResult(
+            check="stash_grounds", passed=False, level="error",
+            message=f"Say why the rights qualify — {what} (§ {details.basis}).",
+        ))
+
+    if details.basis == "7.1":
+        if _in_current_2k(details.player):
+            checks.append(CheckResult(
+                check="stash_not_in_2k", passed=False, level="error",
+                message=(f"{name} has ratings in the 2K scrape. § 7.1 only lets a team "
+                         f"keep unsigned rights to a player who is not in the current "
+                         f"NBA 2K. If he's stashed overseas, use § 7.4 instead."),
+            ))
+        else:
+            checks.append(CheckResult(
+                check="stash_not_in_2k", passed=True, level="info",
+                message=(f"{name} has no ratings in the 2K scrape (§ 7.1). That he is "
+                         f"sitting out organized basketball is checked by hand."),
+            ))
+    else:
+        checks.append(CheckResult(
+            check="stash_grounds", passed=True, level="info",
+            message=("The overseas contract is checked by hand (§ 7.4). If he signs "
+                     "an NBA contract in real life, the team has 30 days to sign him "
+                     "or let him go."),
+        ))
+    return checks
+
+
 def _check_rookie_scale_terms(contract: ContractIn, scale: dict,
                               bio: dict) -> CheckResult:
     """§ 7.1: a first-rounder's deal is the scale — every year, to the dollar.
@@ -6840,6 +6964,7 @@ _VALIDATORS = {
     "offer_sheet":    _validate_offer_sheet,
     "offer_sheet_decision": _validate_offer_sheet_decision,
     "extension":      _validate_extension,
+    "stash":          _validate_stash,
 }
 
 
@@ -7156,7 +7281,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid date; use YYYY-MM-DD")
 
-    if body.type not in ("sign", "pick", "option", "guarantee", "release", "renounce", "rescind_renounce", "trade", "convert_twoway", "sign_pick", "void_player", "set_hard_cap_level", "offer_sheet", "offer_sheet_decision", "extension"):
+    if body.type not in ("sign", "pick", "option", "guarantee", "release", "renounce", "rescind_renounce", "trade", "convert_twoway", "sign_pick", "void_player", "stash", "set_hard_cap_level", "offer_sheet", "offer_sheet_decision", "extension"):
         raise HTTPException(status_code=422, detail=f"Unsupported transaction type: {body.type!r}")
 
     if body.historical and body.type not in ("trade", "sign", "option"):
@@ -7174,6 +7299,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
         "convert_twoway": (ConvertTwoWayDetails,  "Invalid convert_twoway details"),
         "sign_pick":      (SignPickDetails,       "Invalid sign_pick details"),
         "void_player":       (VoidPlayerDetails,  "Invalid void_player details"),
+        "stash":             (StashDetails,       "Invalid stash details"),
         "set_hard_cap_level": (SetHardCapDetails, "Invalid set_hard_cap_level details"),
         "offer_sheet":       (OfferSheetDetails,  "Invalid offer_sheet details"),
         "offer_sheet_decision": (OfferSheetDecisionDetails, "Invalid offer_sheet_decision details"),
@@ -7271,6 +7397,10 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             stored_details["team"] = team
         elif body.type == "void_player":
             team = _apply_void_player(details, body.date, info)
+            stored_details = details.model_dump()
+            stored_details["team"] = team
+        elif body.type == "stash":
+            team = _apply_stash(details, body.date, info, txn_id=txn_id)
             stored_details = details.model_dump()
             stored_details["team"] = team
         elif body.type == "set_hard_cap_level":
@@ -8437,6 +8567,82 @@ def self_sign_pick(body: SelfSignPickIn, info: dict = Depends(get_token_info)):
             "created_by": info.get("name", "unknown"),
             "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "description": body.description or f"{applied_team} signs {player} to the rookie scale",
+            "details": {**details.model_dump(), "team": applied_team, "_source": "owner_self_serve"},
+        }
+        _append_transaction(txn)
+    notify_transaction(txn)
+    return {"ok": True, "transaction": txn, "checks": [c.model_dump() for c in checks]}
+
+
+@router.post("/api/validate/stash")
+def validate_stash(body: StashDetails):
+    """Non-mutating § 7.1/§ 7.4 check of a stash. Shares `_validate_stash` with
+    `POST /api/transactions` and `POST /api/self/stash`. Public, no auth, same
+    terms as `/api/validate/renounce` — it's what the roster page's stash
+    dialog shows before the owner confirms."""
+    ctx = _validation_ctx()
+    if body.player not in ctx["bios"]:
+        raise HTTPException(400, f"Unknown player '{body.player}'.")
+    return _validation_result(_validate_stash(body, ctx), {})
+
+
+class SelfStashIn(BaseModel):
+    player: str
+    basis: Literal["7.1", "7.4"]
+    note: str = ""
+    description: str = ""
+
+
+@router.post("/api/self/stash")
+def self_stash(body: SelfStashIn, info: dict = Depends(get_token_info)):
+    """Owner-initiated stash from their own team's roster page (§ 7.1/§ 7.4).
+
+    Same three safety properties as `self_renounce`: the team is derived from
+    the player's own roster row, never supplied; no force, a real error is
+    always fatal; the date is server-stamped.
+    """
+    player = body.player
+    bios = load_player_bios()
+    if player not in bios:
+        raise HTTPException(status_code=404, detail=f"Unknown player '{player}'.")
+
+    team = _build_team_map().get(player)
+    if not team:
+        raise HTTPException(status_code=422, detail=f"{player!r} is not on any roster.")
+    if not is_team_owner(info, team):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Only {team}'s owner can act on {team} players.",
+        )
+
+    txn_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    details = StashDetails(player=player, basis=body.basis, note=body.note)
+    ctx = {
+        "bios":       bios,
+        "team_state": load_team_state(),
+        "cap_levels": json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {},
+        "cur_season": _season_for_date(txn_date),
+        "txn_date":   txn_date,
+        "trade_exceptions": load_trade_exceptions(),
+    }
+    checks = _validate_stash(details, ctx)
+    if any(not c.passed and c.level == "error" for c in checks):
+        raise HTTPException(status_code=422, detail={
+            "validation": True,
+            "checks": [c.model_dump() for c in checks],
+            "can_force": False,
+        })
+
+    txn_id = secrets.token_hex(8)
+    with _txn_lock:
+        applied_team = _apply_stash(details, txn_date, info, txn_id=txn_id)
+        txn = {
+            "id": txn_id,
+            "type": "stash",
+            "date": txn_date,
+            "created_by": info.get("name", "unknown"),
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "description": body.description or f"{applied_team} stashes {player}",
             "details": {**details.model_dump(), "team": applied_team, "_source": "owner_self_serve"},
         }
         _append_transaction(txn)
