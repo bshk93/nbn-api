@@ -25,7 +25,7 @@ from .storage import (
 from .auth import require_role, get_token_info, is_team_owner
 from .discord_notify import notify_transaction
 from . import inbox
-from .players import load_player_bios, save_player_bios, _build_team_map, _scrub_trading_block
+from .players import load_player_bios, save_player_bios, _build_team_map, _scrub_trading_block, _display_name
 from .roster_picks import (
     load_picks, save_picks, _all_picks_flat, _pick_year_horizon,
     load_team_state, save_team_state, get_season_state,
@@ -6853,7 +6853,7 @@ def _validate_stash(details: StashDetails, ctx: dict) -> list[CheckResult]:
     """
     checks = []
     bio = ctx["bios"].get(details.player) or {}
-    name = bio.get("name") or details.player
+    name = _display_name(bio.get("name") or "") or details.player
     team = _build_team_map().get(details.player)
 
     if bio.get("type") != "draft-rights":
