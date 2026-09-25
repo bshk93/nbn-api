@@ -12,8 +12,14 @@ Pins:
   burned — checked against the wallet, not the market's own bookkeeping.
 - **Yes and No.** A No pushes its outcome's price down, pays when anything
   else wins, and round-trips like a Yes.
-- **Nobody bets against their own team**, directly or as Yes on every other
-  team; a bet on one rival is fine, and admin isn't every team.
+- **Nobody bets against their own team**: no direct No, and no position that
+  would gain more than the allowance if the team threw its season, which is
+  what stops Yes on 28 of the other 29 on a contender. A long shot's GM trades
+  freely, a modest bet on a rival is fine, backing your own team makes room,
+  someone who joins a team can still sell out of a bet against it, and admin
+  isn't every team.
+- **Every market has a close time.**
+- **Shares round down**, so rounding never pays the buyer.
 - **Limits.** No selling what you don't hold; no stake cap unless a market sets
   one, and then it's net of sales and includes the fee; a moved price refuses a trade with `min_shares`;
   a locked, closed or settled market doesn't trade; an overdraw leaves the
@@ -92,7 +98,7 @@ def prices(m):
 
 
 def new_market(**kw):
-    body = {"title": kw.pop("title", "Who wins?"),
+    body = {"title": kw.pop("title", "Who wins?"), "closes_at": kw.pop("closes_at", "2099-01-01T00:00:00"),
             "outcomes": kw.pop("outcomes", [{"label": x} for x in ("ATL", "BOS", "CHI")]), **kw}
     r = c.post("/api/markets", json=body, headers=H("Bookie"))
     assert r.status_code == 200, r.text
@@ -106,9 +112,11 @@ for n in ("Ann", "Ben", "Cat"):
 
 print("\n-- prices --")
 
-r = c.post("/api/markets", json={"title": "x", "outcomes": [{"label": "a"}, {"label": "b"}]},
-           headers=H("Ann"))
+r = c.post("/api/markets", json={"title": "x", "outcomes": [{"label": "a"}, {"label": "b"}],
+                                 "closes_at": "2099-01-01T00:00:00"}, headers=H("Ann"))
 check("only a bookie opens a market", r.status_code == 403)
+r = c.post("/api/markets", json={"title": "x", "outcomes": [{"label": "a"}, {"label": "b"}]}, headers=H("Bookie"))
+check("a market needs a close time", r.status_code == 422)
 
 m = new_market()
 check("no opening prices means uniform", all(near(p, 100 / 3) for p in prices(m)))
@@ -152,10 +160,13 @@ r = c.post(f"/api/markets/{m['id']}/quote", json={"outcome_id": a_id, "side": "b
 q = r.json()
 check("a quote doesn't trade", c.get(f"/api/markets/{m['id']}").json()["trade_count"] == 0)
 before_ann = B("Ann")
+m_before_q = next(x for x in mk._load() if x["id"] == m["id"])["q"]
 r = c.post(f"/api/markets/{m['id']}/buy", json={"outcome_id": a_id, "spend": 100}, headers=H("Ann"))
 check("a buy succeeds", r.status_code == 200)
 m = r.json()["market"]
 check("the buy got the quoted shares", near(r.json()["trade"]["shares"], q["shares"], 1e-4))
+exact = mk._buy_shares_for(m_before_q, 1500, 0, 100)
+check("shares round down, never up", r.json()["trade"]["shares"] <= exact)
 check("the member paid spend + fee", near(before_ann - B("Ann"), 102))
 check("the outcome's price went up", prices(m)[0] > 100 / 3)
 check("...every other one went down", all(p < 100 / 3 for p in prices(m)[1:]))
@@ -201,26 +212,58 @@ print("\n-- your own team --")
 
 r = c.post(f"/api/markets/{ynid}/buy", json={"outcome_id": bos, "contract": "no", "spend": 20}, headers=H("Gm"))
 check("a BOS member can't buy No on Boston", r.status_code == 422)
-give("Gm", 2000); give("Coach", 2000); give("Admin", 2000)
-r = c.post(f"/api/markets/{ynid}/buy", json={"outcome_id": bos, "contract": "no", "spend": 20}, headers=H("Gm"))
-check("...even with the money for it", r.status_code == 422 and "own team" in r.json()["detail"])
-c.post(f"/api/markets/{ynid}/buy", json={"outcome_id": chi, "spend": 20}, headers=H("Gm"))
-check("...but can back one rival", "Gm" in c.get(f"/api/markets/{ynid}").json()["positions"])
-yn = c.get(f"/api/markets/{ynid}").json()
-# Match the Chicago holding on Utah, so every other team pays and Boston doesn't.
-need = yn["positions"]["Gm"][chi]["yes"]
-spend = 20
-while True:
-    qq = c.post(f"/api/markets/{ynid}/quote", json={"outcome_id": uta, "side": "buy", "spend": spend}).json()
-    if qq["shares"] >= need:
-        break
-    spend += 5
-r = c.post(f"/api/markets/{ynid}/buy", json={"outcome_id": uta, "spend": spend}, headers=H("Gm"))
-check("...but not Yes on every other team, which is No on Boston in disguise", r.status_code == 422)
+give("Gm", 5000); give("Coach", 2000); give("Admin", 2000)
+r = c.post(f"/api/markets/{ynid}/buy", json={"outcome_id": bos, "contract": "no", "spend": 5}, headers=H("Gm"))
+check("...not even a small one", r.status_code == 422 and "own team" in r.json()["detail"])
 r = c.post(f"/api/markets/{ynid}/buy", json={"outcome_id": chi, "contract": "no", "spend": 20}, headers=H("Coach"))
 check("a current tenure counts as your team too (CHI coach, No on Chicago)", r.status_code == 422)
 r = c.post(f"/api/markets/{ynid}/buy", json={"outcome_id": bos, "contract": "no", "spend": 20}, headers=H("Admin"))
 check("admin isn't every team", r.status_code == 200)
+
+# The 30-team case. Boston is a contender here, so a Yes on 28 of the other
+# 29 (nearly a No on Boston) is a real reason to tank, and must be refused.
+teams30 = ["BOS"] + sorted(t for t in mk.VALID_TEAMS if t != "BOS")
+big = new_market(title="thirty", outcomes=[{"label": t, "team": t, "open_price": 25 if t == "BOS" else 2.5}
+                                           for t in teams30])
+bid = big["id"]
+oid = {o["team"]: o["id"] for o in big["outcomes"]}
+r = c.post(f"/api/markets/{bid}/buy", json={"outcome_id": oid["CHI"], "spend": 100}, headers=H("Gm"))
+check("a contender's GM can back one rival for a modest amount", r.status_code == 200)
+r = c.post(f"/api/markets/{bid}/buy", json={"outcome_id": oid["CHI"], "spend": 1500}, headers=H("Gm"))
+check("...but not a large one", r.status_code == 422 and "threw their season" in r.json()["detail"])
+refused_at = None
+for n, t in enumerate(teams30[2:], start=2):      # skip BOS and CHI
+    r = c.post(f"/api/markets/{bid}/buy", json={"outcome_id": oid[t], "spend": 40}, headers=H("Gm"))
+    if r.status_code != 200:
+        refused_at = n
+        break
+check(f"Yes on rival after rival is refused well before 28 of 29 (refused at team {refused_at})",
+      refused_at is not None and refused_at < 28)
+r = c.post(f"/api/markets/{bid}/buy", json={"outcome_id": oid["BOS"], "spend": 300}, headers=H("Gm"))
+check("backing your own team is always fine", r.status_code == 200)
+r = c.post(f"/api/markets/{bid}/buy", json={"outcome_id": oid[teams30[refused_at]], "spend": 40}, headers=H("Gm"))
+check("...and it makes room for the rival bet that was refused", r.status_code == 200)
+
+# A long shot's GM has almost nothing to throw away, so can trade freely.
+MEMBERS["Gm"]["roles"] = ["uta"]
+r = c.post(f"/api/markets/{bid}/buy", json={"outcome_id": oid["CHI"], "spend": 1000}, headers=H("Gm"))
+check("a long shot's GM can put NB¥1,000 on a rival", r.status_code == 200)
+r = c.post(f"/api/markets/{bid}/buy", json={"outcome_id": oid["UTA"], "contract": "no", "spend": 10}, headers=H("Gm"))
+check("...but still no direct No on their own team", r.status_code == 422)
+MEMBERS["Gm"]["roles"] = ["bos"]
+
+# Joining a team while holding a bet against it: you can still sell out.
+stuck = new_market(title="stuck", outcomes=[{"label": t, "team": t} for t in ("BOS", "CHI", "UTA")])
+sid = stuck["id"]
+sbos = stuck["outcomes"][0]["id"]
+t = c.post(f"/api/markets/{sid}/buy", json={"outcome_id": sbos, "contract": "no", "spend": 300}, headers=H("Cat")).json()
+MEMBERS["Cat"]["roles"] = ["bos"]
+r = c.post(f"/api/markets/{sid}/sell", json={"outcome_id": sbos, "contract": "no", "shares": t["trade"]["shares"] / 2},
+           headers=H("Cat"))
+check("someone who joins a team can sell part of a bet against it", r.status_code == 200)
+r = c.post(f"/api/markets/{sid}/buy", json={"outcome_id": stuck["outcomes"][1]["id"], "spend": 100}, headers=H("Cat"))
+check("...but can't add to it", r.status_code == 422)
+MEMBERS["Cat"]["roles"] = []
 
 # ── limits ───────────────────────────────────────────────────────────────────
 

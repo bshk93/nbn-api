@@ -33,12 +33,15 @@ one market.
 
 **Nobody bets against their own team** — a member with a team role or a
 current tenure on an outcome's team. A position like that pays more the worse
-the team does, and it's the one bet its holder can influence. The rule is on
-the whole position, not the button: after any trade, what you'd be paid if
-your team wins must be at least what you'd be paid if the worst other outcome
-wins. So a No on your team is refused, and so is its disguise, Yes on every
-other team. Knowing about your own trade early is not blocked; see
+the team does, and it's the one bet its holder can influence. A direct No on
+your team is refused, and so is anything that would let your bets gain more
+than OWN_TEAM_ALLOWANCE if your team threw its season — which is what catches
+Yes on 28 of the other 29 teams on a team with a real chance (`_check_own_team`).
+Knowing about your own trade early is not blocked; see
 `docs/nbyen-economy.md` § 4a.
+
+**Every market has a close time.** One left trading after its result is known
+sells the winner below 100 to whoever notices first.
 
 A trading fee on every buy and sell is burned rather than paid to anyone. It
 makes flipping stale news cost something.
@@ -77,6 +80,9 @@ MIN_TRADE       = 1.0       # NB¥
 # edition opens its top team near 21%, its top five near 70%, and everyone
 # ranked below about 12th at the 1% floor.
 SEED_SPREAD     = 3.0
+# The most a member's bets may stand to gain, at market odds, if their own
+# team threw its season (`_tank_gain`).
+OWN_TEAM_ALLOWANCE = 100.0
 
 _lock = threading.Lock()
 
@@ -259,21 +265,56 @@ def _member_teams(info: dict) -> set[str]:
     return teams
 
 
-def _check_own_team(m: dict, info: dict, pos: dict) -> None:
-    """Refuse a position that pays more if every other outcome wins than if
-    the member's own team does. See the module docstring."""
+def _tank_gain(m: dict, pos: dict, q: list[float], t: int) -> float:
+    """What this position stands to gain, at the market's odds in `q`, if
+    outcome t's chance fell to zero — i.e. if the team threw its season.
+
+    That's t's price times the gap between the expected payout if t loses
+    (over every other outcome, weighted by price) and the payout if t wins.
+    Weighting by t's own price is the point: a 1% team has almost nothing to
+    throw away, so its GM can trade other teams freely, while a contender's GM
+    can't stack much against their own team."""
+    pay = _payoffs(m, pos)
+    p = _probs(q, m["b"])
+    rest = 1 - p[t]
+    if rest <= 0:
+        return 0.0
+    lose = sum(p[j] * pay[j] for j in range(len(pay)) if j != t) / rest
+    return p[t] * (lose - pay[t])
+
+
+def _check_own_team(m: dict, info: dict, i: int, contract: str, side: str, delta: float) -> None:
+    """Refuse a trade that leaves a member better off if their own team loses.
+
+    Two parts. A direct No on your own team is always refused. And after any
+    trade, what your whole position would gain if your team threw its season
+    (`_tank_gain`, at the odds after the trade) may be at most
+    OWN_TEAM_ALLOWANCE. The second part is what catches a No in disguise (Yes
+    on 28 of the other 29) on a team with something to throw away.
+
+    A trade that doesn't raise that gain is always allowed, so someone who
+    joins a team holding a position against it can still sell out of it."""
     mine = _member_teams(info)
     if not mine:
         return
-    pay = _payoffs(m, pos)
-    for i, o in enumerate(m["outcomes"]):
-        if o.get("team") in mine:
-            others = [x for j, x in enumerate(pay) if j != i]
-            if others and pay[i] < min(others) - 0.01:
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"You can't bet against your own team. After this trade you'd be paid more "
-                           f"if any other team won than if {o['label']} did.")
+    who = info["name"]
+    oid = m["outcomes"][i]["id"]
+    before = m["positions"].get(who, {})
+    after = _position_after(m, who, oid, contract, delta)
+    q_after = _apply(m["q"], i, contract, delta)
+    for t, o in enumerate(m["outcomes"]):
+        if o.get("team") not in mine:
+            continue
+        if t == i and contract == "no" and side == "buy":
+            raise HTTPException(status_code=422, detail=f"You can't bet against your own team ({o['label']}).")
+        gain_after = _tank_gain(m, after, q_after, t)
+        gain_before = _tank_gain(m, before, m["q"], t)
+        if gain_after > OWN_TEAM_ALLOWANCE and gain_after > gain_before + 0.01:
+            raise HTTPException(
+                status_code=422,
+                detail=f"You can't bet against your own team. At the current odds, after this trade your bets "
+                       f"would gain about NB¥{gain_after:,.0f} if {o['label']} threw their season "
+                       f"(the most allowed is NB¥{OWN_TEAM_ALLOWANCE:,.0f}). Backing {o['label']} too would balance it.")
 
 
 # ── Quotes ───────────────────────────────────────────────────────────────────
@@ -287,7 +328,8 @@ def _quote_buy(m: dict, i: int, spend: float, contract: str = "yes") -> dict:
     if spend < MIN_TRADE:
         raise HTTPException(status_code=422, detail=f"spend at least NB¥{MIN_TRADE:.0f}")
     spend = math.floor(spend * 100) / 100
-    shares = _buy_shares_for(m["q"], m["b"], i, spend, contract)
+    # Round shares down, so rounding never hands the buyer a fraction of a cent.
+    shares = math.floor(_buy_shares_for(m["q"], m["b"], i, spend, contract) * 1e4) / 1e4
     fee = math.ceil(spend * m["fee"] * 100) / 100
     before = _probs(m["q"], m["b"])[i] * PAYOUT
     after = _probs(_apply(m["q"], i, contract, shares), m["b"])[i] * PAYOUT
@@ -324,7 +366,7 @@ class MarketCreate(BaseModel):
     b: float = DEFAULT_B
     fee: float = DEFAULT_FEE
     max_stake: float | None = DEFAULT_STAKE
-    closes_at: str | None = None
+    closes_at: str             # required: a market left open past its result pays whoever notices first
 
 
 class QuoteIn(BaseModel):
@@ -449,17 +491,17 @@ def create_market(body: MarketCreate, info: dict = Depends(require_role("bookie"
         raise HTTPException(status_code=422, detail="fee must be between 0 and 10%")
     if body.max_stake is not None and body.max_stake < MIN_TRADE:
         raise HTTPException(status_code=422, detail="max_stake too small")
-    closes_at = None
-    if body.closes_at:
-        try:
-            dt = datetime.fromisoformat(body.closes_at)
-        except ValueError:
-            raise HTTPException(status_code=422, detail="closes_at must be an ISO date-time")
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        closes_at = dt.astimezone(timezone.utc).isoformat()
-        if closes_at <= _now():
-            raise HTTPException(status_code=422, detail="closes_at is in the past")
+    if not body.closes_at:
+        raise HTTPException(status_code=422, detail="A market needs a close time, before the result can be known.")
+    try:
+        dt = datetime.fromisoformat(body.closes_at)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="closes_at must be an ISO date-time")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    closes_at = dt.astimezone(timezone.utc).isoformat()
+    if closes_at <= _now():
+        raise HTTPException(status_code=422, detail="closes_at is in the past")
     for o in outs:
         if o.team and o.team.upper() not in VALID_TEAMS:
             raise HTTPException(status_code=422, detail=f"unknown team {o.team!r}")
@@ -560,7 +602,7 @@ def buy(mid: str, body: BuyIn, info: dict = Depends(get_token_info)):
         qt = _quote_buy(m, i, body.spend, c)
         if body.min_shares is not None and qt["shares"] < body.min_shares - 1e-6:
             raise HTTPException(status_code=409, detail="The price moved — check the new quote")
-        _check_own_team(m, info, _position_after(m, who, body.outcome_id, c, qt["shares"]))
+        _check_own_team(m, info, i, c, "buy", qt["shares"])
         acct = _account(m, who)
         net = acct["spent"] - acct["received"]
         if m.get("max_stake") is not None and net + qt["total"] > m["max_stake"] + 1e-6:
@@ -598,7 +640,7 @@ def sell(mid: str, body: SellIn, info: dict = Depends(get_token_info)):
         qt = _quote_sell(m, i, shares, c)
         if body.min_proceeds is not None and qt["total"] < body.min_proceeds - 1e-6:
             raise HTTPException(status_code=409, detail="The price moved — check the new quote")
-        _check_own_team(m, info, _position_after(m, who, body.outcome_id, c, -shares))
+        _check_own_team(m, info, i, c, "sell", -shares)
         what = _what(m["outcomes"][i]["label"], c)
         if qt["total"] > 0:
             wallet.post([{"member": who, "delta": qt["total"], "kind": "market_sell",
