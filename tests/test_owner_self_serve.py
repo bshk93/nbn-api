@@ -148,13 +148,13 @@ print("\n_validate_renounce — errors block, consequences warn")
 CAP_LEVELS = {SEASON: {"cap": 164961000, "min_salary_scale": {"0": 1357763}}}
 
 
-def validate(holds, roster_count, bird=None, on_roster=True):
+def validate(holds, roster_count, bird=None, on_roster=True, bio_type="player"):
     txn._build_team_map = lambda: ({"p": "PHX"} if on_roster else {})
     txn._count_standard_roster = lambda team: roster_count
     txn._bird_tenure = lambda *a, **k: (bird or {
         "tier": None, "seasons": None, "basis": "ledger",
         "evidence": "released on 2025-01-01", "terminal_team": None})
-    bios = {"p": {"name": "TEST, PLAYER", "cap_holds": holds,
+    bios = {"p": {"name": "TEST, PLAYER", "cap_holds": holds, "type": bio_type,
                   "salaries": {NEXT: "$10,000,000"}}}
     ctx = {"bios": bios, "cur_season": SEASON, "cap_levels": CAP_LEVELS,
            "team_state": {}, "txn_date": TODAY, "trade_exceptions": {}}
@@ -180,6 +180,15 @@ r = validate({NEXT: "UFA"}, 14)
 check("dropping to 13 warns about the § 2.1 minimum", not find(r, "roster_minimum").passed)
 check("...as a warning, not an error", find(r, "roster_minimum").level == "warning")
 check("...and names the strike consequence", "strike" in find(r, "roster_minimum").message)
+
+# A two-way or draft-rights hold was never in the standard count, so it can't
+# take the roster below the minimum (PHI / Isaac Jones, 2026-09-25).
+r = validate({NEXT: "RFA"}, 14, bio_type="two-way")
+check("renouncing a lapsed two-way leaves a 14-man roster at 14",
+      find(r, "roster_minimum").passed and "with 14 " in find(r, "roster_minimum").message)
+r = validate({}, 14, bio_type="draft-rights")
+check("renouncing draft rights leaves a 14-man roster at 14",
+      find(r, "roster_minimum").passed)
 
 r = validate({NEXT: "UFA"}, 12)
 check("dropping to 11 warns about the § 2.1a charge",
@@ -260,10 +269,11 @@ check("declining down to 11 warns about the § 2.1a charge",
 print("\n_validate_release — real contract only, renounce covers the rest")
 
 
-def validate_release(salaries, holds, roster_count, stretch_years=None):
+def validate_release(salaries, holds, roster_count, stretch_years=None, bio_type="player"):
     txn._build_team_map = lambda: {"p": "PHX"}
     txn._count_standard_roster = lambda team: roster_count
-    bios = {"p": {"name": "TEST, PLAYER", "cap_holds": holds, "salaries": salaries}}
+    bios = {"p": {"name": "TEST, PLAYER", "cap_holds": holds, "salaries": salaries,
+                  "type": bio_type}}
     ctx = {"bios": bios, "cur_season": SEASON, "cap_levels": CAP_LEVELS,
            "team_state": {}, "txn_date": TODAY, "trade_exceptions": {}}
     details = ReleaseDetails(player="p", stretch_years=stretch_years)
@@ -291,6 +301,10 @@ check("a roster of 15 leaves 14 and passes the minimum", find(r, "roster_minimum
 r = validate_release({NEXT: "$10,000,000"}, {}, 14)
 check("dropping to 13 warns about the § 2.1 minimum",
       not find(r, "roster_minimum").passed and find(r, "roster_minimum").level == "warning")
+
+r = validate_release({NEXT: "$1"}, {}, 14, bio_type="two-way")
+check("releasing a two-way leaves a 14-man standard roster at 14",
+      find(r, "roster_minimum").passed)
 
 r = validate_release({NEXT: "$10,000,000"}, {}, 12)
 check("dropping to 11 warns about the § 2.1a charge",

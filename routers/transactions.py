@@ -2219,6 +2219,18 @@ def _count_standard_roster(team: str, excluding: Optional[str] = None,
     )
 
 
+def _standard_count_after_departure(team: str, bio: dict) -> int:
+    """Standard bodies left on `team` once this player leaves it.
+
+    Only a player who occupies a standard slot frees one. A two-way or unsigned
+    draft rights was never in `_count_standard_roster`'s total, so taking one
+    away must leave it unchanged — subtracting anyway read a 14-man roster as 13
+    and raised a false § 2.1 warning (PHI renouncing lapsed two-way Isaac Jones,
+    2026-09-25)."""
+    count = _count_standard_roster(team)
+    return count - 1 if _is_standard_roster_slot(bio.get("type", "")) else count
+
+
 def _count_two_way_roster(team: str, excluding: Optional[str] = None) -> int:
     """§ 2.2 two-way slots in use. Same `excluding` rule as the standard count —
     a two-way whose deal has lapsed is still a roster row, so re-signing your own
@@ -4881,7 +4893,7 @@ def _validate_release(details: ReleaseDetails, ctx: dict) -> list[CheckResult]:
         message=f"{name} is under contract through {max(real_contract_years)} — releasable under § 5.1.",
     ))
 
-    after = _count_standard_roster(team) - 1
+    after = _standard_count_after_departure(team, bios.get(details.player) or {})
     if after < ROSTER_CHARGE_MIN:
         short = ROSTER_CHARGE_MIN - after
         per = _rookie_min_salary(cur_season, ctx["cap_levels"])
@@ -4945,7 +4957,7 @@ def _validate_renounce(details: RenounceDetails, ctx: dict) -> list[CheckResult]
                      f"renounceable under § 3.10."),
         ))
 
-    after = _count_standard_roster(team) - 1
+    after = _standard_count_after_departure(team, bios.get(details.player) or {})
     if after < ROSTER_CHARGE_MIN:
         short = ROSTER_CHARGE_MIN - after
         per = _rookie_min_salary(season, ctx["cap_levels"])
@@ -6135,7 +6147,7 @@ def _validate_option(details: OptionDetails, ctx: dict) -> list[CheckResult]:
     team = _build_team_map().get(details.player)
     if not team:
         return checks
-    after = _count_standard_roster(team) - 1
+    after = _standard_count_after_departure(team, bios.get(details.player) or {})
     if after < ROSTER_CHARGE_MIN:
         short = ROSTER_CHARGE_MIN - after
         per = _rookie_min_salary(details.year, ctx["cap_levels"])
