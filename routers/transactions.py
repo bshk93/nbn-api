@@ -2297,6 +2297,97 @@ def _two_way_slot_check(team: str, after: int, verb: str) -> "CheckResult | None
     return None
 
 
+TWO_WAY_MAX_YEARS = 2         # § 2.2: maximum length, and maximum consecutive years with one team
+TWO_WAY_MAX_EXPERIENCE = 3    # § 2.2: "3 or fewer years of NBA experience"
+
+
+def _is_two_way_contract_entry(entry: dict) -> bool:
+    """Whether a `contracts` history entry was a two-way deal. The entries don't
+    record a type, but § 2.2 fixes a two-way at $0, and no standard deal is $0 in
+    every year — so every real (non-hold) year being $0 identifies one."""
+    holds = entry.get("cap_holds") or {}
+    years = [y for y in (entry.get("salaries") or {}) if holds.get(y) not in _FA_HOLD_TYPES]
+    return bool(years) and all(_parse_dollar(entry["salaries"][y]) == 0 for y in years)
+
+
+def _check_two_way_terms(contract: "ContractIn", player: str, team: Optional[str],
+                         bio: dict, season: str) -> list[CheckResult]:
+    """§ 2.2's contract terms for a two-way, on both the `sign` and `sign_pick`
+    paths. `two_way_slots` was the only § 2.2 check until 2026-09-25, and
+    passing checks return nothing, so a two-way validated to an empty list: a
+    5-year two-way for a veteran at $3M would have gone straight through.
+
+    Salary and length are exact and are errors. Experience is **not** enforced:
+    the only proxy on file is the draft-year one § 3.12 prices minimums with,
+    and years since the draft is not NBA service. 10 of the 71 two-ways on the
+    books when this was written read over 3 on it (Duop Reath reads 8) — real
+    two-way deals the league mirrors, for players who spent those years overseas
+    or in the G League. So it reports, and a human decides (§ 2.2 is 👁 for it).
+    """
+    checks = []
+    holds = contract.cap_holds or {}
+    years = sorted((y for y in (contract.salaries or {}) if holds.get(y) not in _FA_HOLD_TYPES),
+                   key=_season_start)
+
+    paid = [f"{y}: {contract.salaries[y]}" for y in years if _parse_dollar(contract.salaries[y]) != 0]
+    if paid:
+        checks.append(CheckResult(
+            check="two_way_salary", passed=False, level="error",
+            message=(f"A two-way contract carries $0 salary (§ 2.2) — this one pays "
+                     f"{', '.join(paid)}. Sign a standard contract instead."),
+        ))
+
+    if len(years) > TWO_WAY_MAX_YEARS:
+        checks.append(CheckResult(
+            check="two_way_length", passed=False, level="error",
+            message=(f"A two-way contract runs at most {TWO_WAY_MAX_YEARS} years (§ 2.2) — "
+                     f"this one runs {len(years)} ({years[0]} to {years[-1]})."),
+        ))
+
+    name = bio.get("name") or player
+    declared = getattr(contract, "years_experience", None)
+    draft_year = bio.get("draft_year")
+    if declared is not None:
+        exp, basis = int(declared), "declared on the contract"
+    elif draft_year:
+        exp, basis = _season_start(season) + 2000 - int(draft_year), f"{draft_year} draft class"
+    else:
+        exp, basis = None, None
+    if exp is None:
+        msg = (f"{name}'s NBA experience isn't on file — confirm by hand that it's "
+               f"{TWO_WAY_MAX_EXPERIENCE} years or fewer (§ 2.2).")
+    elif exp > TWO_WAY_MAX_EXPERIENCE:
+        msg = (f"{name} reads {exp} years of experience ({basis}), over § 2.2's "
+               f"{TWO_WAY_MAX_EXPERIENCE} — but years since the draft aren't NBA service. "
+               f"Confirm by hand that they've played {TWO_WAY_MAX_EXPERIENCE} NBA seasons or fewer.")
+    else:
+        msg = f"{name} reads {exp} years of experience ({basis}), within § 2.2's {TWO_WAY_MAX_EXPERIENCE}."
+    checks.append(CheckResult(check="two_way_experience", passed=True, level="info", message=msg))
+
+    # § 2.2: "the same player in a Two-Way spot for up to 2 consecutive years".
+    # Built from `contracts`, which only exists for signings since the write
+    # path began recording them, so a hit is real but a miss proves nothing —
+    # and a standard deal in between could be missing too. Forceable.
+    if team and years:
+        prior = set()
+        for entry in bio.get("contracts") or []:
+            if (entry.get("team") or "").upper() == team.upper() and _is_two_way_contract_entry(entry):
+                eh = entry.get("cap_holds") or {}
+                prior |= {_season_start(y) for y in entry["salaries"] if eh.get(y) not in _FA_HOLD_TYPES}
+        run, start = 0, _season_start(years[0]) - 1
+        while start - run in prior:
+            run += 1
+        if run + len(years) > TWO_WAY_MAX_YEARS:
+            checks.append(CheckResult(
+                check="two_way_consecutive", passed=False, level="warning",
+                message=(f"{name} has already spent {run} straight year(s) in a {team} two-way "
+                         f"spot; this deal would make {run + len(years)}, over § 2.2's "
+                         f"{TWO_WAY_MAX_YEARS} consecutive. Convert them to a standard "
+                         f"contract, or force if the history is wrong."),
+            ))
+    return checks
+
+
 def _roster_size_check(team: str, after: int, verb: str) -> "CheckResult | None":
     """§ 2.1 roster-size ceiling, in the same offseason-aware shape the trade
     validator uses (`_validate_trade`'s "Roster size" block): ≤15 passes,
@@ -4528,6 +4619,8 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
             team, _count_two_way_roster(team, excluding=details.player) + 1, "signing")
         if r:
             checks.append(r)
+        checks.extend(_check_two_way_terms(details.contract, details.player, team,
+                                           bios.get(details.player) or {}, season))
 
     r = _check_signing_method_declared(team, details.signing_method, details.contract.type)
     if r:
@@ -6822,6 +6915,14 @@ def _validate_sign_pick(details: SignPickDetails, ctx: dict) -> list[CheckResult
         r = _roster_size_check(team, _count_standard_roster(team) + 1, "signing this pick")
         if r:
             checks.append(r)
+    elif details.contract.type == "two-way":
+        # § 2.2 applies to a pick signed to a two-way exactly as to a free agent;
+        # until 2026-09-25 this path checked neither the slots nor the terms.
+        if team:
+            r = _two_way_slot_check(team, _count_two_way_roster(team) + 1, "signing this pick")
+            if r:
+                checks.append(r)
+        checks.extend(_check_two_way_terms(details.contract, details.player, team, bio, season))
 
     scale = _rookie_scale_contract(bio.get("draft_year"), bio.get("draft_round"),
                                    bio.get("draft_pick"))

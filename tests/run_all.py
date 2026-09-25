@@ -8,7 +8,7 @@ import sys
 MODULES = ["test_route_bindings",
            "test_stepien_rule", "test_pick_advance_limit", "test_picks_matching", "test_tpe_and_hardcap",
            "test_cap_room_contagion",
-           "test_signing_method_funding", "test_two_way_slots",
+           "test_signing_method_funding", "test_two_way_slots", "test_two_way_terms",
            "test_two_way_hard_cap", "test_convert_twoway_minimum",
            "test_exception_absorption_split",
            "test_fa_hold_calc", "test_room_exception_july1",

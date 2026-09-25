@@ -126,6 +126,10 @@ CHECK_SECTIONS: dict[str, tuple[str, ...]] = {
     "stash_not_in_2k":            ("7.1",),
     "stepien_rule_{}":            ("7.2",),
     "trade_min_legs":             ("4.1",),
+    "two_way_consecutive":        ("2.2",),
+    "two_way_experience":         ("2.2",),
+    "two_way_length":             ("2.2",),
+    "two_way_salary":             ("2.2",),
     "two_way_slots":              ("2.2",),
     # routers/waivers.py — § 1.5.2's buyout restriction, extended to claims.
     "waiver_claim_apron_{}":      ("1.5", "5.1"),
@@ -152,6 +156,9 @@ SECTION_REVIEW: dict[str, str] = {
             "standing restrictions are read off the team page",
     "1.6":  "only TMLE availability is checked; the aggregation and cash "
             "restrictions are read by hand",
+    "2.2":  "experience is reported off the draft-year proxy, which is not NBA "
+            "service, so eligibility is confirmed by hand; the 50-game limit is "
+            "not tracked",
     "3.1":  "eligibility and the declared method are checked, but the method "
             "itself is self-declared and never verified against tenure",
     "3.6":  "availability is checked when the Room Exception is the declared "
