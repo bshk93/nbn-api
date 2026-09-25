@@ -72,6 +72,8 @@ def main():
     f = failed(terms(contract({"26-27": "$0", "27-28": "$0", "28-29": "$0", "29-30": "$1"},
                               {"29-30": "RFA"})))
     check("a trailing hold after three years doesn't hide the third", "two_way_length" in f)
+    check("...and an over-long deal with no history isn't also called consecutive",
+          "two_way_consecutive" not in f)
 
     print("\nexperience — reported, never blocking")
     out = terms(contract(CLEAN, CLEAN_HOLDS), {"draft_year": 2018, "name": "REATH, DUOP"})

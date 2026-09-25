@@ -2377,7 +2377,8 @@ def _check_two_way_terms(contract: "ContractIn", player: str, team: Optional[str
         run, start = 0, _season_start(years[0]) - 1
         while start - run in prior:
             run += 1
-        if run + len(years) > TWO_WAY_MAX_YEARS:
+        # run == 0 is a deal that's merely too long, which two_way_length already says.
+        if run and run + len(years) > TWO_WAY_MAX_YEARS:
             checks.append(CheckResult(
                 check="two_way_consecutive", passed=False, level="warning",
                 message=(f"{name} has already spent {run} straight year(s) in a {team} two-way "
