@@ -100,7 +100,7 @@ def _normalize_open(raw: list[float | None], floor: float = MIN_OPEN_PRICE) -> l
     if all(r is None for r in raw):
         return [1 / n] * n
     if any(r is None or r <= 0 for r in raw):
-        raise HTTPException(status_code=422, detail="give an opening price for every outcome, or for none")
+        raise HTTPException(status_code=422, detail="Give every outcome a weight, or leave them all blank.")
     if floor * n > 1:
         raise HTTPException(status_code=422, detail="too many outcomes for the opening-price floor")
     total = sum(raw)
@@ -280,6 +280,27 @@ def markets_house():
         for k, v in _house(m).items():
             tot[k] = round(tot[k] + v, 2)
     return tot
+
+
+class PreviewIn(BaseModel):
+    open_prices: list[float | None]
+    b: float = DEFAULT_B
+
+
+@router.post("/api/markets/preview")
+def preview_market(body: PreviewIn):
+    """The opening prices a market would get from these weights, after
+    normalizing and the 1% floor, and the most it could create. Read-only;
+    the new-market form calls it as the bookie types, so the form shows what
+    create will do without copying the math."""
+    if len(body.open_prices) < 2:
+        raise HTTPException(status_code=422, detail="at least 2 outcomes")
+    if body.b <= 0:
+        raise HTTPException(status_code=422, detail="b must be positive")
+    p = _normalize_open(body.open_prices)
+    return {"prices": [round(x * PAYOUT, 2) for x in p],
+            "max_mint": round(body.b * math.log(1 / min(p)), 2),
+            "move_10_to_20": round(body.b * math.log(0.9 / 0.8), 2)}
 
 
 @router.get("/api/markets/{mid}")

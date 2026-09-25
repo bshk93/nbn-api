@@ -114,6 +114,11 @@ m2 = new_market(title="seeded", outcomes=[{"label": "fav", "open_price": 60},
                                           {"label": "mid", "open_price": 30},
                                           {"label": "dog", "open_price": 10}])
 check("seeded prices open where they were set", near(prices(m2)[0], 60) and near(prices(m2)[2], 10))
+pv = c.post("/api/markets/preview", json={"open_prices": [60, 30, 10]}).json()
+check("the form's preview gives the prices create will open at",
+      [round(x) for x in pv["prices"]] == [round(x) for x in prices(m2)] and near(pv["max_mint"], m2["max_mint"], 0.05))
+check("the preview applies the floor too",
+      near(min(c.post("/api/markets/preview", json={"open_prices": [99, 0.5, 0.5]}).json()["prices"]), 1.0))
 check("max_mint is b × ln(1 ÷ lowest opening price)", near(m2["max_mint"], 1500 * math.log(10), 0.05))
 
 a_id = m["outcomes"][0]["id"]
