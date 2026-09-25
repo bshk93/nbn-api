@@ -12,12 +12,9 @@ Pins:
   burned — checked against the wallet, not the market's own bookkeeping.
 - **Yes and No.** A No pushes its outcome's price down, pays when anything
   else wins, and round-trips like a Yes.
-- **Nobody bets against their own team**: no direct No, and no position that
-  would gain more than the allowance if the team threw its season, which is
-  what stops Yes on 28 of the other 29 on a contender. A long shot's GM trades
-  freely, a modest bet on a rival is fine, backing your own team makes room,
-  someone who joins a team can still sell out of a bet against it, and admin
-  isn't every team.
+- **Nobody buys No on their own team.** Bets on any other team are
+  unlimited, someone who joins a team can still sell out of a bet against it,
+  and admin isn't every team.
 - **Every market has a close time.**
 - **Shares round down**, so rounding never pays the buyer.
 - **Limits.** No selling what you don't hold; no stake cap unless a market sets
@@ -220,37 +217,17 @@ check("a current tenure counts as your team too (CHI coach, No on Chicago)", r.s
 r = c.post(f"/api/markets/{ynid}/buy", json={"outcome_id": bos, "contract": "no", "spend": 20}, headers=H("Admin"))
 check("admin isn't every team", r.status_code == 200)
 
-# The 30-team case. Boston is a contender here, so a Yes on 28 of the other
-# 29 (nearly a No on Boston) is a real reason to tank, and must be refused.
+# Any other team, any amount — even every other team.
 teams30 = ["BOS"] + sorted(t for t in mk.VALID_TEAMS if t != "BOS")
 big = new_market(title="thirty", outcomes=[{"label": t, "team": t, "open_price": 25 if t == "BOS" else 2.5}
                                            for t in teams30])
 bid = big["id"]
 oid = {o["team"]: o["id"] for o in big["outcomes"]}
-r = c.post(f"/api/markets/{bid}/buy", json={"outcome_id": oid["CHI"], "spend": 100}, headers=H("Gm"))
-check("a contender's GM can back one rival for a modest amount", r.status_code == 200)
 r = c.post(f"/api/markets/{bid}/buy", json={"outcome_id": oid["CHI"], "spend": 1500}, headers=H("Gm"))
-check("...but not a large one", r.status_code == 422 and "threw their season" in r.json()["detail"])
-refused_at = None
-for n, t in enumerate(teams30[2:], start=2):      # skip BOS and CHI
-    r = c.post(f"/api/markets/{bid}/buy", json={"outcome_id": oid[t], "spend": 40}, headers=H("Gm"))
-    if r.status_code != 200:
-        refused_at = n
-        break
-check(f"Yes on rival after rival is refused well before 28 of 29 (refused at team {refused_at})",
-      refused_at is not None and refused_at < 28)
-r = c.post(f"/api/markets/{bid}/buy", json={"outcome_id": oid["BOS"], "spend": 300}, headers=H("Gm"))
-check("backing your own team is always fine", r.status_code == 200)
-r = c.post(f"/api/markets/{bid}/buy", json={"outcome_id": oid[teams30[refused_at]], "spend": 40}, headers=H("Gm"))
-check("...and it makes room for the rival bet that was refused", r.status_code == 200)
-
-# A long shot's GM has almost nothing to throw away, so can trade freely.
-MEMBERS["Gm"]["roles"] = ["uta"]
-r = c.post(f"/api/markets/{bid}/buy", json={"outcome_id": oid["CHI"], "spend": 1000}, headers=H("Gm"))
-check("a long shot's GM can put NB¥1,000 on a rival", r.status_code == 200)
-r = c.post(f"/api/markets/{bid}/buy", json={"outcome_id": oid["UTA"], "contract": "no", "spend": 10}, headers=H("Gm"))
-check("...but still no direct No on their own team", r.status_code == 422)
-MEMBERS["Gm"]["roles"] = ["bos"]
+check("a GM can put a big bet on another team", r.status_code == 200)
+ok = all(c.post(f"/api/markets/{bid}/buy", json={"outcome_id": oid[t], "spend": 20},
+                headers=H("Gm")).status_code == 200 for t in teams30[2:])
+check("...or on every other team (public in the trade log; a conduct question, not a code one)", ok)
 
 # Joining a team while holding a bet against it: you can still sell out.
 stuck = new_market(title="stuck", outcomes=[{"label": t, "team": t} for t in ("BOS", "CHI", "UTA")])
@@ -261,7 +238,7 @@ MEMBERS["Cat"]["roles"] = ["bos"]
 r = c.post(f"/api/markets/{sid}/sell", json={"outcome_id": sbos, "contract": "no", "shares": t["trade"]["shares"] / 2},
            headers=H("Cat"))
 check("someone who joins a team can sell part of a bet against it", r.status_code == 200)
-r = c.post(f"/api/markets/{sid}/buy", json={"outcome_id": stuck["outcomes"][1]["id"], "spend": 100}, headers=H("Cat"))
+r = c.post(f"/api/markets/{sid}/buy", json={"outcome_id": sbos, "contract": "no", "spend": 20}, headers=H("Cat"))
 check("...but can't add to it", r.status_code == 422)
 MEMBERS["Cat"]["roles"] = []
 

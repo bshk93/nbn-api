@@ -32,11 +32,9 @@ money for everyone who pushes it back. A bookie can still set `max_stake` on
 one market.
 
 **Nobody bets against their own team** — a member with a team role or a
-current tenure on an outcome's team. A position like that pays more the worse
-the team does, and it's the one bet its holder can influence. A direct No on
-your team is refused, and so is anything that would let your bets gain more
-than OWN_TEAM_ALLOWANCE if your team threw its season — which is what catches
-Yes on 28 of the other 29 teams on a team with a real chance (`_check_own_team`).
+current tenure on an outcome's team — can't buy No on it. That bet pays more
+the worse the team does, and it's the one its holder can influence. Bets on
+other teams are unlimited (`_check_own_team` says why).
 Knowing about your own trade early is not blocked; see
 `docs/nbyen-economy.md` § 4a.
 
@@ -80,9 +78,6 @@ MIN_TRADE       = 1.0       # NB¥
 # edition opens its top team near 21%, its top five near 70%, and everyone
 # ranked below about 12th at the 1% floor.
 SEED_SPREAD     = 3.0
-# The most a member's bets may stand to gain, at market odds, if their own
-# team threw its season (`_tank_gain`).
-OWN_TEAM_ALLOWANCE = 100.0
 
 _lock = threading.Lock()
 
@@ -265,56 +260,20 @@ def _member_teams(info: dict) -> set[str]:
     return teams
 
 
-def _tank_gain(m: dict, pos: dict, q: list[float], t: int) -> float:
-    """What this position stands to gain, at the market's odds in `q`, if
-    outcome t's chance fell to zero — i.e. if the team threw its season.
+def _check_own_team(m: dict, info: dict, i: int, contract: str, side: str) -> None:
+    """Refuse buying No on a team you work for. Selling one you already hold
+    is fine, so someone who joins a team holding a bet against it can get out.
 
-    That's t's price times the gap between the expected payout if t loses
-    (over every other outcome, weighted by price) and the payout if t wins.
-    Weighting by t's own price is the point: a 1% team has almost nothing to
-    throw away, so its GM can trade other teams freely, while a contender's GM
-    can't stack much against their own team."""
-    pay = _payoffs(m, pos)
-    p = _probs(q, m["b"])
-    rest = 1 - p[t]
-    if rest <= 0:
-        return 0.0
-    lose = sum(p[j] * pay[j] for j in range(len(pay)) if j != t) / rest
-    return p[t] * (lose - pay[t])
-
-
-def _check_own_team(m: dict, info: dict, i: int, contract: str, side: str, delta: float) -> None:
-    """Refuse a trade that leaves a member better off if their own team loses.
-
-    Two parts. A direct No on your own team is always refused. And after any
-    trade, what your whole position would gain if your team threw its season
-    (`_tank_gain`, at the odds after the trade) may be at most
-    OWN_TEAM_ALLOWANCE. The second part is what catches a No in disguise (Yes
-    on 28 of the other 29) on a team with something to throw away.
-
-    A trade that doesn't raise that gain is always allowed, so someone who
-    joins a team holding a position against it can still sell out of it."""
-    mine = _member_teams(info)
-    if not mine:
+    Deliberately only the direct bet. A Yes on another team is partly a bet
+    against your own (one winner), and Yes on all the others is the whole of
+    one, but blocking those stopped GMs from backing the team they think will
+    win. The trade log is public, so the disguised version is visible; like an
+    alt account, it's a conduct question for the league (decided 2026-09-25)."""
+    if contract != "no" or side != "buy":
         return
-    who = info["name"]
-    oid = m["outcomes"][i]["id"]
-    before = m["positions"].get(who, {})
-    after = _position_after(m, who, oid, contract, delta)
-    q_after = _apply(m["q"], i, contract, delta)
-    for t, o in enumerate(m["outcomes"]):
-        if o.get("team") not in mine:
-            continue
-        if t == i and contract == "no" and side == "buy":
-            raise HTTPException(status_code=422, detail=f"You can't bet against your own team ({o['label']}).")
-        gain_after = _tank_gain(m, after, q_after, t)
-        gain_before = _tank_gain(m, before, m["q"], t)
-        if gain_after > OWN_TEAM_ALLOWANCE and gain_after > gain_before + 0.01:
-            raise HTTPException(
-                status_code=422,
-                detail=f"You can't bet against your own team. At the current odds, after this trade your bets "
-                       f"would gain about NB¥{gain_after:,.0f} if {o['label']} threw their season "
-                       f"(the most allowed is NB¥{OWN_TEAM_ALLOWANCE:,.0f}). Backing {o['label']} too would balance it.")
+    o = m["outcomes"][i]
+    if o.get("team") and o["team"] in _member_teams(info):
+        raise HTTPException(status_code=422, detail=f"You can't bet against your own team ({o['label']}).")
 
 
 # ── Quotes ───────────────────────────────────────────────────────────────────
@@ -602,7 +561,7 @@ def buy(mid: str, body: BuyIn, info: dict = Depends(get_token_info)):
         qt = _quote_buy(m, i, body.spend, c)
         if body.min_shares is not None and qt["shares"] < body.min_shares - 1e-6:
             raise HTTPException(status_code=409, detail="The price moved — check the new quote")
-        _check_own_team(m, info, i, c, "buy", qt["shares"])
+        _check_own_team(m, info, i, c, "buy")
         acct = _account(m, who)
         net = acct["spent"] - acct["received"]
         if m.get("max_stake") is not None and net + qt["total"] > m["max_stake"] + 1e-6:
@@ -640,7 +599,6 @@ def sell(mid: str, body: SellIn, info: dict = Depends(get_token_info)):
         qt = _quote_sell(m, i, shares, c)
         if body.min_proceeds is not None and qt["total"] < body.min_proceeds - 1e-6:
             raise HTTPException(status_code=409, detail="The price moved — check the new quote")
-        _check_own_team(m, info, i, c, "sell", -shares)
         what = _what(m["outcomes"][i]["label"], c)
         if qt["total"] > 0:
             wallet.post([{"member": who, "delta": qt["total"], "kind": "market_sell",
