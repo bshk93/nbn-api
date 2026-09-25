@@ -8041,7 +8041,43 @@ def get_rookie_scale_contract(slug: str):
         "draft_round": bio.get("draft_round"),
         "draft_pick": bio.get("draft_pick"),
         "scale": scale,
+        "second_round": _second_round_scale_options(bio),
     }
+
+
+def _second_round_scale_options(bio: dict) -> Optional[dict]:
+    """§ 7.1's two second-round deals for a drafted second-rounder, keyed
+    "2+1" and "3+1", each in `_rookie_scale_contract`'s shape — or None.
+
+    Priced by the same `_second_round_scale_contract` the validator scores
+    against, so the form's figures and the verdict can't disagree. Before
+    2026-09-25 the form only said "enter the structure by hand": four figures,
+    each off a different season's table at a different tier, which is how a
+    flat minimum got posted for two Utah picks on 2026-08-27.
+
+    Year 1 is the later of the draft season and the current league year, so a
+    pick signed a year after its draft starts in the right season. Each option
+    ends in its § 3.10 hold with no amount; the apply path prices it. A 2+1
+    ends with 3 years of experience (RFA), a 3+1 with 4 (UFA, § 3.1).
+    """
+    draft_year = bio.get("draft_year")
+    if bio.get("draft_round") != 2 or not draft_year:
+        return None
+    cap_levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
+    first = max(f"{draft_year % 100:02d}-{(draft_year + 1) % 100:02d}",
+                _current_league_year(), key=_season_start)
+    options = {}
+    for label, years, hold in (("2+1", 3, "RFA"), ("3+1", 4, "UFA")):
+        seasons = [first] + [_season_shift(first, i) for i in range(1, years)]
+        priced = _second_round_scale_contract(
+            ContractIn(salaries={s: "$0" for s in seasons}), cap_levels)
+        if not priced:
+            continue  # no minimum scale configured that far out
+        trailing = _season_shift(first, years)
+        priced["cap_holds"][trailing] = hold
+        priced["seasons"].append(trailing)
+        options[label] = priced
+    return options or None
 
 
 @router.get("/api/offer-sheets/open")

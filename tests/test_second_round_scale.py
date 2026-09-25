@@ -194,6 +194,38 @@ def main():
     check("_second_round_scale_contract returns None for a 1-year shape",
           tx._second_round_scale_contract(two_way, CAP_LEVELS) is None)
 
+    print("\nthe office form's prefill (_second_round_scale_options)")
+    import json as _json, tempfile as _tf
+    real = (tx.CAP_LEVELS_FILE, tx._current_league_year)
+    with _tf.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        _json.dump(CAP_LEVELS, fh)
+    tx.CAP_LEVELS_FILE = Path(fh.name)
+    tx._current_league_year = lambda: "26-27"
+    scale3 = tx._second_round_scale_contract(
+        ContractIn(type="player", salaries={s: "$0" for s in ("26-27", "27-28", "28-29")}),
+        CAP_LEVELS,
+    )
+    try:
+        opts = tx._second_round_scale_options({"draft_year": 2026, "draft_round": 2})
+        check("offers both deals", opts is not None and set(opts) == {"2+1", "3+1"})
+        check("...priced exactly as the validator scores them",
+              opts["2+1"]["salaries"] == scale3["salaries"] and opts["3+1"]["salaries"] == scale4["salaries"])
+        check("the 2+1 rolls into an RFA hold, the 3+1 into a UFA hold (§ 3.1)",
+              opts["2+1"]["cap_holds"].get("29-30") == "RFA" and opts["3+1"]["cap_holds"].get("30-31") == "UFA")
+        check("...with the hold season listed but not priced",
+              opts["3+1"]["seasons"][-1] == "30-31" and "30-31" not in opts["3+1"]["salaries"])
+        loaded = ContractIn(type="player", salaries=opts["3+1"]["salaries"], cap_holds=opts["3+1"]["cap_holds"])
+        r = tx._check_second_round_scale_terms(loaded, BIO, CAP_LEVELS)
+        check("a loaded 3+1 passes the scale check as-is", r is not None and r.passed)
+        tx._current_league_year = lambda: "27-28"
+        late = tx._second_round_scale_options({"draft_year": 2026, "draft_round": 2})
+        check("a pick signed a year late starts in the current season",
+              late is None or min(late["2+1"]["salaries"]) == "27-28")
+        check("a first-rounder gets none",
+              tx._second_round_scale_options({"draft_year": 2026, "draft_round": 1}) is None)
+    finally:
+        tx.CAP_LEVELS_FILE, tx._current_league_year = real
+
     print("\n" + ("=" * 40))
     if FAILS:
         print(f"FAILED: {FAILS}")
