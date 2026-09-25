@@ -35,9 +35,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+import tempfile  # noqa: E402
+
 import routers.auth as auth  # noqa: E402
-import routers.bets as bets  # noqa: E402
 import routers.themes as themes  # noqa: E402
+import routers.wallet as wallet  # noqa: E402
 
 FAILS = []
 
@@ -65,8 +67,29 @@ MEMBERS = {
         {"team": "ORL", "start": "2026-04-26", "end": None, "position": "owner"},
     ]},
 }
-BALANCES = {"Rich": 12000.0, "Poor": 250.0, "Owner": 12000.0}
-LEDGER = []
+TMP = Path(tempfile.mkdtemp(prefix="nbn-themes-test-"))
+wallet.LEDGER_FILE = TMP / "nbyen-ledger.jsonl"
+wallet.BALANCES_FILE = TMP / "member-balances.json"
+# Buying themes is paused since the 2026-09 NB¥ reset; the purchase logic is
+# still what runs when it comes back, so it's tested switched on.
+wallet.KINDS["theme"] = True
+
+
+def give(name, amount):
+    wallet.post([{"member": name, "delta": amount, "kind": "admin", "reason": "test"}])
+
+
+def B(name):
+    return wallet.balance(name)
+
+
+def L():
+    return wallet.read_ledger()
+
+
+give("Rich", 1200.0)
+give("Poor", 25.0)
+give("Owner", 1200.0)
 
 auth.load_members = lambda: MEMBERS
 auth.save_members = lambda m: None      # load_members hands back MEMBERS itself
@@ -74,9 +97,6 @@ themes.load_members = auth.load_members
 themes.save_members = auth.save_members
 themes.log_write = lambda info, msg: None
 
-bets._load_balances = lambda: BALANCES
-bets._save_balances = lambda b: None    # same dict, mutated in place
-bets._append_ledger = lambda entries: LEDGER.extend(entries)
 
 app = FastAPI()
 app.include_router(themes.router)
@@ -107,7 +127,7 @@ check("the two NBN Today themes are free",
 check("Lavender Rose is paid", not by_id[PAID_ID]["free"])
 check("every paid theme is the one flat price",
       all(t["price"] == themes.THEME_PRICE for t in cat if not t["free"]))
-check("the flat price is 5,000 NB¥", themes.THEME_PRICE == 5000.0)
+check("the flat price is 500 NB¥", themes.THEME_PRICE == 500.0)
 check("PHX is listed and carries its abbreviation",
       by_id.get(TEAM_ID, {}).get("team") == "PHX")
 check("every listed team theme has a live CSS block",
@@ -128,12 +148,12 @@ check("unknown theme → 404", r.status_code == 404)
 
 r = c.post("/api/members/me/themes/nbn-today", headers=bearer(RICH_TOKEN))
 check("a free theme cannot be bought → 400", r.status_code == 400)
-check("...and nothing was charged for it", BALANCES["Rich"] == 12000.0)
+check("...and nothing was charged for it", B("Rich") == 1200.0)
 
 r = c.post(f"/api/members/me/themes/{PAID_ID}", headers=bearer(RICH_TOKEN))
 check("buying a paid theme → 200", r.status_code == 200)
-check("charged exactly the price", BALANCES["Rich"] == 7000.0)
-check("the response reports the new balance", r.json()["new_balance"] == 7000.0)
+check("charged exactly the price", B("Rich") == 700.0)
+check("the response reports the new balance", r.json()["new_balance"] == 700.0)
 check("the theme is owned", PAID_ID in r.json()["owned"])
 check("ownership is stored under cosmetics.themes",
       MEMBERS["Rich"]["cosmetics"]["themes"] == [PAID_ID])
@@ -141,18 +161,18 @@ check("the existing cosmetics survived the unlock",
       MEMBERS["Rich"]["cosmetics"]["name_color"] == "#a855f7"
       and MEMBERS["Rich"]["cosmetics"]["status_text"] == "Kachow")
 check("the charge is in the ledger, naming the theme",
-      LEDGER[-1]["member"] == "Rich" and LEDGER[-1]["delta"] == -5000.0
-      and "Lavender Rose" in LEDGER[-1]["reason"])
+      L()[-1]["member"] == "Rich" and L()[-1]["delta"] == -500.0
+      and "Lavender Rose" in L()[-1]["reason"])
 
-before = len(LEDGER)
+before = len(L())
 r = c.post(f"/api/members/me/themes/{PAID_ID}", headers=bearer(RICH_TOKEN))
 check("buying the same theme again → 200, flagged already owned",
       r.status_code == 200 and r.json()["already_owned"] is True)
-check("...and is not charged a second time", BALANCES["Rich"] == 7000.0)
-check("...and writes no second ledger row", len(LEDGER) == before)
+check("...and is not charged a second time", B("Rich") == 700.0)
+check("...and writes no second ledger row", len(L()) == before)
 
 r = c.post(f"/api/members/me/themes/{TEAM_ID}", headers=bearer(RICH_TOKEN))
-check("a second, different theme is charged", BALANCES["Rich"] == 2000.0)
+check("a second, different theme is charged", B("Rich") == 200.0)
 check("...and both are owned now",
       sorted(MEMBERS["Rich"]["cosmetics"]["themes"]) == sorted([PAID_ID, TEAM_ID]))
 
@@ -175,31 +195,31 @@ check("a GM's team counts the same as an owner's",
       themes.free_theme_ids({"tenures": [
           {"team": "SAC", "start": "2026-04-26", "end": None, "position": "gm"}]}) == ["team-sac"])
 
-before = len(LEDGER)
+before = len(L())
 r = c.post(f"/api/members/me/themes/{OWN_TEAM_ID}", headers=bearer(OWNER_TOKEN))
 check("buying your own team's theme → 400", r.status_code == 400)
-check("...and nothing was charged", BALANCES["Owner"] == 12000.0)
-check("...and nothing reached the ledger", len(LEDGER) == before)
+check("...and nothing was charged", B("Owner") == 1200.0)
+check("...and nothing reached the ledger", len(L()) == before)
 check("...and it was not written into the owned list",
       "themes" not in MEMBERS["Owner"].get("cosmetics", {}))
 
 r = c.post(f"/api/members/me/themes/{TEAM_ID}", headers=bearer(OWNER_TOKEN))
 check("another team's theme is still charged in full",
-      r.status_code == 200 and BALANCES["Owner"] == 7000.0)
+      r.status_code == 200 and B("Owner") == 700.0)
 
 
 # ── not enough NB¥ ────────────────────────────────────────────────────────────
 
 print("\n-- not enough NB¥ --")
 
-before = len(LEDGER)
+before = len(L())
 r = c.post(f"/api/members/me/themes/{PAID_ID}", headers=bearer(POOR_TOKEN))
 check("too poor → 402", r.status_code == 402)
 check("the refusal names the price and the balance",
-      "5,000" in r.json()["detail"] and "250" in r.json()["detail"])
-check("nothing was charged", BALANCES["Poor"] == 250.0)
+      "500" in r.json()["detail"] and "25" in r.json()["detail"])
+check("nothing was charged", B("Poor") == 25.0)
 check("nothing was granted", "themes" not in MEMBERS["Poor"].get("cosmetics", {}))
-check("nothing reached the ledger", len(LEDGER) == before)
+check("nothing reached the ledger", len(L()) == before)
 
 
 # ── a failed grant refunds ────────────────────────────────────────────────────
@@ -212,21 +232,29 @@ def _boom(_members):
 
 
 themes.save_members = _boom
-before_balance = BALANCES["Poor"]
-BALANCES["Poor"] = 5000.0
-before = len(LEDGER)
+give("Poor", 475.0)
+before = len(L())
 try:
     c.post(f"/api/members/me/themes/{PAID_ID}", headers=bearer(POOR_TOKEN))
     raised = False
 except RuntimeError:
     raised = True
 check("the write failure propagates rather than being swallowed", raised)
-check("the member was refunded", BALANCES["Poor"] == 5000.0)
+check("the member was refunded", B("Poor") == 500.0)
 check("the refund is in the ledger as its own row",
-      len(LEDGER) == before + 1 and LEDGER[-1]["delta"] == 5000.0
-      and "Refund" in LEDGER[-1]["reason"])
+      len(L()) == before + 2 and L()[-1]["delta"] == 500.0
+      and "Refund" in L()[-1]["reason"])
 themes.save_members = auth.save_members
-BALANCES["Poor"] = before_balance
+
+
+# ── paused ────────────────────────────────────────────────────────────────────
+
+print("\n-- paused --")
+
+wallet.KINDS["theme"] = False
+r = c.post(f"/api/members/me/themes/{PAID_ID}", headers=bearer(OWNER_TOKEN))
+check("while themes are paused, buying one is a 423", r.status_code == 423)
+wallet.KINDS["theme"] = True
 
 
 print("\n" + ("=" * 40))

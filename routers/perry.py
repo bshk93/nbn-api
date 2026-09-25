@@ -14,10 +14,8 @@ from pydantic import BaseModel
 from .constants import DERIVED_DIR, DATA_DIR, PLAYER_BIOS_FILE, logger
 from .storage import _load_json, _save_json, log_write
 from .auth import get_token_info, require_admin, load_members
-from .bets import (
-    _load_balances, _save_balances, _init_bal, _append_ledger,
-    _balances_lock, DISCORD_BETS_WEBHOOK,
-)
+from .bets import DISCORD_BETS_WEBHOOK
+from . import wallet
 
 router = APIRouter()
 
@@ -31,7 +29,7 @@ _perry_lock = threading.Lock()
 _perry_activity_lock = threading.Lock()
 
 SLOTS = ["PG", "SG", "SF", "PF", "C", "6MAN"]
-PRIZES = [100.0, 50.0, 25.0]
+PRIZES = [10.0, 5.0, 2.5]   # paused at the 2026-09 reset; wallet.KINDS
 
 TEAM_NAMES = {
     "ATL": "Atlanta Hawks",    "BKN": "Brooklyn Nets",       "BOS": "Boston Celtics",
@@ -295,7 +293,8 @@ def _discord_daily_results(state: dict) -> None:
     lines = [f"**Perry Game — {state['date']} Results**\n"]
     for i, entry in enumerate(lb):
         prize = int(PRIZES[i])
-        lines.append(f"{medals[i]} **{entry['member']}** — {entry['score']:,.1f} pts  (+NB¥{prize})")
+        paid = f"  (+NB¥{prize})" if wallet.enabled("perry") else ""
+        lines.append(f"{medals[i]} **{entry['member']}** — {entry['score']:,.1f} pts{paid}")
     if not lb:
         lines.append("No entries today.")
     lines.append("\n**Optimal Solution:**")
@@ -310,25 +309,15 @@ def _discord_daily_results(state: dict) -> None:
 
 
 def _award_prizes(state: dict) -> None:
+    """Pay the day's top three. Pays nothing while Perry is paused in
+    wallet.KINDS — the leaderboard and Discord post still run."""
     lb = _leaderboard(state["entries"])[:3]
-    if not lb:
+    if not lb or not wallet.enabled("perry"):
         return
-    ts = datetime.now(timezone.utc).isoformat()
-    ledger_entries = []
-    with _balances_lock:
-        balances = _load_balances()
-        for i, entry in enumerate(lb):
-            prize = PRIZES[i]
-            name = entry["member"]
-            _init_bal(balances, name)
-            balances[name] = round(balances[name] + prize, 2)
-            ledger_entries.append({
-                "ts": ts, "member": name, "delta": prize,
-                "balance": balances[name],
-                "reason": f"Perry Game daily prize (#{i + 1}) — {state['date']}",
-            })
-        _save_balances(balances)
-    _append_ledger(ledger_entries)
+    wallet.post([{"member": e["member"], "delta": PRIZES[i], "kind": "perry",
+                  "reason": f"Perry Game daily prize (#{i + 1}) — {state['date']}",
+                  "ref": f"perry:{state['date']}:{i + 1}"}
+                 for i, e in enumerate(lb)])
 
 
 # ── Archive ───────────────────────────────────────────────────────────────────

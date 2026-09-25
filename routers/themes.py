@@ -46,7 +46,10 @@ router = APIRouter()
 # size of decision as an avatar: something to save for, not something to
 # collect — which is the point, since the one theme a member would obviously
 # wear is the one they no longer pay for.
-THEME_PRICE = 5000.0
+#
+# Divided by ten at the 2026-09 NB¥ reset, with every other price, when the
+# scale became 100 NB¥ per dollar (a stream game is 1,000).
+THEME_PRICE = 500.0
 
 TEAM_NAMES = {
     "ATL": "Hawks", "BKN": "Nets", "BOS": "Celtics", "CHA": "Hornets",
@@ -141,8 +144,9 @@ def list_themes():
 
 @router.post("/api/members/me/themes/{theme_id}")
 def unlock_theme(theme_id: str, info: dict = Depends(get_token_info)):
-    from .bets import _load_balances, _save_balances, _init_bal, _append_ledger, _balances_lock
+    from . import wallet
 
+    wallet.require_enabled("theme")
     entry = next((t for t in _catalog() if t["id"] == theme_id), None)
     if entry is None:
         raise HTTPException(status_code=404, detail="No such theme")
@@ -166,22 +170,17 @@ def unlock_theme(theme_id: str, info: dict = Depends(get_token_info)):
             )
         owned = _owned(members[name])
         if theme_id in owned:
-            balances = _load_balances()
             return {"theme": theme_id, "owned": owned, "already_owned": True,
-                    "new_balance": balances.get(name, 0.0)}
+                    "new_balance": wallet.balance(name)}
 
         price = entry["price"]
-        with _balances_lock:
-            balances = _load_balances()
-            _init_bal(balances, name)
-            if balances[name] < price:
-                raise HTTPException(
-                    status_code=402,
-                    detail=f"Not enough NB¥ — {entry['label']} costs {price:,.0f}, you have {balances[name]:,.0f}",
-                )
-            balances[name] = round(balances[name] - price, 2)
-            new_balance = balances[name]
-            _save_balances(balances)
+        if wallet.balance(name) < price:
+            raise HTTPException(
+                status_code=402,
+                detail=f"Not enough NB¥ — {entry['label']} costs {price:,.0f}, you have {wallet.balance(name):,.0f}",
+            )
+        new_balance = wallet.debit(name, price, "theme", f"Theme unlock: {entry['label']}",
+                                   ref=f"theme:{theme_id}")
 
         try:
             cosmetics = members[name].get("cosmetics", {})
@@ -192,19 +191,9 @@ def unlock_theme(theme_id: str, info: dict = Depends(get_token_info)):
         except Exception:
             # Refund rather than leave a member charged for nothing. The
             # ledger carries both rows, so the reversal is visible.
-            with _balances_lock:
-                balances = _load_balances()
-                _init_bal(balances, name)
-                balances[name] = round(balances[name] + price, 2)
-                _save_balances(balances)
-                refunded = balances[name]
-            _append_ledger([{"ts": ts, "member": name, "delta": price,
-                             "new_balance": refunded,
-                             "reason": f"Refund — theme unlock failed: {entry['label']}"}])
+            wallet.credit(name, price, "theme", f"Refund — theme unlock failed: {entry['label']}",
+                          ref=f"theme:{theme_id}")
             raise
 
-    _append_ledger([{"ts": ts, "member": name, "delta": -price,
-                     "new_balance": new_balance,
-                     "reason": f"Theme unlock: {entry['label']}"}])
     log_write(info, f"POST members/me/themes/{theme_id} — {name!r} unlocked {entry['label']!r}")
     return {"theme": theme_id, "owned": owned, "already_owned": False, "new_balance": new_balance}

@@ -11,7 +11,6 @@ from pydantic import BaseModel
 from .constants import (
     DATA_DIR,
     INVEST_HOLDINGS_FILE, INVEST_TRADES_FILE, INVEST_MARKET_FILE,
-    BALANCES_FILE, LEDGER_FILE,
     _invest_lock, _market_lock,
     VALID_TEAMS, logger,
 )
@@ -20,7 +19,7 @@ from .auth import get_token_info, has_role, load_members
 
 router = APIRouter()
 
-NBY_START = 1000.0
+NBY_START = 0.0   # no default balance since the 2026-09 reset; P&L is against zero
 
 # ── Index definitions ─────────────────────────────────────────────────────────
 
@@ -45,9 +44,8 @@ INDEX_META: dict[str, dict] = {
     "SW":   {"name": "Southwest Division", "conf": "West", "div": "Southwest"},
 }
 
-# Shared balance/ledger locks — same objects used by bets.py so all writers
-# contend on the same lock even when imported across modules.
-from .bets import _balances_lock, _ledger_lock, DISCORD_BETS_WEBHOOK
+from .bets import DISCORD_BETS_WEBHOOK
+from . import wallet
 
 import httpx
 
@@ -370,24 +368,7 @@ def _get_prices(algo: str = "current") -> tuple[dict, dict]:
 # ── Balance helpers ───────────────────────────────────────────────────────────
 
 def _load_balances() -> dict:
-    return _load_json(BALANCES_FILE, {})
-
-
-def _save_balances(bal: dict):
-    _save_json(BALANCES_FILE, bal)
-
-
-def _init_bal(bal: dict, name: str) -> float:
-    if name not in bal:
-        bal[name] = NBY_START
-    return bal[name]
-
-
-def _append_ledger(entries: list[dict]):
-    with _ledger_lock:
-        ledger = json.loads(LEDGER_FILE.read_text()) if LEDGER_FILE.exists() else []
-        ledger.extend(entries)
-        LEDGER_FILE.write_text(json.dumps(ledger))
+    return wallet.balances()
 
 
 # ── Holdings helpers ──────────────────────────────────────────────────────────
@@ -430,6 +411,9 @@ def _save_market(m: dict):
 
 
 def _check_market_open():
+    # Paused at the 2026-09 NB¥ reset. Before it reopens: buy_shares debits
+    # before it checks for an open short, so that refusal keeps the money.
+    wallet.require_enabled("invest")
     m = _load_market()
     if m.get("locked"):
         raise HTTPException(status_code=423, detail=m.get("locked_reason") or "Market is locked")
@@ -972,17 +956,7 @@ def buy_shares(body: BuyIn, info: dict = Depends(get_token_info)):
     member = info["name"]
     ts     = datetime.now(timezone.utc).isoformat()
 
-    with _balances_lock:
-        balances = _load_balances()
-        _init_bal(balances, member)
-        if balances[member] < body.nbyen:
-            raise HTTPException(status_code=400, detail="Insufficient NB¥ balance")
-        balances[member] = round(balances[member] - body.nbyen, 2)
-        new_balance = balances[member]
-        _save_balances(balances)
-
-    _append_ledger([{"ts": ts, "member": member, "delta": -round(body.nbyen, 2),
-                     "balance": new_balance, "reason": f"Share purchase: {team}"}])
+    new_balance = wallet.debit(member, round(body.nbyen, 2), "invest", f"Share purchase: {team}")
 
     with _invest_lock:
         holdings = _load_holdings()
@@ -1057,17 +1031,10 @@ def sell_shares(body: SellIn, info: dict = Depends(get_token_info)):
                        "game_count": game_count, "sentiment_delta": s_delta})
         _save_holdings(holdings)
 
-    with _balances_lock:
-        balances = _load_balances()
-        _init_bal(balances, member)
-        balances[member] = round(balances[member] + nbyen, 2)
-        new_balance = balances[member]
-        _save_balances(balances)
+    new_balance = wallet.balance(member) if nbyen <= 0 else wallet.credit(member, nbyen, "invest", f"Share sale: {team}")
 
     trades[-1]["balance_after"] = new_balance
     _save_trades(trades)
-    _append_ledger([{"ts": ts, "member": member, "delta": nbyen,
-                     "balance": new_balance, "reason": f"Share sale: {team}"}])
     _discord_trade("sell", member, team, body.shares, price, nbyen,
                    new_balance, _load_holdings(), algo_cur)
     return {"team": team, "shares": round(body.shares, 6), "price": price,
@@ -1101,17 +1068,7 @@ def short_shares(body: ShortIn, info: dict = Depends(get_token_info)):
     member = info["name"]
     ts     = datetime.now(timezone.utc).isoformat()
 
-    with _balances_lock:
-        balances = _load_balances()
-        _init_bal(balances, member)
-        if balances[member] < body.nbyen:
-            raise HTTPException(status_code=400, detail="Insufficient NB¥ balance")
-        balances[member] = round(balances[member] - body.nbyen, 2)
-        new_balance = balances[member]
-        _save_balances(balances)
-
-    _append_ledger([{"ts": ts, "member": member, "delta": -round(body.nbyen, 2),
-                     "balance": new_balance, "reason": f"Short position: {team}"}])
+    new_balance = wallet.debit(member, round(body.nbyen, 2), "invest", f"Short position: {team}")
 
     with _invest_lock:
         holdings = _load_holdings()
@@ -1193,17 +1150,10 @@ def cover_shares(body: CoverIn, info: dict = Depends(get_token_info)):
                        "game_count": game_count, "sentiment_delta": s_delta})
         _save_holdings(holdings)
 
-    with _balances_lock:
-        balances = _load_balances()
-        _init_bal(balances, member)
-        balances[member] = round(balances[member] + nbyen, 2)
-        new_balance = balances[member]
-        _save_balances(balances)
+    new_balance = wallet.balance(member) if nbyen <= 0 else wallet.credit(member, nbyen, "invest", f"Cover short: {team}")
 
     trades[-1]["balance_after"] = new_balance
     _save_trades(trades)
-    _append_ledger([{"ts": ts, "member": member, "delta": nbyen,
-                     "balance": new_balance, "reason": f"Cover short: {team}"}])
     _discord_trade("cover", member, team, body.shares, price, nbyen,
                    new_balance, _load_holdings(), algo_cur)
     return {"team": team, "shares": round(body.shares, 6), "price": price,

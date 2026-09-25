@@ -50,8 +50,8 @@ CALENDAR_GAMES_FILE   = DATA_DIR / "calendar-games.json"
 # knockout round is not reproduced at all.
 SCHEDULE_FILE_FMT = "schedule-{season}.json"
 BETS_FILE     = DATA_DIR / "bets.json"
-BALANCES_FILE = DATA_DIR / "member-balances.json"
-LEDGER_FILE   = DATA_DIR / "bets-ledger.json"
+# NB¥ balances and the ledger are routers/wallet.py's. The pre-reset ledger,
+# bets-ledger.json, is kept as history and nothing writes it.
 BIO_REWARDS_FILE = DATA_DIR / "bio-rewards.json"
 INVEST_HOLDINGS_FILE = DATA_DIR / "invest-holdings.json"
 INVEST_TRADES_FILE   = DATA_DIR / "invest-trades.json"

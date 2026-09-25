@@ -37,7 +37,7 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 import routers.auth as auth  # noqa: E402
-import routers.bets as bets  # noqa: E402
+import routers.wallet as wallet  # noqa: E402
 import routers.tips as tips  # noqa: E402
 
 FAILS = []
@@ -61,8 +61,17 @@ tips.load_members = lambda: MEMBERS
 
 TMP = Path(tempfile.mkdtemp(prefix="nbn-tips-test-"))
 tips.TIPS_FILE = TMP / "tips.json"
-bets.BALANCES_FILE = TMP / "member-balances.json"
-bets.LEDGER_FILE = TMP / "bets-ledger.json"
+wallet.BALANCES_FILE = TMP / "member-balances.json"
+wallet.LEDGER_FILE = TMP / "nbyen-ledger.jsonl"
+# Tipping is paused since the 2026-09 NB¥ reset; tested switched on, since this
+# is the code that runs when it comes back. The paused path is checked at the end.
+wallet.KINDS["tip"] = True
+
+
+def set_balance(name, amount):
+    d = amount - wallet.balance(name)
+    if d:
+        wallet.post([{"member": name, "delta": d, "kind": "admin", "reason": "test"}])
 tips.log_write = lambda info, msg: None
 
 app = FastAPI()
@@ -73,9 +82,7 @@ ALICE = {"Authorization": "Bearer " + ALICE_TOKEN}
 BOB   = {"Authorization": "Bearer " + BOB_TOKEN}
 
 # Give Alice a starting balance to tip from.
-bal = bets._load_balances()
-bal["Alice"] = 10_000.0
-bets._save_balances(bal)
+set_balance("Alice", 10_000.0)
 
 # ── plain tip, no context (existing behavior unchanged) ─────────────────────
 
@@ -115,9 +122,7 @@ check("member totals sum across context and non-context tips",
 # ── multi-recipient tips (power rankings: many credited authors) ───────────
 
 print("multi-recipient tips")
-bal = bets._load_balances()
-bal["Alice"] = 10_000.0
-bets._save_balances(bal)
+set_balance("Alice", 10_000.0)
 
 r = c.post("/api/tips/multi", json={"to": ["Bob", "Carol"], "amount": 100, "context": "article:multi"}, headers=ALICE)
 check("multi tip succeeds", r.status_code == 200)
@@ -128,14 +133,14 @@ check("both recipients recorded under the same context", ctx_multi["total"] == 2
 check("each recipient got the full amount, not a split",
       all(t["amount"] == 100 for t in ctx_multi["tips"]))
 
-alice_bal_after = bets._load_balances()["Alice"]
+alice_bal_after = wallet.balance("Alice")
 check("sender pays amount x recipient count", alice_bal_after == 10_000.0 - 200)
 
 check("insufficient balance rejects the whole batch, not a partial send",
       c.post("/api/tips/multi", json={"to": ["Bob", "Carol"], "amount": 999_999}, headers=ALICE).status_code == 422)
-bob_before = bets._load_balances()["Bob"]
+bob_before = wallet.balance("Bob")
 c.post("/api/tips/multi", json={"to": ["Bob", "Bob"], "amount": 50}, headers=ALICE)
-bob_after = bets._load_balances()["Bob"]
+bob_after = wallet.balance("Bob")
 check("duplicate recipients are deduped rather than double-charged", bob_after - bob_before == 50)
 check("self among recipients is rejected",
       c.post("/api/tips/multi", json={"to": ["Bob", "Alice"], "amount": 10}, headers=ALICE).status_code == 422)
@@ -149,6 +154,21 @@ check("self-tip still rejected", c.post("/api/tips", json={"to": "Alice", "amoun
       headers=ALICE).status_code == 422)
 check("unknown recipient still rejected", c.post("/api/tips", json={"to": "Nobody", "amount": 10},
       headers=ALICE).status_code == 404)
+
+print("paused")
+wallet.KINDS["tip"] = False
+before = wallet.balance("Alice")
+check("while tipping is paused, a tip is a 423",
+      c.post("/api/tips", json={"to": "Bob", "amount": 10}, headers=ALICE).status_code == 423)
+check("...and so is a multi-tip",
+      c.post("/api/tips/multi", json={"to": ["Bob"], "amount": 10}, headers=ALICE).status_code == 423)
+check("...and nothing moved", wallet.balance("Alice") == before)
+try:
+    tips.perform_tip("Alice", "Bob", 10)
+    raised = None
+except tips.TipError as e:
+    raised = e
+check("the Discord /tip path gets a TipError it already knows how to show", isinstance(raised, tips.TipError))
 
 print()
 if FAILS:

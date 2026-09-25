@@ -302,7 +302,8 @@ class MemberSelfUpdate(BaseModel):
     dob: Optional[str] = None
 
 
-_COSMETIC_COST = 500.0
+# Prices are on the 100-NB¥-per-dollar scale set at the 2026-09 reset.
+_COSMETIC_COST = 50.0
 _VALID_COLORS = {"#f59e0b", "#ef4444", "#a855f7", "#60a5fa", "#34d399", "#f472b6", "#fb923c", "#2dd4bf"}
 
 
@@ -311,7 +312,7 @@ class CosmeticsUpdate(BaseModel):
     status_text: Optional[str] = None  # max 40 chars or "" to clear
 
 
-_AVATAR_COST = 5000.0
+_AVATAR_COST = 500.0
 _AVATAR_MAX_BYTES = 512 * 1024  # 512 KB
 _AVATAR_MAX_PX = 512
 _AVATAR_ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp"}
@@ -534,7 +535,8 @@ def update_my_profile(body: MemberSelfUpdate, info: dict = Depends(get_token_inf
 
 @router.patch("/api/members/me/cosmetics")
 def update_my_cosmetics(body: CosmeticsUpdate, info: dict = Depends(get_token_info)):
-    from .bets import _load_balances, _save_balances, _init_bal, _append_ledger, _balances_lock
+    from . import wallet
+    wallet.require_enabled("cosmetic")
 
     name = info["name"]
     if body.name_color is not None and body.name_color != "" and body.name_color not in _VALID_COLORS:
@@ -544,20 +546,7 @@ def update_my_cosmetics(body: CosmeticsUpdate, info: dict = Depends(get_token_in
         if len(body.status_text) > 40:
             raise HTTPException(status_code=422, detail="status_text must be 40 characters or fewer")
 
-    from datetime import datetime, timezone as tz
-    ts = datetime.now(tz.utc).isoformat()
-
-    with _balances_lock:
-        balances = _load_balances()
-        _init_bal(balances, name)
-        if balances[name] < _COSMETIC_COST:
-            raise HTTPException(status_code=402, detail=f"Insufficient NB¥ balance (need {_COSMETIC_COST:.0f})")
-        balances[name] = round(balances[name] - _COSMETIC_COST, 2)
-        new_balance = balances[name]
-        _save_balances(balances)
-
-    _append_ledger([{"ts": ts, "member": name, "delta": -_COSMETIC_COST,
-                     "new_balance": new_balance, "reason": "Cosmetics update"}])
+    new_balance = wallet.debit(name, _COSMETIC_COST, "cosmetic", "Cosmetics update")
 
     members = load_members()
     if name not in members:
@@ -581,8 +570,9 @@ def update_my_cosmetics(body: CosmeticsUpdate, info: dict = Depends(get_token_in
 
 @router.post("/api/members/me/avatar")
 async def upload_my_avatar(info: dict = Depends(get_token_info), file: UploadFile = File(...)):
-    from .bets import _load_balances, _save_balances, _init_bal, _append_ledger, _balances_lock
+    from . import wallet
     from PIL import Image
+    wallet.require_enabled("avatar")
 
     name = info["name"]
     if file.content_type not in _AVATAR_ALLOWED_TYPES:
@@ -598,20 +588,7 @@ async def upload_my_avatar(info: dict = Depends(get_token_info), file: UploadFil
     except Exception:
         raise HTTPException(status_code=422, detail="Could not process image")
 
-    from datetime import datetime, timezone as tz
-    ts = datetime.now(tz.utc).isoformat()
-
-    with _balances_lock:
-        balances = _load_balances()
-        _init_bal(balances, name)
-        if balances[name] < _AVATAR_COST:
-            raise HTTPException(status_code=402, detail=f"Insufficient NB¥ balance (need {_AVATAR_COST:.0f})")
-        balances[name] = round(balances[name] - _AVATAR_COST, 2)
-        new_balance = balances[name]
-        _save_balances(balances)
-
-    _append_ledger([{"ts": ts, "member": name, "delta": -_AVATAR_COST,
-                     "new_balance": new_balance, "reason": "Avatar upload"}])
+    new_balance = wallet.debit(name, _AVATAR_COST, "avatar", "Avatar upload")
 
     AVATARS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = AVATARS_DIR / f"{name}.jpg"
@@ -663,6 +640,11 @@ def create_member(body: MemberCreate, info: dict = Depends(require_admin)):
     token = secrets.token_hex(32)
     members[name] = {"token": token, "roles": body.roles, "tenures": [t.model_dump() for t in body.tenures]}
     save_members(members)
+    # Every member starts with one stream game's worth. A real ledger line,
+    # not a default — see routers/wallet.py.
+    from . import wallet
+    if not wallet.has_ref(f"start:{name}"):
+        wallet.credit(name, wallet.START_GRANT, "start", "Starting NB¥", ref=f"start:{name}")
     log_write(info, f"POST members — created {name!r} roles={body.roles}")
     return {"name": name, "token": token, "roles": body.roles, "tenures": members[name]["tenures"]}
 

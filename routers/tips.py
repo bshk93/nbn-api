@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from .constants import TIPS_FILE, logger
 from .storage import _load_json, _save_json, log_write
 from .auth import get_token_info, load_members
-from .bets import _load_balances, _save_balances, _init_bal, _append_ledger, _balances_lock
+from . import wallet
 
 router = APIRouter()
 
@@ -35,6 +35,21 @@ class TipError(ValueError):
     member, insufficient funds). Callers map this to their own error shape."""
 
 
+class TipsPaused(TipError):
+    """Tipping is switched off in wallet.KINDS."""
+
+
+def _check_enabled():
+    if not wallet.enabled("tip"):
+        raise TipsPaused("Tipping is paused while NB¥ restarts.")
+
+
+def _error_code(e: TipError) -> int:
+    if isinstance(e, TipsPaused):
+        return 423
+    return 404 if "not found" in str(e) else 422
+
+
 def perform_tip(sender: str, to: str, amount: float, message: str = "",
                  context: str | None = None) -> dict:
     """Move NB¥ from `sender` to `to`, record the tip + ledger entries, and
@@ -50,39 +65,29 @@ def perform_tip(sender: str, to: str, amount: float, message: str = "",
     if to not in all_members:
         raise TipError(f"Member '{to}' not found")
 
-    with _tips_lock, _balances_lock:
-        balances = _load_balances()
-        _init_bal(balances, sender)
-        _init_bal(balances, to)
-        if balances[sender] < amount:
-            raise TipError(f"Insufficient balance — NB¥{balances[sender]:.2f} available")
-        balances[sender] = round(balances[sender] - amount, 2)
-        balances[to]     = round(balances[to]     + amount, 2)
-        sender_bal    = balances[sender]
-        recipient_bal = balances[to]
-        _save_balances(balances)
-
-        tips = _load_json(TIPS_FILE, [])
-        msg = message.strip() if amount >= TIP_MESSAGE_THRESHOLD else ""
+    _check_enabled()
+    with _tips_lock, wallet.lock:
+        have = wallet.balance(sender)
+        if have < amount:
+            raise TipError(f"Insufficient balance — NB¥{have:.2f} available")
         tip = {
             "id":      secrets.token_hex(6),
             "from":    sender,
             "to":      to,
             "amount":  amount,
-            "message": msg,
+            "message": message.strip() if amount >= TIP_MESSAGE_THRESHOLD else "",
             "ts":      datetime.now(timezone.utc).isoformat(),
         }
         if context:
             tip["context"] = context
+        new = wallet.post([
+            {"member": sender, "delta": -amount, "kind": "tip", "reason": f"Tip to {to}", "ref": f"tip:{tip['id']}"},
+            {"member": to,     "delta":  amount, "kind": "tip", "reason": f"Tip from {sender}", "ref": f"tip:{tip['id']}"},
+        ])
+        sender_bal, recipient_bal = new[sender], new[to]
+        tips = _load_json(TIPS_FILE, [])
         tips.append(tip)
         _save_json(TIPS_FILE, tips)
-
-    _append_ledger([
-        {"ts": tip["ts"], "member": sender, "delta": -amount,
-         "balance": sender_bal,    "reason": f"Tip to {to}"},
-        {"ts": tip["ts"], "member": to,     "delta":  amount,
-         "balance": recipient_bal, "reason": f"Tip from {sender}"},
-    ])
     return {"sender_bal": sender_bal, "recipient_bal": recipient_bal, "tip": tip}
 
 
@@ -107,38 +112,30 @@ def perform_tip_multi(sender: str, to: list[str], amount: float, message: str = 
     if unknown:
         raise TipError(f"Member(s) not found: {', '.join(unknown)}")
 
+    _check_enabled()
     total = round(amount * len(to), 2)
-    with _tips_lock, _balances_lock:
-        balances = _load_balances()
-        _init_bal(balances, sender)
-        for m in to:
-            _init_bal(balances, m)
-        if balances[sender] < total:
-            raise TipError(f"Insufficient balance — NB¥{balances[sender]:.2f} available, "
+    with _tips_lock, wallet.lock:
+        have = wallet.balance(sender)
+        if have < total:
+            raise TipError(f"Insufficient balance — NB¥{have:.2f} available, "
                             f"need NB¥{total:.2f} for {len(to)} recipients")
-        balances[sender] = round(balances[sender] - total, 2)
-        sender_bal = balances[sender]
-
         ts = datetime.now(timezone.utc).isoformat()
         msg = message.strip() if amount >= TIP_MESSAGE_THRESHOLD else ""
-        tips = _load_json(TIPS_FILE, [])
         new_tips = []
-        ledger = [{"ts": ts, "member": sender, "delta": -total, "balance": sender_bal,
-                   "reason": f"Tip to {', '.join(to)}"}]
+        lines = [{"member": sender, "delta": -total, "kind": "tip", "reason": f"Tip to {', '.join(to)}"}]
         for m in to:
-            balances[m] = round(balances[m] + amount, 2)
             tip = {"id": secrets.token_hex(6), "from": sender, "to": m,
                    "amount": amount, "message": msg, "ts": ts}
             if context:
                 tip["context"] = context
             new_tips.append(tip)
-            ledger.append({"ts": ts, "member": m, "delta": amount,
-                            "balance": balances[m], "reason": f"Tip from {sender}"})
+            lines.append({"member": m, "delta": amount, "kind": "tip",
+                          "reason": f"Tip from {sender}", "ref": f"tip:{tip['id']}"})
+        sender_bal = wallet.post(lines)[sender]
+        tips = _load_json(TIPS_FILE, [])
         tips.extend(new_tips)
         _save_json(TIPS_FILE, tips)
-        _save_balances(balances)
 
-    _append_ledger(ledger)
     return {"sender_bal": sender_bal, "tips": new_tips}
 
 
@@ -147,8 +144,7 @@ def send_tip(body: TipIn, info: dict = Depends(get_token_info)):
     try:
         result = perform_tip(info["name"], body.to, body.amount, body.message, body.context)
     except TipError as e:
-        code = 404 if "not found" in str(e) else 422
-        raise HTTPException(status_code=code, detail=str(e))
+        raise HTTPException(status_code=_error_code(e), detail=str(e))
     log_write(info, f"POST tips — NB¥{body.amount} to {body.to}")
     return {"ok": True, "new_balance": result["sender_bal"]}
 
@@ -158,8 +154,7 @@ def send_tip_multi(body: TipMultiIn, info: dict = Depends(get_token_info)):
     try:
         result = perform_tip_multi(info["name"], body.to, body.amount, body.message, body.context)
     except TipError as e:
-        code = 404 if "not found" in str(e) else 422
-        raise HTTPException(status_code=code, detail=str(e))
+        raise HTTPException(status_code=_error_code(e), detail=str(e))
     log_write(info, f"POST tips/multi — NB¥{body.amount} each to {', '.join(body.to)}")
     return {"ok": True, "new_balance": result["sender_bal"], "tips": result["tips"]}
 

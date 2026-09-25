@@ -1,4 +1,3 @@
-import json
 import os
 import secrets
 import threading
@@ -9,25 +8,24 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from .constants import (
-    DATA_DIR, BETS_FILE, BALANCES_FILE, LEDGER_FILE, TIPS_FILE,
-    logger,
-)
+from .constants import DATA_DIR, BETS_FILE, TIPS_FILE, logger
+from . import wallet
 from .storage import _load_json, _save_json, log_write
 from .auth import get_token_info, has_role, require_role, require_admin, load_members
 
 router = APIRouter()
 
-NBY_START            = 1000.0
-NBY_BOXSCORE_REWARD  = 200.0
-NBY_BIO_REWARD       = 10.0
-NBY_MAX_WAGER        = 300.0
+# Rewards are paused at the reset (wallet.KINDS); these are the prices they
+# come back at, on the 100-NB¥-per-dollar scale.
+NBY_BOXSCORE_REWARD  = 30.0
+NBY_BIO_REWARD       = 1.0
+# Per member, per bet. Bookies price by hand and there's no house bank, so this
+# is what keeps one badly priced long shot from paying out thousands.
+NBY_MAX_WAGER        = 100.0
 
 DISCORD_BETS_WEBHOOK = os.environ.get("DISCORD_BETS_WEBHOOK", "")
 
 _bets_lock     = threading.Lock()
-_balances_lock = threading.Lock()
-_ledger_lock   = threading.Lock()
 
 
 # ── Discord helpers ───────────────────────────────────────────────────────────
@@ -168,6 +166,9 @@ def _discord_bet_settled(bet: dict) -> None:
 
 
 # ── Balance/ledger helpers ────────────────────────────────────────────────────
+#
+# Balances and the ledger belong to `wallet.py`. What stays here is bets.json
+# and the two reward shims boxscores/players call.
 
 def _load_bets() -> list[dict]:
     return _load_json(BETS_FILE, [])
@@ -178,37 +179,13 @@ def _save_bets(bets: list[dict]):
 
 
 def _load_balances() -> dict:
-    return _load_json(BALANCES_FILE, {})
+    return wallet.balances()
 
 
-def _save_balances(bal: dict):
-    _save_json(BALANCES_FILE, bal)
-
-
-def _init_bal(bal: dict, name: str) -> float:
-    if name not in bal:
-        bal[name] = NBY_START
-    return bal[name]
-
-
-def _append_ledger(entries: list[dict]):
-    with _ledger_lock:
-        ledger = json.loads(LEDGER_FILE.read_text()) if LEDGER_FILE.exists() else []
-        ledger.extend(entries)
-        LEDGER_FILE.write_text(json.dumps(ledger))
-
-
-def _award_amount(name: str, amount: float, reason: str) -> tuple[float, float]:
-    """Credit *amount* to *name* with a ledger line. Returns (amount, new_balance)."""
-    with _balances_lock:
-        balances = _load_balances()
-        _init_bal(balances, name)
-        balances[name] = round(balances[name] + amount, 2)
-        _save_balances(balances)
-    ts = datetime.now(timezone.utc).isoformat()
-    _append_ledger([{"ts": ts, "member": name, "delta": amount,
-                     "balance": balances[name], "reason": reason}])
-    return amount, balances[name]
+def _award_amount(name: str, amount: float, reason: str, kind: str = "boxscore") -> tuple[float, float]:
+    """Pay a reward attached to some other action. Pays nothing while `kind` is
+    paused, and never fails the action. Returns (amount paid, balance)."""
+    return wallet.try_credit(name, amount, kind, reason)
 
 
 def _award_submission_reward(name: str) -> tuple[float, float]:
@@ -220,7 +197,7 @@ def _award_submission_reward(name: str) -> tuple[float, float]:
 def _award_bio_reward(name: str, amount: float) -> tuple[float, float]:
     """Award *amount* to *name* for filling in player bio fields.
     Returns (amount, new_balance)."""
-    return _award_amount(name, amount, "Bio field reward")
+    return _award_amount(name, amount, "Bio field reward", kind="bio")
 
 
 def _bet_summary(bet: dict) -> dict:
@@ -255,7 +232,7 @@ class BetCreate(BaseModel):
     title: str
     description: str = ""
     options: list[BetOptionSpec]
-    bet_type: str = "pool"
+    bet_type: str = "fixed_odds"
 
 
 class WagerIn(BaseModel):
@@ -271,7 +248,9 @@ class CloseBetIn(BaseModel):
 class BalanceAdjustIn(BaseModel):
     member: str
     delta: float
-    reason: str = ""
+    reason: str
+    # "admin" for a manual correction, "achievement" for the achievement job.
+    kind: str = "admin"
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -283,8 +262,10 @@ def list_bets():
 
 @router.post("/api/bets")
 def create_bet(body: BetCreate, info: dict = Depends(require_role("bookie"))):
-    if body.bet_type not in ("pool", "fixed_odds"):
-        raise HTTPException(status_code=422, detail="bet_type must be 'pool' or 'fixed_odds'")
+    # Fixed odds only since the 2026-09 reset. Pool bets were 2 of the first 24
+    # and nobody missed them. Closed pool bets stay in bets.json as history.
+    if body.bet_type != "fixed_odds":
+        raise HTTPException(status_code=422, detail="Only fixed-odds bets can be created")
     if not body.title.strip():
         raise HTTPException(status_code=422, detail="title is required")
 
@@ -331,13 +312,15 @@ def create_bet(body: BetCreate, info: dict = Depends(require_role("bookie"))):
 def place_wager(bet_id: str, body: WagerIn, info: dict = Depends(get_token_info)):
     if body.amount <= 0:
         raise HTTPException(status_code=422, detail="amount must be positive")
-    with _bets_lock, _balances_lock:
+    with _bets_lock:
         bets     = _load_bets()
         bet      = next((b for b in bets if b["id"] == bet_id), None)
         if bet is None:
             raise HTTPException(status_code=404, detail="Bet not found")
         if bet["status"] != "open":
             raise HTTPException(status_code=409, detail="Bet is not open for wagering")
+        if bet.get("bet_type") != "fixed_odds":
+            raise HTTPException(status_code=409, detail="Pool bets are retired")
         opt_ids = {o["id"] for o in bet["options"]}
         if body.option_id not in opt_ids:
             raise HTTPException(status_code=422, detail="Invalid option_id")
@@ -351,19 +334,8 @@ def place_wager(bet_id: str, body: WagerIn, info: dict = Depends(get_token_info)
                 status_code=422,
                 detail=f"Maximum stake per bet is NB¥{NBY_MAX_WAGER:.0f} — you have NB¥{already_staked:.2f} on this bet, so you can add at most NB¥{remaining:.2f} more",
             )
-        balances = _load_balances()
-        _init_bal(balances, info["name"])
-        if balances[info["name"]] < body.amount:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Insufficient balance — NB¥{balances[info['name']]:.2f} available",
-            )
-        balances[info["name"]] = round(balances[info["name"]] - body.amount, 2)
-        _save_balances(balances)
-        ts = datetime.now(timezone.utc).isoformat()
-        _append_ledger([{"ts": ts, "member": info["name"], "delta": -body.amount,
-                         "balance": balances[info["name"]],
-                         "reason": f"Wager on \"{bet['title']}\""}])
+        wallet.debit(info["name"], body.amount, "wager",
+                     f"Wager on \"{bet['title']}\"", ref=f"bet:{bet_id}")
         if bet.get("bet_type") == "fixed_odds":
             opt    = next(o for o in bet["options"] if o["id"] == body.option_id)
             prob   = opt["probability"]
@@ -413,13 +385,19 @@ def lock_bet(bet_id: str, info: dict = Depends(require_role("bookie"))):
 
 @router.post("/api/bets/{bet_id}/close")
 def close_bet(bet_id: str, body: CloseBetIn, info: dict = Depends(require_role("bookie"))):
-    with _bets_lock, _balances_lock:
+    """Settle a fixed-odds bet. Each winner is paid their stake at the odds they
+    took. There is no house wallet: a payout can exceed what was wagered, and
+    that difference is new NB¥. It's visible rather than capped — see
+    GET /api/bets/house."""
+    with _bets_lock:
         bets = _load_bets()
         bet  = next((b for b in bets if b["id"] == bet_id), None)
         if bet is None:
             raise HTTPException(status_code=404, detail="Bet not found")
         if bet["status"] not in ("open", "locked"):
             raise HTTPException(status_code=409, detail="Bet is already closed")
+        if bet.get("bet_type") != "fixed_odds":
+            raise HTTPException(status_code=409, detail="Pool bets are retired — delete this one to refund it")
 
         # Normalize to a list of winning IDs
         if body.winning_option_ids:
@@ -434,108 +412,45 @@ def close_bet(bet_id: str, body: CloseBetIn, info: dict = Depends(require_role("
                 raise HTTPException(status_code=422, detail=f"Invalid winning option id: {wid}")
         win_ids_set = set(win_ids)
 
-        wagers   = bet["wagers"]
-        balances = _load_balances()
+        wagers = bet["wagers"]
         payouts: dict[str, float] = {}
+        lines = []
+        for member, w in wagers.items():
+            if w["option_id"] in win_ids_set:
+                payout = w.get("potential_payout", w["amount"])
+                payouts[member] = payout
+                lines.append({"member": member, "delta": payout, "kind": "payout",
+                              "reason": f"Payout: \"{bet['title']}\"", "ref": f"bet:{bet_id}"})
+        if lines:
+            wallet.post(lines)
 
-        if bet.get("bet_type") == "fixed_odds":
-            total_stakes   = round(sum(w["amount"] for w in wagers.values()), 2)
-            winners_stakes = round(
-                sum(w["amount"] for w in wagers.values() if w["option_id"] in win_ids_set),
-                2,
-            )
-            total_paid_out = 0.0
-
-            ledger_entries = []
-            ts = datetime.now(timezone.utc).isoformat()
-            for member, w in wagers.items():
-                if w["option_id"] in win_ids_set:
-                    payout = w.get("potential_payout", w["amount"])
-                    _init_bal(balances, member)
-                    balances[member] = round(balances[member] + payout, 2)
-                    payouts[member]  = payout
-                    total_paid_out   = round(total_paid_out + payout, 2)
-                    ledger_entries.append({"ts": ts, "member": member, "delta": payout,
-                                           "balance": balances[member],
-                                           "reason": f"Payout (fixed odds): \"{bet['title']}\"" })
-
-            net_shortfall = round(total_paid_out - total_stakes, 2)
-            _save_balances(balances)
-            if ledger_entries:
-                _append_ledger(ledger_entries)
-            bet.update(
-                status="closed",
-                closed_at=datetime.now(timezone.utc).isoformat(),
-                winning_option_id=win_ids[0],
-                winning_option_ids=win_ids,
-                resolution={
-                    "total_pool":     total_stakes,
-                    "winners_pool":   winners_stakes,
-                    "total_paid_out": total_paid_out,
-                    "net_shortfall":  net_shortfall,
-                    "voided":         False,
-                    "payouts":        payouts,
-                },
-            )
-            _save_bets(bets)
-            log_write(info, f"POST bets/{bet_id}/close (fixed_odds) — winners={win_ids}, stakes=NB¥{total_stakes}, paid=NB¥{total_paid_out:.2f}, shortfall=NB¥{net_shortfall:.2f}")
-            _discord_bet_settled(bet)
-            return _bet_summary(bet)
-
-        # Pool bet
-        total_pool   = round(sum(w["amount"] for w in wagers.values()), 2)
-        winners_pool = round(
-            sum(w["amount"] for w in wagers.values() if w["option_id"] in win_ids_set),
-            2,
-        )
-        voided = winners_pool == 0
-
-        ledger_entries = []
-        ts = datetime.now(timezone.utc).isoformat()
-        if voided:
-            for member, w in wagers.items():
-                _init_bal(balances, member)
-                balances[member] = round(balances[member] + w["amount"], 2)
-                payouts[member]  = w["amount"]
-                ledger_entries.append({"ts": ts, "member": member, "delta": w["amount"],
-                                       "balance": balances[member],
-                                       "reason": f"Refund (voided): \"{bet['title']}\"" })
-        else:
-            for member, w in wagers.items():
-                if w["option_id"] in win_ids_set:
-                    payout = round((w["amount"] / winners_pool) * total_pool, 2)
-                    _init_bal(balances, member)
-                    balances[member] = round(balances[member] + payout, 2)
-                    payouts[member]  = payout
-                    ledger_entries.append({"ts": ts, "member": member, "delta": payout,
-                                           "balance": balances[member],
-                                           "reason": f"Payout (pool): \"{bet['title']}\"" })
-
-        _save_balances(balances)
-        if ledger_entries:
-            _append_ledger(ledger_entries)
+        total_stakes   = round(sum(w["amount"] for w in wagers.values()), 2)
+        winners_stakes = round(sum(w["amount"] for w in wagers.values() if w["option_id"] in win_ids_set), 2)
+        total_paid_out = round(sum(payouts.values()), 2)
+        net_shortfall  = round(total_paid_out - total_stakes, 2)
         bet.update(
             status="closed",
             closed_at=datetime.now(timezone.utc).isoformat(),
             winning_option_id=win_ids[0],
             winning_option_ids=win_ids,
             resolution={
-                "total_pool":   total_pool,
-                "winners_pool": winners_pool,
-                "voided":       voided,
-                "payouts":      payouts,
+                "total_pool":     total_stakes,
+                "winners_pool":   winners_stakes,
+                "total_paid_out": total_paid_out,
+                "net_shortfall":  net_shortfall,
+                "voided":         False,
+                "payouts":        payouts,
             },
         )
         _save_bets(bets)
-
-    log_write(info, f"POST bets/{bet_id}/close — winners={win_ids}, pool=NB¥{total_pool}")
+    log_write(info, f"POST bets/{bet_id}/close — winners={win_ids}, stakes=NB¥{total_stakes}, paid=NB¥{total_paid_out:.2f}, house={-net_shortfall:+.2f}")
     _discord_bet_settled(bet)
     return _bet_summary(bet)
 
 
 @router.delete("/api/bets/{bet_id}")
 def delete_bet(bet_id: str, info: dict = Depends(require_role("bookie"))):
-    with _bets_lock, _balances_lock:
+    with _bets_lock:
         bets = _load_bets()
         bet  = next((b for b in bets if b["id"] == bet_id), None)
         if bet is None:
@@ -545,17 +460,9 @@ def delete_bet(bet_id: str, info: dict = Depends(require_role("bookie"))):
         if bet["wagers"] and not has_role(info, "admin"):
             raise HTTPException(status_code=409, detail="Cannot delete a bet that has wagers — close it instead")
         if bet["wagers"]:
-            balances = _load_balances()
-            ledger_entries = []
-            ts = datetime.now(timezone.utc).isoformat()
-            for member, w in bet["wagers"].items():
-                _init_bal(balances, member)
-                balances[member] = round(balances[member] + w["amount"], 2)
-                ledger_entries.append({"ts": ts, "member": member, "delta": w["amount"],
-                                       "balance": balances[member],
-                                       "reason": f"Refund (deleted): \"{bet['title']}\"" })
-            _save_balances(balances)
-            _append_ledger(ledger_entries)
+            wallet.post([{"member": m, "delta": w["amount"], "kind": "bet_refund",
+                          "reason": f"Refund (deleted): \"{bet['title']}\"", "ref": f"bet:{bet_id}"}
+                         for m, w in bet["wagers"].items()])
         _save_bets([b for b in bets if b["id"] != bet_id])
     log_write(info, f"DELETE bets/{bet_id}")
     return {"ok": True}
@@ -566,9 +473,28 @@ def get_member_balance(member: str):
     all_members = load_members()
     if member not in all_members:
         raise HTTPException(status_code=404, detail=f"Member '{member}' not found")
-    balances = _load_balances()
-    _init_bal(balances, member)
-    return {"name": member, "balance": balances[member]}
+    return {"name": member, "balance": wallet.balance(member)}
+
+
+@router.get("/api/bets/house")
+def get_house():
+    """What betting has done to the money supply since the reset. `net` is the
+    house's result: positive means members lost more than they won and NB¥ left
+    circulation; negative means the bookies' odds created that much."""
+    wagered = paid = refunded = 0.0
+    for r in wallet.read_ledger():
+        if r["kind"] == "wager":
+            wagered -= r["delta"]
+        elif r["kind"] == "payout":
+            paid += r["delta"]
+        elif r["kind"] == "bet_refund":
+            refunded += r["delta"]
+    open_stakes = sum(w["amount"] for b in _load_bets() if b["status"] in ("open", "locked")
+                      for w in b.get("wagers", {}).values())
+    settled = wagered - refunded - open_stakes
+    return {"wagered": round(wagered, 2), "paid_out": round(paid, 2),
+            "refunded": round(refunded, 2), "open_stakes": round(open_stakes, 2),
+            "net": round(settled - paid, 2)}
 
 
 def _compute_bet_stats(member: str, bets: list, tips: list) -> dict:
@@ -649,9 +575,7 @@ def get_member_bet_stats(member: str):
 @router.get("/api/bets/balances")
 def get_bets_balances():
     all_members = load_members()
-    balances    = _load_balances()
-    for name in all_members:
-        _init_bal(balances, name)
+    balances    = wallet.balances()
 
     breakdown: dict[str, dict] = {}
     def _bd(name: str) -> dict:
@@ -661,21 +585,12 @@ def get_bets_balances():
                                "bet_pnl": 0.0}
         return breakdown[name]
 
-    if LEDGER_FILE.exists():
-        ledger = json.loads(LEDGER_FILE.read_text())
-        for entry in ledger:
-            name   = entry.get("member", "")
-            delta  = entry.get("delta", 0.0)
-            reason = entry.get("reason", "")
-            bd = _bd(name)
-            if reason.startswith("Payout"):
-                bd["bet_won"] += delta
-            elif "Box score" in reason:
-                bd["stats_earned"] += delta
-            elif reason.startswith("Trivia"):
-                bd["trivia_earned"] += delta
-            elif "Bio field" in reason:
-                bd["bio_earned"] += delta
+    by_kind = {"payout": "bet_won", "boxscore": "stats_earned",
+               "trivia": "trivia_earned", "bio": "bio_earned"}
+    for entry in wallet.read_ledger():
+        key = by_kind.get(entry["kind"])
+        if key:
+            _bd(entry["member"])[key] += entry["delta"]
 
     for bet in _load_bets():
         wagers = bet.get("wagers", {})
@@ -696,11 +611,11 @@ def get_bets_balances():
                         _bd(member)["bet_pnl"] = round(_bd(member)["bet_pnl"] + payout - stake, 2)
 
     result = []
-    for n, b in balances.items():
+    for n in all_members:
         bd = _bd(n)
         result.append({
             "name":          n,
-            "balance":       round(b, 2),
+            "balance":       round(balances.get(n, 0.0), 2),
             "bet_won":       round(bd["bet_won"], 2),
             "bet_lost":      round(bd["bet_lost"], 2),
             "bet_placed":    round(bd["bet_placed"], 2),
@@ -714,35 +629,25 @@ def get_bets_balances():
 
 @router.get("/api/bets/ledger")
 def get_bets_ledger(info: dict = Depends(require_admin)):
-    if not LEDGER_FILE.exists():
-        return []
-    ledger = json.loads(LEDGER_FILE.read_text())
-    return list(reversed(ledger))
+    return list(reversed(wallet.read_ledger()))
 
 
 @router.post("/api/bets/admin/adjust")
 def admin_adjust_balance(body: BalanceAdjustIn, info: dict = Depends(require_admin)):
+    """A manual credit or debit. `kind` is "admin" for a correction or
+    "achievement" for build/achievement-notify.js — which is paused, so the job's
+    calls get a 423 until achievements pay again."""
     if body.delta == 0:
         raise HTTPException(status_code=422, detail="delta cannot be zero")
+    if body.kind not in ("admin", "achievement"):
+        raise HTTPException(status_code=422, detail="kind must be 'admin' or 'achievement'")
+    if not body.reason.strip():
+        raise HTTPException(status_code=422, detail="reason is required")
     all_members = load_members()
     if body.member not in all_members:
         raise HTTPException(status_code=404, detail=f"Member '{body.member}' not found")
-    with _balances_lock:
-        balances = _load_balances()
-        _init_bal(balances, body.member)
-        old_bal = balances[body.member]
-        new_bal = round(old_bal + body.delta, 2)
-        if new_bal < 0:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Would result in negative balance (NB¥{new_bal:.2f}); current balance is NB¥{old_bal:.2f}",
-            )
-        balances[body.member] = new_bal
-        _save_balances(balances)
-    ts = datetime.now(timezone.utc).isoformat()
-    reason_str = f"Admin adjustment: {body.reason}" if body.reason else "Admin adjustment"
-    _append_ledger([{"ts": ts, "member": body.member, "delta": body.delta,
-                     "balance": new_bal, "reason": reason_str}])
+    old_bal = wallet.balance(body.member)
+    new_bal = wallet.credit(body.member, body.delta, body.kind, body.reason.strip())
     verb = "gave" if body.delta > 0 else "took"
-    log_write(info, f"POST bets/admin/adjust — {verb} NB¥{abs(body.delta)} {'to' if body.delta > 0 else 'from'} {body.member}" + (f" ({body.reason})" if body.reason else ""))
+    log_write(info, f"POST bets/admin/adjust — {verb} NB¥{abs(body.delta)} {'to' if body.delta > 0 else 'from'} {body.member} [{body.kind}] ({body.reason})")
     return {"member": body.member, "old_balance": old_bal, "new_balance": new_bal, "delta": body.delta, "reason": body.reason}

@@ -28,7 +28,7 @@ from .auth import (
     get_token_info, has_role, require_role, require_admin,
     load_tokens, _resolve_token,
 )
-from .bets import _load_balances, _save_balances, _init_bal, _append_ledger, _balances_lock
+from . import wallet
 from .picks_scheduler import wake_picks_horizon_scheduler
 
 router = APIRouter()
@@ -455,22 +455,17 @@ def post_trivia_answer(body: TriviaAnswerSubmit, info: dict = Depends(get_token_
         raise HTTPException(status_code=401, detail="Authentication required")
     if body.streak < 1:
         raise HTTPException(status_code=422, detail="streak must be >= 1")
+    # Paused at the 2026-09 reset, and must stay paused until the server tracks
+    # the streak itself: `streak` comes from the browser, so as written this
+    # pays whatever a client claims, as often as it asks.
+    if not wallet.enabled("trivia"):
+        return {"ok": True, "reward": 0.0, "balance": wallet.balance(info["name"])}
     reward = 0.0 if body.streak > 10 else float(min(2 ** (body.streak - 1), 512))
     if reward == 0.0:
-        return {"ok": True, "reward": 0.0, "balance": _load_balances().get(info["name"], 0.0)}
-    with _balances_lock:
-        balances = _load_balances()
-        _init_bal(balances, info["name"])
-        balances[info["name"]] = round(balances[info["name"]] + reward, 2)
-        _save_balances(balances)
-    ts = datetime.now(timezone.utc).isoformat()
-    _append_ledger([{
-        "ts": ts, "member": info["name"], "delta": reward,
-        "balance": balances[info["name"]],
-        "reason": f"Trivia streak {body.streak} reward",
-    }])
+        return {"ok": True, "reward": 0.0, "balance": wallet.balance(info["name"])}
+    new_bal = wallet.credit(info["name"], reward, "trivia", f"Trivia streak {body.streak} reward")
     log_write(info, f"POST trivia/answer — streak={body.streak} reward={reward}")
-    return {"ok": True, "reward": reward, "balance": balances[info["name"]]}
+    return {"ok": True, "reward": reward, "balance": new_bal}
 
 
 # ── Calendar events ───────────────────────────────────────────────────────────

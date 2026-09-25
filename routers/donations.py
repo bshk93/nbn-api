@@ -7,7 +7,8 @@ from pydantic import BaseModel
 
 from .constants import DATA_DIR, VALID_TEAMS, _donations_lock
 from .storage import _load_json, _save_json, log_write
-from .auth import require_role
+from .auth import require_role, load_members
+from . import wallet
 
 router = APIRouter()
 
@@ -42,6 +43,28 @@ def _validate(body: DonationIn):
         raise HTTPException(status_code=422, detail="date must be YYYY-MM-DD")
 
 
+def _nbyen(member: str, amount: int) -> tuple[str, int] | None:
+    """The NB¥ a donation is worth, or None if the donor isn't a member (the
+    tracker takes free text, and only a member has a balance)."""
+    if member not in load_members():
+        return None
+    return member, amount * wallet.NBY_PER_DOLLAR
+
+
+def _credit_lines(donation_id: str, old: tuple[str, int] | None, new: tuple[str, int] | None) -> list[dict]:
+    """Ledger lines taking a donation from `old` (member, NB¥) to `new`. An add
+    has no old; an edit reverses what changed. Both carry the donation's id."""
+    ref = f"donation:{donation_id}"
+    delta: dict[str, int] = {}
+    if old:
+        delta[old[0]] = delta.get(old[0], 0) - old[1]
+    if new:
+        delta[new[0]] = delta.get(new[0], 0) + new[1]
+    return [{"member": m, "delta": d, "kind": "donation", "ref": ref,
+             "reason": "Donation" if not old else "Donation corrected"}
+            for m, d in delta.items() if d]
+
+
 @router.get("/api/donations")
 def list_donations():
     """Public — the whole donation record."""
@@ -64,6 +87,9 @@ def add_donation(body: DonationIn, info: dict = Depends(require_role("bod"))):
         data = _load_donations()
         data.append(donation)
         _save_donations(data)
+        lines = _credit_lines(donation["id"], None, _nbyen(donation["member"], donation["amount"]))
+        if lines:
+            wallet.post(lines)
     log_write(info, f"POST donations — {donation['team']} {donation['member']} ${donation['amount']}")
     return donation
 
@@ -75,6 +101,7 @@ def edit_donation(donation_id: str, body: DonationIn, info: dict = Depends(requi
         data = _load_donations()
         for d in data:
             if d["id"] == donation_id:
+                before = _nbyen(d["member"], d["amount"])
                 d.update({
                     "team": body.team.upper(),
                     "member": body.member.strip(),
@@ -84,6 +111,11 @@ def edit_donation(donation_id: str, body: DonationIn, info: dict = Depends(requi
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 })
                 _save_donations(data)
+                # A correction can take back NB¥ the member already spent, so
+                # it's allowed to leave them below zero.
+                lines = _credit_lines(donation_id, before, _nbyen(d["member"], d["amount"]))
+                if lines:
+                    wallet.post(lines, allow_negative=True)
                 log_write(info, f"PUT donations/{donation_id} — {d['team']} {d['member']} ${d['amount']}")
                 return d
     raise HTTPException(status_code=404, detail="Donation not found")

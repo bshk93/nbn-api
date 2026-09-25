@@ -1,0 +1,14 @@
+[Unit]
+Description=Monthly NB¥ for Twitch subscribers
+Documentation=file:///home/skim/projects/nbn-api/credit_twitch_subs.py
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=skim
+WorkingDirectory=/home/skim/projects/nbn-api
+EnvironmentFile=/home/skim/projects/nbn-api/.env
+ExecStart=/home/skim/projects/nbn-api/venv/bin/python /home/skim/projects/nbn-api/credit_twitch_subs.py --apply
+StandardOutput=journal
+StandardError=journal

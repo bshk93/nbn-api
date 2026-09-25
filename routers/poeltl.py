@@ -16,10 +16,8 @@ from .league_time import league_today, league_today_str
 from .constants import DERIVED_DIR, DATA_DIR, PLAYER_BIOS_FILE, logger
 from .storage import _load_json, _save_json, log_write
 from .auth import get_token_info, require_admin, load_members
-from .bets import (
-    _load_balances, _save_balances, _init_bal, _append_ledger,
-    _balances_lock, DISCORD_BETS_WEBHOOK,
-)
+from .bets import DISCORD_BETS_WEBHOOK
+from . import wallet
 
 router = APIRouter()
 
@@ -34,7 +32,7 @@ POELTL_MIN_GAMES   = 40        # minimum games to be eligible
 POELTL_NO_REPEAT_WINDOW = 50   # don't reuse an answer from the last N archived puzzles
 POELTL_MAX_GUESSES = 7
 POELTL_TIME_LIMIT  = 300       # seconds (5-min anti-cheat window)
-NBY_POELTL_REWARD  = 50.0
+NBY_POELTL_REWARD  = 5.0     # paused at the 2026-09 reset; wallet.KINDS
 
 # 🟨 closeness thresholds — within these values = yellow, outside = black
 HEIGHT_CLOSE_IN = 2     # inches
@@ -369,19 +367,10 @@ def _archive_state(state: dict) -> None:
 
 # ── NBYen reward ───────────────────────────────────────────────────────────────
 
-def _award_poeltl_reward(name: str) -> float:
-    ts = datetime.now(timezone.utc).isoformat()
-    with _balances_lock:
-        balances = _load_balances()
-        _init_bal(balances, name)
-        balances[name] = round(balances[name] + NBY_POELTL_REWARD, 2)
-        new_bal = balances[name]
-        _save_balances(balances)
-    _append_ledger([{
-        "ts": ts, "member": name, "delta": NBY_POELTL_REWARD,
-        "balance": new_bal, "reason": "NBN Poeltl daily solve",
-    }])
-    return NBY_POELTL_REWARD
+def _award_poeltl_reward(name: str) -> float | None:
+    """Pay a solve. None (no reward shown) while Poeltl is paused in wallet.KINDS."""
+    paid, _ = wallet.try_credit(name, NBY_POELTL_REWARD, "poeltl", "NBN Poeltl daily solve")
+    return paid or None
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────

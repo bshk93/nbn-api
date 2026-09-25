@@ -1,0 +1,13 @@
+[Unit]
+Description=Pay the month's NB¥ to Twitch subscribers
+
+[Timer]
+# Once a month. Twitch only reports who is subbed right now, so any one day
+# stands for the month; the 1st is just easy to remember. The payment is
+# idempotent per month, so a catch-up run after downtime pays nobody twice.
+OnCalendar=*-*-01 18:00:00
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target
