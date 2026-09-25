@@ -62,6 +62,11 @@ KINDS: dict[str, bool] = {
     "wager":           True,
     "payout":          True,
     "bet_refund":      True,
+    # Futures markets (routers/markets.py)
+    "market_buy":      True,
+    "market_sell":     True,
+    "market_payout":   True,
+    "market_refund":   True,
     # Buying a stream
     "stream_purchase": True,
     "stream_refund":   True,
