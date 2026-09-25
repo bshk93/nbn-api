@@ -509,7 +509,23 @@ def get_boxscore_games(season: str = Query(default=None), team: str = Query(defa
     return games
 
 
-def _boxscore_player_row(r: dict) -> dict:
+def _bios_by_name() -> dict[str, tuple[str, str]]:
+    """Upper-cased bio name -> (slug, photo_url).
+
+    The raw box score rows carry a name and no slug, so this is how a line is
+    tied back to its player. Same match `get_player_gamelog` makes, in the
+    other direction.
+    """
+    out = {}
+    for slug, bio in load_player_bios().items():
+        name = (bio.get("name") or "").strip().upper()
+        if name:
+            out.setdefault(name, (slug, bio.get("photo_url") or ""))
+    return out
+
+
+def _boxscore_player_row(r: dict, bios: dict[str, tuple[str, str]]) -> dict:
+    slug, photo = bios.get(r.get("PLAYER", "").strip().upper(), ("", ""))
     def iv(k): return int(r.get(k, 0) or 0)
     def fv(k):
         v = r.get(k, "")
@@ -517,7 +533,8 @@ def _boxscore_player_row(r: dict) -> dict:
         except (ValueError, TypeError): return None
     return {
         "player": r.get("PLAYER", ""),
-        "slug": r.get("SLUG", ""),
+        "slug": slug,
+        "photo_url": photo,
         "min": iv("M"),
         "pts": iv("P"),
         "reb": iv("R"),
@@ -554,6 +571,7 @@ def get_boxscores(date: str = Query(...), season: str = Query(default=None)):
         _, rows = read_csv(path)
         all_rows.extend(r for r in rows if r.get("DATE", "").strip() == date)
 
+    bios = _bios_by_name()
     games: dict[tuple, dict] = {}
     for r in all_rows:
         opp_raw = r.get("OPP_RAW", r.get("OPP", "")).strip().lstrip("@")
@@ -597,12 +615,12 @@ def get_boxscores(date: str = Query(...), season: str = Query(default=None)):
             if g["home_score"] is None:
                 g["home_score"] = team_pts
                 g["away_score"] = opp_pts
-            g["home_players"].append(_boxscore_player_row(r))
+            g["home_players"].append(_boxscore_player_row(r, bios))
         else:
             if g["away_score"] is None:
                 g["away_score"] = team_pts
                 g["home_score"] = opp_pts
-            g["away_players"].append(_boxscore_player_row(r))
+            g["away_players"].append(_boxscore_player_row(r, bios))
 
     return sorted(games.values(), key=lambda g: (g["home_team"], g["away_team"]))
 
