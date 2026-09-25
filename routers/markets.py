@@ -45,6 +45,7 @@ from .storage import _load_json, _save_json, log_write
 from .auth import get_token_info, require_role
 from . import wallet
 from .bets import _discord_post_bet
+from .news import load_articles
 
 router = APIRouter()
 
@@ -56,6 +57,11 @@ DEFAULT_FEE     = 0.02      # on every buy and sell, burned
 DEFAULT_STAKE   = 500.0     # per member per market, net of sales
 MIN_OPEN_PRICE  = 0.01      # no outcome opens below 1%, so the worst case is b × ln 100
 MIN_TRADE       = 1.0       # NB¥
+# Seeding a title market from power rankings: a team's weight falls by a factor
+# of e for every SEED_SPREAD places of average rank. At 3, the 2026 preseason
+# edition opens its top team near 21%, its top five near 70%, and everyone
+# ranked below about 12th at the 1% floor.
+SEED_SPREAD     = 3.0
 
 _lock = threading.Lock()
 
@@ -301,6 +307,35 @@ def preview_market(body: PreviewIn):
     return {"prices": [round(x * PAYOUT, 2) for x in p],
             "max_mint": round(body.b * math.log(1 / min(p)), 2),
             "move_10_to_20": round(body.b * math.log(0.9 / 0.8), 2)}
+
+
+def power_ranking_seed(articles: list[dict]) -> dict | None:
+    """Opening weights for the 30 teams from the latest published power
+    rankings. Uses each team's average ballot rank, not its rank, so a clear
+    gap between two teams shows up as a gap in the odds. Weights are returned
+    as percentages to one decimal (at least 0.1) so the form shows numbers a
+    bookie can read and edit; the 1% floor is applied when the market opens."""
+    eds = [a for a in articles
+           if a.get("type") == "power_rankings" and a.get("status") == "published" and a.get("final")]
+    if not eds:
+        return None
+    ed = max(eds, key=lambda a: a.get("published_at") or "")
+    raw = {r["team"]: math.exp(-(r["avg"] - 1) / SEED_SPREAD) for r in ed["final"]}
+    total = sum(raw.values())
+    return {
+        "source": {"id": ed["id"], "title": ed.get("title", ""), "published_at": ed.get("published_at")},
+        "teams": {r["team"]: {"rank": r["rank"], "avg": r["avg"],
+                              "weight": max(0.1, round(raw[r["team"]] / total * 100, 1))}
+                  for r in ed["final"]},
+    }
+
+
+@router.get("/api/markets/seeds/power-rankings")
+def seed_from_power_rankings():
+    seed = power_ranking_seed(load_articles())
+    if seed is None:
+        raise HTTPException(status_code=404, detail="No published power rankings yet")
+    return seed
 
 
 @router.get("/api/markets/{mid}")

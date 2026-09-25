@@ -119,6 +119,24 @@ check("the form's preview gives the prices create will open at",
       [round(x) for x in pv["prices"]] == [round(x) for x in prices(m2)] and near(pv["max_mint"], m2["max_mint"], 0.05))
 check("the preview applies the floor too",
       near(min(c.post("/api/markets/preview", json={"open_prices": [99, 0.5, 0.5]}).json()["prices"]), 1.0))
+# Power-rankings seed: the latest published edition wins, weights follow avg rank.
+def _ed(eid, when, avgs, status="published"):
+    return {"id": eid, "type": "power_rankings", "status": status, "published_at": when, "title": eid,
+            "final": [{"team": t, "avg": a, "rank": i + 1} for i, (t, a) in enumerate(avgs)]}
+mk.load_articles = lambda: [
+    _ed("old", "2026-02-10", [("UTA", 1.0), ("ORL", 5.0)]),
+    _ed("new", "2026-09-16", [("ORL", 1.67), ("PHX", 2.5), ("MIL", 7.83), ("UTA", 29.83)]),
+    _ed("draft", "2026-09-20", [("UTA", 1.0)], status="draft"),
+]
+sd = c.get("/api/markets/seeds/power-rankings").json()
+check("the seed uses the latest published edition, not a draft", sd["source"]["id"] == "new")
+w = {t: v["weight"] for t, v in sd["teams"].items()}
+check("...a better average rank gets a bigger weight", w["ORL"] > w["PHX"] > w["MIL"] > w["UTA"])
+check("...and the gap follows the average, not the rank",
+      near(w["ORL"] / w["PHX"], math.exp((2.5 - 1.67) / mk.SEED_SPREAD), 0.05))
+check("...and no weight is zero, so the market can open from it", min(w.values()) >= 0.1)
+mk.load_articles = lambda: []
+check("no published rankings is a 404", c.get("/api/markets/seeds/power-rankings").status_code == 404)
 check("max_mint is b × ln(1 ÷ lowest opening price)", near(m2["max_mint"], 1500 * math.log(10), 0.05))
 
 a_id = m["outcomes"][0]["id"]
