@@ -10,8 +10,12 @@ Pins:
 - **The money supply moves by exactly the formula.** At settlement the NB¥
   created equals b × ln(winner's closing price ÷ opening price), less the fees
   burned — checked against the wallet, not the market's own bookkeeping.
-- **Limits.** No selling what you don't hold; the per-member stake cap is net of
-  sales and includes the fee; a moved price refuses a trade with `min_shares`;
+- **Yes and No.** A No pushes its outcome's price down, pays when anything
+  else wins, and round-trips like a Yes.
+- **Nobody bets against their own team**, directly or as Yes on every other
+  team; a bet on one rival is fine, and admin isn't every team.
+- **Limits.** No selling what you don't hold; no stake cap unless a market sets
+  one, and then it's net of sales and includes the fee; a moved price refuses a trade with `min_shares`;
   a locked, closed or settled market doesn't trade; an overdraw leaves the
   market untouched.
 - **Endings.** Settle pays 100 a winning share; void refunds net spend.
@@ -47,10 +51,14 @@ wallet.LEDGER_FILE = TMP / "nbyen-ledger.jsonl"
 wallet.BALANCES_FILE = TMP / "member-balances.json"
 mk.MARKETS_FILE = TMP / "markets.json"
 
-T = {n: c * 64 for n, c in [("Ann", "a"), ("Ben", "b"), ("Cat", "c"), ("Bookie", "k")]}
-MEMBERS = {n: {"token": T[n], "roles": ["bookie"] if n == "Bookie" else [], "tenures": []} for n in T}
+T = {n: c * 64 for n, c in [("Ann", "a"), ("Ben", "b"), ("Cat", "c"), ("Bookie", "k"),
+                            ("Gm", "g"), ("Coach", "h"), ("Admin", "z")]}
+ROLES = {"Bookie": ["bookie"], "Gm": ["bos"], "Admin": ["admin"]}
+MEMBERS = {n: {"token": T[n], "roles": ROLES.get(n, []), "tenures": []} for n in T}
+MEMBERS["Coach"]["tenures"] = [{"team": "CHI", "position": "coach", "start": "2020-01-01", "end": None}]
 auth.load_members = lambda: MEMBERS
 auth.save_members = lambda m: None
+mk.load_members = auth.load_members
 mk.log_write = lambda info, msg: None
 mk._discord_post_bet = lambda embed: None
 
@@ -152,7 +160,8 @@ check("the member paid spend + fee", near(before_ann - B("Ann"), 102))
 check("the outcome's price went up", prices(m)[0] > 100 / 3)
 check("...every other one went down", all(p < 100 / 3 for p in prices(m)[1:]))
 check("...and they still sum to 100", near(sum(prices(m)), 100))
-check("Ann holds the shares", near(m["positions"]["Ann"][a_id], q["shares"], 1e-4))
+check("Ann holds the shares", near(m["positions"]["Ann"][a_id]["yes"], q["shares"], 1e-4))
+check("no per-member cap unless the bookie sets one", m["max_stake"] is None)
 
 # ── round trips ──────────────────────────────────────────────────────────────
 
@@ -168,6 +177,51 @@ check("with no fee, buying and selling back costs at most a cent or two", near(B
 free = c.get(f"/api/markets/{free['id']}").json()
 check("...and the prices return to where they opened", all(near(p, 100 / 3) for p in prices(free)))
 
+# ── yes and no ───────────────────────────────────────────────────────────────
+
+print("\n-- yes and no --")
+
+yn = new_market(title="yes/no", fee=0,
+                outcomes=[{"label": "Boston", "team": "BOS"}, {"label": "Chicago", "team": "CHI"},
+                          {"label": "Utah", "team": "UTA"}])
+ynid = yn["id"]
+bos, chi, uta = [o["id"] for o in yn["outcomes"]]
+q = c.post(f"/api/markets/{ynid}/quote", json={"outcome_id": bos, "side": "buy", "contract": "no", "spend": 100}).json()
+check("a No quote reports Boston's own price going down", q["price_after"] < q["price_before"])
+b0 = B("Ben")
+r = c.post(f"/api/markets/{ynid}/buy", json={"outcome_id": bos, "contract": "no", "spend": 100}, headers=H("Ben"))
+yn = r.json()["market"]
+check("buying No on Boston lowers Boston's price", prices(yn)[0] < 100 / 3)
+check("...and raises everyone else's", all(p > 100 / 3 for p in prices(yn)[1:]))
+check("...and Ben holds No shares", near(yn["positions"]["Ben"][bos]["no"], q["shares"], 1e-4))
+c.post(f"/api/markets/{ynid}/sell", json={"outcome_id": bos, "contract": "no", "shares": q["shares"]}, headers=H("Ben"))
+check("a No round-trips like a Yes", near(B("Ben"), b0, 0.02))
+
+print("\n-- your own team --")
+
+r = c.post(f"/api/markets/{ynid}/buy", json={"outcome_id": bos, "contract": "no", "spend": 20}, headers=H("Gm"))
+check("a BOS member can't buy No on Boston", r.status_code == 422)
+give("Gm", 2000); give("Coach", 2000); give("Admin", 2000)
+r = c.post(f"/api/markets/{ynid}/buy", json={"outcome_id": bos, "contract": "no", "spend": 20}, headers=H("Gm"))
+check("...even with the money for it", r.status_code == 422 and "own team" in r.json()["detail"])
+c.post(f"/api/markets/{ynid}/buy", json={"outcome_id": chi, "spend": 20}, headers=H("Gm"))
+check("...but can back one rival", "Gm" in c.get(f"/api/markets/{ynid}").json()["positions"])
+yn = c.get(f"/api/markets/{ynid}").json()
+# Match the Chicago holding on Utah, so every other team pays and Boston doesn't.
+need = yn["positions"]["Gm"][chi]["yes"]
+spend = 20
+while True:
+    qq = c.post(f"/api/markets/{ynid}/quote", json={"outcome_id": uta, "side": "buy", "spend": spend}).json()
+    if qq["shares"] >= need:
+        break
+    spend += 5
+r = c.post(f"/api/markets/{ynid}/buy", json={"outcome_id": uta, "spend": spend}, headers=H("Gm"))
+check("...but not Yes on every other team, which is No on Boston in disguise", r.status_code == 422)
+r = c.post(f"/api/markets/{ynid}/buy", json={"outcome_id": chi, "contract": "no", "spend": 20}, headers=H("Coach"))
+check("a current tenure counts as your team too (CHI coach, No on Chicago)", r.status_code == 422)
+r = c.post(f"/api/markets/{ynid}/buy", json={"outcome_id": bos, "contract": "no", "spend": 20}, headers=H("Admin"))
+check("admin isn't every team", r.status_code == 200)
+
 # ── limits ───────────────────────────────────────────────────────────────────
 
 print("\n-- limits --")
@@ -175,8 +229,11 @@ print("\n-- limits --")
 r = c.post(f"/api/markets/{m['id']}/sell", json={"outcome_id": m["outcomes"][1]["id"], "shares": 1},
            headers=H("Ann"))
 check("no selling an outcome you don't hold (no shorting)", r.status_code == 422)
-r = c.post(f"/api/markets/{m['id']}/buy", json={"outcome_id": a_id, "spend": 450}, headers=H("Ann"))
-check("the stake cap counts what's already in, fee included", r.status_code == 422)
+capped = new_market(title="capped", max_stake=150)
+cid = capped["outcomes"][0]["id"]
+c.post(f"/api/markets/{capped['id']}/buy", json={"outcome_id": cid, "spend": 100}, headers=H("Ann"))
+r = c.post(f"/api/markets/{capped['id']}/buy", json={"outcome_id": cid, "spend": 49}, headers=H("Ann"))
+check("a market's stake cap counts what's already in, fee included", r.status_code == 422)
 r = c.post(f"/api/markets/{m['id']}/buy", json={"outcome_id": a_id, "spend": 50, "min_shares": 10_000},
            headers=H("Ann"))
 check("a price that moved past min_shares refuses the buy", r.status_code == 409)
@@ -215,16 +272,21 @@ start = circulation()
 c.post(f"/api/markets/{gid}/buy", json={"outcome_id": ids[0], "spend": 300}, headers=H("Ann"))
 c.post(f"/api/markets/{gid}/buy", json={"outcome_id": ids[1], "spend": 200}, headers=H("Ben"))
 t = c.post(f"/api/markets/{gid}/buy", json={"outcome_id": ids[0], "spend": 150}, headers=H("Cat")).json()
+c.post(f"/api/markets/{gid}/buy", json={"outcome_id": ids[2], "contract": "no", "spend": 120}, headers=H("Ben"))
+c.post(f"/api/markets/{gid}/buy", json={"outcome_id": ids[0], "contract": "no", "spend": 60}, headers=H("Ann"))
 c.post(f"/api/markets/{gid}/sell", json={"outcome_id": ids[0], "shares": t["trade"]["shares"] / 2},
        headers=H("Cat"))
 g = c.get(f"/api/markets/{gid}").json()
 close_price = g["outcomes"][0]["price"] / 100
 fees = g["house"]["fees_burned"]
-ann_shares = g["positions"]["Ann"][ids[0]]
-ann_before = B("Ann")
+ann_shares = g["positions"]["Ann"][ids[0]]["yes"]
+ben_no = g["positions"]["Ben"][ids[2]]["no"]
+ann_before, ben_before = B("Ann"), B("Ben")
 r = c.post(f"/api/markets/{gid}/settle", json={"winner": ids[0]}, headers=H("Bookie"))
 check("settle succeeds", r.status_code == 200)
-check("a winning share pays 100", near(B("Ann") - ann_before, ann_shares * 100, 0.02))
+check("a winning Yes pays 100, a No on the winner pays nothing",
+      near(B("Ann") - ann_before, ann_shares * 100, 0.02))
+check("a No on a loser pays 100", near(B("Ben") - ben_before, ben_no * 100, 0.02))
 created = circulation() - start
 expected = 1500 * math.log(close_price / open_price) - fees
 check(f"NB¥ created ({created:.2f}) = b·ln(close/open) − fees ({expected:.2f})", near(created, expected, 1.0))

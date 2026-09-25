@@ -22,11 +22,26 @@ wrong, and the most it can ever create is `b × ln(1 ÷ lowest opening price)`.
 A floor on opening prices (`MIN_OPEN_PRICE`) keeps that finite when a bookie
 seeds uneven odds. `docs/nbyen-economy.md` § "Futures markets" has the numbers.
 
-Two things keep fast money on stale news from being free: a trading fee on
-every buy and sell, which is burned rather than paid to anyone, and a cap on
-what one member can have in one market (`max_stake`, net of what they've sold).
+**Every outcome has a Yes and a No.** A No share on Boston pays 100 if Boston
+doesn't win. To the market maker it is one share of every other outcome, so it
+needs no math of its own, and it pushes Boston's price down exactly as a Yes
+pushes it up. That's what makes a price someone pumped too high cheap to
+correct, and it's why there's no per-member cap by default: a big bet can't
+make the house lose more than its bound, and a price pushed the wrong way is
+money for everyone who pushes it back. A bookie can still set `max_stake` on
+one market.
 
-There's no shorting. Selling means selling shares you hold.
+**Nobody bets against their own team** — a member with a team role or a
+current tenure on an outcome's team. A position like that pays more the worse
+the team does, and it's the one bet its holder can influence. The rule is on
+the whole position, not the button: after any trade, what you'd be paid if
+your team wins must be at least what you'd be paid if the worst other outcome
+wins. So a No on your team is refused, and so is its disguise, Yes on every
+other team. Knowing about your own trade early is not blocked; see
+`docs/nbyen-economy.md` § 4a.
+
+A trading fee on every buy and sell is burned rather than paid to anyone. It
+makes flipping stale news cost something.
 
 Balances move only through `wallet.post`, under the `market_*` kinds.
 """
@@ -42,7 +57,7 @@ from pydantic import BaseModel
 
 from .constants import DATA_DIR, VALID_TEAMS
 from .storage import _load_json, _save_json, log_write
-from .auth import get_token_info, require_role
+from .auth import get_token_info, require_role, load_members
 from . import wallet
 from .bets import _discord_post_bet
 from .news import load_articles
@@ -54,7 +69,7 @@ MARKETS_FILE = DATA_DIR / "markets.json"
 PAYOUT          = 100.0     # NB¥ a winning share pays
 DEFAULT_B       = 1_500.0   # liquidity; the max NB¥ a flat 30-way market can create is b × ln 30 ≈ 5,100
 DEFAULT_FEE     = 0.02      # on every buy and sell, burned
-DEFAULT_STAKE   = 500.0     # per member per market, net of sales
+DEFAULT_STAKE   = None      # no per-member cap unless a bookie sets one
 MIN_OPEN_PRICE  = 0.01      # no outcome opens below 1%, so the worst case is b × ln 100
 MIN_TRADE       = 1.0       # NB¥
 # Seeding a title market from power rankings: a team's weight falls by a factor
@@ -79,17 +94,33 @@ def _probs(q: list[float], b: float) -> list[float]:
     return [x / s for x in e]
 
 
-def _buy_shares_for(q: list[float], b: float, i: int, spend: float) -> float:
-    """Shares of outcome i that `spend` NB¥ buys (before the fee).
-    Cost of Δ shares is b·ln(1 − p + p·e^{kΔ}); solved for Δ."""
+# A Yes share of outcome i adds 1 to q_i. A No share adds 1 to every other
+# outcome. Both are a bundle whose price is p (Yes: p_i; No: 1 − p_i), and the
+# cost of Δ of a bundle priced p is b·ln(1 − p + p·e^{kΔ}), so one formula
+# serves both.
+
+def _side_price(q: list[float], b: float, i: int, contract: str) -> float:
     p = _probs(q, b)[i]
+    return p if contract == "yes" else 1 - p
+
+
+def _apply(q: list[float], i: int, contract: str, shares: float) -> list[float]:
+    """q after adding `shares` (negative to remove) of a Yes or No on i."""
+    if contract == "yes":
+        return [x + shares if j == i else x for j, x in enumerate(q)]
+    return [x if j == i else x + shares for j, x in enumerate(q)]
+
+
+def _buy_shares_for(q: list[float], b: float, i: int, spend: float, contract: str = "yes") -> float:
+    """Shares that `spend` NB¥ buys (before the fee); the cost formula solved for Δ."""
+    p = _side_price(q, b, i, contract)
     k = PAYOUT / b
     return math.log((math.exp(spend / b) - (1 - p)) / p) / k
 
 
-def _sell_proceeds(q: list[float], b: float, i: int, shares: float) -> float:
-    """NB¥ the house pays for `shares` of outcome i (before the fee)."""
-    p = _probs(q, b)[i]
+def _sell_proceeds(q: list[float], b: float, i: int, shares: float, contract: str = "yes") -> float:
+    """NB¥ the house pays for `shares` (before the fee)."""
+    p = _side_price(q, b, i, contract)
     k = PAYOUT / b
     return -b * math.log(1 - p + p * math.exp(-k * shares))
 
@@ -168,8 +199,14 @@ def _house(m: dict) -> dict:
 def _view(m: dict) -> dict:
     p = _probs(m["q"], m["b"])
     outs = []
-    for o, pi, q, q0 in zip(m["outcomes"], p, m["q"], m["q0"]):
-        outs.append({**o, "price": round(pi * PAYOUT, 2), "shares_out": round(q - q0, 4)})
+    held = {o["id"]: {"yes": 0.0, "no": 0.0} for o in m["outcomes"]}
+    for pos in m["positions"].values():
+        for oid, h in pos.items():
+            for c in ("yes", "no"):
+                held[oid][c] += h.get(c, 0.0)
+    for o, pi in zip(m["outcomes"], p):
+        outs.append({**o, "price": round(pi * PAYOUT, 2),
+                     "yes_out": round(held[o["id"]]["yes"], 4), "no_out": round(held[o["id"]]["no"], 4)})
     return {
         "id": m["id"], "title": m["title"], "description": m["description"],
         "status": m["status"], "trading": _is_trading(m),
@@ -197,34 +234,77 @@ def _outcome_index(m: dict, oid: str) -> int:
     raise HTTPException(status_code=422, detail="Invalid outcome_id")
 
 
+def _contract(c: str) -> str:
+    if c not in ("yes", "no"):
+        raise HTTPException(status_code=422, detail="contract must be yes or no")
+    return c
+
+
+def _payoffs(m: dict, pos: dict) -> list[float]:
+    """What a position pays under each outcome."""
+    ids = [o["id"] for o in m["outcomes"]]
+    no_total = sum(h.get("no", 0.0) for h in pos.values())
+    return [PAYOUT * (pos.get(w, {}).get("yes", 0.0) + no_total - pos.get(w, {}).get("no", 0.0))
+            for w in ids]
+
+
+def _member_teams(info: dict) -> set[str]:
+    """Teams a member works for: a team role, or a current tenure in any
+    position. Admin's implied roles don't count — admin isn't every team."""
+    teams = {r.upper() for r in info.get("roles", []) if r.upper() in VALID_TEAMS}
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    for t in (load_members().get(info.get("name", "")) or {}).get("tenures", []):
+        if (t.get("start") or "") <= today and (not t.get("end") or t["end"] >= today) and t.get("team"):
+            teams.add(t["team"].upper())
+    return teams
+
+
+def _check_own_team(m: dict, info: dict, pos: dict) -> None:
+    """Refuse a position that pays more if every other outcome wins than if
+    the member's own team does. See the module docstring."""
+    mine = _member_teams(info)
+    if not mine:
+        return
+    pay = _payoffs(m, pos)
+    for i, o in enumerate(m["outcomes"]):
+        if o.get("team") in mine:
+            others = [x for j, x in enumerate(pay) if j != i]
+            if others and pay[i] < min(others) - 0.01:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"You can't bet against your own team. After this trade you'd be paid more "
+                           f"if any other team won than if {o['label']} did.")
+
+
 # ── Quotes ───────────────────────────────────────────────────────────────────
 # Buys round cost up and sells round proceeds down, to the cent, so rounding
 # never favours the trader.
 
-def _quote_buy(m: dict, i: int, spend: float) -> dict:
+# `price_before`/`price_after` are the outcome's own price (its odds of
+# happening) whichever side is traded, since that's the number on the board.
+
+def _quote_buy(m: dict, i: int, spend: float, contract: str = "yes") -> dict:
     if spend < MIN_TRADE:
         raise HTTPException(status_code=422, detail=f"spend at least NB¥{MIN_TRADE:.0f}")
     spend = math.floor(spend * 100) / 100
-    shares = _buy_shares_for(m["q"], m["b"], i, spend)
+    shares = _buy_shares_for(m["q"], m["b"], i, spend, contract)
     fee = math.ceil(spend * m["fee"] * 100) / 100
     before = _probs(m["q"], m["b"])[i] * PAYOUT
-    q2 = list(m["q"]); q2[i] += shares
-    after = _probs(q2, m["b"])[i] * PAYOUT
-    return {"side": "buy", "shares": round(shares, 4), "cost": spend, "fee": fee,
+    after = _probs(_apply(m["q"], i, contract, shares), m["b"])[i] * PAYOUT
+    return {"side": "buy", "contract": contract, "shares": round(shares, 4), "cost": spend, "fee": fee,
             "total": round(spend + fee, 2), "avg_price": round(spend / shares, 2),
             "price_before": round(before, 2), "price_after": round(after, 2),
-            "pays_if_wins": round(shares * PAYOUT, 2)}
+            "pays_if_right": round(shares * PAYOUT, 2)}
 
 
-def _quote_sell(m: dict, i: int, shares: float) -> dict:
+def _quote_sell(m: dict, i: int, shares: float, contract: str = "yes") -> dict:
     if shares <= 0:
         raise HTTPException(status_code=422, detail="shares must be positive")
-    gross = math.floor(_sell_proceeds(m["q"], m["b"], i, shares) * 100) / 100
+    gross = math.floor(_sell_proceeds(m["q"], m["b"], i, shares, contract) * 100) / 100
     fee = math.ceil(gross * m["fee"] * 100) / 100
     before = _probs(m["q"], m["b"])[i] * PAYOUT
-    q2 = list(m["q"]); q2[i] -= shares
-    after = _probs(q2, m["b"])[i] * PAYOUT
-    return {"side": "sell", "shares": round(shares, 4), "proceeds": gross, "fee": fee,
+    after = _probs(_apply(m["q"], i, contract, -shares), m["b"])[i] * PAYOUT
+    return {"side": "sell", "contract": contract, "shares": round(shares, 4), "proceeds": gross, "fee": fee,
             "total": round(gross - fee, 2), "avg_price": round(gross / shares, 2),
             "price_before": round(before, 2), "price_after": round(after, 2)}
 
@@ -243,25 +323,28 @@ class MarketCreate(BaseModel):
     outcomes: list[OutcomeIn]
     b: float = DEFAULT_B
     fee: float = DEFAULT_FEE
-    max_stake: float = DEFAULT_STAKE
+    max_stake: float | None = DEFAULT_STAKE
     closes_at: str | None = None
 
 
 class QuoteIn(BaseModel):
     outcome_id: str
     side: str                 # "buy" | "sell"
+    contract: str = "yes"     # "yes" | "no"
     spend: float | None = None
     shares: float | None = None
 
 
 class BuyIn(BaseModel):
     outcome_id: str
+    contract: str = "yes"
     spend: float
     min_shares: float | None = None    # refuse if the price moved against you
 
 
 class SellIn(BaseModel):
     outcome_id: str
+    contract: str = "yes"
     shares: float
     min_proceeds: float | None = None
 
@@ -364,7 +447,7 @@ def create_market(body: MarketCreate, info: dict = Depends(require_role("bookie"
         raise HTTPException(status_code=422, detail="b must be between 100 and 20,000")
     if not (0 <= body.fee <= 0.1):
         raise HTTPException(status_code=422, detail="fee must be between 0 and 10%")
-    if body.max_stake < MIN_TRADE:
+    if body.max_stake is not None and body.max_stake < MIN_TRADE:
         raise HTTPException(status_code=422, detail="max_stake too small")
     closes_at = None
     if body.closes_at:
@@ -416,94 +499,117 @@ def create_market(body: MarketCreate, info: dict = Depends(require_role("bookie"
 @router.post("/api/markets/{mid}/quote")
 def quote(mid: str, body: QuoteIn):
     """What a buy or sell would do right now. Read-only; the page calls it as
-    the member types."""
+    the member types. It doesn't apply the own-team rule, which needs to know
+    who's asking; the trade does."""
     m = _find(_load(), mid)
     i = _outcome_index(m, body.outcome_id)
+    c = _contract(body.contract)
     if body.side == "buy":
         if body.spend is None:
             raise HTTPException(status_code=422, detail="spend is required for a buy")
-        return _quote_buy(m, i, body.spend)
+        return _quote_buy(m, i, body.spend, c)
     if body.side == "sell":
         if body.shares is None:
             raise HTTPException(status_code=422, detail="shares is required for a sell")
-        return _quote_sell(m, i, body.shares)
+        return _quote_sell(m, i, body.shares, c)
     raise HTTPException(status_code=422, detail="side must be buy or sell")
 
 
-def _record(m: dict, member: str, i: int, side: str, shares: float, cash: float, fee: float) -> None:
+def _position_after(m: dict, member: str, oid: str, contract: str, delta: float) -> dict:
+    """A copy of the member's position with `delta` shares added (or removed)."""
+    pos = {k: dict(v) for k, v in m["positions"].get(member, {}).items()}
+    h = pos.setdefault(oid, {"yes": 0.0, "no": 0.0})
+    h[contract] = round(h.get(contract, 0.0) + delta, 4)
+    return pos
+
+
+def _record(m: dict, member: str, i: int, contract: str, side: str, shares: float,
+            cash: float, fee: float) -> None:
     oid = m["outcomes"][i]["id"]
-    m["q"][i] += shares if side == "buy" else -shares
-    pos = m["positions"].setdefault(member, {})
-    pos[oid] = round(pos.get(oid, 0.0) + (shares if side == "buy" else -shares), 4)
-    if pos[oid] <= 1e-4:
-        del pos[oid]
-    if not pos:
-        del m["positions"][member]
+    delta = shares if side == "buy" else -shares
+    m["q"] = _apply(m["q"], i, contract, delta)
+    pos = _position_after(m, member, oid, contract, delta)
+    for k in list(pos):
+        pos[k] = {c: v for c, v in pos[k].items() if v > 1e-4}
+        if not pos[k]:
+            del pos[k]
+    if pos:
+        m["positions"][member] = pos
+    else:
+        m["positions"].pop(member, None)
     ts = _now()
-    m["trades"].append({"ts": ts, "member": member, "outcome_id": oid, "side": side,
-                        "shares": round(shares, 4), "cash": cash, "fee": fee})
+    m["trades"].append({"ts": ts, "member": member, "outcome_id": oid, "contract": contract,
+                        "side": side, "shares": round(shares, 4), "cash": cash, "fee": fee})
     m["history"].append({"ts": ts, "p": [round(x * PAYOUT, 2) for x in _probs(m["q"], m["b"])]})
+
+
+def _what(label: str, contract: str) -> str:
+    return label if contract == "yes" else f"No on {label}"
 
 
 @router.post("/api/markets/{mid}/buy")
 def buy(mid: str, body: BuyIn, info: dict = Depends(get_token_info)):
     who = info["name"]
+    c = _contract(body.contract)
     with _lock:
         ms = _load()
         m = _find(ms, mid)
         if not _is_trading(m):
             raise HTTPException(status_code=409, detail="This market isn't trading")
         i = _outcome_index(m, body.outcome_id)
-        qt = _quote_buy(m, i, body.spend)
+        qt = _quote_buy(m, i, body.spend, c)
         if body.min_shares is not None and qt["shares"] < body.min_shares - 1e-6:
             raise HTTPException(status_code=409, detail="The price moved — check the new quote")
+        _check_own_team(m, info, _position_after(m, who, body.outcome_id, c, qt["shares"]))
         acct = _account(m, who)
         net = acct["spent"] - acct["received"]
-        if net + qt["total"] > m["max_stake"] + 1e-6:
+        if m.get("max_stake") is not None and net + qt["total"] > m["max_stake"] + 1e-6:
             room = max(0.0, m["max_stake"] - net)
             raise HTTPException(status_code=422,
                                 detail=f"The most you can have in this market is NB¥{m['max_stake']:,.0f}, "
                                        f"net of what you've sold. You have NB¥{room:,.2f} of room, fee included.")
-        label = m["outcomes"][i]["label"]
+        what = _what(m["outcomes"][i]["label"], c)
         wallet.post([{"member": who, "delta": -qt["total"], "kind": "market_buy",
-                      "reason": f"Bought {qt['shares']:.2f} {label} in \"{m['title']}\" "
+                      "reason": f"Bought {qt['shares']:.2f} {what} in \"{m['title']}\" "
                                 f"(NB¥{qt['cost']:,.2f} + NB¥{qt['fee']:,.2f} fee)",
                       "ref": f"market:{mid}"}])
         acct["spent"] = round(acct["spent"] + qt["total"], 2)
-        _record(m, who, i, "buy", qt["shares"], qt["total"], qt["fee"])
+        _record(m, who, i, c, "buy", qt["shares"], qt["total"], qt["fee"])
         _save(ms)
-    log_write(info, f"POST markets/{mid}/buy — {qt['shares']} {label} for NB¥{qt['total']}")
+    log_write(info, f"POST markets/{mid}/buy — {qt['shares']} {what} for NB¥{qt['total']}")
     return {"trade": qt, "market": _view(m), "balance": wallet.balance(who)}
 
 
 @router.post("/api/markets/{mid}/sell")
 def sell(mid: str, body: SellIn, info: dict = Depends(get_token_info)):
     who = info["name"]
+    c = _contract(body.contract)
     with _lock:
         ms = _load()
         m = _find(ms, mid)
         if not _is_trading(m):
             raise HTTPException(status_code=409, detail="This market isn't trading")
         i = _outcome_index(m, body.outcome_id)
-        held = m["positions"].get(who, {}).get(body.outcome_id, 0.0)
+        held = m["positions"].get(who, {}).get(body.outcome_id, {}).get(c, 0.0)
         # "Sell all" sends what the page showed, which is rounded; accept that.
         shares = held if abs(body.shares - held) < 1e-3 else body.shares
         if shares > held + 1e-9:
-            raise HTTPException(status_code=422, detail=f"You hold {held:.2f} shares of that outcome")
-        qt = _quote_sell(m, i, shares)
+            raise HTTPException(status_code=422, detail=f"You hold {held:.2f} of those shares")
+        qt = _quote_sell(m, i, shares, c)
         if body.min_proceeds is not None and qt["total"] < body.min_proceeds - 1e-6:
             raise HTTPException(status_code=409, detail="The price moved — check the new quote")
-        label = m["outcomes"][i]["label"]
+        _check_own_team(m, info, _position_after(m, who, body.outcome_id, c, -shares))
+        what = _what(m["outcomes"][i]["label"], c)
         if qt["total"] > 0:
             wallet.post([{"member": who, "delta": qt["total"], "kind": "market_sell",
-                          "reason": f"Sold {shares:.2f} {label} in \"{m['title']}\" "
+                          "reason": f"Sold {shares:.2f} {what} in \"{m['title']}\" "
                                     f"(NB¥{qt['proceeds']:,.2f} − NB¥{qt['fee']:,.2f} fee)",
                           "ref": f"market:{mid}"}])
         acct = _account(m, who)
         acct["received"] = round(acct["received"] + qt["total"], 2)
-        _record(m, who, i, "sell", shares, qt["total"], qt["fee"])
+        _record(m, who, i, c, "sell", shares, qt["total"], qt["fee"])
         _save(ms)
-    log_write(info, f"POST markets/{mid}/sell — {shares} {label} for NB¥{qt['total']}")
+    log_write(info, f"POST markets/{mid}/sell — {shares} {what} for NB¥{qt['total']}")
     return {"trade": qt, "market": _view(m), "balance": wallet.balance(who)}
 
 
@@ -538,7 +644,8 @@ def unlock_market(mid: str, info: dict = Depends(require_role("bookie"))):
 
 @router.post("/api/markets/{mid}/settle")
 def settle(mid: str, body: SettleIn, info: dict = Depends(require_role("bookie"))):
-    """Pay every share of the winner PAYOUT NB¥. Everything else is worth 0."""
+    """Pay PAYOUT NB¥ for every Yes on the winner and every No on anything
+    else. Everything else is worth 0."""
     with _lock:
         ms = _load()
         m = _find(ms, mid)
@@ -548,9 +655,9 @@ def settle(mid: str, body: SettleIn, info: dict = Depends(require_role("bookie")
         label = m["outcomes"][i]["label"]
         payouts = {}
         for member, pos in m["positions"].items():
-            sh = pos.get(body.winner, 0.0)
-            if sh > 0:
-                payouts[member] = math.floor(sh * PAYOUT * 100) / 100
+            amt = math.floor(_payoffs(m, pos)[i] * 100) / 100
+            if amt > 0:
+                payouts[member] = amt
         lines = [{"member": mem, "delta": amt, "kind": "market_payout",
                   "reason": f"{label} won \"{m['title']}\"", "ref": f"market:{mid}"}
                  for mem, amt in payouts.items() if amt > 0]
