@@ -87,7 +87,8 @@ def _announce_published(article: dict) -> None:
         "url": url,
         "color": 0x3b82f6,
         "description": desc or "Read the full story on NBN.",
-        "author": {"name": f"By {article.get('author', 'NBN')}"},
+        # Discord caps an embed author name at 256 characters.
+        "author": {"name": f"By {_byline(article) or 'NBN'}"[:256]},
         "fields": fields,
         "footer": {"text": "Nothing But Net · nbn.today/news"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -200,6 +201,8 @@ def _article_view(a: dict, viewer: Optional[str] = None) -> dict:
     count instead; the ballots live on the detail endpoint."""
     out = {k: v for k, v in a.items() if k not in ("comments", "ballots", "blurbs")}
     out["comment_count"] = len(a.get("comments", []))
+    # Same gate as _article_detail: before publish this would say who has voted.
+    out["credited"] = _credited(a) if a.get("status") == "published" else []
     if pr.is_ranking(a):
         out["ballot_progress"] = {
             "submitted": len(pr.submitted_ballots(a)),
@@ -253,6 +256,14 @@ def _credited(a: dict) -> list[str]:
         if n and n not in out:
             out.append(n)
     return out
+
+
+def _byline(a: dict) -> str:
+    """The credited names as one line: "A", "A and B", "A, B and C"."""
+    names = _credited(a)
+    if len(names) <= 1:
+        return names[0] if names else ""
+    return ", ".join(names[:-1]) + " and " + names[-1]
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────

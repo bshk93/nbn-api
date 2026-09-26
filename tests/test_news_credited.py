@@ -74,6 +74,17 @@ plain_article = {"id": "p1", "author": "alice", "status": "published", "comments
 out3 = news._article_detail(plain_article, info=None)
 check("a published plain article still credits its author", out3["credited"] == ["alice"])
 
+print("\n_byline / _article_view")
+
+check("one name is just the name", news._byline(plain) == "alice")
+three = {**ranking, "blurbs": {"LAL": {"claimed_by": "dave", "body": "Rebuilding."}}}
+check("three names: commas, then 'and'", news._byline(three) == "alice, bob and dave")
+out4 = news._article_view(published, None)
+check("list view carries credited once published", out4["credited"] == ["alice", "bob"])
+out5 = news._article_view(voting, None)
+check("list view hides credited before publish", out5["credited"] == [])
+check("byline of the published ranking", news._byline(published) == "alice and bob")
+
 print()
 if FAILS:
     print(f"{len(FAILS)} FAILED: " + ", ".join(FAILS))

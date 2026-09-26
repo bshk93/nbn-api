@@ -46,7 +46,7 @@ from .constants import DERIVED_DIR, logger
 from .storage import read_csv
 from .auth import load_members
 from .players import load_player_bios, load_ovr, _display_name, _build_team_map
-from .news import _load_article, _md_excerpt, _article_teaser
+from .news import _load_article, _md_excerpt, _article_teaser, _credited, _byline
 from .proposals import load_proposals
 from .discord import TEAM_NAMES
 
@@ -161,10 +161,8 @@ def news_head(article_id: str) -> str:
 
     title = (a.get("title") or "Untitled").strip()
     desc = _article_teaser(a, limit=200) or "Read the full story on NBN."
-    author = a.get("author")
-    extra = []
-    if author:
-        extra.append(f'<meta property="article:author" content="{_esc(author)}">')
+    author = _byline(a)
+    extra = [f'<meta property="article:author" content="{_esc(n)}">' for n in _credited(a)]
     if a.get("published_at"):
         extra.append(f'<meta property="article:published_time" content="{_esc(a["published_at"])}">')
     extra += [f'<meta property="article:tag" content="{_esc(t)}">' for t in a.get("tags") or []]
