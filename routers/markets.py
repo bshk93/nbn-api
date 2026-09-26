@@ -119,6 +119,13 @@ def _buy_shares_for(q: list[float], b: float, i: int, spend: float, contract: st
     return math.log((math.exp(spend / b) - (1 - p)) / p) / k
 
 
+def _buy_cost(q: list[float], b: float, i: int, shares: float, contract: str = "yes") -> float:
+    """NB¥ that `shares` cost (before the fee); the inverse of _buy_shares_for."""
+    p = _side_price(q, b, i, contract)
+    k = PAYOUT / b
+    return b * math.log(1 - p + p * math.exp(k * shares))
+
+
 def _sell_proceeds(q: list[float], b: float, i: int, shares: float, contract: str = "yes") -> float:
     """NB¥ the house pays for `shares` (before the fee)."""
     p = _side_price(q, b, i, contract)
@@ -283,12 +290,26 @@ def _check_own_team(m: dict, info: dict, i: int, contract: str, side: str) -> No
 # `price_before`/`price_after` are the outcome's own price (its odds of
 # happening) whichever side is traded, since that's the number on the board.
 
-def _quote_buy(m: dict, i: int, spend: float, contract: str = "yes") -> dict:
-    if spend < MIN_TRADE:
-        raise HTTPException(status_code=422, detail=f"spend at least NB¥{MIN_TRADE:.0f}")
-    spend = math.floor(spend * 100) / 100
-    # Round shares down, so rounding never hands the buyer a fraction of a cent.
-    shares = math.floor(_buy_shares_for(m["q"], m["b"], i, spend, contract) * 1e4) / 1e4
+def _quote_buy(m: dict, i: int, spend: float | None = None, contract: str = "yes",
+               shares: float | None = None) -> dict:
+    """A buy priced from NB¥ to spend, or from a share count (what the page
+    sends). Exactly one of the two."""
+    if (spend is None) == (shares is None):
+        raise HTTPException(status_code=422, detail="give either spend or shares for a buy")
+    if shares is not None:
+        if shares <= 0:
+            raise HTTPException(status_code=422, detail="shares must be positive")
+        shares = round(shares, 4)
+        # Round cost up, so rounding never hands the buyer a fraction of a cent.
+        spend = math.ceil(_buy_cost(m["q"], m["b"], i, shares, contract) * 100) / 100
+        if spend < MIN_TRADE:
+            raise HTTPException(status_code=422, detail=f"a buy must cost at least NB¥{MIN_TRADE:.0f}")
+    else:
+        if spend < MIN_TRADE:
+            raise HTTPException(status_code=422, detail=f"spend at least NB¥{MIN_TRADE:.0f}")
+        spend = math.floor(spend * 100) / 100
+        # Round shares down, so rounding never hands the buyer a fraction of a cent.
+        shares = math.floor(_buy_shares_for(m["q"], m["b"], i, spend, contract) * 1e4) / 1e4
     fee = math.ceil(spend * m["fee"] * 100) / 100
     before = _probs(m["q"], m["b"])[i] * PAYOUT
     after = _probs(_apply(m["q"], i, contract, shares), m["b"])[i] * PAYOUT
@@ -339,8 +360,10 @@ class QuoteIn(BaseModel):
 class BuyIn(BaseModel):
     outcome_id: str
     contract: str = "yes"
-    spend: float
-    min_shares: float | None = None    # refuse if the price moved against you
+    spend: float | None = None         # NB¥ to spend, or…
+    shares: float | None = None        # …shares to buy (the page sends this)
+    min_shares: float | None = None    # refuse if the price moved against you (spend)
+    max_total: float | None = None     # same, for a share-count buy: cost + fee ceiling
 
 
 class SellIn(BaseModel):
@@ -506,9 +529,7 @@ def quote(mid: str, body: QuoteIn):
     i = _outcome_index(m, body.outcome_id)
     c = _contract(body.contract)
     if body.side == "buy":
-        if body.spend is None:
-            raise HTTPException(status_code=422, detail="spend is required for a buy")
-        return _quote_buy(m, i, body.spend, c)
+        return _quote_buy(m, i, body.spend, c, shares=body.shares)
     if body.side == "sell":
         if body.shares is None:
             raise HTTPException(status_code=422, detail="shares is required for a sell")
@@ -558,8 +579,9 @@ def buy(mid: str, body: BuyIn, info: dict = Depends(get_token_info)):
         if not _is_trading(m):
             raise HTTPException(status_code=409, detail="This market isn't trading")
         i = _outcome_index(m, body.outcome_id)
-        qt = _quote_buy(m, i, body.spend, c)
-        if body.min_shares is not None and qt["shares"] < body.min_shares - 1e-6:
+        qt = _quote_buy(m, i, body.spend, c, shares=body.shares)
+        if ((body.min_shares is not None and qt["shares"] < body.min_shares - 1e-6)
+                or (body.max_total is not None and qt["total"] > body.max_total + 1e-6)):
             raise HTTPException(status_code=409, detail="The price moved — check the new quote")
         _check_own_team(m, info, i, c, "buy")
         acct = _account(m, who)

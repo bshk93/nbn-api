@@ -258,6 +258,29 @@ r = c.post(f"/api/markets/{m['id']}/buy", json={"outcome_id": a_id, "spend": 50,
            headers=H("Ann"))
 check("a price that moved past min_shares refuses the buy", r.status_code == 409)
 
+# Buying by share count — what the page sends.
+mq = next(x for x in mk._load() if x["id"] == m["id"])["q"]
+q = c.post(f"/api/markets/{m['id']}/quote", json={"outcome_id": a_id, "side": "buy", "shares": 10}).json()
+check("a share-count quote gives exactly those shares", near(q["shares"], 10, 1e-9))
+exact = mk._buy_cost(mq, 1500, 0, 10)
+check("...priced at the LMSR cost, rounded up to the cent", q["cost"] >= exact and q["cost"] - exact < 0.01)
+check("...which buying that NB¥ back gets the same shares", near(mk._buy_shares_for(mq, 1500, 0, exact), 10, 1e-6))
+b0 = B("Ann")
+r = c.post(f"/api/markets/{m['id']}/buy", json={"outcome_id": a_id, "shares": 10, "max_total": q["total"]},
+           headers=H("Ann"))
+check("a share-count buy succeeds", r.status_code == 200 and near(r.json()["trade"]["shares"], 10, 1e-9))
+check("...and costs what it was quoted", near(b0 - B("Ann"), q["total"]))
+m = r.json()["market"]
+r = c.post(f"/api/markets/{m['id']}/buy", json={"outcome_id": a_id, "shares": 10, "max_total": 1},
+           headers=H("Ann"))
+check("a price that moved past max_total refuses the buy", r.status_code == 409)
+r = c.post(f"/api/markets/{m['id']}/quote", json={"outcome_id": a_id, "side": "buy", "shares": 1, "spend": 10})
+check("a buy with both spend and shares is refused", r.status_code == 422)
+r = c.post(f"/api/markets/{m['id']}/quote", json={"outcome_id": a_id, "side": "buy"})
+check("...and with neither", r.status_code == 422)
+r = c.post(f"/api/markets/{m['id']}/quote", json={"outcome_id": a_id, "side": "buy", "shares": 0.001})
+check("a share-count buy under the NB¥1 minimum is refused", r.status_code == 422)
+
 poor = "Cat"
 wallet.post([{"member": poor, "delta": -B(poor) + 5, "kind": "admin", "reason": "test"}])
 n_trades = c.get(f"/api/markets/{m['id']}").json()["trade_count"]
