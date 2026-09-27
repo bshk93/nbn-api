@@ -1,17 +1,13 @@
-"""`routers/nbnfl.py` — the NBNFL sister-league dashboard's backend.
+"""`routers/nbnfl.py` — the NBNFL stat log's backend.
 
 Deliberately the smallest subsystem in this API: one file, no roster/contract
 model, no build step. What's worth pinning is the part that would be easy to
 get wrong silently since nothing else checks it:
 
-- **Standings are computed from the raw game list, not stored.** Wins/losses/
-  ties and PF/PA have to come out right for both the home and away side of
-  every game, including a tie.
-- **A stat line must belong to one of the two teams actually in its game.**
-  Nothing else would catch a stat line attributed to a team that didn't play.
-- **Leaders sum a category's primary stat across every stat line for a
-  player**, not just the most recent one — a QB's week 2 line has to add to
-  week 1, not replace it.
+- **Only `MY_TEAM`'s games and stat lines are accepted.** A game that doesn't
+  involve it, or a stat line for the opponent, is refused.
+- **An edit re-validates the whole merged game**, and replacing `stats`
+  replaces every line rather than appending.
 - **Writes are admin-gated; reads are not.**
 
 Writes go to a temp file; nothing here touches live data.
@@ -60,7 +56,7 @@ PLAIN = {"Authorization": "Bearer " + PLAIN_TOKEN}
 
 
 def base_game(**over):
-    g = {"season": 2026, "week": 1, "date": "2026-09-07", "home": "KC", "away": "BUF",
+    g = {"season": 2026, "week": 1, "date": "2026-09-07", "home": "CIN", "away": "BUF",
          "home_score": 27, "away_score": 20, "stats": []}
     g.update(over)
     return g
@@ -71,6 +67,7 @@ def base_game(**over):
 r = c.get("/api/nbnfl/teams")
 check("teams: 200", r.status_code == 200)
 check("teams: all 32 present", len(r.json()["teams"]) == 32)
+check("teams: names the tracked team", r.json()["my_team"] == nbnfl.MY_TEAM == "CIN")
 check("teams: KC is AFC West", any(t["abbr"] == "KC" and t["conference"] == "AFC" and t["division"] == "West"
                                     for t in r.json()["teams"]))
 
@@ -84,10 +81,10 @@ check("post: 403 for a non-admin token", r.status_code == 403)
 
 # ── validation ───────────────────────────────────────────────────────────────
 
-r = c.post("/api/nbnfl/games", json=base_game(home="KC", away="KC"), headers=ADMIN)
+r = c.post("/api/nbnfl/games", json=base_game(home="CIN", away="CIN"), headers=ADMIN)
 check("post: rejects home == away", r.status_code == 400)
 
-r = c.post("/api/nbnfl/games", json=base_game(home="ZZZ"), headers=ADMIN)
+r = c.post("/api/nbnfl/games", json=base_game(away="ZZZ"), headers=ADMIN)
 check("post: rejects an unknown team abbr", r.status_code == 400)
 
 r = c.post("/api/nbnfl/games", json=base_game(date="09-07-2026"), headers=ADMIN)
@@ -96,54 +93,54 @@ check("post: rejects a non-ISO date", r.status_code == 400)
 r = c.post("/api/nbnfl/games", json=base_game(away_score=-3), headers=ADMIN)
 check("post: rejects a negative score", r.status_code == 400)
 
-r = c.post("/api/nbnfl/games", json=base_game(
-    stats=[{"player": "Some Guy", "team": "DAL", "category": "passing", "stats": {"yds": 100}}]
-), headers=ADMIN)
-check("post: rejects a stat line for a team not in the game", r.status_code == 400)
+r = c.post("/api/nbnfl/games", json=base_game(home="KC", away="BUF"), headers=ADMIN)
+check("post: rejects a game the tracked team isn't in", r.status_code == 400)
 
 r = c.post("/api/nbnfl/games", json=base_game(
-    stats=[{"player": "Some Guy", "team": "KC", "category": "juggling", "stats": {}}]
+    stats=[{"player": "Josh Allen", "team": "BUF", "category": "passing", "stats": {"yds": 100}}]
+), headers=ADMIN)
+check("post: rejects a stat line for the opponent", r.status_code == 400)
+
+r = c.post("/api/nbnfl/games", json=base_game(
+    stats=[{"player": "Some Guy", "team": "CIN", "category": "juggling", "stats": {}}]
 ), headers=ADMIN)
 check("post: rejects an unknown stat category", r.status_code == 400)
 
-# ── round trip: create, standings, leaders, edit, delete ────────────────────
+# ── round trip: create, edit, delete ────────────────────────────────────────
 
 r = c.post("/api/nbnfl/games", json=base_game(
-    week=1, home="KC", away="BUF", home_score=27, away_score=20,
-    stats=[
-        {"player": "Pat Mahomes", "team": "KC", "category": "passing", "stats": {"yds": 305, "td": 3}},
-        {"player": "Josh Allen", "team": "BUF", "category": "passing", "stats": {"yds": 280, "td": 2}},
-    ]
+    week=1, home="CIN", away="BUF", home_score=27, away_score=20,
+    stats=[{"player": "J. Burrow", "team": "CIN", "category": "passing", "stats": {"yds": 305, "td": 3}}]
 ), headers=ADMIN)
 check("post: 200 on a legal game", r.status_code == 200)
 game_id = r.json()["id"]
 check("post: assigns an id", bool(game_id))
 
-r = c.post("/api/nbnfl/games", json=base_game(
-    week=2, home="BUF", away="KC", home_score=17, away_score=24,
-    stats=[{"player": "Pat Mahomes", "team": "KC", "category": "passing", "stats": {"yds": 260, "td": 1}}]
-), headers=ADMIN)
-check("post: 200 on the rematch", r.status_code == 200)
+r = c.post("/api/nbnfl/games", json=base_game(week=2, home="KC", away="CIN", home_score=17, away_score=24),
+           headers=ADMIN)
+check("post: 200 with the tracked team away", r.status_code == 200)
 
-st = c.get("/api/nbnfl/standings").json()
-kc = next(row for row in st["AFC"]["West"] if row["abbr"] == "KC")
-buf = next(row for row in st["AFC"]["East"] if row["abbr"] == "BUF")
-check("standings: KC is 2-0", kc["wins"] == 2 and kc["losses"] == 0)
-check("standings: BUF is 0-2", buf["wins"] == 0 and buf["losses"] == 2)
-check("standings: KC PF/PA sums both games from both sides", kc["pf"] == 27 + 24 and kc["pa"] == 20 + 17)
-check("standings: diff is pf - pa", kc["diff"] == kc["pf"] - kc["pa"])
-
-ld = c.get("/api/nbnfl/leaders").json()
-check("leaders: Mahomes leads passing", ld["passing"][0]["player"] == "Pat Mahomes")
-check("leaders: passing yards sum across both games, not just the last one",
-      ld["passing"][0]["value"] == 305 + 260)
+r = c.put(f"/api/nbnfl/games/{game_id}", json={"home_score": 30}, headers=PLAIN)
+check("put: 403 for a non-admin token", r.status_code == 403)
 
 r = c.put(f"/api/nbnfl/games/{game_id}", json={"home_score": 30}, headers=ADMIN)
 check("put: 200 on a partial edit", r.status_code == 200)
-check("put: only the given field changed", r.json()["home_score"] == 30 and r.json()["away"] == "BUF")
+check("put: only the given field changed", r.json()["home_score"] == 30 and r.json()["away"] == "BUF"
+      and len(r.json()["stats"]) == 1)
+
+r = c.put(f"/api/nbnfl/games/{game_id}", json={"stats": [
+    {"player": "J. Burrow", "team": "CIN", "category": "passing", "stats": {"yds": 310, "td": 3}},
+    {"player": "C. Brown", "team": "CIN", "category": "rushing", "stats": {"yds": 90}},
+]}, headers=ADMIN)
+check("put: stats are replaced, not appended",
+      r.status_code == 200 and len(r.json()["stats"]) == 2 and r.json()["stats"][0]["stats"]["yds"] == 310)
 
 r = c.put(f"/api/nbnfl/games/{game_id}", json={"home": "ZZZ"}, headers=ADMIN)
 check("put: re-validates the merged game", r.status_code == 400)
+
+r = c.put(f"/api/nbnfl/games/{game_id}", json={"stats": [
+    {"player": "Josh Allen", "team": "BUF", "category": "passing", "stats": {"yds": 1}}]}, headers=ADMIN)
+check("put: rejects an opponent stat line on edit", r.status_code == 400)
 
 r = c.delete(f"/api/nbnfl/games/{game_id}", headers=ADMIN)
 check("delete: 200", r.status_code == 200)

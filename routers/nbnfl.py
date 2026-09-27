@@ -1,10 +1,11 @@
-"""NBNFL — the sister American-football league. Deliberately much smaller than
-the rest of this API: one file (`NBNFL_FILE`, see constants.py), no roster or
-contract model, no build pipeline. A game is entered once, after it's been
-played, with its final score and whatever player stat lines go with it;
-standings and stat leaders are computed from that on every request rather than
-written anywhere, since there's little enough data that recomputing is cheap
-and a stored copy would just be one more place a correction could be missed.
+"""NBNFL — a stat log for one team in the sister American-football league.
+Deliberately much smaller than the rest of this API: one file (`NBNFL_FILE`,
+see constants.py), no roster or contract model, no build pipeline.
+
+It tracks `MY_TEAM` only (changed 2026-09-27; it launched as a league-wide
+board with standings and leaders). Every game must involve that team, and
+every stat line must be one of its players — the opponent is just a name and a
+score. Records and season totals are computed by the page from the game list.
 
 Stat lines are deliberately schema-blind on the wire (`stats: {field: value}`
 rather than fixed pydantic fields per category) — same call as
@@ -12,15 +13,14 @@ routers/coaching_settings.py's config blob, for the same reason: which fields
 matter per category is a frontend-form decision, not a backend one, so a new
 stat column is a `nbnfl/index.html`-only change.
 
-Regular season only — no playoff bracket yet. When the postseason is added,
-model it as its own endpoint/shape rather than overloading `week`; do not
-guess a "week 19+" convention here first.
+Regular season only. If playoff games are ever logged, model them as their
+own field rather than overloading `week` with a "week 19+" convention.
 """
 import re
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from .constants import NBNFL_FILE, _nbnfl_lock
@@ -30,6 +30,9 @@ from .auth import require_admin
 router = APIRouter()
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# The one team whose games and stats are logged.
+MY_TEAM = "CIN"
 
 NFL_TEAMS = {
     "BUF": {"name": "Bills",       "conference": "AFC", "division": "East"},
@@ -66,17 +69,9 @@ NFL_TEAMS = {
     "SEA": {"name": "Seahawks",    "conference": "NFC", "division": "West"},
 }
 
-# The stat a category's leaderboard ranks on, and what a stat line's `stats`
-# dict is summed over per player. Other fields in a stat line (e.g. passing's
-# comp/att/int) are stored and returned but don't drive a leaderboard.
-PRIMARY_STAT = {
-    "passing": "yds",
-    "rushing": "yds",
-    "receiving": "yds",
-    "kicking": "fgm",
-    "kick_returns": "yds",
-    "punt_returns": "yds",
-}
+# Stat categories a line may use. Which fields each one carries is the page's
+# call (see the module docstring), so this is only the set of names.
+CATEGORIES = {"passing", "rushing", "receiving", "kicking", "kick_returns", "punt_returns"}
 
 
 class StatLine(BaseModel):
@@ -129,20 +124,22 @@ def _check_game(home: str, away: str, date: str, home_score: int, away_score: in
         raise HTTPException(status_code=400, detail="home/away must be valid NFL team abbreviations")
     if home == away:
         raise HTTPException(status_code=400, detail="home and away must be different teams")
+    if MY_TEAM not in (home, away):
+        raise HTTPException(status_code=400, detail=f"only {MY_TEAM} games are logged")
     if not DATE_RE.match(date):
         raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
     if home_score < 0 or away_score < 0:
         raise HTTPException(status_code=400, detail="scores cannot be negative")
     for line in stats:
-        if line.team not in (home, away):
-            raise HTTPException(status_code=400, detail=f"stat line team {line.team!r} is not playing in this game")
-        if line.category not in PRIMARY_STAT:
+        if line.team != MY_TEAM:
+            raise HTTPException(status_code=400, detail=f"only {MY_TEAM} stat lines are logged, not {line.team!r}")
+        if line.category not in CATEGORIES:
             raise HTTPException(status_code=400, detail=f"unknown stat category {line.category!r}")
 
 
 @router.get("/api/nbnfl/teams")
 def list_teams():
-    return {"teams": [{"abbr": abbr, **info} for abbr, info in NFL_TEAMS.items()]}
+    return {"my_team": MY_TEAM, "teams": [{"abbr": abbr, **info} for abbr, info in NFL_TEAMS.items()]}
 
 
 @router.get("/api/nbnfl/games")
@@ -200,64 +197,3 @@ def delete_game(game_id: str, info: dict = Depends(require_admin)):
         _save(data)
     log_write(info, f"DELETE nbnfl/games/{game_id}")
     return {"deleted": game_id}
-
-
-@router.get("/api/nbnfl/standings")
-def standings():
-    record = {
-        abbr: {"abbr": abbr, "name": info["name"], "wins": 0, "losses": 0, "ties": 0, "pf": 0, "pa": 0}
-        for abbr, info in NFL_TEAMS.items()
-    }
-    for g in _load()["games"]:
-        home, away, hs, aws = g["home"], g["away"], g["home_score"], g["away_score"]
-        if home not in record or away not in record:
-            continue  # a game entered before a since-corrected team typo — skip rather than crash the board
-        record[home]["pf"] += hs
-        record[home]["pa"] += aws
-        record[away]["pf"] += aws
-        record[away]["pa"] += hs
-        if hs > aws:
-            record[home]["wins"] += 1
-            record[away]["losses"] += 1
-        elif aws > hs:
-            record[away]["wins"] += 1
-            record[home]["losses"] += 1
-        else:
-            record[home]["ties"] += 1
-            record[away]["ties"] += 1
-
-    for row in record.values():
-        row["diff"] = row["pf"] - row["pa"]
-
-    def sort_key(row):
-        return (-row["wins"], -row["diff"])
-
-    out = {}
-    for abbr, info in NFL_TEAMS.items():
-        conf = out.setdefault(info["conference"], {})
-        conf.setdefault(info["division"], []).append(record[abbr])
-    for conf in out.values():
-        for division_rows in conf.values():
-            division_rows.sort(key=sort_key)
-    return out
-
-
-@router.get("/api/nbnfl/leaders")
-def leaders(limit: int = Query(5, ge=1, le=50)):
-    totals: dict[tuple[str, str, str], float] = {}
-    for g in _load()["games"]:
-        for line in g.get("stats", []):
-            category = line["category"]
-            primary = PRIMARY_STAT.get(category)
-            if primary is None:
-                continue
-            key = (category, line["player"], line["team"])
-            totals[key] = totals.get(key, 0) + (line.get("stats", {}).get(primary) or 0)
-
-    out = {cat: [] for cat in PRIMARY_STAT}
-    for (category, player, team), value in totals.items():
-        out[category].append({"player": player, "team": team, "value": value})
-    for category in out:
-        out[category].sort(key=lambda r: -r["value"])
-        out[category] = out[category][:limit]
-    return out

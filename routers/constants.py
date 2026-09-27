@@ -111,11 +111,10 @@ COACHING_SETTINGS_FILE = DATA_DIR / "coaching-settings.json"
 # Per-date streaming status — a day of games marked done, and its YouTube VOD
 # link. Keyed by date — see routers/streaming_days.py.
 STREAMING_DAYS_FILE = DATA_DIR / "streaming-days.json"
-# NBNFL (the sister American-football league) — one file, regular-season games
-# only. { "games": [{id, season, week, date, home, away, home_score,
-# away_score, stats: [{player, team, category, stats: {...}}]}] }. Standings
-# and stat leaders are computed from this on every request — there is no build
-# step or aggregation pipeline of its own. See routers/nbnfl.py.
+# NBNFL (the sister American-football league) — one team's regular-season
+# games only. { "games": [{id, season, week, date, home, away, home_score,
+# away_score, stats: [{player, team, category, stats: {...}}]}] }. Every stat
+# line is that team's; totals are computed by the page. See routers/nbnfl.py.
 NBNFL_FILE = DATA_DIR / "nbnfl.json"
 
 PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PLAYER", "PROTECTED", "SWAP_OWNER", "NOTES", "FROZEN", "FROZEN_REASON"]
