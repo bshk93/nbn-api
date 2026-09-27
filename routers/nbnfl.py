@@ -71,7 +71,7 @@ NFL_TEAMS = {
 
 # Stat categories a line may use. Which fields each one carries is the page's
 # call (see the module docstring), so this is only the set of names.
-CATEGORIES = {"passing", "rushing", "receiving", "kicking", "kick_returns", "punt_returns"}
+CATEGORIES = {"passing", "rushing", "receiving", "defense", "kicking", "kick_returns", "punt_returns"}
 
 
 class StatLine(BaseModel):

@@ -131,9 +131,10 @@ check("put: only the given field changed", r.json()["home_score"] == 30 and r.js
 r = c.put(f"/api/nbnfl/games/{game_id}", json={"stats": [
     {"player": "J. Burrow", "team": "CIN", "category": "passing", "stats": {"yds": 310, "td": 3}},
     {"player": "C. Brown", "team": "CIN", "category": "rushing", "stats": {"yds": 90}},
+    {"player": "T. Hendrickson", "team": "CIN", "category": "defense", "stats": {"tkl": 4, "sack": 1.5}},
 ]}, headers=ADMIN)
 check("put: stats are replaced, not appended",
-      r.status_code == 200 and len(r.json()["stats"]) == 2 and r.json()["stats"][0]["stats"]["yds"] == 310)
+      r.status_code == 200 and len(r.json()["stats"]) == 3 and r.json()["stats"][0]["stats"]["yds"] == 310)
 
 r = c.put(f"/api/nbnfl/games/{game_id}", json={"home": "ZZZ"}, headers=ADMIN)
 check("put: re-validates the merged game", r.status_code == 400)
