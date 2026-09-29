@@ -113,7 +113,8 @@ APPLIED = []
 
 
 def fake_apply_trade(details, date, info, description="", force=False, relay_to_roster_log=False):
-    txn = {"id": f"txn{len(APPLIED) + 1}", "type": "trade", "details": details.model_dump()}
+    txn = {"id": f"txn{len(APPLIED) + 1}", "type": "trade", "details": details.model_dump(),
+           "relay_to_roster_log": relay_to_roster_log}
     APPLIED.append(txn)
     return txn
 
@@ -263,6 +264,8 @@ final = tr.finalize_trade_request(rid, tr.FinalizeBody(), TRC_HEAD)
 check("finalize applies the trade for real", len(APPLIED) == 2)
 check("status is finalized", final["status"] == "finalized")
 check("txn_id recorded", final["finalized"]["txn_id"] == APPLIED[-1]["id"])
+check("a finalized TRC trade is relayed into #roster-log (nobody enters it by hand)",
+      APPLIED[-1]["relay_to_roster_log"] is True)
 raises("a second finalize 409s instead of double-applying", 409,
        lambda: tr.finalize_trade_request(rid, tr.FinalizeBody(), TRC_HEAD))
 

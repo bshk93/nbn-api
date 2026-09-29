@@ -369,9 +369,12 @@ def finalize_trade_request(request_id: str, body: FinalizeBody = FinalizeBody(),
             description += f" (forced through — illegal per checks — override: {body.override_reason})"
 
         trade_in = TradeIn(**item["trade"])
+        # Relayed into #roster-log: unlike an office-entered trade, nobody
+        # types a TRC trade into #roster-log by hand, so without the relay it
+        # would never get there.
         txn = apply_trade(
             trade_in, datetime.now(timezone.utc).strftime("%Y-%m-%d"), info,
-            description=description, force=body.force)
+            description=description, force=body.force, relay_to_roster_log=True)
 
         now = _now()
         item["status"] = "finalized"
