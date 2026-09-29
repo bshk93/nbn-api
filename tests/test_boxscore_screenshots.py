@@ -112,7 +112,8 @@ check("the away side uploads", r.status_code == 200, r.text)
 item = r.json()["item"]
 check("it lands on the away side", len(item["images"]["away"]) == 1 and not item["images"]["home"])
 check("one side is not ready to parse", item["ready"] is False)
-check("the first side pays half the reward", REWARDS == [("Statsy", 100.0)])
+HALF = bx.NBY_BOXSCORE_REWARD / 2
+check("the first side pays half the reward", REWARDS == [("Statsy", HALF)])
 
 # A second member, with home and away the other way round.
 r = upload("PHX", headers=STATS2, game={**GAME, "home_team": "LAL", "away_team": "PHX"})
@@ -120,7 +121,7 @@ item2 = r.json()["item"]
 check("the other side joins the same game", item2["id"] == item["id"])
 check("and is filed by team, not by the caller's home/away", len(item2["images"]["home"]) == 1)
 check("both sides in: ready", item2["ready"] is True)
-check("the second side pays its half", REWARDS[-1] == ("Statso", 100.0))
+check("the second side pays its half", REWARDS[-1] == ("Statso", HALF))
 
 r = upload("LAL")
 item3 = r.json()["item"]

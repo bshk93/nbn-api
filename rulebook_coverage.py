@@ -101,6 +101,7 @@ CHECK_SECTIONS: dict[str, tuple[str, ...]] = {
     # and § 3.13 is where the 8% Full Bird ceiling lives.
     "raise_limit":                ("3.9", "3.13"),
     "release_eligible":           ("5.1",),
+    "trade_release_{}":           ("5.1",),
     "renounce_eligible":          ("3.10",),
     "rescind_cap_restriction":    ("3.10",),
     "rookie_scale":               ("7.1",),

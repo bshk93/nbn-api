@@ -74,7 +74,13 @@ def _legs(item: dict) -> str:
     for tr in (item.get("trade") or {}).get("transfers", []):
         assets = ", ".join(_asset(a, bios) for a in tr.get("assets", []))
         lines.append(f"**{tr['from_team']} → {tr['to_team']}**: {assets}")
+    for team, slugs in _releases(item).items():
+        lines.append(f"**{team} releases**: {', '.join(_player_name(s, bios) or s for s in slugs)}")
     return _truncate("\n".join(lines), 1000) or "—"
+
+
+def _releases(item: dict) -> dict:
+    return {t: s for t, s in ((item.get("trade") or {}).get("releases") or {}).items() if s}
 
 
 def _title(item: dict, what: str) -> str:
@@ -141,6 +147,8 @@ def trade_post_text(item: dict, number: int) -> str:
     for tr in (item.get("trade") or {}).get("transfers", []):
         received.setdefault(tr["to_team"], []).extend(_trade_asset(a, bios) for a in tr.get("assets", []))
     blocks = [f"{team} receives: {', '.join(assets)}" for team, assets in received.items()]
+    blocks += [f"{team} releases: {', '.join(_player_name(s, bios) or s for s in slugs)}"
+               for team, slugs in _releases(item).items()]
     return f"Trade {number}:\n" + "\n\n".join(blocks)
 
 

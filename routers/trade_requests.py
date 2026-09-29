@@ -104,11 +104,17 @@ def _live_check(item: dict) -> dict:
     conveyance_store = _load_conveyance_store_for_shadow_check()
     ownership_problems = _trade_leg_ownership_problems(
         trade, bios, team_map, pick_index, conveyance_store)
+    # A release that can't happen is never forceable (apply_trade refuses it),
+    # so it's reported with the ownership problems rather than as an
+    # overridable illegal check.
+    release_problems = [c.message for c in checks
+                        if c.check.startswith("trade_release_") and not c.passed]
 
     return {
         "legal": legal and not ownership_problems,
         "checks": [c.model_dump() for c in checks],
         "ownership_problems": ownership_problems,
+        "release_problems": release_problems,
     }
 
 
@@ -362,6 +368,11 @@ def finalize_trade_request(request_id: str, body: FinalizeBody = FinalizeBody(),
             raise HTTPException(status_code=422, detail={
                 "message": "One or more assets in this trade are no longer where it expects them to be",
                 "ownership_problems": live["ownership_problems"],
+            })
+        if live["release_problems"]:
+            raise HTTPException(status_code=422, detail={
+                "message": "One or more of this trade's releases can't happen",
+                "release_problems": live["release_problems"],
             })
         if not live["legal"] and not body.force:
             raise HTTPException(status_code=422, detail={

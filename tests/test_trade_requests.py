@@ -109,12 +109,14 @@ LEGAL = {"value": True}
 
 
 class FakeCheck:
-    def __init__(self, passed, level="error"):
+    def __init__(self, passed, level="error", check="test", message=""):
         self.passed = passed
         self.level = level
+        self.check = check
+        self.message = message
 
     def model_dump(self):
-        return {"check": "test", "passed": self.passed, "level": self.level, "message": ""}
+        return {"check": self.check, "passed": self.passed, "level": self.level, "message": self.message}
 
 
 tr._validate_trade = lambda trade, ctx: [] if LEGAL["value"] else [FakeCheck(False)]
@@ -317,6 +319,33 @@ check("the ready-for-a-vote post lists each leg", "PHX → BOS" in agreed["field
       or "BOS → PHX" in agreed["fields"][0]["value"], agreed["fields"][0]["value"])
 check("rejected and withdrawn requests post nothing",
       not alert_titles(req3["number"]) and not alert_titles(w["number"]))
+print("\na trade that carries a release")
+rel_body = body_2team()
+rel_body.releases = {"PHX": ["player-b"]}
+rel = tr.create_trade_request(rel_body, PHX_GM)
+check("the release is stored on the request", rel["trade"]["releases"] == {"PHX": ["player-b"]})
+tr.consent_trade_request(rel["id"], PHX_OWNER)
+tr.consent_trade_request(rel["id"], BOS_OWNER)
+ready = [e for c, e in ALERTS if e["title"] == f"Trade #{rel['number']} (BOS ⇄ PHX) — ready for a vote"]
+check("the ready-for-a-vote post lists the release", ready and "**PHX releases**: Ben Bravo" in ready[0]["fields"][0]["value"],
+      ready and ready[0]["fields"][0]["value"])
+for who in (TRC_A, TRC_B, TRC_C):
+    tr.ballot_trade_request(rel["id"], tr.BallotBody(decision="approve", note="ok"), who)
+BAD_RELEASE = FakeCheck(False, check="trade_release_player-b", message="Ben Bravo has no real contract years left to release")
+tr._validate_trade = lambda trade, ctx: [BAD_RELEASE]
+raises("a release that can't happen blocks finalize", 422,
+       lambda: tr.finalize_trade_request(rel["id"], tr.FinalizeBody(), TRC_HEAD))
+raises("even forced", 422, lambda: tr.finalize_trade_request(
+    rel["id"], tr.FinalizeBody(force=True, override_reason="push it"), TRC_HEAD))
+stored = next(i for i in STORE["items"] if i["id"] == rel["id"])
+check("the page is told why", tr._public_view(stored)["validation"]["release_problems"]
+      == ["Ben Bravo has no real contract years left to release"])
+tr._validate_trade = lambda trade, ctx: [] if LEGAL["value"] else [FakeCheck(False)]
+rel = tr.finalize_trade_request(rel["id"], tr.FinalizeBody(), TRC_HEAD)
+check("#transactions gets the release line",
+      TRADE_POSTS[-1] == f"Trade {rel['finalized']['trade_number']}:\nBOS receives: Andy Alpha\n\n"
+                         "PHX receives: Ben Bravo\n\nPHX releases: Ben Bravo", TRADE_POSTS[-1:])
+
 print("\ntrade numbers reset each league year")
 LEAGUE_YEAR["value"] = "27-28"
 nxt = tr.create_trade_request(body_2team(), PHX_GM)

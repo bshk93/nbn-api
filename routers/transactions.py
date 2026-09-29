@@ -568,6 +568,11 @@ class TradeIn(BaseModel):
     # transaction in practice (see .claude/commands/enter-transaction.md) —
     # this only informs validation, it never itself writes a contract.
     sign_and_trade_signings: list[SignDetails] = []
+    # Team abbr -> players that team releases right after the trade (§ 5.1,
+    # original payment schedule only). A slug must be on that team once the
+    # trade is done — a player it keeps, or one it receives here. Each is
+    # applied by `apply_trade` as its own ordinary release, after the trade.
+    releases: dict[str, list[str]] = {}
 
 
 class TradeValidateInput(BaseModel):
@@ -578,6 +583,7 @@ class TradeValidateInput(BaseModel):
     exceptions: dict[str, Optional[str]] = {}
     exception_players: dict[str, list[str]] = {}
     tpe_usage: dict[str, str] = {}
+    releases: dict[str, list[str]] = {}
 
 
 class TransactionValidationResult(BaseModel):
@@ -4937,6 +4943,66 @@ def _check_max_salary(details: SignDetails, bios: dict, season: str,
     )
 
 
+def _release_contract_years(bio: dict, cur_season: str) -> list[str]:
+    """The seasons from `cur_season` on that carry a real contract to release.
+    A player whose every remaining season is a bare UFA/RFA/TEAM_OPT hold (or
+    who has no salaries at all) has none — they're renounceable instead
+    (§ 3.10), and releasing them would just ceremonially reproduce a renounce
+    through the wrong transaction."""
+    holds = bio.get("cap_holds") or {}
+    salaries = bio.get("salaries") or {}
+    return [
+        s for s, sal in salaries.items()
+        if s >= cur_season and holds.get(s) not in ("UFA", "RFA", "TEAM_OPT") and _parse_dollar(sal)
+    ]
+
+
+def _trade_release_checks(details, bios: dict, season: str) -> list[CheckResult]:
+    """§ 5.1 checks on the releases a trade carries (`details.releases`).
+
+    Judged against the rosters as they'll be once the trade is done: a team
+    can release a player it keeps or one it receives here, but not one it
+    sends away or never had. The contract test is `_validate_release`'s own.
+    Both are errors `apply_trade` refuses even when forced — there is no
+    release to apply for a player who isn't there or has no contract.
+    """
+    releases = getattr(details, "releases", None) or {}
+    if not releases:
+        return []
+    after = {slug: team for slug, team in _build_team_map().items()}
+    for tr in details.transfers:
+        for a in tr.assets:
+            if a.type == "player" and a.slug:
+                after[a.slug] = tr.to_team.upper()
+
+    checks: list[CheckResult] = []
+    seen: set[str] = set()
+    for team, slugs in releases.items():
+        team = team.upper()
+        for slug in slugs:
+            name = (bios.get(slug) or {}).get("name") or slug
+            key = f"trade_release_{slug}"
+            if slug in seen:
+                checks.append(CheckResult(check=key, passed=False, level="error",
+                                          message=f"{name} is listed for release more than once."))
+                continue
+            seen.add(slug)
+            if after.get(slug) != team:
+                checks.append(CheckResult(check=key, passed=False, level="error",
+                                          message=f"{name} won't be on {team} after this trade, so {team} can't release them."))
+                continue
+            years = _release_contract_years(bios.get(slug) or {}, season)
+            if not years:
+                checks.append(CheckResult(check=key, passed=False, level="error",
+                                          message=f"{name} has no real contract years left to release — renounce instead (§ 3.10)."))
+                continue
+            checks.append(CheckResult(check=key, passed=True,
+                                      message=(f"{team} releases {name} right after the trade (§ 5.1): "
+                                               f"under contract through {max(years)}, dead cap on the "
+                                               "original payment schedule.")))
+    return checks
+
+
 def _validate_release(details: ReleaseDetails, ctx: dict) -> list[CheckResult]:
     """§ 5.1 release checks. Real content mirrors renounce's shape: an
     eligibility test (error) plus the same roster-count consequence
@@ -4966,16 +5032,7 @@ def _validate_release(details: ReleaseDetails, ctx: dict) -> list[CheckResult]:
         return checks
 
     cur_season = ctx["cur_season"]
-    holds = bio.get("cap_holds") or {}
-    salaries = bio.get("salaries") or {}
-    # A player whose every remaining season is a bare UFA/RFA/TEAM_OPT hold
-    # (or who has no salaries at all) carries no real contract to release —
-    # they're renounceable instead (§ 3.10), and releasing them would just
-    # ceremonially reproduce a renounce through the wrong transaction.
-    real_contract_years = [
-        s for s, sal in salaries.items()
-        if s >= cur_season and holds.get(s) not in ("UFA", "RFA", "TEAM_OPT") and _parse_dollar(sal)
-    ]
+    real_contract_years = _release_contract_years(bio, cur_season)
     if not real_contract_years:
         checks.append(CheckResult(
             check="release_eligible", passed=False, level="error",
@@ -6198,6 +6255,9 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
     # ── Extension trade freeze (§ 4.5 / § 6.2 rule 11) ──────────────────────────
     checks.extend(_check_extension_trade_restriction(details, ctx))
 
+    # ── Releases after the trade (§ 5.1) ───────────────────────────────────────
+    checks.extend(_trade_release_checks(details, ctx["bios"], season))
+
     return checks
 
 
@@ -7358,6 +7418,16 @@ def apply_trade(details: TradeIn, txn_date: str, info: dict, *,
     }
     checks = _run_validation("trade", details, val_ctx)
     failed = [c for c in checks if not c.passed]
+    bad_releases = [c for c in failed if c.check.startswith("trade_release_")]
+    if bad_releases:
+        # Not forceable: there's no release to apply for a player who won't be
+        # on that team, or who has no contract, so forcing would apply the
+        # trade and then fail halfway through the releases.
+        raise HTTPException(status_code=422, detail={
+            "validation": True,
+            "checks": [c.model_dump() for c in checks],
+            "can_force": False,
+        })
     if failed and not force:
         raise HTTPException(status_code=422, detail={
             "validation": True,
@@ -7385,6 +7455,82 @@ def apply_trade(details: TradeIn, txn_date: str, info: dict, *,
         _append_transaction(txn)
 
     notify_transaction(txn, forced_checks, relay_to_roster_log=relay_to_roster_log)
+
+    # The trade's releases, each its own ordinary release after the trade —
+    # own ledger entry, dead cap, waiver wire. Warnings (a roster left short)
+    # don't block: they were on the trade's checks, and the trade is done.
+    release_txns = []
+    for rel_team, slugs in (details.releases or {}).items():
+        for slug in slugs:
+            release_txns.append(apply_release(
+                ReleaseDetails(player=slug), txn_date, info,
+                description=f"Released after trade {txn_id}" + (f" ({description})" if description else ""),
+                force_warnings_only=True, relay_to_roster_log=relay_to_roster_log))
+    if release_txns:
+        txn = {**txn, "release_txn_ids": [r["id"] for r in release_txns]}
+    return txn
+
+
+def apply_release(details: ReleaseDetails, txn_date: str, info: dict, *,
+                  description: str = "", force: bool = False,
+                  force_warnings_only: bool = False,
+                  relay_to_roster_log: bool = False) -> dict:
+    """Validate, apply, ledger-append and announce a release — create_transaction's
+    type=="release" path, factored out so a trade can carry releases
+    (`apply_trade`). Opens the § 5.1 waiver wire like any release.
+    `force_warnings_only` is `apply_sign`'s: warnings pass, errors still block."""
+    val_ctx = {
+        "bios":        load_player_bios(),
+        "team_state":  load_team_state(),
+        "cap_levels":  json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {},
+        "cur_season":  _season_for_date(txn_date),
+        "txn_date":    txn_date,
+        "trade_exceptions": load_trade_exceptions(),
+    }
+    checks = _run_validation("release", details, val_ctx)
+    failed = [c for c in checks if not c.passed]
+    blocking = [c for c in failed if c.level == "error"] if force_warnings_only else failed
+    if blocking and not force:
+        raise HTTPException(status_code=422, detail={
+            "validation": True,
+            "checks": [c.model_dump() for c in checks],
+            "can_force": True,
+        })
+
+    txn_id = secrets.token_hex(8)
+    with _txn_lock:
+        team, dead_cap, terminated_salary, snapshot = _apply_release(details, txn_date, info)
+        stored_details = details.model_dump()
+        stored_details["team"] = team
+        stored_details["dead_cap"] = dead_cap
+        stored_details["terminated_salary"] = terminated_salary
+        # Restore source for a waiver claim during the § 5.1 48-hour window
+        # (routers/waivers.py) — same idea as renounce's `_snapshot`, just a
+        # different mutation to undo.
+        stored_details["_snapshot"] = snapshot
+        forced_checks = [c.check for c in failed] if failed and (force or force_warnings_only) else None
+        if forced_checks:
+            stored_details["_forced_checks"] = forced_checks
+        txn = {
+            "id": txn_id,
+            "type": "release",
+            "date": txn_date,
+            "created_by": info.get("name", "unknown"),
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "description": description,
+            "details": stored_details,
+        }
+        _append_transaction(txn)
+
+    notify_transaction(txn, forced_checks, relay_to_roster_log=relay_to_roster_log)
+    if snapshot:
+        # § 5.1 waiver wire (nbn-today/docs/waiver-wire-spec.md § 6) — opens the
+        # 48-hour claim window's #waivers + fa-news announcements. Imported here
+        # rather than at module load: waiver_notify -> waivers would be the
+        # natural direction, and transactions.py is what waivers.py itself
+        # imports from, so a top-level import here would be circular.
+        from .waiver_notify import notify_waived
+        notify_waived(stored_details["player"], team)
     return txn
 
 
@@ -7427,6 +7573,8 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
 
     if body.historical:
         if body.type == "trade":
+            if parsed_details.releases:
+                raise HTTPException(status_code=422, detail="A historical trade can't carry releases — log each release on its own.")
             return _create_historical_trade(parsed_details, body, info)
         if body.type == "sign":
             return _create_historical_sign(parsed_details, body, info)
@@ -7445,6 +7593,9 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
     if body.type == "extension":
         return apply_extension(parsed_details, body.date, info, description=body.description,
                                force=body.force, relay_to_roster_log=body.relay_to_roster_log)
+    if body.type == "release":
+        return apply_release(parsed_details, body.date, info, description=body.description,
+                             force=body.force, relay_to_roster_log=body.relay_to_roster_log)
 
     _val_ctx = {
         "bios":        load_player_bios(),
@@ -7478,16 +7629,6 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             team = _apply_guarantee(details, info)
             stored_details = details.model_dump()
             stored_details["team"] = team
-        elif body.type == "release":
-            team, dead_cap, terminated_salary, snapshot = _apply_release(details, body.date, info)
-            stored_details = details.model_dump()
-            stored_details["team"] = team
-            stored_details["dead_cap"] = dead_cap
-            stored_details["terminated_salary"] = terminated_salary
-            # Restore source for a waiver claim during the § 5.1 48-hour window
-            # (routers/waivers.py) — same idea as renounce's `_snapshot`, just a
-            # different mutation to undo.
-            stored_details["_snapshot"] = snapshot
         elif body.type == "renounce":
             team, snapshot = _apply_renounce(details, body.date, info)
             stored_details = details.model_dump()
@@ -7545,14 +7686,6 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
     # append are already committed, so a Discord problem must not delay or fail
     # them. Historical backfills never reach here (they return far above).
     notify_transaction(txn, forced_checks, relay_to_roster_log=body.relay_to_roster_log)
-    if body.type == "release" and stored_details.get("_snapshot"):
-        # § 5.1 waiver wire (nbn-today/docs/waiver-wire-spec.md § 6) — opens the
-        # 48-hour claim window's #waivers + fa-news announcements. Imported here
-        # rather than at module load: waiver_notify -> waivers would be the
-        # natural direction, and transactions.py is what waivers.py itself
-        # imports from, so a top-level import here would be circular.
-        from .waiver_notify import notify_waived
-        notify_waived(stored_details["player"], team)
     if body.type == "offer_sheet":
         # No submitted_by/created_by to address the way a self-serve PDC offer
         # has — this is entered by an office member on the team's behalf, so
@@ -7817,6 +7950,12 @@ def _require_trade_validatable(body: "TradeValidateInput", ctx: dict) -> None:
         for asset in tr.assets:
             if asset.type == "player" and asset.slug not in ctx["bios"]:
                 raise HTTPException(400, f"Unknown player '{asset.slug}'.")
+    for team, slugs in (getattr(body, "releases", None) or {}).items():
+        if (team or "").upper() not in VALID_TEAMS:
+            raise HTTPException(400, f"Unknown team '{team}'.")
+        for slug in slugs:
+            if slug not in ctx["bios"]:
+                raise HTTPException(400, f"Unknown player '{slug}'.")
 
 
 def _signing_fact_sheet(team: str, player: str, contract, ctx: dict, *,
