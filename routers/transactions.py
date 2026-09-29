@@ -23,7 +23,7 @@ from .storage import (
     _season_for_date, _current_league_year, _league_rollovers, _season_start_date,
 )
 from .auth import require_role, get_token_info, is_team_owner
-from .discord_notify import notify_transaction
+from .discord_notify import notify_transaction, _player_name
 from . import inbox
 from .players import load_player_bios, save_player_bios, _build_team_map, _scrub_trading_block, _display_name
 from .roster_picks import (
@@ -4957,6 +4957,35 @@ def _release_contract_years(bio: dict, cur_season: str) -> list[str]:
     ]
 
 
+def _post_trade_teams(details) -> dict[str, str]:
+    """slug -> the team a player is on once this trade is done."""
+    after = dict(_build_team_map())
+    for tr in details.transfers:
+        for a in tr.assets:
+            if a.type == "player" and a.slug:
+                after[a.slug] = tr.to_team.upper()
+    return after
+
+
+def _valid_trade_releases(details) -> dict[str, list[str]]:
+    """The releases a trade carries that can happen — each player on that team
+    once the trade is done, listed once. Team abbrs upper-cased."""
+    releases = getattr(details, "releases", None) or {}
+    if not releases:
+        return {}
+    after = _post_trade_teams(details)
+    out: dict[str, list[str]] = {}
+    seen: set[str] = set()
+    for team, slugs in releases.items():
+        team = team.upper()
+        for slug in slugs:
+            if slug in seen or after.get(slug) != team:
+                continue
+            seen.add(slug)
+            out.setdefault(team, []).append(slug)
+    return out
+
+
 def _trade_release_checks(details, bios: dict, season: str) -> list[CheckResult]:
     """§ 5.1 checks on the releases a trade carries (`details.releases`).
 
@@ -4969,18 +4998,14 @@ def _trade_release_checks(details, bios: dict, season: str) -> list[CheckResult]
     releases = getattr(details, "releases", None) or {}
     if not releases:
         return []
-    after = {slug: team for slug, team in _build_team_map().items()}
-    for tr in details.transfers:
-        for a in tr.assets:
-            if a.type == "player" and a.slug:
-                after[a.slug] = tr.to_team.upper()
+    after = _post_trade_teams(details)
 
     checks: list[CheckResult] = []
     seen: set[str] = set()
     for team, slugs in releases.items():
         team = team.upper()
         for slug in slugs:
-            name = (bios.get(slug) or {}).get("name") or slug
+            name = _player_name(slug, bios) or slug
             key = f"trade_release_{slug}"
             if slug in seen:
                 checks.append(CheckResult(check=key, passed=False, level="error",
@@ -5829,16 +5854,25 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
     # any slot left below the 14-player minimum still costs at least that
     # season's rookie minimum to fill. Reused verbatim by the roster-size
     # section further down so the two never compute "after" differently.
+    # A team's releases after the trade (§ 5.1) count here too, so a trade that
+    # takes a team over the limit and cuts back under it reads as what it is.
+    # Only the roster moves: a release on the original payment schedule leaves
+    # the same money on the books as dead cap, so the cap figures don't change.
+    valid_releases = _valid_trade_releases(details)
+    roster_teams = sorted(set(out_players) | set(in_players) | set(valid_releases))
     roster_after: dict[str, int] = {}
+    released_std: dict[str, int] = {}
     erc_deficiency: dict[str, int] = {}
     erc_charge: dict[str, int] = {}
-    for team in sorted(set(out_players) | set(in_players)):
+    for team in roster_teams:
         before = _count_standard_roster(team)
         out_std = sum(1 for s in out_players.get(team, [])
                       if _is_standard_roster_slot(bios.get(s, {}).get("type", "")))
         in_std  = sum(1 for s in in_players.get(team, [])
                       if _is_standard_roster_slot(bios.get(s, {}).get("type", "")))
-        after = before - out_std + in_std
+        released_std[team] = sum(1 for s in valid_releases.get(team, [])
+                                 if _is_standard_roster_slot(bios.get(s, {}).get("type", "")))
+        after = before - out_std + in_std - released_std[team]
         roster_after[team] = after
         erc_deficiency[team], erc_charge[team] = _empty_roster_charge(after, season, ctx["cap_levels"])
 
@@ -6076,34 +6110,36 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
     # season. So: ≤15 passes, 16–20 is a warning (a net gain into that band is
     # flagged; a balanced swap that leaves an already-over roster unchanged is a
     # quiet note), and anything above 20 is a hard block.
-    for team in sorted(set(out_players) | set(in_players)):
+    for team in roster_teams:
         before = _count_standard_roster(team)
         after = roster_after[team]
         key = f"roster_size_{team.lower()}"
+        k = released_std[team]
+        counting = f" (counting {k} release{'s' if k != 1 else ''})" if k else ""
         if after > ROSTER_OFFSEASON_MAX:
             checks.append(CheckResult(
                 check=key, passed=False, level="error",
-                message=(f"{team} would carry {after} standard players, over the "
+                message=(f"{team} would carry {after} standard players{counting}, over the "
                          f"{ROSTER_OFFSEASON_MAX}-player offseason maximum — release a player first."),
             ))
         elif after > ROSTER_MAX and after > before:
             checks.append(CheckResult(
                 check=key, passed=False, level="warning",
-                message=(f"{team} would go from {before} to {after} standard players — over the "
+                message=(f"{team} would go from {before} to {after} standard players{counting} — over the "
                          f"{ROSTER_MAX}-man regular-season limit (offseason ceiling {ROSTER_OFFSEASON_MAX}); "
                          f"trim to {ROSTER_MAX} before the season."),
             ))
         elif after > ROSTER_MAX:
             checks.append(CheckResult(
                 check=key, passed=True,
-                message=(f"{team}: {after} standard players after trade — over the {ROSTER_MAX}-man "
+                message=(f"{team}: {after} standard players after trade{counting} — over the {ROSTER_MAX}-man "
                          f"regular-season limit but within the offseason ceiling of {ROSTER_OFFSEASON_MAX} "
                          "(unchanged by this trade); trim before the season."),
             ))
         else:
             checks.append(CheckResult(
                 check=key, passed=True,
-                message=f"{team}: {after} standard players after trade (max {ROSTER_MAX}).",
+                message=f"{team}: {after} standard players after trade{counting} (max {ROSTER_MAX}).",
             ))
 
         deficiency, charge = erc_deficiency[team], erc_charge[team]
