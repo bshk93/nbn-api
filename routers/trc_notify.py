@@ -39,6 +39,17 @@ DASHBOARD = f"{SITE}/committees/trc/"
 
 COLOR_ACTION = 0xFBBF24
 
+# The 👍/👎 buttons on a "ready for a vote" post. A click comes back through
+# /api/discord/interactions to routers/trc_discord.py, which casts the vote.
+VOTE_PREFIX = "trc_vote"
+
+
+def vote_buttons(request_id: str) -> list[dict]:
+    return [{"type": 1, "components": [
+        {"type": 2, "style": 3, "emoji": {"name": "👍"}, "custom_id": f"{VOTE_PREFIX}:approve:{request_id}"},
+        {"type": 2, "style": 4, "emoji": {"name": "👎"}, "custom_id": f"{VOTE_PREFIX}:reject:{request_id}"},
+    ]}]
+
 
 def _alert(embed_fn) -> bool:
     try:
@@ -105,7 +116,7 @@ def notify_ready_for_vote(item: dict, needed: int) -> None:
             "fields": [{"name": "Trade", "value": _legs(item), "inline": False},
                        {"name": "Legality", "value": _legality(item), "inline": False}],
             "url": DASHBOARD,
-        }]}
+        }], "components": vote_buttons(item["id"])}
     _alert(build)
 
 

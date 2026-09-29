@@ -72,6 +72,8 @@ ROUND_NAMES = {"1": "First Round", "2": "Conf Semifinals",
 PING                       = 1
 APPLICATION_COMMAND        = 2
 PONG                       = 1
+MESSAGE_COMPONENT          = 3   # a button click
+MODAL_SUBMIT               = 5
 CHANNEL_MESSAGE            = 4   # CHANNEL_MESSAGE_WITH_SOURCE
 EPHEMERAL                  = 1 << 6  # message flag: only the invoker sees it
 
@@ -1644,6 +1646,17 @@ async def interactions(request: Request):
             return dispatch(payload.get("data", {}), invoker)
         except Exception:
             logger.exception("discord command failed")
+            return {"type": CHANNEL_MESSAGE,
+                    "data": {"content": "Something went wrong.", "flags": EPHEMERAL}}
+    if itype in (MESSAGE_COMPONENT, MODAL_SUBMIT):
+        # TRC vote buttons on trc-alerts posts (routers/trc_discord.py).
+        from . import trc_discord
+        try:
+            if itype == MESSAGE_COMPONENT:
+                return trc_discord.handle_component(payload)
+            return trc_discord.handle_modal(payload)
+        except Exception:
+            logger.exception("discord component failed")
             return {"type": CHANNEL_MESSAGE,
                     "data": {"content": "Something went wrong.", "flags": EPHEMERAL}}
     return {"type": CHANNEL_MESSAGE,
