@@ -1,9 +1,11 @@
 """Discord alerts for the TRC trade pipeline — the `trc-alerts` channel.
 
 Private, committee-only, the TRC analogue of `pdc-alerts`
-(`DISCORD_TRC_CHANNEL`). It gets every step of a trade request's life:
-submitted, ready for ballots, each ballot, ready to finalize, and the three
-endings (rejected, withdrawn, finalized). A finalized trade also posts to
+(`DISCORD_TRC_CHANNEL`). A trade reaches it once every team has agreed, not
+when it is proposed (decided 2026-09-29): ready for ballots, each ballot,
+ready to finalize, and the three endings (rejected, withdrawn, finalized). A
+request that ends before every team agreed never posted, so its ending
+doesn't either. A finalized trade also posts to
 #transactions through `apply_trade`, same as before; the post here just closes
 the thread for the committee.
 
@@ -92,20 +94,6 @@ def _legality(item: dict) -> str:
     return f"✗ Fails {problems} check{'s' if problems != 1 else ''} right now"
 
 
-def notify_submitted(item: dict) -> None:
-    def build():
-        return {"embeds": [{
-            "title": _title(item, "proposed"),
-            "description": f"Proposed by **{item['created_by']}**. Waiting on every team's consent "
-                           f"before it opens for ballots.",
-            "color": COLOR_SUBMIT,
-            "fields": [{"name": "Trade", "value": _legs(item), "inline": False},
-                       {"name": "Legality", "value": _legality(item), "inline": False}],
-            "url": DASHBOARD,
-        }]}
-    _alert(build)
-
-
 def notify_ready_for_ballots(item: dict, needed: int) -> None:
     def build():
         return {"embeds": [{
@@ -144,8 +132,11 @@ def notify_ready_to_finalize(item: dict, needed: int) -> None:
     _alert(build)
 
 
-def notify_closed(item: dict) -> None:
-    """Rejected, withdrawn or finalized — whichever the item now is."""
+def notify_closed(item: dict, was_open_for_ballots: bool = True) -> None:
+    """Rejected, withdrawn or finalized — whichever the item now is. Skipped for
+    a request that never reached ballots, since the channel never heard of it."""
+    if not was_open_for_ballots:
+        return
     status = item.get("status")
     end = item.get(status) or {}
     if status == "finalized":

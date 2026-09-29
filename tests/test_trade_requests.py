@@ -288,21 +288,31 @@ print()
 print("\ntrc-alerts (the committee's Discord channel)")
 check("every alert goes to the trc channel", ALERTS and all(c == "trc-chan" for c, _ in ALERTS))
 t1 = alert_titles(1)
-check("request #1: proposed, ready for ballots, each ballot, ready to finalize, finalized — in order",
+check("request #1: nothing on proposal; ready for ballots, each ballot, ready to finalize, finalized",
       [t.split(" — ", 1)[1] for t in t1] == [
-          "proposed", "ready for ballots", "trcA approved", "trcB voted to reject", "trcB approved",
+          "ready for ballots", "trcA approved", "trcB voted to reject", "trcB approved",
           "trcC approved", "ready to finalize", "trcD approved", "finalized"], t1)
-check("titles name the parties", t1[0] == "Trade #1 (BOS ⇄ PHX) — proposed", t1[0])
-proposed = next(e for _, e in ALERTS if e["title"] == t1[0])
-check("the proposal lists each leg", "PHX → BOS" in proposed["fields"][0]["value"]
-      or "BOS → PHX" in proposed["fields"][0]["value"], proposed["fields"][0]["value"])
-check("a rejection carries its reason",
-      any("rejected" in e["title"] and "Too lopsided" in e["description"] for _, e in ALERTS))
-check("a withdrawal carries its reason",
-      any("withdrawn" in e["title"] and "changed our minds" in e["description"] for _, e in ALERTS))
+check("titles name the parties", t1[0] == "Trade #1 (BOS ⇄ PHX) — ready for ballots", t1[0])
+agreed = next(e for _, e in ALERTS if e["title"] == t1[0])
+check("the ready-for-ballots post lists each leg", "PHX → BOS" in agreed["fields"][0]["value"]
+      or "BOS → PHX" in agreed["fields"][0]["value"], agreed["fields"][0]["value"])
+check("a request rejected before every team agreed posts nothing",
+      not alert_titles(req3["number"]), alert_titles(req3["number"]))
+check("a request withdrawn before every team agreed posts nothing",
+      not alert_titles(w["number"]), alert_titles(w["number"]))
+agreed_w = tr.create_trade_request(body_2team(), PHX_GM)
+tr.consent_trade_request(agreed_w["id"], PHX_OWNER)
+tr.consent_trade_request(agreed_w["id"], BOS_OWNER)
+tr.withdraw_trade_request(agreed_w["id"], tr.WithdrawBody(reason="changed our minds"), PHX_OWNER)
+tw = alert_titles(agreed_w["number"])
+check("once agreed, a withdrawal posts with its reason",
+      [t.split(" — ", 1)[1] for t in tw] == ["ready for ballots", "withdrawn"]
+      and any("changed our minds" in e["description"] for _, e in ALERTS if e["title"] == tw[-1]), tw)
 n = len(ALERTS)
 tr.trc_notify.DISCORD_TRC_CHANNEL = ""
-tr.create_trade_request(body_2team(), PHX_GM)
+quiet = tr.create_trade_request(body_2team(), PHX_GM)
+tr.consent_trade_request(quiet["id"], PHX_OWNER)
+tr.consent_trade_request(quiet["id"], BOS_OWNER)
 check("with the channel unset nothing is sent", len(ALERTS) == n)
 
 if FAILS:

@@ -210,9 +210,7 @@ def create_trade_request(body: TradeValidateInput, info: dict = Depends(get_toke
                     f"(request #{item['number']}) — your team's consent is needed.")
         inbox.notify_team(p, text, link="/committees/trc/")
 
-    view = _public_view(item)
-    trc_notify.notify_submitted(view)
-    return view
+    return _public_view(item)
 
 
 @router.post("/api/trade-requests/{request_id}/consent")
@@ -261,6 +259,7 @@ def withdraw_trade_request(request_id: str, body: WithdrawBody, info: dict = Dep
         idx = _find(store, request_id)
         item = store["items"][idx]
         _refuse_if_terminal(item)
+        was_open = item["status"] != "awaiting_consent"
         allowed = has_role(info, "trc_head") or has_role(info, "admin") or \
             any(is_team_owner(info, p) for p in item["parties"])
         if not allowed:
@@ -271,7 +270,7 @@ def withdraw_trade_request(request_id: str, body: WithdrawBody, info: dict = Dep
         item["updated_at"] = now
         _save_store(store)
     log_write(info, f"POST trade-requests/{request_id}/withdraw")
-    trc_notify.notify_closed(item)
+    trc_notify.notify_closed(item, was_open)
     return _public_view(item)
 
 
@@ -324,13 +323,14 @@ def reject_trade_request(request_id: str, body: RejectBody, info: dict = Depends
         idx = _find(store, request_id)
         item = store["items"][idx]
         _refuse_if_terminal(item)
+        was_open = item["status"] != "awaiting_consent"
         item["status"] = "rejected"
         item["rejected"] = {"at": now, "by": info["name"], "reason": body.reason}
         item["history"].append({"at": now, "by": info["name"], "action": "rejected", "reason": body.reason})
         item["updated_at"] = now
         _save_store(store)
     log_write(info, f"POST trade-requests/{request_id}/reject")
-    trc_notify.notify_closed(item)
+    trc_notify.notify_closed(item, was_open)
     return _public_view(item)
 
 
