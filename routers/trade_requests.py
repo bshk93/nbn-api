@@ -19,7 +19,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from . import inbox
+from . import inbox, trc_notify
 from .constants import TRADE_REQUESTS_FILE
 from .storage import _load_json, _save_json, log_write
 from .auth import get_token_info, has_role, require_role, is_team_owner
@@ -210,7 +210,9 @@ def create_trade_request(body: TradeValidateInput, info: dict = Depends(get_toke
                     f"(request #{item['number']}) — your team's consent is needed.")
         inbox.notify_team(p, text, link="/committees/trc/")
 
-    return _public_view(item)
+    view = _public_view(item)
+    trc_notify.notify_submitted(view)
+    return view
 
 
 @router.post("/api/trade-requests/{request_id}/consent")
@@ -245,7 +247,10 @@ def consent_trade_request(request_id: str, info: dict = Depends(get_token_info))
         inbox.notify_role("trc", text, link="/committees/trc/")
         inbox.notify_role("trc_head", text, link="/committees/trc/")
 
-    return _public_view(item)
+    view = _public_view(item)
+    if ready_for_ballot:
+        trc_notify.notify_ready_for_ballots(view, APPROVALS_NEEDED)
+    return view
 
 
 @router.post("/api/trade-requests/{request_id}/withdraw")
@@ -266,6 +271,7 @@ def withdraw_trade_request(request_id: str, body: WithdrawBody, info: dict = Dep
         item["updated_at"] = now
         _save_store(store)
     log_write(info, f"POST trade-requests/{request_id}/withdraw")
+    trc_notify.notify_closed(item)
     return _public_view(item)
 
 
@@ -296,13 +302,18 @@ def ballot_trade_request(request_id: str, body: BallotBody, info: dict = Depends
         item["history"].append({"at": now, "by": info["name"], "action": f"ballot:{body.decision}"})
         # A reject ballot never auto-rejects (decided 2026-09-20) — only
         # trc_head's own /reject does that. This only ever advances forward.
-        if item["status"] == "balloting" and _approve_count(item) >= APPROVALS_NEEDED:
+        just_ready = item["status"] == "balloting" and _approve_count(item) >= APPROVALS_NEEDED
+        if just_ready:
             item["status"] = "ready_to_finalize"
             item["history"].append({"at": now, "by": info["name"], "action": "ready_to_finalize"})
         item["updated_at"] = now
         _save_store(store)
     log_write(info, f"PUT trade-requests/{request_id}/ballot — {body.decision}")
-    return _public_view(item)
+    view = _public_view(item)
+    trc_notify.notify_ballot(view, info["name"], body.decision, body.note.strip(), APPROVALS_NEEDED)
+    if just_ready:
+        trc_notify.notify_ready_to_finalize(view, APPROVALS_NEEDED)
+    return view
 
 
 @router.post("/api/trade-requests/{request_id}/reject")
@@ -319,6 +330,7 @@ def reject_trade_request(request_id: str, body: RejectBody, info: dict = Depends
         item["updated_at"] = now
         _save_store(store)
     log_write(info, f"POST trade-requests/{request_id}/reject")
+    trc_notify.notify_closed(item)
     return _public_view(item)
 
 
@@ -376,4 +388,5 @@ def finalize_trade_request(request_id: str, body: FinalizeBody = FinalizeBody(),
         item["updated_at"] = now
         _save_store(store)
     log_write(info, f"POST trade-requests/{request_id}/finalize — txn {txn['id']}")
+    trc_notify.notify_closed(item)
     return _public_view(item)

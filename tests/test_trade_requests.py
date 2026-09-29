@@ -43,8 +43,8 @@ from routers.transactions import TradeTransfer, TradeAsset  # noqa: E402
 FAILS = []
 
 
-def check(name, cond):
-    print(f"  [{'ok' if cond else 'FAIL'}] {name}")
+def check(name, cond, extra=""):
+    print(f"  [{'ok' if cond else 'FAIL'}] {name}{(' — ' + str(extra)) if extra and not cond else ''}")
     if not cond:
         FAILS.append(name)
 
@@ -80,6 +80,17 @@ tr._load_conveyance_store_for_shadow_check = lambda: None
 NOTIFICATIONS = []
 tr.inbox.notify_team = lambda team, text, link=None: NOTIFICATIONS.append(("team", team, text))
 tr.inbox.notify_role = lambda role, text, link=None: NOTIFICATIONS.append(("role", role, text))
+
+# trc-alerts: the real embed builders run, only the network send is captured.
+ALERTS = []
+tr.trc_notify.transport._enqueue = lambda msg: ALERTS.append((msg["channel"], msg["payload"]["embeds"][0]))
+tr.trc_notify.transport.DISCORD_BOT_TOKEN = "test-token"
+tr.trc_notify.DISCORD_TRC_CHANNEL = "trc-chan"
+tr.trc_notify.load_player_bios = lambda: {}
+
+
+def alert_titles(number):
+    return [e["title"] for _, e in ALERTS if e["title"].startswith(f"Trade #{number} ")]
 
 LEGAL = {"value": True}
 
@@ -272,6 +283,28 @@ raises("can't withdraw an already-terminal request", 409,
        lambda: tr.withdraw_trade_request(w["id"], tr.WithdrawBody(), PHX_OWNER))
 
 print()
+# ══ trc-alerts ══════════════════════════════════════════════════════════════════
+
+print("\ntrc-alerts (the committee's Discord channel)")
+check("every alert goes to the trc channel", ALERTS and all(c == "trc-chan" for c, _ in ALERTS))
+t1 = alert_titles(1)
+check("request #1: proposed, ready for ballots, each ballot, ready to finalize, finalized — in order",
+      [t.split(" — ", 1)[1] for t in t1] == [
+          "proposed", "ready for ballots", "trcA approved", "trcB voted to reject", "trcB approved",
+          "trcC approved", "ready to finalize", "trcD approved", "finalized"], t1)
+check("titles name the parties", t1[0] == "Trade #1 (BOS ⇄ PHX) — proposed", t1[0])
+proposed = next(e for _, e in ALERTS if e["title"] == t1[0])
+check("the proposal lists each leg", "PHX → BOS" in proposed["fields"][0]["value"]
+      or "BOS → PHX" in proposed["fields"][0]["value"], proposed["fields"][0]["value"])
+check("a rejection carries its reason",
+      any("rejected" in e["title"] and "Too lopsided" in e["description"] for _, e in ALERTS))
+check("a withdrawal carries its reason",
+      any("withdrawn" in e["title"] and "changed our minds" in e["description"] for _, e in ALERTS))
+n = len(ALERTS)
+tr.trc_notify.DISCORD_TRC_CHANNEL = ""
+tr.create_trade_request(body_2team(), PHX_GM)
+check("with the channel unset nothing is sent", len(ALERTS) == n)
+
 if FAILS:
     print(f"{len(FAILS)} FAILED: {FAILS}")
     sys.exit(1)
