@@ -19,6 +19,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+import season_clock
+
 from . import inbox, trc_notify
 from .constants import TRADE_REQUESTS_FILE
 from .storage import _load_json, _save_json, log_write
@@ -40,6 +42,12 @@ _trc_lock = threading.Lock()
 # approvals is a floor to clear the ballot stage, not a majority of the
 # committee's actual size.
 APPROVALS_NEEDED = 3
+
+# The league's trade number ("Trade 52:" in #transactions), counted per league
+# year and assigned when a trade is finalized, not when it is proposed. 26-27
+# started with 51 trades already numbered by hand in #transactions, so its
+# count carries on from there; every later year starts at 1.
+_TRADE_NUMBER_SEED = {"26-27": 51}
 
 _TERMINAL_STATUSES = {"finalized", "rejected", "withdrawn"}
 
@@ -369,16 +377,21 @@ def finalize_trade_request(request_id: str, body: FinalizeBody = FinalizeBody(),
             description += f" (forced through — illegal per checks — override: {body.override_reason})"
 
         trade_in = TradeIn(**item["trade"])
-        # Relayed into #roster-log: unlike an office-entered trade, nobody
-        # types a TRC trade into #roster-log by hand, so without the relay it
-        # would never get there.
+        # Not relayed into #roster-log from here: the #transactions post below
+        # is, and relaying both would put the trade in #roster-log twice.
         txn = apply_trade(
             trade_in, datetime.now(timezone.utc).strftime("%Y-%m-%d"), info,
-            description=description, force=body.force, relay_to_roster_log=True)
+            description=description, force=body.force)
+
+        league_year = season_clock.current_season()
+        numbers = store.setdefault("trade_numbers", {})
+        trade_number = numbers.get(league_year, _TRADE_NUMBER_SEED.get(league_year, 0)) + 1
+        numbers[league_year] = trade_number
 
         now = _now()
         item["status"] = "finalized"
-        item["finalized"] = {"at": now, "by": info["name"], "txn_id": txn["id"]}
+        item["finalized"] = {"at": now, "by": info["name"], "txn_id": txn["id"],
+                             "league_year": league_year, "trade_number": trade_number}
         finalize_history = {"at": now, "by": info["name"], "action": "finalized", "txn_id": txn["id"]}
         if body.force:
             finalize_history["override_reason"] = body.override_reason
@@ -386,4 +399,5 @@ def finalize_trade_request(request_id: str, body: FinalizeBody = FinalizeBody(),
         item["updated_at"] = now
         _save_store(store)
     log_write(info, f"POST trade-requests/{request_id}/finalize — txn {txn['id']}")
+    trc_notify.post_trade(item, trade_number)
     return _public_view(item)

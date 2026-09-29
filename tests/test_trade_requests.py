@@ -83,10 +83,23 @@ tr.inbox.notify_role = lambda role, text, link=None: NOTIFICATIONS.append(("role
 
 # trc-alerts: the real embed builders run, only the network send is captured.
 ALERTS = []
-tr.trc_notify.transport._enqueue = lambda msg: ALERTS.append((msg["channel"], msg["payload"]["embeds"][0]))
+TRADE_POSTS = []
+
+
+def _capture(msg):
+    if msg["channel"] == "trades-chan":
+        TRADE_POSTS.append(msg["payload"]["content"])
+    else:
+        ALERTS.append((msg["channel"], msg["payload"]["embeds"][0]))
+
+
+tr.trc_notify.transport._enqueue = _capture
+tr.trc_notify.DISCORD_TRADES_CHANNEL = "trades-chan"
+tr.trc_notify.load_player_bios = lambda: {"player-a": {"name": "ALPHA, ANDY"}, "player-b": {"name": "BRAVO, BEN"}}
+LEAGUE_YEAR = {"value": "26-27"}
+tr.season_clock.current_season = lambda: LEAGUE_YEAR["value"]
 tr.trc_notify.transport.DISCORD_BOT_TOKEN = "test-token"
 tr.trc_notify.DISCORD_TRC_CHANNEL = "trc-chan"
-tr.trc_notify.load_player_bios = lambda: {}
 
 
 def alert_titles(number):
@@ -264,8 +277,13 @@ final = tr.finalize_trade_request(rid, tr.FinalizeBody(), TRC_HEAD)
 check("finalize applies the trade for real", len(APPLIED) == 2)
 check("status is finalized", final["status"] == "finalized")
 check("txn_id recorded", final["finalized"]["txn_id"] == APPLIED[-1]["id"])
-check("a finalized TRC trade is relayed into #roster-log (nobody enters it by hand)",
-      APPLIED[-1]["relay_to_roster_log"] is True)
+check("the #roster-log-nbn-today post isn't relayed (the #transactions post is)",
+      APPLIED[-1]["relay_to_roster_log"] is False)
+check("numbered at finalization: request #1, finalized second, is trade 53 (26-27 starts after 51)",
+      forced["finalized"]["trade_number"] == 52 and final["finalized"]["trade_number"] == 53)
+check("the league year is recorded with the number", final["finalized"]["league_year"] == "26-27")
+check("#transactions gets the league's format",
+      TRADE_POSTS[-1] == "Trade 53:\nBOS receives: Andy Alpha\n\nPHX receives: Ben Bravo", TRADE_POSTS[-1:])
 raises("a second finalize 409s instead of double-applying", 409,
        lambda: tr.finalize_trade_request(rid, tr.FinalizeBody(), TRC_HEAD))
 
@@ -299,6 +317,18 @@ check("the ready-for-a-vote post lists each leg", "PHX → BOS" in agreed["field
       or "BOS → PHX" in agreed["fields"][0]["value"], agreed["fields"][0]["value"])
 check("rejected and withdrawn requests post nothing",
       not alert_titles(req3["number"]) and not alert_titles(w["number"]))
+print("\ntrade numbers reset each league year")
+LEAGUE_YEAR["value"] = "27-28"
+nxt = tr.create_trade_request(body_2team(), PHX_GM)
+tr.consent_trade_request(nxt["id"], PHX_OWNER)
+tr.consent_trade_request(nxt["id"], BOS_OWNER)
+for who in (TRC_A, TRC_B, TRC_C):
+    tr.ballot_trade_request(nxt["id"], tr.BallotBody(decision="approve", note="ok"), who)
+nxt = tr.finalize_trade_request(nxt["id"], tr.FinalizeBody(), TRC_HEAD)
+check("a new league year starts at 1", nxt["finalized"]["trade_number"] == 1 and TRADE_POSTS[-1].startswith("Trade 1:\n"))
+check("a pick reads the league's way", tr.trc_notify._trade_asset(
+    {"type": "pick", "year": 2027, "round": 2, "orig": "ATL"}, {}) == "ATL 2027 2nd")
+
 n = len(ALERTS)
 tr.trc_notify.DISCORD_TRC_CHANNEL = ""
 quiet = tr.create_trade_request(body_2team(), PHX_GM)

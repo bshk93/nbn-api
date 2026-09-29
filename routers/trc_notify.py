@@ -7,6 +7,11 @@ for a vote; and the third approval is in, so it is ready to finalize. Nothing
 on proposal, individual votes, or the endings. A finalized trade posts to
 #transactions through `apply_trade`, as before.
 
+`post_trade` is separate: the finalized trade, as plain text in the league's
+own format, to the public #transactions channel (`DISCORD_TRADES_CHANNEL`).
+That channel is the league's record of trades. The #roster-log relay copies it
+from there.
+
 Same rules as fa_notify/poext_notify: a no-op while the env var is unset,
 delivered through discord_transport's paced queue, and never raises — the
 write it describes has already happened.
@@ -23,6 +28,7 @@ from .players import load_player_bios
 logger = logging.getLogger(__name__)
 
 DISCORD_TRC_CHANNEL = os.environ.get("DISCORD_TRC_CHANNEL", "").strip()
+DISCORD_TRADES_CHANNEL = os.environ.get("DISCORD_TRADES_CHANNEL", "").strip()
 
 # Trade requests are low-volume (a handful a week). This only stops a runaway
 # loop from flooding the channel.
@@ -107,3 +113,42 @@ def notify_ready_to_finalize(item: dict, needed: int) -> None:
             "url": DASHBOARD,
         }]}
     _alert(build)
+
+
+def _ordinal(n) -> str:
+    return {1: "1st", 2: "2nd"}.get(n, f"{n}th")
+
+
+def _trade_asset(a: dict, bios: dict) -> str:
+    """One asset the way the league writes it in #transactions: a player's
+    name, or a pick as "ATL 2027 2nd"."""
+    if a.get("type") == "player":
+        return _player_name(a["slug"], bios) or a["slug"]
+    label = f"{a.get('orig')} {a.get('year')} {_ordinal(a.get('round'))}"
+    if a.get("protection"):
+        label += f" (top-{a['protection']} protected)"
+    if a.get("swap_with"):
+        label += f" (swap with {a['swap_with']})"
+    return label
+
+
+def trade_post_text(item: dict, number: int) -> str:
+    try:
+        bios = load_player_bios()
+    except Exception:
+        bios = {}
+    received: dict[str, list[str]] = {}
+    for tr in (item.get("trade") or {}).get("transfers", []):
+        received.setdefault(tr["to_team"], []).extend(_trade_asset(a, bios) for a in tr.get("assets", []))
+    blocks = [f"{team} receives: {', '.join(assets)}" for team, assets in received.items()]
+    return f"Trade {number}:\n" + "\n\n".join(blocks)
+
+
+def post_trade(item: dict, number: int) -> bool:
+    """Post a finalized trade to #transactions. Never raises."""
+    try:
+        return transport.send(DISCORD_TRADES_CHANNEL, lambda: {"content": trade_post_text(item, number)},
+                              max_burst=TRC_MAX_BURST, burst_window=TRC_BURST_WINDOW)
+    except Exception as exc:
+        logger.warning("#transactions trade post failed: %s", exc)
+        return False
