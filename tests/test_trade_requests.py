@@ -288,26 +288,14 @@ print()
 print("\ntrc-alerts (the committee's Discord channel)")
 check("every alert goes to the trc channel", ALERTS and all(c == "trc-chan" for c, _ in ALERTS))
 t1 = alert_titles(1)
-check("request #1: nothing on proposal; ready for a vote, each vote, ready to finalize, finalized",
-      [t.split(" — ", 1)[1] for t in t1] == [
-          "ready for a vote", "trcA approved", "trcB voted to reject", "trcB approved",
-          "trcC approved", "ready to finalize", "trcD approved", "finalized"], t1)
+check("request #1: only ready for a vote and ready to finalize — no proposal, votes or ending",
+      [t.split(" — ", 1)[1] for t in t1] == ["ready for a vote", "ready to finalize"], t1)
 check("titles name the parties", t1[0] == "Trade #1 (BOS ⇄ PHX) — ready for a vote", t1[0])
 agreed = next(e for _, e in ALERTS if e["title"] == t1[0])
-check("the ready-for-ballots post lists each leg", "PHX → BOS" in agreed["fields"][0]["value"]
+check("the ready-for-a-vote post lists each leg", "PHX → BOS" in agreed["fields"][0]["value"]
       or "BOS → PHX" in agreed["fields"][0]["value"], agreed["fields"][0]["value"])
-check("a request rejected before every team agreed posts nothing",
-      not alert_titles(req3["number"]), alert_titles(req3["number"]))
-check("a request withdrawn before every team agreed posts nothing",
-      not alert_titles(w["number"]), alert_titles(w["number"]))
-agreed_w = tr.create_trade_request(body_2team(), PHX_GM)
-tr.consent_trade_request(agreed_w["id"], PHX_OWNER)
-tr.consent_trade_request(agreed_w["id"], BOS_OWNER)
-tr.withdraw_trade_request(agreed_w["id"], tr.WithdrawBody(reason="changed our minds"), PHX_OWNER)
-tw = alert_titles(agreed_w["number"])
-check("once agreed, a withdrawal posts with its reason",
-      [t.split(" — ", 1)[1] for t in tw] == ["ready for a vote", "withdrawn"]
-      and any("changed our minds" in e["description"] for _, e in ALERTS if e["title"] == tw[-1]), tw)
+check("rejected and withdrawn requests post nothing",
+      not alert_titles(req3["number"]) and not alert_titles(w["number"]))
 n = len(ALERTS)
 tr.trc_notify.DISCORD_TRC_CHANNEL = ""
 quiet = tr.create_trade_request(body_2team(), PHX_GM)

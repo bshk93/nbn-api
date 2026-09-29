@@ -259,7 +259,6 @@ def withdraw_trade_request(request_id: str, body: WithdrawBody, info: dict = Dep
         idx = _find(store, request_id)
         item = store["items"][idx]
         _refuse_if_terminal(item)
-        was_open = item["status"] != "awaiting_consent"
         allowed = has_role(info, "trc_head") or has_role(info, "admin") or \
             any(is_team_owner(info, p) for p in item["parties"])
         if not allowed:
@@ -270,7 +269,6 @@ def withdraw_trade_request(request_id: str, body: WithdrawBody, info: dict = Dep
         item["updated_at"] = now
         _save_store(store)
     log_write(info, f"POST trade-requests/{request_id}/withdraw")
-    trc_notify.notify_closed(item, was_open)
     return _public_view(item)
 
 
@@ -286,7 +284,7 @@ def ballot_trade_request(request_id: str, body: BallotBody, info: dict = Depends
     if body.decision not in ("approve", "reject"):
         raise HTTPException(status_code=422, detail="decision must be 'approve' or 'reject'")
     if not body.note.strip():
-        raise HTTPException(status_code=422, detail="note is required — ballots judge fairness, not just legality")
+        raise HTTPException(status_code=422, detail="note is required — votes judge fairness, not just legality")
 
     now = _now()
     with _trc_lock:
@@ -309,7 +307,6 @@ def ballot_trade_request(request_id: str, body: BallotBody, info: dict = Depends
         _save_store(store)
     log_write(info, f"PUT trade-requests/{request_id}/ballot — {body.decision}")
     view = _public_view(item)
-    trc_notify.notify_vote(view, info["name"], body.decision, body.note.strip(), APPROVALS_NEEDED)
     if just_ready:
         trc_notify.notify_ready_to_finalize(view, APPROVALS_NEEDED)
     return view
@@ -323,14 +320,12 @@ def reject_trade_request(request_id: str, body: RejectBody, info: dict = Depends
         idx = _find(store, request_id)
         item = store["items"][idx]
         _refuse_if_terminal(item)
-        was_open = item["status"] != "awaiting_consent"
         item["status"] = "rejected"
         item["rejected"] = {"at": now, "by": info["name"], "reason": body.reason}
         item["history"].append({"at": now, "by": info["name"], "action": "rejected", "reason": body.reason})
         item["updated_at"] = now
         _save_store(store)
     log_write(info, f"POST trade-requests/{request_id}/reject")
-    trc_notify.notify_closed(item, was_open)
     return _public_view(item)
 
 
@@ -388,5 +383,4 @@ def finalize_trade_request(request_id: str, body: FinalizeBody = FinalizeBody(),
         item["updated_at"] = now
         _save_store(store)
     log_write(info, f"POST trade-requests/{request_id}/finalize — txn {txn['id']}")
-    trc_notify.notify_closed(item)
     return _public_view(item)

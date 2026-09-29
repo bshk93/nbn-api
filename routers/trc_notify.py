@@ -1,13 +1,11 @@
 """Discord alerts for the TRC trade pipeline — the `trc-alerts` channel.
 
 Private, committee-only, the TRC analogue of `pdc-alerts`
-(`DISCORD_TRC_CHANNEL`). A trade reaches it once every team has agreed, not
-when it is proposed (decided 2026-09-29): ready for a vote, each vote,
-ready to finalize, and the three endings (rejected, withdrawn, finalized). A
-request that ends before every team agreed never posted, so its ending
-doesn't either. A finalized trade also posts to
-#transactions through `apply_trade`, same as before; the post here just closes
-the thread for the committee.
+(`DISCORD_TRC_CHANNEL`). Two posts, both points where the committee has
+something to do (decided 2026-09-29): every team has agreed, so it is ready
+for a vote; and the third approval is in, so it is ready to finalize. Nothing
+on proposal, individual votes, or the endings. A finalized trade posts to
+#transactions through `apply_trade`, as before.
 
 Same rules as fa_notify/poext_notify: a no-op while the env var is unset,
 delivered through discord_transport's paced queue, and never raises — the
@@ -33,11 +31,7 @@ TRC_BURST_WINDOW = 900
 
 DASHBOARD = f"{SITE}/committees/trc/"
 
-COLOR_SUBMIT = 0x60A5FA
 COLOR_ACTION = 0xFBBF24
-COLOR_VOTE = 0x94A3B8
-COLOR_DONE = 0x22C55E
-COLOR_CLOSED = 0xEF4444
 
 
 def _alert(embed_fn) -> bool:
@@ -81,10 +75,6 @@ def _title(item: dict, what: str) -> str:
     return f"Trade #{item['number']} ({' ⇄ '.join(item['parties'])}) — {what}"
 
 
-def _approvals(item: dict) -> int:
-    return sum(1 for b in (item.get("ballots") or {}).values() if b.get("decision") == "approve")
-
-
 def _legality(item: dict) -> str:
     v = item.get("validation") or {}
     if v.get("legal", True):
@@ -107,19 +97,6 @@ def notify_ready_for_vote(item: dict, needed: int) -> None:
     _alert(build)
 
 
-def notify_vote(item: dict, member: str, decision: str, note: str, needed: int) -> None:
-    def build():
-        verb = "approved" if decision == "approve" else "voted to reject"
-        return {"embeds": [{
-            "title": _title(item, f"{member} {verb}"),
-            "description": _truncate(note, 1500),
-            "color": COLOR_VOTE,
-            "fields": [{"name": "Approvals", "value": f"{_approvals(item)}/{needed}", "inline": True}],
-            "url": DASHBOARD,
-        }]}
-    _alert(build)
-
-
 def notify_ready_to_finalize(item: dict, needed: int) -> None:
     def build():
         return {"embeds": [{
@@ -129,30 +106,4 @@ def notify_ready_to_finalize(item: dict, needed: int) -> None:
             "fields": [{"name": "Legality", "value": _legality(item), "inline": False}],
             "url": DASHBOARD,
         }]}
-    _alert(build)
-
-
-def notify_closed(item: dict, was_open_for_vote: bool = True) -> None:
-    """Rejected, withdrawn or finalized — whichever the item now is. Skipped for
-    a request that never reached a vote, since the channel never heard of it."""
-    if not was_open_for_vote:
-        return
-    status = item.get("status")
-    end = item.get(status) or {}
-    if status == "finalized":
-        what, color = "finalized", COLOR_DONE
-        desc = f"Finalized by **{end.get('by')}**. The trade is applied and posted to #transactions."
-    elif status == "rejected":
-        what, color = "rejected", COLOR_CLOSED
-        desc = f"Rejected by **{end.get('by')}**: {_truncate(end.get('reason'), 1500)}"
-    elif status == "withdrawn":
-        what, color = "withdrawn", COLOR_CLOSED
-        reason = _truncate(end.get("reason"), 1500)
-        desc = f"Withdrawn by **{end.get('by')}**" + (f": {reason}" if reason else ".")
-    else:
-        return
-
-    def build():
-        return {"embeds": [{"title": _title(item, what), "description": desc,
-                            "color": color, "url": DASHBOARD}]}
     _alert(build)
