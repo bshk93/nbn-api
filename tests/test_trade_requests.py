@@ -156,8 +156,11 @@ check("parties derived from transfers", req["parties"] == ["BOS", "PHX"])
 check("number assigned", req["number"] == 1)
 check("neither team pre-consented", not any(c["consented"] for c in req["consents"].values()))
 notified_teams = [n[1] for n in NOTIFICATIONS if n[0] == "team"]
-check("the OTHER party is notified, not the proposer's own team",
-      "BOS" in notified_teams and "PHX" not in notified_teams)
+check("every party is notified, the proposer's own team included",
+      "BOS" in notified_teams and "PHX" in notified_teams)
+phx_text = next(n[2] for n in NOTIFICATIONS if n[:2] == ("team", "PHX"))
+check("the proposer's team is told its own consent is still needed",
+      "still needs your team's consent" in phx_text)
 
 req3 = tr.create_trade_request(body_3team(), GSW_OWNER)
 check("3-team request has all 3 parties", req3["parties"] == ["BOS", "GSW", "PHX"])

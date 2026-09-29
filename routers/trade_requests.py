@@ -196,15 +196,19 @@ def create_trade_request(body: TradeValidateInput, info: dict = Depends(get_toke
 
     # Fired outside the lock, same as notify_transaction — a Discord/inbox
     # problem must never delay or fail the write it's reporting on. Every
-    # party except the one(s) the proposer already represents — they know,
-    # they just submitted it — matching the offer_sheet precedent of
-    # notifying the other side, not the actor.
+    # party is notified, the proposer's own team included: consent is needed
+    # from every party (decision 7), and the proposer's owner is often not the
+    # member who clicked Submit. Skipping that team once left request #1 with
+    # nobody on the proposing side told it was waiting on them.
     for p in parties:
-        if not has_role(info, p.lower()):
-            inbox.notify_team(
-                p, f"A trade involving {', '.join(parties)} has been proposed "
-                   f"(request #{item['number']}) — your team's consent is needed.",
-                link="/committees/trc/")
+        if has_role(info, p.lower()):
+            text = (f"{info['name']} proposed a trade involving {', '.join(parties)} "
+                    f"(request #{item['number']}). It still needs your team's consent "
+                    f"— only the owner can give it.")
+        else:
+            text = (f"A trade involving {', '.join(parties)} has been proposed "
+                    f"(request #{item['number']}) — your team's consent is needed.")
+        inbox.notify_team(p, text, link="/committees/trc/")
 
     return _public_view(item)
 
