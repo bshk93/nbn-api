@@ -189,7 +189,7 @@ before_notify = len(NOTIFICATIONS)
 r = tr.consent_trade_request(rid, BOS_OWNER)
 check("flips to balloting once every party has consented", r["status"] == "balloting")
 new_notifications = NOTIFICATIONS[before_notify:]
-check("trc and trc_head are both notified once it's ready for ballots",
+check("trc and trc_head are both notified once it's ready for a vote",
       ("role", "trc") in [(n[0], n[1]) for n in new_notifications]
       and ("role", "trc_head") in [(n[0], n[1]) for n in new_notifications])
 
@@ -288,11 +288,11 @@ print()
 print("\ntrc-alerts (the committee's Discord channel)")
 check("every alert goes to the trc channel", ALERTS and all(c == "trc-chan" for c, _ in ALERTS))
 t1 = alert_titles(1)
-check("request #1: nothing on proposal; ready for ballots, each ballot, ready to finalize, finalized",
+check("request #1: nothing on proposal; ready for a vote, each vote, ready to finalize, finalized",
       [t.split(" — ", 1)[1] for t in t1] == [
-          "ready for ballots", "trcA approved", "trcB voted to reject", "trcB approved",
+          "ready for a vote", "trcA approved", "trcB voted to reject", "trcB approved",
           "trcC approved", "ready to finalize", "trcD approved", "finalized"], t1)
-check("titles name the parties", t1[0] == "Trade #1 (BOS ⇄ PHX) — ready for ballots", t1[0])
+check("titles name the parties", t1[0] == "Trade #1 (BOS ⇄ PHX) — ready for a vote", t1[0])
 agreed = next(e for _, e in ALERTS if e["title"] == t1[0])
 check("the ready-for-ballots post lists each leg", "PHX → BOS" in agreed["fields"][0]["value"]
       or "BOS → PHX" in agreed["fields"][0]["value"], agreed["fields"][0]["value"])
@@ -306,7 +306,7 @@ tr.consent_trade_request(agreed_w["id"], BOS_OWNER)
 tr.withdraw_trade_request(agreed_w["id"], tr.WithdrawBody(reason="changed our minds"), PHX_OWNER)
 tw = alert_titles(agreed_w["number"])
 check("once agreed, a withdrawal posts with its reason",
-      [t.split(" — ", 1)[1] for t in tw] == ["ready for ballots", "withdrawn"]
+      [t.split(" — ", 1)[1] for t in tw] == ["ready for a vote", "withdrawn"]
       and any("changed our minds" in e["description"] for _, e in ALERTS if e["title"] == tw[-1]), tw)
 n = len(ALERTS)
 tr.trc_notify.DISCORD_TRC_CHANNEL = ""

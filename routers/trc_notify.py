@@ -2,7 +2,7 @@
 
 Private, committee-only, the TRC analogue of `pdc-alerts`
 (`DISCORD_TRC_CHANNEL`). A trade reaches it once every team has agreed, not
-when it is proposed (decided 2026-09-29): ready for ballots, each ballot,
+when it is proposed (decided 2026-09-29): ready for a vote, each vote,
 ready to finalize, and the three endings (rejected, withdrawn, finalized). A
 request that ends before every team agreed never posted, so its ending
 doesn't either. A finalized trade also posts to
@@ -35,7 +35,7 @@ DASHBOARD = f"{SITE}/committees/trc/"
 
 COLOR_SUBMIT = 0x60A5FA
 COLOR_ACTION = 0xFBBF24
-COLOR_BALLOT = 0x94A3B8
+COLOR_VOTE = 0x94A3B8
 COLOR_DONE = 0x22C55E
 COLOR_CLOSED = 0xEF4444
 
@@ -94,10 +94,10 @@ def _legality(item: dict) -> str:
     return f"✗ Fails {problems} check{'s' if problems != 1 else ''} right now"
 
 
-def notify_ready_for_ballots(item: dict, needed: int) -> None:
+def notify_ready_for_vote(item: dict, needed: int) -> None:
     def build():
         return {"embeds": [{
-            "title": _title(item, "ready for ballots"),
+            "title": _title(item, "ready for a vote"),
             "description": f"Every team has consented. It needs {needed} approvals.",
             "color": COLOR_ACTION,
             "fields": [{"name": "Trade", "value": _legs(item), "inline": False},
@@ -107,13 +107,13 @@ def notify_ready_for_ballots(item: dict, needed: int) -> None:
     _alert(build)
 
 
-def notify_ballot(item: dict, member: str, decision: str, note: str, needed: int) -> None:
+def notify_vote(item: dict, member: str, decision: str, note: str, needed: int) -> None:
     def build():
         verb = "approved" if decision == "approve" else "voted to reject"
         return {"embeds": [{
             "title": _title(item, f"{member} {verb}"),
             "description": _truncate(note, 1500),
-            "color": COLOR_BALLOT,
+            "color": COLOR_VOTE,
             "fields": [{"name": "Approvals", "value": f"{_approvals(item)}/{needed}", "inline": True}],
             "url": DASHBOARD,
         }]}
@@ -132,10 +132,10 @@ def notify_ready_to_finalize(item: dict, needed: int) -> None:
     _alert(build)
 
 
-def notify_closed(item: dict, was_open_for_ballots: bool = True) -> None:
+def notify_closed(item: dict, was_open_for_vote: bool = True) -> None:
     """Rejected, withdrawn or finalized — whichever the item now is. Skipped for
-    a request that never reached ballots, since the channel never heard of it."""
-    if not was_open_for_ballots:
+    a request that never reached a vote, since the channel never heard of it."""
+    if not was_open_for_vote:
         return
     status = item.get("status")
     end = item.get(status) or {}

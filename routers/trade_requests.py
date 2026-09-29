@@ -238,7 +238,7 @@ def consent_trade_request(request_id: str, info: dict = Depends(get_token_info))
 
     if ready_for_ballot:
         text = (f"Trade request #{item['number']} ({', '.join(item['parties'])}) has every "
-                f"party's consent and is ready for ballots.")
+                f"party's consent and is ready for a vote.")
         # Both roles, not just trc — notify_team/notify_role check a member's
         # literal roles list, not ROLE_IMPLIES, so a trc_head-only member
         # would otherwise never hear about it (see docs/trc-trade-pipeline.md).
@@ -247,7 +247,7 @@ def consent_trade_request(request_id: str, info: dict = Depends(get_token_info))
 
     view = _public_view(item)
     if ready_for_ballot:
-        trc_notify.notify_ready_for_ballots(view, APPROVALS_NEEDED)
+        trc_notify.notify_ready_for_vote(view, APPROVALS_NEEDED)
     return view
 
 
@@ -294,7 +294,7 @@ def ballot_trade_request(request_id: str, body: BallotBody, info: dict = Depends
         idx = _find(store, request_id)
         item = store["items"][idx]
         if item["status"] not in ("balloting", "ready_to_finalize"):
-            raise HTTPException(status_code=422, detail=f"Request is {item['status']}, not open for ballots")
+            raise HTTPException(status_code=422, detail=f"Request is {item['status']}, not open for a vote")
         # Re-voting overwrites rather than appending — same convention PDC/POEXT
         # use, freely revisable until finalized.
         item["ballots"][info["name"]] = {"decision": body.decision, "note": body.note.strip(), "at": now}
@@ -309,7 +309,7 @@ def ballot_trade_request(request_id: str, body: BallotBody, info: dict = Depends
         _save_store(store)
     log_write(info, f"PUT trade-requests/{request_id}/ballot — {body.decision}")
     view = _public_view(item)
-    trc_notify.notify_ballot(view, info["name"], body.decision, body.note.strip(), APPROVALS_NEEDED)
+    trc_notify.notify_vote(view, info["name"], body.decision, body.note.strip(), APPROVALS_NEEDED)
     if just_ready:
         trc_notify.notify_ready_to_finalize(view, APPROVALS_NEEDED)
     return view
