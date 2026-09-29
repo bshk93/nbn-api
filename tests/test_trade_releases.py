@@ -110,7 +110,7 @@ RELEASE_CHECKS = {"value": []}
 t._run_validation = run_validation
 INFO = {"name": "Pat"}
 
-txn = t.apply_trade(trade({"UTA": ["hayes-jaxson"]}), "2026-09-29", INFO, description="TRC request #1")
+txn = t.apply_trade(trade({"UTA": ["hayes-jaxson"]}), "2026-09-29", INFO, description="Trade 52")
 kinds = [e[0] for e in EVENTS]
 check("trade applied and logged, then the release applied and logged",
       kinds == ["trade", "ledger", "notify", "release", "ledger", "notify"], EVENTS)

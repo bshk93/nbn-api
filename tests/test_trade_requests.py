@@ -102,8 +102,13 @@ tr.trc_notify.transport.DISCORD_BOT_TOKEN = "test-token"
 tr.trc_notify.DISCORD_TRC_CHANNEL = "trc-chan"
 
 
-def alert_titles(number):
-    return [e["title"] for _, e in ALERTS if e["title"].startswith(f"Trade #{number} ")]
+def alerts_during(fn):
+    """fn's result and the trc-alerts titles posted while it ran. Titles name a
+    trade by its teams, not a number, so several BOS ⇄ PHX requests are told
+    apart by when their alerts were posted."""
+    before = len(ALERTS)
+    result = fn()
+    return result, [e["title"] for _, e in ALERTS[before:]]
 
 LEGAL = {"value": True}
 
@@ -129,7 +134,7 @@ APPLIED = []
 
 def fake_apply_trade(details, date, info, description="", force=False, relay_to_roster_log=False):
     txn = {"id": f"txn{len(APPLIED) + 1}", "type": "trade", "details": details.model_dump(),
-           "relay_to_roster_log": relay_to_roster_log}
+           "relay_to_roster_log": relay_to_roster_log, "description": description}
     APPLIED.append(txn)
     return txn
 
@@ -202,7 +207,7 @@ r = tr.consent_trade_request(rid, PHX_OWNER)
 check("PHX consented", r["consents"]["PHX"]["consented"] is True)
 check("still awaiting BOS", r["status"] == "awaiting_consent")
 before_notify = len(NOTIFICATIONS)
-r = tr.consent_trade_request(rid, BOS_OWNER)
+r, vote_alerts = alerts_during(lambda: tr.consent_trade_request(rid, BOS_OWNER))
 check("flips to balloting once every party has consented", r["status"] == "balloting")
 new_notifications = NOTIFICATIONS[before_notify:]
 check("trc and trc_head are both notified once it's ready for a vote",
@@ -222,7 +227,8 @@ r = tr.ballot_trade_request(rid, tr.BallotBody(decision="reject", note="Lopsided
 check("a reject doesn't move the approve count", r["status"] == "balloting" and tr._approve_count(r) == 1)
 r = tr.ballot_trade_request(rid, tr.BallotBody(decision="approve", note="Changed my mind"), TRC_B)
 check("re-voting overwrites, doesn't double-count", tr._approve_count(r) == 2)
-r = tr.ballot_trade_request(rid, tr.BallotBody(decision="approve", note="Fine by me"), TRC_C)
+r, finalize_alerts = alerts_during(
+    lambda: tr.ballot_trade_request(rid, tr.BallotBody(decision="approve", note="Fine by me"), TRC_C))
 check("3rd distinct approver readies it", r["status"] == "ready_to_finalize")
 r = tr.ballot_trade_request(rid, tr.BallotBody(decision="approve", note="Also fine"), gm("trcD", "trc"))
 check("a 4th vote doesn't change ready status", r["status"] == "ready_to_finalize")
@@ -283,13 +289,16 @@ check("the #roster-log-nbn-today post isn't relayed (the #transactions post is)"
       APPLIED[-1]["relay_to_roster_log"] is False)
 check("numbered at finalization: request #1, finalized second, is trade 53 (26-27 starts after 51)",
       forced["finalized"]["trade_number"] == 52 and final["finalized"]["trade_number"] == 53)
+check("the ledger entry carries the same league number as #transactions",
+      APPLIED[-1]["description"] == "Trade 53", APPLIED[-1]["description"])
 check("the league year is recorded with the number", final["finalized"]["league_year"] == "26-27")
 check("#transactions gets the league's format",
       TRADE_POSTS[-1] == "Trade 53:\nBOS receives: Andy Alpha\n\nPHX receives: Ben Bravo", TRADE_POSTS[-1:])
 raises("a second finalize 409s instead of double-applying", 409,
        lambda: tr.finalize_trade_request(rid, tr.FinalizeBody(), TRC_HEAD))
 
-r = tr.reject_trade_request(req3["id"], tr.RejectBody(reason="Too lopsided"), TRC_HEAD)
+r, reject_alerts = alerts_during(
+    lambda: tr.reject_trade_request(req3["id"], tr.RejectBody(reason="Too lopsided"), TRC_HEAD))
 check("trc_head can reject outright, no ballots needed", r["status"] == "rejected")
 raises("can't act on an already-rejected request", 409,
        lambda: tr.consent_trade_request(req3["id"], GSW_OWNER))
@@ -297,10 +306,12 @@ raises("can't act on an already-rejected request", 409,
 # ══ withdraw ═══════════════════════════════════════════════════════════════════
 
 print("\nwithdraw")
-w = tr.create_trade_request(body_2team(), PHX_GM)
+w, withdraw_alerts = alerts_during(lambda: tr.create_trade_request(body_2team(), PHX_GM))
 raises("an uninvolved member can't withdraw", 403,
        lambda: tr.withdraw_trade_request(w["id"], tr.WithdrawBody(), OUTSIDER))
-r = tr.withdraw_trade_request(w["id"], tr.WithdrawBody(reason="changed our minds"), PHX_OWNER)
+r, more = alerts_during(
+    lambda: tr.withdraw_trade_request(w["id"], tr.WithdrawBody(reason="changed our minds"), PHX_OWNER))
+withdraw_alerts += more
 check("a party owner can withdraw", r["status"] == "withdrawn")
 raises("can't withdraw an already-terminal request", 409,
        lambda: tr.withdraw_trade_request(w["id"], tr.WithdrawBody(), PHX_OWNER))
@@ -310,15 +321,18 @@ print()
 
 print("\ntrc-alerts (the committee's Discord channel)")
 check("every alert goes to the trc channel", ALERTS and all(c == "trc-chan" for c, _ in ALERTS))
-t1 = alert_titles(1)
-check("request #1: only ready for a vote and ready to finalize — no proposal, votes or ending",
+t1 = vote_alerts + finalize_alerts
+check("one request: only ready for a vote and ready to finalize — no proposal, votes or ending",
       [t.split(" — ", 1)[1] for t in t1] == ["ready for a vote", "ready to finalize"], t1)
-check("titles name the parties", t1[0] == "Trade #1 (BOS ⇄ PHX) — ready for a vote", t1[0])
+check("titles name the trade by its teams, with no request number",
+      t1[0] == "BOS ⇄ PHX trade — ready for a vote" and "#" not in t1[0], t1[0])
 agreed = next(e for _, e in ALERTS if e["title"] == t1[0])
 check("the ready-for-a-vote post lists each leg", "PHX → BOS" in agreed["fields"][0]["value"]
       or "BOS → PHX" in agreed["fields"][0]["value"], agreed["fields"][0]["value"])
 check("rejected and withdrawn requests post nothing",
-      not alert_titles(req3["number"]) and not alert_titles(w["number"]))
+      not reject_alerts and not withdraw_alerts, (reject_alerts, withdraw_alerts))
+check("no inbox notice shows the request number",
+      not any("#" in n[2] for n in NOTIFICATIONS), [n[2] for n in NOTIFICATIONS if "#" in n[2]])
 print("\na trade that carries a release")
 rel_body = body_2team()
 rel_body.releases = {"PHX": ["player-b"]}
@@ -326,7 +340,7 @@ rel = tr.create_trade_request(rel_body, PHX_GM)
 check("the release is stored on the request", rel["trade"]["releases"] == {"PHX": ["player-b"]})
 tr.consent_trade_request(rel["id"], PHX_OWNER)
 tr.consent_trade_request(rel["id"], BOS_OWNER)
-ready = [e for c, e in ALERTS if e["title"] == f"Trade #{rel['number']} (BOS ⇄ PHX) — ready for a vote"]
+ready = [e for c, e in ALERTS if e["title"] == "BOS ⇄ PHX trade — ready for a vote"][-1:]
 check("the ready-for-a-vote post lists the release", ready and "**PHX releases**: Ben Bravo" in ready[0]["fields"][0]["value"],
       ready and ready[0]["fields"][0]["value"])
 for who in (TRC_A, TRC_B, TRC_C):

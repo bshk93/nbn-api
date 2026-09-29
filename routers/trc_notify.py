@@ -94,8 +94,16 @@ def _releases(item: dict) -> dict:
     return {t: s for t, s in ((item.get("trade") or {}).get("releases") or {}).items() if s}
 
 
+def trade_name(item: dict) -> str:
+    """How a trade under review is named anywhere a member reads it: by its
+    teams. The only number members see is the league's trade number, which
+    is assigned at finalize (see `_TRADE_NUMBER_SEED`). The request's own
+    `number` stays internal, so the league never has two numbering systems."""
+    return f"{' ⇄ '.join(item['parties'])} trade"
+
+
 def _title(item: dict, what: str) -> str:
-    return f"Trade #{item['number']} ({' ⇄ '.join(item['parties'])}) — {what}"
+    return f"{trade_name(item)} — {what}"
 
 
 def _legality(item: dict) -> str:

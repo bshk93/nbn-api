@@ -86,4 +86,4 @@ def handle_component(payload: dict) -> dict:
     approvals = tr._approve_count(item)
     verb = "Approved" if decision == "approve" else "Voted to reject"
     tail = " It's ready to finalize." if item["status"] == "ready_to_finalize" else ""
-    return _reply(f"{verb} trade #{item['number']} — {approvals}/{tr.APPROVALS_NEEDED} approvals.{tail}")
+    return _reply(f"{verb} the {tr.trc_notify.trade_name(item)} — {approvals}/{tr.APPROVALS_NEEDED} approvals.{tail}")

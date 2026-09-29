@@ -33,7 +33,7 @@ td.load_members = lambda: {
     "Fan": {"discord_id": "222", "roles": ["uta"]},
 }
 CAST = []
-RESULT = {"status": "balloting", "number": 1, "ballots": {"Voter": {"decision": "approve"}}}
+RESULT = {"status": "balloting", "number": 1, "parties": ["LAL", "UTA"], "ballots": {"Voter": {"decision": "approve"}}}
 
 
 def fake_ballot(request_id, body, info):
@@ -74,7 +74,7 @@ print("\na TRC member votes with one click")
 r = click("111", "trc_vote:approve:abc123")
 check("the click casts the vote as that member, with the Discord note",
       CAST[-1] == ("abc123", "approve", td.DISCORD_NOTE, "Voter"), CAST)
-check("and says where it stands, privately", text(r) == "Approved trade #1 — 1/3 approvals."
+check("and says where it stands, privately", text(r) == "Approved the LAL ⇄ UTA trade — 1/3 approvals."
       and r["data"]["flags"] == td.EPHEMERAL, text(r))
 click("111", "trc_vote:reject:abc123")
 check("👎 casts a reject", CAST[-1][1] == "reject")

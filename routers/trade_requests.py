@@ -212,16 +212,15 @@ def create_trade_request(body: TradeValidateInput, info: dict = Depends(get_toke
     # problem must never delay or fail the write it's reporting on. Every
     # party is notified, the proposer's own team included: consent is needed
     # from every party (decision 7), and the proposer's owner is often not the
-    # member who clicked Submit. Skipping that team once left request #1 with
+    # member who clicked Submit. Skipping that team once left the first request with
     # nobody on the proposing side told it was waiting on them.
     for p in parties:
         if has_role(info, p.lower()):
-            text = (f"{info['name']} proposed a trade involving {', '.join(parties)} "
-                    f"(request #{item['number']}). It still needs your team's consent "
-                    f"— only the owner can give it.")
+            text = (f"{info['name']} proposed a trade involving {', '.join(parties)}. "
+                    f"It still needs your team's consent — only the owner can give it.")
         else:
             text = (f"A trade involving {', '.join(parties)} has been proposed "
-                    f"(request #{item['number']}) — your team's consent is needed.")
+                    f"— your team's consent is needed.")
         inbox.notify_team(p, text, link="/committees/trc/")
 
     return _public_view(item)
@@ -251,7 +250,7 @@ def consent_trade_request(request_id: str, info: dict = Depends(get_token_info))
     log_write(info, f"POST trade-requests/{request_id}/consent")
 
     if ready_for_ballot:
-        text = (f"Trade request #{item['number']} ({', '.join(item['parties'])}) has every "
+        text = (f"The {trc_notify.trade_name(item)} has every "
                 f"party's consent and is ready for a vote.")
         # Both roles, not just trc — notify_team/notify_role check a member's
         # literal roles list, not ROLE_IMPLIES, so a trc_head-only member
@@ -383,7 +382,14 @@ def finalize_trade_request(request_id: str, body: FinalizeBody = FinalizeBody(),
         if body.force and not (body.override_reason or "").strip():
             raise HTTPException(status_code=400, detail="override_reason is required to force a finalize.")
 
-        description = f"TRC request #{item['number']}"
+        # Numbered before applying, so the ledger entry carries the same
+        # "Trade 52" as #transactions. Nothing is saved until the apply
+        # succeeds, so a failed apply doesn't use up a number.
+        league_year = season_clock.current_season()
+        numbers = store.setdefault("trade_numbers", {})
+        trade_number = numbers.get(league_year, _TRADE_NUMBER_SEED.get(league_year, 0)) + 1
+
+        description = f"Trade {trade_number}"
         if body.force:
             description += f" (forced through — illegal per checks — override: {body.override_reason})"
 
@@ -394,9 +400,6 @@ def finalize_trade_request(request_id: str, body: FinalizeBody = FinalizeBody(),
             trade_in, datetime.now(timezone.utc).strftime("%Y-%m-%d"), info,
             description=description, force=body.force)
 
-        league_year = season_clock.current_season()
-        numbers = store.setdefault("trade_numbers", {})
-        trade_number = numbers.get(league_year, _TRADE_NUMBER_SEED.get(league_year, 0)) + 1
         numbers[league_year] = trade_number
 
         now = _now()
