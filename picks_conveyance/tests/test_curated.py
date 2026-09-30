@@ -1,15 +1,27 @@
 """Validate + resolve the curated nodes end to end.
 
-Seeds a store from the live CSV, applies the curated conveyance, validates every
-node, then resolves the whole store under a synthetic full-league draft order and
-asserts every contingent (protected / swap / binary) pick lands on a real team
-and every legacy pick is skipped. Proves the reconciliation is executable.
+Seeds a store from a synthetic picks CSV, applies the curated conveyance,
+validates every node, then resolves the whole store under a synthetic
+full-league draft order and asserts every contingent (protected / swap /
+binary) pick lands on a real team and every legacy pick is skipped. Proves the
+reconciliation is executable.
+
+**Fixture, not live data.** Until 2026-09-30 this built its store from the live
+`draft-picks.csv` and the live registry, so it was testing whatever the league
+had traded since, not `curated.py`. Every retrade since July broke one of the
+direction checks below (2031 HOU/MIN, 2027 PHI/TOR/DAL), and with no registry
+on disk its `seed_registry_from_curated()` would have *written* the live one.
+Now the CSV is every team's own pick for each year the seed covers, and the
+registry is seeded from `curated.py` into a temp file, so this pins the seed and
+nothing else.
 
     venv/bin/python -m picks_conveyance.tests.test_curated
 """
 from __future__ import annotations
 
+import csv
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -34,10 +46,33 @@ def synthetic_positions(years):
     return pos
 
 
+FIELDS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PLAYER", "PROTECTED",
+          "SWAP_OWNER", "NOTES", "FROZEN", "FROZEN_REASON"]
+
+
+def fixture_store(tmp: Path) -> dict:
+    """Every team's own 1st and 2nd for each year the seed touches, owned by
+    that team, plus a registry seeded fresh from curated.py. Nothing live."""
+    keys = (set(curated.PROTECTED) | set(curated.LEGACY)
+            | {(m["year"], m["round"], m["orig"])
+               for g in curated.SWAP_GROUPS.values() for m in g["members"] if "orig" in m}
+            | {k for ks in curated.CHAIN_MEMBERS.values() for k in ks})
+    years = sorted({k[0] for k in keys})
+    csv_path = tmp / "draft-picks.csv"
+    with open(csv_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=FIELDS)
+        w.writeheader()
+        for y in years:
+            for rnd in (1, 2):
+                for t in TEAMS:
+                    w.writerow({"YEAR": y, "ROUND": rnd, "ORIG": t, "OWNER": t})
+    registry.REGISTRY_FILE = tmp / "draft-conveyance-registry.json"
+    registry.seed_registry_from_curated(force=True)
+    return registry.apply_registry(seed_store.build_store(csv_path))
+
+
 def main():
-    store = seed_store.build_store(seed_store.DEFAULT_IN)
-    registry.seed_registry_from_curated()
-    registry.apply_registry(store)
+    store = fixture_store(Path(tempfile.mkdtemp(prefix="nbn-test-curated-")))
 
     # 1. validate every node
     nerr = 0
@@ -150,33 +185,11 @@ def main():
     check("DET's own leftover ends up with GSW (worst of the whole chain)",
           r_d.get((2027, 1, "DET")), "GSW")
 
-    print("\n2028 SAC/DAL/MIA/PHX/CHA cluster (Trades 53/31, 15/3/28, manual edit):")
-    r_e = resolver.resolve_all(store, {(2028, 1, "DAL"): 20, (2028, 1, "CHA"): 5,
-                                       (2028, 1, "SAC"): 8, (2028, 1, "MIA"): 25,
-                                       (2028, 1, "PHX"): 3})
-    check("feeder: CHA-origin (5) beats DAL's own (20) -> MIL takes CHA-origin",
-          r_e.get((2028, 1, "CHA")), "MIL")
-    check("feeder: SAC's own (8) beats MIA-origin (25) -> CHA takes MIA-origin",
-          r_e.get((2028, 1, "MIA")), "CHA")
-    check("3-way: PHX (3) best overall -> MIA takes it", r_e.get((2028, 1, "PHX")), "MIA")
-    check("3-way: SAC's own (8) 2nd -> SAC keeps it", r_e.get((2028, 1, "SAC")), "SAC")
-    check("3-way: DAL's own (20) worst, no named claimant -> stays DAL",
-          r_e.get((2028, 1, "DAL")), "DAL")
-    r_f = resolver.resolve_all(store, {(2028, 1, "DAL"): 4, (2028, 1, "CHA"): 18,
-                                       (2028, 1, "SAC"): 22, (2028, 1, "MIA"): 6,
-                                       (2028, 1, "PHX"): 30})
-    check("feeder: DAL's own (4) beats CHA-origin (18) -> MIL takes DAL's own",
-          r_f.get((2028, 1, "DAL")), "MIL")
-    # Note: the 3-way ranked group's own assignment for its dynamic members
-    # runs after the feeder chain and correctly overwrites it (same ordering
-    # as test_resolver.py's dynamic-member test) -- only the final merged
-    # value is checked, not an intermediate feeder-only snapshot.
-    check("3-way: MIA-origin (6, held by SAC after the feeder) best overall -> MIA takes it",
-          r_f.get((2028, 1, "MIA")), "MIA")
-    check("3-way: CHA's own (18, worse-of-feeder-A) 2nd -> SAC takes it",
-          r_f.get((2028, 1, "CHA")), "SAC")
-    check("3-way: PHX's own (30) worst, no named claimant -> stays PHX",
-          r_f.get((2028, 1, "PHX")), "PHX")
+    # The 2028 SAC/DAL/MIA/PHX/CHA cluster's seed here was overruled by league
+    # office memo 2026-01 (the live chain is pick_rulings/2026-01-sac-2028-first.json,
+    # pinned against the memo in tests/test_restructure_picks.py). Its seed is
+    # still validated and resolved by the generic checks above, but its
+    # direction is no longer asserted: those checks encoded the overruled reading.
 
     print()
     if FAILS:

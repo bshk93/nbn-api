@@ -42,12 +42,21 @@ MODULES = ["test_route_bindings",
            "test_drive_backup",
            "test_data_paths"]
 
+# The picks_conveyance package keeps its tests beside it. They were never in
+# this list, which is how test_curated sat broken for two months (2026-09-30).
+PICKS_MODULES = ["picks_conveyance.tests." + n for n in (
+    "test_curated", "test_from_trade", "test_ladders", "test_ownership",
+    "test_parity", "test_projection_full", "test_projection_parity",
+    "test_registry", "test_resolver", "test_resync", "test_retrade",
+    "test_validation_hardening")]
+
 
 def main():
     failed = []
-    for name in MODULES:
+    for name in MODULES + PICKS_MODULES:
         print(f"\n===== {name} =====")
-        rc = subprocess.call([sys.executable, "-m", f"tests.{name}"])
+        module = name if "." in name else f"tests.{name}"
+        rc = subprocess.call([sys.executable, "-m", module])
         if rc:
             failed.append(name)
     print("\n" + ("=" * 40))
