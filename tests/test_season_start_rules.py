@@ -175,6 +175,20 @@ def test_trade_limit():
     checks = with_ledger(fifteen, lambda: T._check_trade_limit(trade("p"), {"txn_date": "2026-05-01"}))
     check("no limit before 26-27", checks == [])
 
+    unlabelled = fourteen[:13] + [
+        {**trade_txn("2026-09-01", ["AAA", "CCC"], ""), "id": "a5389b095048afa5"},
+        trade_txn("2026-09-01", ["AAA", "CCC"], "Trade 42 revision: fixes a pick")]
+    checks = with_ledger(unlabelled, lambda: T._check_trade_limit(trade("p"), {"txn_date": "2026-11-01"}))
+    r = only(checks, "trade_limit_aaa")
+    check("an unlabelled entry known to be Trade 42 joins its corrections",
+          r.passed and "trade 15 of 15" in r.message)
+
+    set_dates({})
+    check("26-27's deadline is known with nothing entered", cal.trade_deadline("26-27") == "2027-02-11")
+    check("a season with no known deadline has none", cal.trade_deadline("27-28") is None)
+    set_dates({"season_dates": {"26-27": {"trade_deadline": "2027-02-04"}}})
+    check("a date set through the endpoint wins", cal.trade_deadline("26-27") == "2027-02-04")
+
 
 def test_fa_signing_freeze():
     print("\n-- § 4.5: newly signed free agents --")

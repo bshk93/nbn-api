@@ -5880,6 +5880,15 @@ def _check_fa_signing_trade_restriction(details: TradeIn, ctx: dict) -> list[Che
 
 _TRADE_NUMBER_RE = re.compile(r"^\s*Trade\s+(\d+)\b")
 
+# Ledger entries that are a numbered league trade but whose description doesn't
+# say so, by transaction id. Without this the entry counts as its own trade
+# beside the "Trade N completion/revision" entries that do carry the number.
+# The better fix for a new case is to edit the entry's description
+# (PATCH /api/transactions/{id}) so it starts "Trade N".
+_TRADE_NUMBER_BY_TXN = {
+    "a5389b095048afa5": "42",   # 2026-07-22 BKN/DEN/HOU, the original Trade 42 entry
+}
+
 
 def _trade_teams(details: dict) -> set[str]:
     teams = {t.upper() for t in (details.get("teams") or []) if t}
@@ -5913,12 +5922,13 @@ def _trade_limit_counts(season: str, draft_days: set[str],
         if _season_for_date(date) != season or date in draft_days:
             continue
         m = _TRADE_NUMBER_RE.match(txn.get("description") or "")
-        label = f"Trade {m.group(1)}" if m else f"{date} trade"
+        number = m.group(1) if m else _TRADE_NUMBER_BY_TXN.get(txn.get("id") or "")
+        label = f"Trade {number}" if number else f"{date} trade"
         for team in _trade_teams(txn.get("details") or {}):
-            if m:
-                if (team, m.group(1)) in seen_numbers:
+            if number:
+                if (team, number) in seen_numbers:
                     continue
-                seen_numbers.add((team, m.group(1)))
+                seen_numbers.add((team, number))
             if date == deadline:
                 deadline_day[team] = deadline_day.get(team, 0) + 1
                 if deadline_day[team] == 1:

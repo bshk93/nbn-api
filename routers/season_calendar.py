@@ -91,8 +91,14 @@ def _season_dates(season: str) -> dict:
     return (state.get("season_dates") or {}).get(season) or {}
 
 
+# The league follows the NBA's trade deadline (settled 2026-09-30), so a known
+# one is checked in here and needs nobody to enter it. A date set through
+# PUT /api/league-year/{season}/dates wins over it.
+DEFAULT_TRADE_DEADLINES = {"26-27": "2027-02-11"}
+
+
 def trade_deadline(season: str) -> Optional[str]:
-    return _season_dates(season).get("trade_deadline") or None
+    return _season_dates(season).get("trade_deadline") or DEFAULT_TRADE_DEADLINES.get(season)
 
 
 def draft_days(season: str) -> list[str]:
