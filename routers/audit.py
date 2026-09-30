@@ -49,6 +49,7 @@ _AUDITED_NAMES = {
     "transactions.json",
     "ovr-history.json",
     "draft-picks.csv",
+    "draft-conveyance-registry.json",   # what /api/picks serves for any structured pick
     "coaching-settings.json",
     "streaming-days.json",
 }
