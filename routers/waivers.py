@@ -262,7 +262,7 @@ def _validate_waiver_claim(claim: dict, release_txn: dict, ctx: dict) -> list[Ch
             ))
 
     if contract_type != "two-way":
-        r = _roster_size_check(team, _count_standard_roster(team) + 1, "claiming")
+        r = _roster_size_check(team, _count_standard_roster(team) + 1, "claiming", ctx["txn_date"])
         if r:
             checks.append(r)
 

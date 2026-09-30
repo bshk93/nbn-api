@@ -30,6 +30,8 @@ from .auth import (
 )
 from . import wallet
 from .picks_scheduler import wake_picks_horizon_scheduler
+from . import season_calendar
+from .league_time import league_today_str
 
 router = APIRouter()
 
@@ -168,7 +170,10 @@ class LeagueRollover(BaseModel):
 @router.get("/api/league-year")
 def get_league_year():
     rollovers = _load_json(LEAGUE_STATE_FILE, {}).get("rollovers", {})
-    return {"current_season": _current_league_year(), "rollovers": rollovers}
+    season = _current_league_year()
+    return {"current_season": season, "rollovers": rollovers,
+            "calendar": season_calendar.season_calendar(season),
+            "in_season": season_calendar.is_regular_season(league_today_str())}
 
 
 @router.put("/api/league-year/{season}")
@@ -195,6 +200,49 @@ def delete_league_rollover(season: str, info: dict = Depends(require_role("bod")
         log_write(info, f"DELETE league-year/{season} — reset to default")
     wake_picks_horizon_scheduler()
     return {"current_season": _current_league_year(), "rollovers": state.get("rollovers", {})}
+
+
+class SeasonDates(BaseModel):
+    trade_deadline: Optional[str] = None   # YYYY-MM-DD; "" clears it
+    draft_days: Optional[list[str]] = None  # YYYY-MM-DD each; [] clears them
+
+
+@router.put("/api/league-year/{season}/dates")
+def put_season_dates(season: str, body: SeasonDates, info: dict = Depends(require_role("bod"))):
+    """Set a season's trade deadline and draft days (routers/season_calendar.py).
+    Opening night isn't set here: it's the first game on the schedule.
+
+    Each date must fall inside the season's own league year, so the June draft
+    that ends 26-27 is filed under 26-27 and can't be filed under 27-28 by
+    mistake. A field left out of the body is left alone."""
+    if not re.fullmatch(r"\d{2}-\d{2}", season):
+        raise HTTPException(status_code=422, detail="season must be YY-YY format")
+    given = ([body.trade_deadline] if body.trade_deadline else []) + list(body.draft_days or [])
+    for d in given:
+        try:
+            datetime.strptime(d, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=422, detail=f"{d!r} is not a YYYY-MM-DD date")
+        if season_calendar._season_for_date(d) != season:
+            raise HTTPException(status_code=422,
+                                detail=f"{d} is in the {season_calendar._season_for_date(d)} league year, not {season}")
+    state = _load_json(LEAGUE_STATE_FILE, {})
+    dates = state.setdefault("season_dates", {}).setdefault(season, {})
+    if body.trade_deadline is not None:
+        if body.trade_deadline:
+            dates["trade_deadline"] = body.trade_deadline
+        else:
+            dates.pop("trade_deadline", None)
+    if body.draft_days is not None:
+        if body.draft_days:
+            dates["draft_days"] = sorted(set(body.draft_days))
+        else:
+            dates.pop("draft_days", None)
+    if not dates:
+        state["season_dates"].pop(season, None)
+    _save_json(LEAGUE_STATE_FILE, state)
+    log_write(info, f"PUT league-year/{season}/dates — {json.dumps(dates, sort_keys=True)}")
+    return {"season": season, **season_calendar.season_calendar(season)}
 
 
 # ── Awards config ─────────────────────────────────────────────────────────────

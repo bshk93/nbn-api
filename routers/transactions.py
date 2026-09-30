@@ -16,6 +16,7 @@ from .constants import (
     ROOKIE_SCALE_FILE, ATTRIBUTES_FILE,
     _txn_lock, _deadcap_lock, _state_lock, _picks_lock, _trade_exc_lock,
     ROSTER_MAX, ROSTER_OFFSEASON_MAX, ROSTER_MIN, ROSTER_CHARGE_MIN, TWO_WAY_MAX,
+    TRADE_LIMIT, TRADE_LIMIT_FROM,
     SALARY_MATCH_TIER1_CAP, SALARY_MATCH_TIER2_CAP,
 )
 from .storage import (
@@ -25,6 +26,8 @@ from .storage import (
 from .auth import require_role, get_token_info, is_team_owner
 from .discord_notify import notify_transaction, _player_name
 from . import inbox
+from . import season_calendar
+from .league_time import league_today_str
 from .players import load_player_bios, save_player_bios, _build_team_map, _scrub_trading_block, _display_name
 from .roster_picks import (
     load_picks, save_picks, _all_picks_flat, _pick_year_horizon,
@@ -2395,17 +2398,26 @@ def _check_two_way_terms(contract: "ContractIn", player: str, team: Optional[str
     return checks
 
 
-def _roster_size_check(team: str, after: int, verb: str) -> "CheckResult | None":
-    """§ 2.1 roster-size ceiling, in the same offseason-aware shape the trade
-    validator uses (`_validate_trade`'s "Roster size" block): ≤15 passes,
-    16-20 is a warning (legal, but flagged to trim before the season), and
-    only >20 is a hard block. Signing-side validators (`_validate_sign`,
-    `_validate_offer_sheet`, `_validate_offer_sheet_decision`,
-    `_validate_convert_twoway`) used to hard-block at 15 unconditionally,
-    which meant a team sitting at exactly the in-season limit couldn't even
-    make an offseason FA offer — inconsistent with what a trade adding the
-    same body would allow.
+def _roster_size_check(team: str, after: int, verb: str,
+                       txn_date: Optional[str] = None) -> "CheckResult | None":
+    """§ 2.1 roster-size ceiling, in the same shape the trade validator uses
+    (`_validate_trade`'s "Roster size" block).
+
+    During the regular season (opening night through the last regular-season
+    game, `season_calendar.is_regular_season`) anything over 15 is a hard
+    block. The rest of the year ≤15 passes, 16-20 is a warning (legal, but
+    flagged to trim before the season), and only >20 is a hard block.
+    Signing-side validators used to hard-block at 15 unconditionally, which
+    meant a team at exactly 15 couldn't even make an offseason FA offer; then,
+    until 2026-09-30, they never blocked at 15 at all, because nothing knew
+    when the season started. `txn_date` is what tells them.
     """
+    if txn_date and season_calendar.is_regular_season(txn_date) and after > ROSTER_MAX:
+        return CheckResult(
+            check="roster_size", passed=False, level="error",
+            message=(f"{team} would carry {after} standard players, over the {ROSTER_MAX}-man "
+                     f"regular-season limit (§ 2.1) — release a player before {verb}."),
+        )
     if after > ROSTER_OFFSEASON_MAX:
         return CheckResult(
             check="roster_size", passed=False, level="error",
@@ -4614,7 +4626,8 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
 
     if details.contract.type != "two-way":
         r = _roster_size_check(
-            team, _count_standard_roster(team, excluding=details.player) + 1, "signing")
+            team, _count_standard_roster(team, excluding=details.player) + 1, "signing",
+            ctx.get("txn_date"))
         if r:
             checks.append(r)
     else:
@@ -5411,7 +5424,7 @@ def _validate_offer_sheet(details: OfferSheetDetails, ctx: dict) -> list[CheckRe
         # now rather than at decision time: a team shouldn't extend an offer it
         # has no room to honour, and the incumbent's choice can't create room.
         r = _roster_size_check(team, _count_standard_roster(team) + 1,
-                               "extending an offer sheet they'd have to honour")
+                               "extending an offer sheet they'd have to honour", ctx.get("txn_date"))
         if r:
             checks.append(r)
 
@@ -5462,7 +5475,8 @@ def _validate_offer_sheet_decision(details: OfferSheetDecisionDetails, ctx: dict
             checks.append(r)
 
     if details.outcome == "not_matched" and (contract.get("type") != "two-way"):
-        r = _roster_size_check(team, _count_standard_roster(team) + 1, "adding this player")
+        r = _roster_size_check(team, _count_standard_roster(team) + 1, "adding this player",
+                               ctx.get("txn_date"))
         if r:
             checks.append(r)
 
@@ -5769,6 +5783,191 @@ def _check_extension_trade_restriction(details: TradeIn, ctx: dict) -> list[Chec
             checks.append(CheckResult(
                 check=check_id, passed=True,
                 message=f"{slug}'s extension ({last}) is more than six months old — clear to trade under § 4.5.",
+            ))
+    return checks
+
+
+def _fa_signing_dates() -> dict[str, list[str]]:
+    """{slug: [date, ...]} of every free-agent signing on the ledger, for
+    § 4.5's newly-signed restriction. Settled 2026-09-30: every free-agent
+    signing starts the clock, including re-signing a team's own free agent
+    and either outcome of an offer sheet. Not a sign-and-trade (the player is
+    signed *to be* traded), not a draft-pick signing, not a waiver claim.
+
+    Built in the same pass as `_player_acquisition_index`'s cache would be,
+    but kept apart from it: that index's "sign" kind lumps draft-pick
+    signings and sign-and-trades in with free agency, which § 3.8 wants and
+    this rule doesn't."""
+    try:
+        st = TRANSACTIONS_FILE.stat()
+        key = (st.st_mtime, st.st_size)
+    except OSError:
+        key = None
+    if key is not None and _FA_SIGN_CACHE["key"] == key:
+        return _FA_SIGN_CACHE["dates"]
+    ledger = _load_transactions()
+    offers_by_id = {t["id"]: (t.get("details") or {})
+                    for t in ledger if t.get("type") == "offer_sheet" and t.get("id")}
+    dates: dict[str, list[str]] = {}
+    for txn in ledger:
+        d = txn.get("details") or {}
+        date = txn.get("date")
+        if not date:
+            continue
+        if txn.get("type") == "sign":
+            method = d.get("signing_method") or (d.get("contract") or {}).get("signing_method")
+            if method == "sign_and_trade" or not d.get("player"):
+                continue
+            dates.setdefault(d["player"], []).append(date)
+        elif txn.get("type") in ("offer_sheet", "offer_sheet_decision"):
+            src = d
+            if txn.get("type") == "offer_sheet_decision" and d.get("offer_id"):
+                src = {**(offers_by_id.get(d["offer_id"]) or {}), "outcome": d.get("outcome")}
+            if src.get("outcome") and src.get("player"):
+                dates.setdefault(src["player"], []).append(date)
+    for v in dates.values():
+        v.sort()
+    _FA_SIGN_CACHE.update({"key": key, "dates": dates})
+    return dates
+
+
+_FA_SIGN_CACHE: dict = {"key": None, "dates": {}}
+
+
+def _check_fa_signing_trade_restriction(details: TradeIn, ctx: dict) -> list[CheckResult]:
+    """§ 4.5: a player signed as a free agent can't be traded until both 90
+    days have passed since the signing and December 15 of that season has
+    passed. The window opens on the later of the two dates.
+
+    Only a player being traded out is checked, and only against his latest
+    free-agent signing. A player with no signing on the ledger passes: the
+    ledger has real backfill gaps for old deals, and those are long past both
+    dates anyway."""
+    checks: list[CheckResult] = []
+    trade_date = ctx.get("txn_date") or league_today_str()
+    signings = _fa_signing_dates()
+    seen = set()
+    for tr in details.transfers:
+        for asset in tr.assets:
+            slug = asset.slug if asset.type == "player" else None
+            if not slug or slug in seen:
+                continue
+            seen.add(slug)
+            prior = [d for d in signings.get(slug, []) if d <= trade_date]
+            if not prior:
+                continue
+            signed = prior[-1]
+            ninety = (datetime.strptime(signed, "%Y-%m-%d") + timedelta(days=90)).strftime("%Y-%m-%d")
+            # "The trade window opens on whichever date is later" — Dec 15
+            # itself, as in the NBA, and day 90 itself.
+            dec15 = f"{_season_start(_season_for_date(signed)) + 2000}-12-15"
+            eligible = max(ninety, dec15)
+            name = _display_name((ctx.get("bios") or {}).get(slug, {}).get("name", "")) or slug
+            if trade_date < eligible:
+                checks.append(CheckResult(
+                    check=f"fa_signing_trade_freeze_{slug}", passed=False, level="error",
+                    message=(f"{name} signed as a free agent on {signed} and can't be traded until "
+                             f"{eligible} (§ 4.5: the later of 90 days after signing, {ninety}, "
+                             f"and December 15, {dec15})."),
+                ))
+            else:
+                checks.append(CheckResult(
+                    check=f"fa_signing_trade_freeze_{slug}", passed=True,
+                    message=f"{name} signed on {signed}; tradeable since {eligible} (§ 4.5).",
+                ))
+    return checks
+
+
+_TRADE_NUMBER_RE = re.compile(r"^\s*Trade\s+(\d+)\b")
+
+
+def _trade_teams(details: dict) -> set[str]:
+    teams = {t.upper() for t in (details.get("teams") or []) if t}
+    for leg in details.get("transfers") or []:
+        for side in ("from_team", "to_team"):
+            if leg.get(side):
+                teams.add(leg[side].upper())
+    return teams
+
+
+def _trade_limit_counts(season: str, draft_days: set[str],
+                        deadline: Optional[str]) -> tuple[dict[str, list[str]], dict[str, int]]:
+    """Per team, the trades that count toward § 4.5's limit in `season`, and
+    how many trades each team has already made on deadline day.
+
+    Returns ({team: [label, ...]}, {team: deadline_day_trades}).
+
+    A trade is one league trade, not one ledger entry. The office sometimes
+    enters a correction as a second entry ("Trade 42 completion", "Trade 42
+    revision"), so entries sharing a "Trade N" number in the same league year
+    are one trade. An entry with no number counts on its own. Draft-day
+    trades don't count at all. On deadline day each team's first trade is
+    exempt, and any after it count."""
+    counted: dict[str, list[str]] = {}
+    deadline_day: dict[str, int] = {}
+    seen_numbers: set[tuple[str, str]] = set()
+    ledger = sorted((t for t in _load_transactions() if t.get("type") == "trade" and t.get("date")),
+                    key=lambda t: (t["date"], t.get("created_at") or ""))
+    for txn in ledger:
+        date = txn["date"]
+        if _season_for_date(date) != season or date in draft_days:
+            continue
+        m = _TRADE_NUMBER_RE.match(txn.get("description") or "")
+        label = f"Trade {m.group(1)}" if m else f"{date} trade"
+        for team in _trade_teams(txn.get("details") or {}):
+            if m:
+                if (team, m.group(1)) in seen_numbers:
+                    continue
+                seen_numbers.add((team, m.group(1)))
+            if date == deadline:
+                deadline_day[team] = deadline_day.get(team, 0) + 1
+                if deadline_day[team] == 1:
+                    continue
+            counted.setdefault(team, []).append(label)
+    return counted, deadline_day
+
+
+def _check_trade_limit(details: TradeIn, ctx: dict) -> list[CheckResult]:
+    """§ 4.5: each team may make at most TRADE_LIMIT (15) trades per league
+    year, effective 2026-27. Draft-day trades and one trade made on
+    trade-deadline day are exempt.
+
+    The league year is July 1 – June 30, the same boundary as everything else
+    (settled 2026-09-30), not the draft-to-draft run of the league's own trade
+    numbering. The draft days and the deadline come from
+    `season_calendar`; with neither set, every trade counts."""
+    trade_date = ctx.get("txn_date") or league_today_str()
+    season = _season_for_date(trade_date)
+    if _season_start(season) < _season_start(TRADE_LIMIT_FROM):
+        return []
+    teams = sorted(_trade_teams({"transfers": [t.model_dump() for t in details.transfers]}))
+    draft_days = set(season_calendar.draft_days(season))
+    deadline = season_calendar.trade_deadline(season)
+    if trade_date in draft_days:
+        return [CheckResult(check="trade_limit", passed=True,
+                            message=f"Draft-day trade — doesn't count toward the {TRADE_LIMIT}-trade limit (§ 4.5).")]
+    counted, deadline_day = _trade_limit_counts(season, draft_days, deadline)
+    checks: list[CheckResult] = []
+    for team in teams:
+        key = f"trade_limit_{team.lower()}"
+        n = len(counted.get(team, []))
+        if trade_date == deadline and not deadline_day.get(team):
+            checks.append(CheckResult(
+                check=key, passed=True,
+                message=(f"{team}'s first trade on deadline day — exempt from the {TRADE_LIMIT}-trade "
+                         f"limit (§ 4.5). {n} counted so far in {season}."),
+            ))
+        elif n >= TRADE_LIMIT:
+            checks.append(CheckResult(
+                check=key, passed=False, level="error",
+                message=(f"{team} has already made {n} trades in {season}, the § 4.5 limit of {TRADE_LIMIT}"
+                         + (f" (only a first deadline-day trade on {deadline} is still exempt)" if deadline else "")
+                         + f". Counted: {', '.join(counted[team])}."),
+            ))
+        else:
+            checks.append(CheckResult(
+                check=key, passed=True,
+                message=f"{team}: this would be trade {n + 1} of {TRADE_LIMIT} in {season} (§ 4.5).",
             ))
     return checks
 
@@ -6105,18 +6304,27 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
                 ))
 
     # ── Roster size (Article II) ───────────────────────────────────────────────
-    # In-season the standard-roster limit is ROSTER_MAX (15). In the offseason it
-    # rises to ROSTER_OFFSEASON_MAX (20); teams must trim back to 15 before the
-    # season. So: ≤15 passes, 16–20 is a warning (a net gain into that band is
-    # flagged; a balanced swap that leaves an already-over roster unchanged is a
-    # quiet note), and anything above 20 is a hard block.
+    # In-season the standard-roster limit is ROSTER_MAX (15), a hard block: the
+    # receiving team names its release in the trade itself (`releases`), which
+    # is what `roster_after` already counts. In the offseason it rises to
+    # ROSTER_OFFSEASON_MAX (20); teams must trim back to 15 before the season.
+    # So out of season: ≤15 passes, 16–20 is a warning (a net gain into that
+    # band is flagged; a balanced swap that leaves an already-over roster
+    # unchanged is a quiet note), and anything above 20 is a hard block.
+    in_season = season_calendar.is_regular_season(ctx.get("txn_date") or league_today_str())
     for team in roster_teams:
         before = _count_standard_roster(team)
         after = roster_after[team]
         key = f"roster_size_{team.lower()}"
         k = released_std[team]
         counting = f" (counting {k} release{'s' if k != 1 else ''})" if k else ""
-        if after > ROSTER_OFFSEASON_MAX:
+        if in_season and after > ROSTER_MAX:
+            checks.append(CheckResult(
+                check=key, passed=False, level="error",
+                message=(f"{team} would carry {after} standard players{counting}, over the "
+                         f"{ROSTER_MAX}-man regular-season limit (§ 2.1) — add a release to the trade."),
+            ))
+        elif after > ROSTER_OFFSEASON_MAX:
             checks.append(CheckResult(
                 check=key, passed=False, level="error",
                 message=(f"{team} would carry {after} standard players{counting}, over the "
@@ -6291,6 +6499,12 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
     # ── Extension trade freeze (§ 4.5 / § 6.2 rule 11) ──────────────────────────
     checks.extend(_check_extension_trade_restriction(details, ctx))
 
+    # ── Newly signed free agents: 90 days and December 15 (§ 4.5) ──────────────
+    checks.extend(_check_fa_signing_trade_restriction(details, ctx))
+
+    # ── Trade limit: 15 per team per league year (§ 4.5) ────────────────────────
+    checks.extend(_check_trade_limit(details, ctx))
+
     # ── Releases after the trade (§ 5.1) ───────────────────────────────────────
     checks.extend(_trade_release_checks(details, ctx["bios"], season))
 
@@ -6402,7 +6616,7 @@ def _validate_convert_twoway(details: ConvertTwoWayDetails, ctx: dict) -> list[C
 
     if team:
         r = _roster_size_check(team, _count_standard_roster(team) + 1,
-                               "converting this two-way contract")
+                               "converting this two-way contract", ctx.get("txn_date"))
         if r:
             checks.append(r)
 
@@ -6817,11 +7031,28 @@ def _validate_extension(details: ExtensionDetails, ctx: dict) -> list[CheckResul
             checks.append(CheckResult(check="extension_window", passed=True,
                                       message=f"Within the § 6.3 expiring-veteran window (by {deadline})."))
     else:
-        checks.append(CheckResult(
-            check="extension_window", passed=True, level="warning",
-            message="§ 6.3's rookie-scale/non-expiring-veteran windows key off the regular-season "
-                    "start date, which isn't tracked yet — not verified.",
-        ))
+        # Rookie-scale and non-expiring veteran: "any time up to the day before
+        # the regular season starts" — opening night off the schedule.
+        as_of = details.announced_date or ctx.get("txn_date") or league_today_str()
+        kind = "rookie-scale" if details.kind == "rookie_scale" else "non-expiring veteran"
+        deadline = season_calendar.day_before_opening_night(cur_season)
+        if not deadline:
+            checks.append(CheckResult(
+                check="extension_window", passed=True, level="warning",
+                message=(f"§ 6.3's {kind} window closes the day before opening night, and {cur_season} "
+                         "has no schedule on file — not verified."),
+            ))
+        elif as_of > deadline:
+            checks.append(CheckResult(
+                check="extension_window", passed=False, level="error",
+                message=(f"§ 6.3: {kind} extensions must be submitted by {deadline}, the day before "
+                         f"opening night; this is dated {as_of}."),
+            ))
+        else:
+            checks.append(CheckResult(
+                check="extension_window", passed=True,
+                message=f"Within the § 6.3 {kind} window (by {deadline}, the day before opening night).",
+            ))
 
     r = _check_trailing_hold(details.contract)
     if r:
@@ -7009,7 +7240,8 @@ def _validate_sign_pick(details: SignPickDetails, ctx: dict) -> list[CheckResult
     # `draft-rights` is roster-exempt (`_ROSTER_EXEMPT_TYPES`), so signing to a
     # standard deal is what puts the player on the 15. A two-way stays exempt.
     if team and details.contract.type != "two-way":
-        r = _roster_size_check(team, _count_standard_roster(team) + 1, "signing this pick")
+        r = _roster_size_check(team, _count_standard_roster(team) + 1, "signing this pick",
+                               ctx.get("txn_date"))
         if r:
             checks.append(r)
     elif details.contract.type == "two-way":
@@ -7937,7 +8169,7 @@ def _validation_ctx() -> dict:
         "team_state": load_team_state(),
         "cap_levels": json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {},
         "cur_season": _current_league_year(),
-        "txn_date":   datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "txn_date":   league_today_str(),
         "trade_exceptions": load_trade_exceptions(),
     }
 

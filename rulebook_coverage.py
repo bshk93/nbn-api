@@ -82,6 +82,7 @@ CHECK_SECTIONS: dict[str, tuple[str, ...]] = {
     "extension_team_match":       ("6.2",),
     "extension_trade_freeze_{}":  ("4.5", "6.2"),
     "extension_window":           ("6.3",),
+    "fa_signing_trade_freeze_{}": ("4.5",),
     "hard_cap_league_{}":         ("1.3",),
     "hard_cap_{}":                ("1.3", "1.4"),
     "max_salary":                 ("3.11",),
@@ -108,6 +109,8 @@ CHECK_SECTIONS: dict[str, tuple[str, ...]] = {
     "roster_minimum":             ("2.1", "2.1a"),
     "roster_size":                ("2.1",),
     "roster_size_{}":             ("2.1",),
+    "trade_limit":                ("4.5",),
+    "trade_limit_{}":             ("4.5",),
     # one check name covers all four absorption routes, so it is the only
     # enforcement § 4.2a and the BAE's trade half have.
     "salary_matching_{}":         ("3.5", "4.1a", "4.2", "4.2a", "4.3"),

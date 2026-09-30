@@ -43,6 +43,7 @@ from .players import _display_name
 from .constants import CAP_LEVELS_FILE, DATA_DIR, VALID_TEAMS, logger
 from .roster_picks import get_season_state, load_team_state
 from .storage import _current_league_year, _load_json, read_csv
+from . import season_calendar
 from .transactions import (_compute_team_salary, _compute_team_salary_ex_holds,
                             _is_standard_roster_slot, _real_empty_roster_charge)
 
@@ -128,6 +129,7 @@ def build_rows(on_date: Optional[str] = None, season: Optional[str] = None) -> l
     # The full record, not the three thresholds `_cap_levels_for` narrows to —
     # the Empty Roster Charge is priced off `min_salary_scale`.
     all_levels = _load_json(CAP_LEVELS_FILE, {})
+    in_season = season_calendar.is_regular_season(on_date)
 
     rows = []
     for team in sorted(VALID_TEAMS):
@@ -171,6 +173,10 @@ def build_rows(on_date: Optional[str] = None, season: Optional[str] = None) -> l
             "mle_type": ts.get("mle_type"),
             "bae_used": ts.get("bae_used", False),
             **counts,
+            # § 2.1's ceiling is 15 during the regular season and 20 outside it,
+            # so a 16-man roster is a breach on one row and a trim owed on the
+            # next. Stored per row so an old row keeps the reading of its day.
+            "in_season": in_season,
             "draft_rights": _draft_rights(team, bios),
         })
     return rows

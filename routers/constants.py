@@ -219,6 +219,8 @@ ROSTER_OFFSEASON_MAX = 20  # offseason ceiling; teams must trim to ROSTER_MAX be
 ROSTER_MIN = 14            # standard-roster minimum, year-round (§ 2.1) — trade legality is judged against this full floor (§ 2.1a)
 ROSTER_CHARGE_MIN = 12     # real, persisted Empty Roster Charge floor (§ 2.1a) — narrower than ROSTER_MIN; below 12 the charge counts as real guaranteed salary, not just a trade-legality mock
 TWO_WAY_MAX = 3            # G-League two-way slots, outside the standard limit (§ 2.2). No offseason band, unlike ROSTER_MAX/ROSTER_OFFSEASON_MAX — § 2.2 grants none
+TRADE_LIMIT = 15           # § 4.5: trades per team per league year (July 1 – June 30); draft-day trades and one deadline-day trade don't count
+TRADE_LIMIT_FROM = "26-27"  # § 4.5: "Effective 2026-27" — no limit is counted for earlier league years
 
 # § 4.2 tier boundary constants
 SALARY_MATCH_TIER1_CAP = 8_527_000
