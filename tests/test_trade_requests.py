@@ -76,6 +76,7 @@ tr._validation_ctx = lambda: {"bios": {}}
 tr._build_team_map = lambda: {}
 tr.load_picks = lambda: []
 tr._load_conveyance_store_for_shadow_check = lambda: None
+tr._trade_fact_sheet = lambda trade, ctx: {"season": "26-27", "teams": {"PHX": {"incoming_salary": 1}}}
 
 NOTIFICATIONS = []
 tr.inbox.notify_team = lambda team, text, link=None: NOTIFICATIONS.append(("team", team, text))
@@ -352,6 +353,8 @@ raises("a release that can't happen blocks finalize", 422,
 raises("even forced", 422, lambda: tr.finalize_trade_request(
     rel["id"], tr.FinalizeBody(force=True, override_reason="push it"), TRC_HEAD))
 stored = next(i for i in STORE["items"] if i["id"] == rel["id"])
+check("the page gets the fact sheet, so it can show each team's money",
+      tr._public_view(stored)["validation"]["fact_sheet"]["teams"]["PHX"]["incoming_salary"] == 1)
 check("the page is told why", tr._public_view(stored)["validation"]["release_problems"]
       == ["Ben Bravo has no real contract years left to release"])
 tr._validate_trade = lambda trade, ctx: [] if LEGAL["value"] else [FakeCheck(False)]

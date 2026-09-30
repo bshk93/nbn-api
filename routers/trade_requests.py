@@ -29,7 +29,7 @@ from .transactions import (
     TradeValidateInput, TradeIn,
     _validation_ctx, _require_trade_validatable, _validate_trade,
     _trade_leg_ownership_problems, _build_team_map, load_picks,
-    _load_conveyance_store_for_shadow_check, apply_trade,
+    _load_conveyance_store_for_shadow_check, apply_trade, _trade_fact_sheet,
 )
 
 router = APIRouter()
@@ -115,6 +115,10 @@ def _live_check(item: dict) -> dict:
         "checks": [c.model_dump() for c in checks],
         "ownership_problems": ownership_problems,
         "release_problems": release_problems,
+        # Each party's salary and roster before/after, from the same helpers
+        # the checks used, so the dashboard shows the money without doing any
+        # cap math of its own.
+        "fact_sheet": _trade_fact_sheet(trade, ctx),
     }
 
 
