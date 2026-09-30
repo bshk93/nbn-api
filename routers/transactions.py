@@ -25,6 +25,7 @@ from .storage import (
 )
 from .auth import require_role, get_token_info, is_team_owner
 from .discord_notify import notify_transaction, _player_name
+from .roster_move_notify import announce as announce_roster_move
 from . import inbox
 from . import season_calendar
 from .league_time import league_today_str
@@ -7964,6 +7965,10 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
     # append are already committed, so a Discord problem must not delay or fail
     # them. Historical backfills never reach here (they return far above).
     notify_transaction(txn, forced_checks, relay_to_roster_log=body.relay_to_roster_log)
+    if body.type == "void_player":
+        # #waivers, like a release — it is relayed into #roster-log, which is
+        # how the void reaches the office's log (roster_move_notify).
+        announce_roster_move(txn)
     if body.type == "offer_sheet":
         # No submitted_by/created_by to address the way a self-serve PDC offer
         # has — this is entered by an office member on the team's behalf, so
@@ -8576,6 +8581,17 @@ class SelfRenounceIn(BaseModel):
     description: str = ""
 
 
+def _notify_self_serve(txn: dict) -> None:
+    """Discord for a move an owner made on the site, which nobody else will
+    post (docs/discord-integrations.md § "Owner moves on the site"). The line
+    in #fa-news is the league's announcement; the embed is relayed into
+    #roster-log, since a bot post in #fa-news is not. A release doesn't come
+    through here — `notify_waived` announces it in #waivers, which is relayed
+    already, so its embed stays unrelayed."""
+    notify_transaction(txn, relay_to_roster_log=True)
+    announce_roster_move(txn)
+
+
 @router.post("/api/self/renounce")
 def self_renounce(body: SelfRenounceIn, info: dict = Depends(get_token_info)):
     """Owner-initiated renounce from their own team's roster page (§ 3.10).
@@ -8647,7 +8663,7 @@ def self_renounce(body: SelfRenounceIn, info: dict = Depends(get_token_info)):
             },
         }
         _append_transaction(txn)
-    notify_transaction(txn)
+    _notify_self_serve(txn)
     return {"ok": True, "transaction": txn, "checks": [c.model_dump() for c in checks]}
 
 
@@ -8740,7 +8756,7 @@ def self_option(body: SelfOptionIn, info: dict = Depends(get_token_info)):
             "details": {**details.model_dump(), "team": applied_team, "_source": "owner_self_serve"},
         }
         _append_transaction(txn)
-    notify_transaction(txn)
+    _notify_self_serve(txn)
     return {"ok": True, "transaction": txn, "checks": [c.model_dump() for c in checks]}
 
 
@@ -9001,7 +9017,7 @@ def self_convert_twoway(body: SelfConvertTwoWayIn, info: dict = Depends(get_toke
             "details": {**details.model_dump(), "team": applied_team, "_source": "owner_self_serve"},
         }
         _append_transaction(txn)
-    notify_transaction(txn)
+    _notify_self_serve(txn)
     return {"ok": True, "transaction": txn, "checks": [c.model_dump() for c in checks]}
 
 
@@ -9137,7 +9153,7 @@ def self_sign_pick(body: SelfSignPickIn, info: dict = Depends(get_token_info)):
             "details": {**details.model_dump(), "team": applied_team, "_source": "owner_self_serve"},
         }
         _append_transaction(txn)
-    notify_transaction(txn)
+    _notify_self_serve(txn)
     return {"ok": True, "transaction": txn, "checks": [c.model_dump() for c in checks]}
 
 
@@ -9213,7 +9229,7 @@ def self_stash(body: SelfStashIn, info: dict = Depends(get_token_info)):
             "details": {**details.model_dump(), "team": applied_team, "_source": "owner_self_serve"},
         }
         _append_transaction(txn)
-    notify_transaction(txn)
+    _notify_self_serve(txn)
     return {"ok": True, "transaction": txn, "checks": [c.model_dump() for c in checks]}
 
 

@@ -31,7 +31,7 @@ from fastapi import APIRouter, Request, Response
 from nacl.exceptions import BadSignatureError
 from nacl.signing import VerifyKey
 
-from .constants import DERIVED_DIR, DATA_DIR, ATTRIBUTES_FILE, PLAYER_BIOS_FILE, OVR_FILE  # NBS_DATA_DIR; holds raw playoff box scores
+from .constants import TEAM_NAMES, DERIVED_DIR, DATA_DIR, ATTRIBUTES_FILE, PLAYER_BIOS_FILE, OVR_FILE  # NBS_DATA_DIR; holds raw playoff box scores
 from .storage import _load_json, _current_league_year
 from .auth import load_members, save_members
 from .tips import perform_tip, TipError
@@ -85,18 +85,6 @@ NBN_BLUE = 0x1D63E6  # fallback embed accent
 GREEN    = 0x2ECC71
 RED      = 0xE74C3C
 
-TEAM_NAMES = {
-    "ATL": "Atlanta Hawks", "BKN": "Brooklyn Nets", "BOS": "Boston Celtics",
-    "CHA": "Charlotte Hornets", "CHI": "Chicago Bulls", "CLE": "Cleveland Cavaliers",
-    "DAL": "Dallas Mavericks", "DEN": "Denver Nuggets", "DET": "Detroit Pistons",
-    "GSW": "Golden State Warriors", "HOU": "Houston Rockets", "IND": "Indiana Pacers",
-    "LAC": "LA Clippers", "LAL": "Los Angeles Lakers", "MEM": "Memphis Grizzlies",
-    "MIA": "Miami Heat", "MIL": "Milwaukee Bucks", "MIN": "Minnesota Timberwolves",
-    "NOP": "New Orleans Pelicans", "NYK": "New York Knicks", "OKC": "Oklahoma City Thunder",
-    "ORL": "Orlando Magic", "PHI": "Philadelphia 76ers", "PHX": "Phoenix Suns",
-    "POR": "Portland Trail Blazers", "SAC": "Sacramento Kings", "SAS": "San Antonio Spurs",
-    "TOR": "Toronto Raptors", "UTA": "Utah Jazz", "WAS": "Washington Wizards",
-}
 
 # Team primary colors — used as the embed accent for the player's current team.
 TEAM_COLORS = {
