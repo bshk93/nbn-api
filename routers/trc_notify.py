@@ -28,6 +28,11 @@ from .players import load_player_bios
 logger = logging.getLogger(__name__)
 
 DISCORD_TRC_CHANNEL = os.environ.get("DISCORD_TRC_CHANNEL", "").strip()
+# Optional second channel that gets a copy of every TRC alert, buttons and all.
+# Added 2026-10-01 when the alerts moved to #trade-vote, so the commissioner,
+# who isn't in that channel, can still see them in #trc-alerts. Temporary:
+# unset it to stop the copies.
+DISCORD_TRC_MIRROR_CHANNEL = os.environ.get("DISCORD_TRC_MIRROR_CHANNEL", "").strip()
 DISCORD_TRADES_CHANNEL = os.environ.get("DISCORD_TRADES_CHANNEL", "").strip()
 
 # Trade requests are low-volume (a handful a week). This only stops a runaway
@@ -52,12 +57,16 @@ def vote_buttons(request_id: str) -> list[dict]:
 
 
 def _alert(embed_fn) -> bool:
-    try:
-        return transport.send(DISCORD_TRC_CHANNEL, embed_fn,
-                              max_burst=TRC_MAX_BURST, burst_window=TRC_BURST_WINDOW)
-    except Exception as exc:
-        logger.warning("TRC alert failed: %s", exc)
-        return False
+    sent = False
+    for channel in (DISCORD_TRC_CHANNEL, DISCORD_TRC_MIRROR_CHANNEL):
+        if not channel:
+            continue
+        try:
+            sent = transport.send(channel, embed_fn,
+                                  max_burst=TRC_MAX_BURST, burst_window=TRC_BURST_WINDOW) or sent
+        except Exception as exc:
+            logger.warning("TRC alert to %s failed: %s", channel, exc)
+    return sent
 
 
 def _truncate(text: str, limit: int) -> str:

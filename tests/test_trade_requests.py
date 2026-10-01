@@ -376,6 +376,15 @@ check("a pick reads the league's way", tr.trc_notify._trade_asset(
     {"type": "pick", "year": 2027, "round": 2, "orig": "ATL"}, {}) == "ATL 2027 2nd")
 
 n = len(ALERTS)
+tr.trc_notify.DISCORD_TRC_MIRROR_CHANNEL = "mirror-chan"
+mirrored = tr.create_trade_request(body_2team(), PHX_GM)
+tr.consent_trade_request(mirrored["id"], PHX_OWNER)
+tr.consent_trade_request(mirrored["id"], BOS_OWNER)
+check("a mirror channel gets the same alert",
+      [c for c, _ in ALERTS[n:]] == ["trc-chan", "mirror-chan"] and ALERTS[n][1] == ALERTS[n + 1][1])
+tr.trc_notify.DISCORD_TRC_MIRROR_CHANNEL = ""
+
+n = len(ALERTS)
 tr.trc_notify.DISCORD_TRC_CHANNEL = ""
 quiet = tr.create_trade_request(body_2team(), PHX_GM)
 tr.consent_trade_request(quiet["id"], PHX_OWNER)
