@@ -101,6 +101,15 @@ CHECK_SECTIONS: dict[str, tuple[str, ...]] = {
     # cites § 3.12 only to name the minimum-scale exemption; the rule is § 3.9,
     # and § 3.13 is where the 8% Full Bird ceiling lives.
     "raise_limit":                ("3.9", "3.13"),
+    # § 3.1's UFA/RFA test and the qualifying offer that decides it.
+    "qo_player":                  ("3.1",),
+    "qo_rfa_eligible":            ("3.1",),
+    "qo_deadline":                ("3.1",),
+    "qo_undecided":               ("3.1",),
+    "qo_amount":                  ("3.1",),
+    "qo_withdrawable":            ("3.1",),
+    "qo_withdraw_window":         ("3.1",),
+    "qo_acceptable":              ("3.1",),
     "release_eligible":           ("5.1",),
     "trade_release_{}":           ("5.1",),
     "renounce_eligible":          ("3.10",),
@@ -164,7 +173,9 @@ SECTION_REVIEW: dict[str, str] = {
             "service, so eligibility is confirmed by hand; the 50-game limit is "
             "not tracked",
     "3.1":  "eligibility and the declared method are checked, but the method "
-            "itself is self-declared and never verified against tenure",
+            "itself is self-declared and never verified against tenure; a "
+            "qualifying offer's under-4-years test falls back to a human for "
+            "an undrafted player, and the NBA's starter criteria are not modeled",
     "3.6":  "availability is checked when the Room Exception is the declared "
             "method; whether the team actually used room to get there is not",
     "3.7":  "no DPE exception type exists in the system at all",

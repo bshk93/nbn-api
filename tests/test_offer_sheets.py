@@ -201,11 +201,15 @@ print("\nRFA eligibility — must match what a signing can actually do")
 from routers.transactions import _rfa_eligibility  # noqa: E402
 
 
-def rfa(holds):
-    return _rfa_eligibility("p", {"p": {"cap_holds": holds}}, SEASON)
+def rfa(holds, qo_status="extended"):
+    qos = {s: {"status": qo_status} for s, t in holds.items() if t == "RFA"} if qo_status else {}
+    return _rfa_eligibility("p", {"p": {"cap_holds": holds, "qualifying_offers": qos}}, SEASON)
 
 
 check("a current-season RFA hold is eligible", rfa({SEASON: "RFA"})[0])
+# § 3.1: the tag is eligibility, the qualifying offer is the decision.
+check("…but not once the QO lapsed without being extended", not rfa({SEASON: "RFA"}, None)[0])
+check("…or was withdrawn", not rfa({SEASON: "RFA"}, "withdrawn")[0])
 check("a UFA is not — no match right to sell", not rfa({SEASON: "UFA"})[0])
 check("...and says which hold it found", "not RFA" in rfa({SEASON: "UFA"})[1], rfa({SEASON: "UFA"})[1])
 check("a player under contract now, RFA later, is NOT eligible yet",

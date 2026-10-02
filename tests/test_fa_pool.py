@@ -37,12 +37,13 @@ def main():
             "cap_holds": {"26-27": "UFA"}, "salaries": {"26-27": "$18,000,000"},
         },
         "rfa-2nd-round": {
-            "type": "player", "draft_round": 2, "draft_year": 2024,
+            "type": "player", "draft_round": 2, "draft_year": 2024, "qualifying_offers": {"26-27": {"status": "extended"}},
             # 26-27 is the hold; the QO prices off 25-26, the year actually played.
             "cap_holds": {"26-27": "RFA"},
             "salaries": {"25-26": "$2,000,000", "26-27": "$2,400,000"},
         },
         "rfa-hold-above-salary": {
+            "qualifying_offers": {"26-27": {"status": "extended"}},
             # Hardy's shape: a hold three times the last salary. The QO must
             # come from the $1.6M salary, not the $4.8M hold.
             "type": "player", "draft_round": 2, "draft_year": 2024,
@@ -50,8 +51,17 @@ def main():
             "salaries": {"25-26": "$1,600,000", "26-27": "$4,800,000"},
         },
         "rfa-1st-round": {
-            "type": "player", "draft_round": 1, "draft_year": 2023,
-            "cap_holds": {"26-27": "RFA"}, "salaries": {"26-27": "$6,000,000"},
+            # Jaden Hardy's shape: finishing a 2022 rookie deal at pick 21.
+            "type": "player", "draft_round": 1, "draft_year": 2022, "draft_pick": 21,
+            "qualifying_offers": {"26-27": {"status": "extended"}},
+            "cap_holds": {"26-27": "RFA"},
+            "salaries": {"25-26": "$4,101,338", "26-27": "$12,304,014"},
+        },
+        "rfa-lapsed": {
+            # Tagged RFA, but nobody extended a QO by July 1.
+            "type": "player", "draft_round": 2, "draft_year": 2024,
+            "cap_holds": {"26-27": "RFA"},
+            "salaries": {"25-26": "$2,000,000", "26-27": "$2,400,000"},
         },
         "team-opt-guy": {
             "type": "player",
@@ -102,9 +112,14 @@ def main():
     check("rfa-hold-above-salary: QO prices off the salary, not the hold",
           pool["rfa-hold-above-salary"]["qo_amount"] == 2500000)  # min 2.5M > 125% of 1.6M
 
-    check("rfa-1st-round: rfa true but qo_amount None (rookie scale unsourced)",
+    check("rfa-1st-round: rookie-scale QO, 4th-year salary + the slot's raise",
           pool["rfa-1st-round"]["rfa"] is True
-          and pool["rfa-1st-round"]["qo_amount"] is None)
+          and pool["rfa-1st-round"]["qo_amount"] == round(4_101_338 * 1.441))
+
+    check("rfa-lapsed: an RFA tag with no QO by the deadline is not an RFA",
+          pool["rfa-lapsed"]["rfa"] is False
+          and pool["rfa-lapsed"]["qo_amount"] is None
+          and pool["rfa-lapsed"]["qo_status"] is None)
 
     check("team-opt-guy: hold_type TEAM_OPT, not rfa",
           pool["team-opt-guy"]["hold_type"] == "TEAM_OPT"

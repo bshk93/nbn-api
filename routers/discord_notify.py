@@ -56,6 +56,7 @@ TYPE_LABELS = {
     "convert_twoway": "Two-Way Conversion", "void_player": "Void Player",
     "stash": "Stash",
     "set_hard_cap_level": "Hard Cap", "extension": "Extension",
+    "qualifying_offer": "Qualifying Offer", "accept_qo": "Qualifying Offer Accepted",
 }
 
 # Mirrors the badge colours on /transactions so the channel reads the same way
@@ -64,6 +65,7 @@ TYPE_COLORS = {
     "sign": 0x22C55E, "pick": 0x60A5FA, "sign_pick": 0x60A5FA,
     "option": 0xFB923C, "guarantee": 0x2DD4BF, "release": 0xEF4444,
     "renounce": 0xFCD34D, "rescind_renounce": 0xFCD34D, "trade": 0xC084FC,
+    "qualifying_offer": 0xA5B4FC, "accept_qo": 0x22C55E,
     "convert_twoway": 0xA8A29E, "void_player": 0x9CA3AF, "stash": 0x60A5FA,
     "set_hard_cap_level": 0xD4AF37, "offer_sheet": 0xA5B4FC,
     "offer_sheet_decision": 0xA5B4FC,
@@ -277,6 +279,19 @@ def _describe(txn: dict, bios: dict) -> str:
 
     if t == "renounce":
         return "Renounced — free agent, no dead cap"
+
+    if t == "qualifying_offer":
+        season = d.get("season") or ""
+        if d.get("action") == "withdraw":
+            return f"{season} QO withdrawn — UFA, cap hold and Bird Rights kept"
+        amt = d.get("amount")
+        return f"{season} QO extended — RFA" + (f" · ${amt / 1e6:.2f}M" if amt else "")
+
+    if t == "accept_qo":
+        if d.get("two_way"):
+            return "Signed his qualifying offer — 1 year, two-way"
+        amt = d.get("amount")
+        return "Signed his qualifying offer — 1 year" + (f", ${amt / 1e6:.2f}M" if amt else "")
 
     if t == "rescind_renounce":
         return f"Restored to {d.get('team', '')} — cap hold and contract terms reinstated"

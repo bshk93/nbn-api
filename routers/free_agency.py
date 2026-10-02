@@ -36,13 +36,14 @@ from .players import load_player_bios, _build_team_map
 from .proposals import _member_current_team
 from .storage import (_current_league_year, _load_json, _parse_dollar,
                       _save_json, _season_shift, log_write)
-from .transactions import (ContractIn, OfferSheetDetails, SignDetails,
+from .transactions import (AcceptQualifyingOfferDetails, ContractIn, OfferSheetDetails, SignDetails,
                            _compute_team_salary, _count_standard_roster,
                            _min_salary_for, _real_empty_roster_charge,
                            _require_validatable, _rfa_eligibility,
+                           _qo_amount, _qo_record, _qo_status,
                            _signee_existing_hold, _signing_fact_sheet,
                            _validate_sign, _validation_ctx, apply_offer_sheet,
-                           apply_sign, apply_with_warning_confirm)
+                           apply_accept_qo, apply_sign, apply_with_warning_confirm)
 
 router = APIRouter()
 
@@ -64,29 +65,6 @@ def _latest_salary(salaries: dict) -> int:
         return 0
     latest_yr = max(salaries.keys())
     return _parse_dollar(salaries[latest_yr])
-
-
-def _qo_amount(bio: dict, class_year: str, prior_salary: int, cap_levels: dict) -> Optional[int]:
-    """§ 3.9 qualifying offer amount — proposed formula, pending BOD confirmation.
-
-    First-round picks still on the rookie scale price off the Year 4 team
-    option (§ 7.1) — that branch returns None rather than guess, but not
-    because the data is missing: `/api/rookie-scale` has been populated for
-    2025 and 2026 since `build/load_rookie_scale.py` shipped (docstring
-    corrected 2026-08-19; it previously cited that as the reason and was
-    stale). The real blocker is BACKLOG [P1]: the § 3.9 formula itself is an
-    unratified synthesis pending BOD confirmation, so wiring the now-available
-    rookie-scale figure in here would bake an unratified number into a QO
-    amount before the formula is settled. Everyone else (2nd round, UDFA, or
-    any other player under 4 years of experience) gets the greater of the
-    applicable minimum salary scale figure (§ 3.12) or 125% of prior salary.
-    """
-    if bio.get("draft_round") == 1:
-        return None
-    min_amt = _min_salary_for(bio, class_year, cap_levels)
-    raise_amt = round(prior_salary * 1.25) if prior_salary else None
-    candidates = [v for v in (min_amt, raise_amt) if v]
-    return max(candidates) if candidates else None
 
 
 def _is_current_fa(entry: dict, season: str) -> bool:
@@ -153,11 +131,14 @@ def _fa_pool(bios: dict, team_map: dict, season: str, cap_levels: Optional[dict]
             years_seen.add(yr)
             hold_amount = _parse_dollar(salaries.get(yr))
             prior_salary = _parse_dollar(salaries.get(_season_shift(yr, -1)) or "")
-            rfa, _ = _rfa_eligibility(slug, bios, yr)
-            qo = _qo_amount(bio, yr, prior_salary, cap_levels) if rfa else None
+            rfa, _ = _rfa_eligibility(slug, bios, yr, as_of=season)
+            # A recorded QO is the real figure; an undecided one is the formula's.
+            qo_status = _qo_status(bio, yr, season) if rfa else None
+            recorded = _qo_record(bio, yr).get("amount") if qo_status == "extended" else None
+            qo = (recorded if recorded is not None else _qo_amount(bio, yr, cap_levels)) if rfa else None
             pool[slug] = {
                 "class_year": yr, "hold_type": hold_type, "hold_amount": hold_amount,
-                "prior_salary": prior_salary, "rfa": rfa, "qo_amount": qo,
+                "prior_salary": prior_salary, "rfa": rfa, "qo_amount": qo, "qo_status": qo_status,
             }
             continue
 
@@ -169,12 +150,12 @@ def _fa_pool(bios: dict, team_map: dict, season: str, cap_levels: Optional[dict]
         pool[slug] = {
             "class_year": target_year, "hold_type": "RENOUNCED", "hold_amount": 0,
             "prior_salary": _latest_salary(bios[slug].get("salaries") or {}),
-            "rfa": False, "qo_amount": None,
+            "rfa": False, "qo_amount": None, "qo_status": None,
         }
     for slug in unsigned:
         pool[slug] = {
             "class_year": target_year, "hold_type": "UNSIGNED", "hold_amount": 0,
-            "prior_salary": 0, "rfa": False, "qo_amount": None,
+            "prior_salary": 0, "rfa": False, "qo_amount": None, "qo_status": None,
         }
 
     # Stamped here so no caller has to re-derive it. Every picker and menu that
@@ -1992,12 +1973,9 @@ def _ballot_options(slug: str, live: list[dict], pool: dict) -> list[dict]:
     if pool.get(slug, {}).get("rfa"):
         qo = pool[slug].get("qo_amount")
         opts.append({"key": QO, "kind": "qo", "amount": qo,
-                     # The § 3.9 formula is marked "proposed, pending BOD
-                     # confirmation" in the rulebook itself, so the figure is
-                     # labelled rather than presented as settled. The line shows
-                     # either way — an RFA's incumbent keeping him on the QO is a
-                     # real outcome whether or not we can price it.
-                     "estimated": qo is not None})
+                     # Real once the team has extended it (§ 3.1); before that
+                     # it's the formula's figure for a QO not yet made.
+                     "estimated": pool[slug].get("qo_status") != "extended"})
     opts.append({"key": NO_SIGNING, "kind": "no_signing"})
     return opts
 
@@ -2322,21 +2300,13 @@ def declare_winner(slug: str, body: DeclareWinnerIn, info: dict = Depends(requir
         if body.key == NO_SIGNING:
             pass
         elif body.key == QO:
-            # Deliberately NOT auto-executed. BACKLOG.md's [P1] "Qualifying
-            # Offers don't exist in the system at all" is explicit: "get BOD
-            # to ratify or amend the § 3.9 formula first, then add the
-            # transaction type and the derived amount. Doing it the other way
-            # round bakes an unratified number into the ledger." qo_amount
-            # here comes from exactly that unratified formula — writing a
-            # real sign off it is the thing the backlog item says not to do
-            # yet, however tidy it would be to close this branch out along
-            # with the other two. Leave this on the manual /transactions path
-            # until the formula is ratified and a real qualifying_offer
-            # transaction type exists to record it against.
-            raise HTTPException(
-                422, "QO retention isn't auto-executed yet — the § 3.9 formula is still "
-                     "unratified (BACKLOG.md [P1]) and there's no transaction type to record "
-                     "it against. Enter this signing by hand on /transactions.")
+            # The player takes his qualifying offer (§ 3.1): a one-year deal at
+            # the recorded QO amount with his own team. Refused, like any
+            # error, if the QO was never extended or was withdrawn.
+            txn = apply_with_warning_confirm(
+                apply_accept_qo, AcceptQualifyingOfferDetails(player=slug), txn_date, info,
+                description=f"FA round {round_id} — the qualifying offer won the ballot",
+                confirm_warnings=body.confirm_warnings)
         else:
             offer = next(o for o in round_offers if o["id"] == body.key)
             # The SignDetails-shaped payload lives under offer["offer"] (per

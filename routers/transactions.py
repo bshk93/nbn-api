@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from .constants import (
     DATA_DIR, CAP_LEVELS_FILE, TRANSACTIONS_FILE, VALID_TEAMS, ROOM_ZONE_BASELINE_FILE,
-    ROOKIE_SCALE_FILE, ATTRIBUTES_FILE,
+    ROOKIE_SCALE_FILE, ATTRIBUTES_FILE, FA_STATE_FILE,
     _txn_lock, _deadcap_lock, _state_lock, _picks_lock, _trade_exc_lock,
     ROSTER_MAX, ROSTER_OFFSEASON_MAX, ROSTER_MIN, ROSTER_CHARGE_MIN, TWO_WAY_MAX,
     TRADE_LIMIT, TRADE_LIMIT_FROM,
@@ -421,6 +421,22 @@ class RenounceDetails(BaseModel):
 
 class RescindRenounceDetails(BaseModel):
     txn_id: str   # the renounce being undone; its stored snapshot is the restore source
+
+
+class QualifyingOfferDetails(BaseModel):
+    """§ 3.1: the team extends or withdraws a qualifying offer. `season` is the
+    hold season and is derived when omitted. `amount` overrides the formula —
+    office only, for a player the formula can't price."""
+    player: str
+    action: Literal["extend", "withdraw"] = "extend"
+    season: Optional[str] = None
+    amount: Optional[int] = None
+
+
+class AcceptQualifyingOfferDetails(BaseModel):
+    """§ 3.1: the player signs his qualifying offer — a one-year deal at the QO
+    amount with his own team. Decided by the PDC ballot, not the team."""
+    player: str
 
 
 class OfferSheetDetails(BaseModel):
@@ -2678,7 +2694,8 @@ def _max_salary(bio: dict, season: str, cap_levels: dict) -> Optional[int]:
 _BIRD_HOLD_PCT = {"EQVFA": 1.3, "Non-QVFA": 1.2}
 
 
-def _rfa_eligibility(player: str, bios: dict, cur_season: str) -> tuple[bool, str]:
+def _rfa_eligibility(player: str, bios: dict, cur_season: str,
+                     as_of: Optional[str] = None) -> tuple[bool, str]:
     """Whether `player` is a restricted free agent who can receive an offer sheet
     (§ 3.15), as ``(ok, reason)``.
 
@@ -2700,7 +2717,19 @@ def _rfa_eligibility(player: str, bios: dict, cur_season: str) -> tuple[bool, st
         return False, "no cap hold on file"
     current = holds.get(cur_season)
     if current == "RFA":
-        return True, ""
+        # The tag only makes him RFA-*eligible*; the qualifying offer is what
+        # makes him an RFA (§ 3.1). `as_of` is today's league year when the
+        # caller is asking about a later class (the FA pool), where an
+        # undecided QO is still pending rather than lapsed.
+        status = _qo_status(bios[player], cur_season, as_of or cur_season)
+        if status in ("extended", "pending"):
+            return True, ""
+        if status == "withdrawn":
+            return False, f"{cur_season} qualifying offer was withdrawn — he is a UFA (§ 3.1)"
+        if status == "accepted":
+            return False, f"he accepted his {cur_season} qualifying offer"
+        return False, (f"no qualifying offer was extended for {cur_season} by the July 1 "
+                       f"deadline — he is a UFA (§ 3.1)")
     if current:
         return False, f"cap hold for {cur_season} is {current}, not RFA"
     upcoming = sorted(y for y, t in holds.items() if t == "RFA" and y > cur_season)
@@ -2708,6 +2737,163 @@ def _rfa_eligibility(player: str, bios: dict, cur_season: str) -> tuple[bool, st
         return False, (f"still under contract for {cur_season}; becomes an RFA in "
                        f"{upcoming[0]}, so an offer sheet has to wait for that league year")
     return False, f"no cap hold for {cur_season}"
+
+
+# ── § 3.1 qualifying offers ───────────────────────────────────────────────────
+#
+# A contract's trailing `RFA` tag only says the player *can* be made a
+# restricted free agent. Whether he is one is the team's decision, recorded in
+# bio["qualifying_offers"][season] (season = the hold season):
+#
+#   {"status": "extended" | "withdrawn" | "accepted" | "lapsed",
+#    "amount": int | None, "two_way": bool, "date": "YYYY-MM-DD",
+#    "txn_id": str | None, "base_hold": int (only if the QO raised the hold)}
+#
+# A tag with no decision is "pending" until the hold season's league year
+# begins — July 1, the deadline — and "lapsed" from then on, whether or not the
+# daily sweep has written that down yet. Reads derive it, so nothing depends
+# on the sweep having run. docs/qualifying-offers.md.
+
+# NBA rookie-scale QO: the raise over the 4th-year salary, by draft slot (2017
+# CBA Exhibit B). The 2023 CBA added 10 points from the 2023 draft class on.
+_ROOKIE_QO_RAISE = (
+    0.300, 0.305, 0.312, 0.319, 0.326, 0.334, 0.341, 0.348, 0.355, 0.362,
+    0.369, 0.376, 0.383, 0.391, 0.398, 0.405, 0.412, 0.419, 0.426, 0.433,
+    0.441, 0.448, 0.455, 0.462, 0.469, 0.476, 0.483, 0.490, 0.500, 0.500,
+)
+_ROOKIE_QO_BUMP_FROM_CLASS = 2023
+_ROOKIE_QO_BUMP = 0.10
+
+
+def _finishes_rookie_scale(bio: dict, hold_season: str) -> bool:
+    """§ 3.1's carve-out: a first-round pick whose four-year rookie-scale deal
+    (§ 7.1) ends right before `hold_season`. He is RFA-eligible even though he
+    has four years of experience by then."""
+    dy, pick = bio.get("draft_year"), bio.get("draft_pick")
+    if bio.get("draft_round") != 1 or not dy or not pick or not 1 <= int(pick) <= 30:
+        return False
+    return _season_start(hold_season) + 2000 == int(dy) + 4
+
+
+def _last_contract_ns(bio: dict):
+    """The contract a hold follows, shaped for `_contract_years_exp`, or None
+    when it declared no experience (callers fall back to the draft year)."""
+    last = (bio.get("contracts") or [None])[-1] or {}
+    if last.get("years_experience") is None:
+        return None
+    return SimpleNamespace(years_experience=last["years_experience"],
+                           salaries=last.get("salaries") or {},
+                           cap_holds=last.get("cap_holds") or {})
+
+
+def _qo_years_exp(bio: dict, hold_season: str) -> Optional[int]:
+    """Years of NBA experience entering `hold_season` (§ 3.1): the experience
+    declared on the contract, climbing a row a year, else the draft-year proxy.
+    None when neither exists — an undrafted player is judged by hand."""
+    declared = _contract_years_exp(_last_contract_ns(bio), hold_season)
+    if declared is not None:
+        return declared
+    dy = bio.get("draft_year")
+    return _season_start(hold_season) + 2000 - int(dy) if dy else None
+
+
+def _qo_amount(bio: dict, hold_season: str, cap_levels: dict) -> Optional[int]:
+    """§ 3.1 qualifying offer amount, or None when it can't be priced.
+
+    - Two-way player: a one-year two-way contract, so no cap figure (0).
+    - First-round pick finishing his rookie scale: the 4th-year salary plus the
+      slot's raise (`_ROOKIE_QO_RAISE`).
+    - Everyone else: the greater of the player's minimum (§ 3.12) and 125% of
+      his prior salary.
+
+    The prior salary is the season before the hold — never the hold season's
+    own `salaries` entry, which *is* the hold (that mistake priced Jaden
+    Hardy's QO off his $12.3M hold instead of his $4.1M salary)."""
+    if bio.get("type") == "two-way":
+        return 0
+    prior = _parse_dollar((bio.get("salaries") or {}).get(_season_shift(hold_season, -1)) or "")
+    if _finishes_rookie_scale(bio, hold_season):
+        if not prior:
+            return None
+        pct = _ROOKIE_QO_RAISE[int(bio["draft_pick"]) - 1]
+        if int(bio["draft_year"]) >= _ROOKIE_QO_BUMP_FROM_CLASS:
+            pct += _ROOKIE_QO_BUMP
+        return round(prior * (1 + pct))
+    min_amt = _min_salary_for(bio, hold_season, cap_levels, _last_contract_ns(bio))
+    raise_amt = round(prior * 1.25) if prior else None
+    candidates = [v for v in (min_amt, raise_amt) if v]
+    return max(candidates) if candidates else None
+
+
+def _qo_record(bio: dict, season: str) -> dict:
+    return (bio.get("qualifying_offers") or {}).get(season) or {}
+
+
+def _qo_status(bio: dict, season: str, as_of: str) -> Optional[str]:
+    """The QO decision for `season`'s hold, as of league year `as_of`:
+    a recorded status, or "pending" (RFA-tagged, deadline still ahead), or
+    "lapsed" (RFA-tagged, deadline passed, nothing extended). None when the
+    hold isn't RFA-eligible at all."""
+    status = _qo_record(bio, season).get("status")
+    if status:
+        return status
+    if (bio.get("cap_holds") or {}).get(season) != "RFA":
+        return None
+    return "pending" if _season_start(season) > _season_start(as_of) else "lapsed"
+
+
+def _qo_round_opened(slug: str, season: str) -> Optional[str]:
+    """When the player's PDC round opened in `season`'s free agency, or None.
+    A QO can be withdrawn only until then (§ 3.1), so the ballot never loses
+    its QO line mid-vote. An entry from an earlier year's free agency doesn't
+    count; one with no timestamp at all does, since it can't be ruled out."""
+    entry = ((_load_json(FA_STATE_FILE, {}) or {}).get("players") or {}).get(slug) or {}
+    if not entry.get("round_id"):
+        return None
+    opened = entry.get("opened_at") or (entry.get("ffa") or {}).get("started_at")
+    if not opened:
+        return "an unknown date"
+    start = _season_start_date(season, _league_rollovers())
+    when = datetime.fromisoformat(opened).replace(tzinfo=None)
+    return opened[:10] if when >= start else None
+
+
+def _qo_target_season(bio: dict, action: str) -> Optional[str]:
+    """The hold season a QO action is about: the earliest UFA/RFA hold for an
+    extension, the extended QO for a withdrawal or acceptance."""
+    if action == "extend":
+        fa = sorted((y for y, t in (bio.get("cap_holds") or {}).items() if t in _FA_HOLD_TYPES),
+                    key=_season_start)
+        return fa[0] if fa else None
+    live = sorted((s for s, r in (bio.get("qualifying_offers") or {}).items()
+                   if r.get("status") == "extended"), key=_season_start)
+    return live[0] if live else None
+
+
+def sweep_lapsed_qualifying_offers(as_of: Optional[str] = None) -> list[str]:
+    """Write down the QOs that lapsed at the July 1 deadline: every player still
+    tagged RFA for the current league year with no decision becomes a UFA.
+
+    Reads already treat these players as UFAs (`_qo_status`), so this only
+    brings the stored tag into line for everything that displays it. Run daily
+    by `snapshot_cap_history.py`. Returns the slugs it changed."""
+    season = as_of or _current_league_year()
+    today = league_today_str()
+    with _txn_lock:
+        bios = load_player_bios()
+        lapsed = []
+        for slug, bio in bios.items():
+            if _qo_status(bio, season, season) != "lapsed" or _qo_record(bio, season):
+                continue
+            bio.setdefault("qualifying_offers", {})[season] = {
+                "status": "lapsed", "amount": None, "two_way": bio.get("type") == "two-way",
+                "date": today, "txn_id": None,
+            }
+            bio["cap_holds"][season] = "UFA"
+            lapsed.append(slug)
+        if lapsed:
+            save_player_bios(bios)
+    return lapsed
 
 
 def _offer_sheet_outcome_team(details: dict) -> Optional[str]:
@@ -7403,7 +7589,241 @@ def _check_rookie_scale_terms(contract: ContractIn, scale: dict,
     )
 
 
+def _qo_subject(details, bios: dict) -> tuple[Optional[dict], Optional[str], list[CheckResult]]:
+    """(bio, team, failures) — the player must exist and be on a roster."""
+    bio = bios.get(details.player)
+    if bio is None:
+        return None, None, [CheckResult(check="qo_player", passed=False,
+                                        message=f"Unknown player {details.player!r}.")]
+    team = _build_team_map().get(details.player)
+    if not team:
+        return bio, None, [CheckResult(
+            check="qo_player", passed=False,
+            message=f"{_display_name(bio.get('name') or details.player)} is not on any roster — "
+                    f"only his own team can make him a qualifying offer.")]
+    return bio, team, []
+
+
+def _validate_qualifying_offer(details: QualifyingOfferDetails, ctx: dict) -> list[CheckResult]:
+    """§ 3.1 qualifying offer checks, for both extending and withdrawing one."""
+    bio, team, fails = _qo_subject(details, ctx["bios"])
+    if fails:
+        return fails
+    cur = ctx["cur_season"]
+    name = _display_name(bio.get("name") or details.player)
+    season = details.season or _qo_target_season(bio, details.action)
+    checks: list[CheckResult] = []
+
+    if details.action == "withdraw":
+        rec = _qo_record(bio, season) if season else {}
+        if rec.get("status") != "extended":
+            return [CheckResult(
+                check="qo_withdrawable", passed=False,
+                message=f"{name} has no extended qualifying offer to withdraw.")]
+        checks.append(CheckResult(
+            check="qo_withdrawable", passed=True,
+            message=(f"Withdrawing {name}'s {season} qualifying offer makes him a UFA. {team} "
+                     f"keeps his cap hold and Bird Rights until he signs elsewhere (§ 3.1).")))
+        opened = _qo_round_opened(details.player, season)
+        checks.append(CheckResult(
+            check="qo_withdraw_window", passed=not opened,
+            message=(f"{name}'s free-agency round opened on {opened}; a qualifying offer can only "
+                     f"be withdrawn before then (§ 3.1)." if opened else
+                     f"{name}'s free-agency round hasn't opened, so the offer can still be withdrawn.")))
+        return checks
+
+    if not season:
+        return [CheckResult(check="qo_rfa_eligible", passed=False,
+                            message=f"{name} has no free-agent hold on file to attach a qualifying offer to.")]
+    tag = (bio.get("cap_holds") or {}).get(season)
+    if tag != "RFA":
+        checks.append(CheckResult(
+            check="qo_rfa_eligible", passed=False,
+            message=f"{name}'s {season} hold is {tag}, not RFA-eligible — no qualifying offer applies (§ 3.1)."))
+    elif _finishes_rookie_scale(bio, season):
+        checks.append(CheckResult(
+            check="qo_rfa_eligible", passed=True,
+            message=f"{name} is finishing his first-round rookie-scale deal, so he is RFA-eligible (§ 3.1)."))
+    else:
+        exp = _qo_years_exp(bio, season)
+        if exp is None:
+            checks.append(CheckResult(
+                check="qo_rfa_eligible", passed=False, level="warning",
+                message=(f"{name}'s NBA experience isn't on file, so the under-4-years test can't "
+                         f"be checked — confirm it by hand (§ 3.1).")))
+        else:
+            checks.append(CheckResult(
+                check="qo_rfa_eligible", passed=exp < 4,
+                message=(f"{name} will have {exp} years of experience entering {season} — "
+                         + ("under 4, so he is RFA-eligible (§ 3.1)." if exp < 4 else
+                            "4 or more makes him a UFA regardless of any qualifying offer (§ 3.1).")),
+            ))
+
+    final_year = _season_shift(season, -1)
+    deadline = _season_start_date(season, _league_rollovers()).strftime("%Y-%m-%d")
+    if cur == final_year:
+        checks.append(CheckResult(
+            check="qo_deadline", passed=True,
+            message=f"Inside the window: a {season} qualifying offer is due by {deadline}."))
+    elif _season_start(cur) >= _season_start(season):
+        checks.append(CheckResult(
+            check="qo_deadline", passed=False,
+            message=f"The deadline for {name}'s {season} qualifying offer was {deadline} (§ 3.1)."))
+    else:
+        checks.append(CheckResult(
+            check="qo_deadline", passed=False,
+            message=(f"A {season} qualifying offer can only be extended during the final year of "
+                     f"{name}'s contract, {final_year} (§ 3.1).")))
+
+    status = _qo_record(bio, season).get("status")
+    checks.append(CheckResult(
+        check="qo_undecided", passed=not status,
+        message=(f"{name}'s {season} qualifying offer is already {status}." if status else
+                 f"No qualifying offer has been decided for {name} yet.")))
+
+    amount = details.amount if details.amount is not None else _qo_amount(bio, season, ctx["cap_levels"])
+    if amount is None:
+        checks.append(CheckResult(
+            check="qo_amount", passed=False, level="warning",
+            message=(f"{name}'s qualifying offer can't be priced from what's on file (no "
+                     f"{final_year} salary or minimum scale) — the office sets the amount.")))
+    else:
+        checks.append(CheckResult(
+            check="qo_amount", passed=True,
+            message=("A two-way qualifying offer: a one-year two-way contract, no cap figure."
+                     if bio.get("type") == "two-way" else
+                     f"Qualifying offer: ${amount:,} for one year (§ 3.1).")))
+    return checks
+
+
+def _qualifying_offer_fact_sheet(details: QualifyingOfferDetails, ctx: dict) -> dict:
+    """What the QO decision does to the books. The hold only ever moves when an
+    extended QO is larger than the § 3.10 hold (the RFA hold is the greater of
+    the two), and a withdrawal puts it back."""
+    bio = ctx["bios"].get(details.player) or {}
+    season = details.season or _qo_target_season(bio, details.action)
+    if not season:
+        return {}
+    rec = _qo_record(bio, season)
+    hold = _parse_dollar((bio.get("salaries") or {}).get(season) or "")
+    two_way = bio.get("type") == "two-way"
+    if details.action == "withdraw":
+        amount = rec.get("amount")
+        after = rec["base_hold"] if rec.get("base_hold") is not None else hold
+    else:
+        amount = details.amount if details.amount is not None else _qo_amount(bio, season, ctx["cap_levels"])
+        after = max(hold, amount) if (amount and not two_way) else hold
+    return {"season": season, "amount": amount, "two_way": two_way,
+            "status": _qo_status(bio, season, ctx["cur_season"]),
+            "hold_before": hold, "hold_after": after,
+            "deadline": _season_start_date(season, _league_rollovers()).strftime("%Y-%m-%d")}
+
+
+def _validate_accept_qo(details: AcceptQualifyingOfferDetails, ctx: dict) -> list[CheckResult]:
+    """§ 3.1: a player can sign his qualifying offer only while it's extended,
+    in the league year it's for, and while he's still unsigned with his team."""
+    bio, team, fails = _qo_subject(details, ctx["bios"])
+    if fails:
+        return fails
+    cur = ctx["cur_season"]
+    name = _display_name(bio.get("name") or details.player)
+    rec = _qo_record(bio, cur)
+    if rec.get("status") != "extended":
+        return [CheckResult(
+            check="qo_acceptable", passed=False,
+            message=f"{name} has no extended {cur} qualifying offer to accept (§ 3.1).")]
+    if (bio.get("cap_holds") or {}).get(cur) != "RFA":
+        return [CheckResult(
+            check="qo_acceptable", passed=False,
+            message=f"{name} no longer holds a {cur} RFA hold with {team} — he has already signed.")]
+    if rec.get("amount") is None:
+        return [CheckResult(
+            check="qo_acceptable", passed=False,
+            message=f"{name}'s qualifying offer has no amount on file — the office has to set it first.")]
+    what = ("a one-year two-way contract" if rec.get("two_way")
+            else f"one year at ${rec['amount']:,}")
+    return [CheckResult(
+        check="qo_acceptable", passed=True,
+        message=f"{name} signs his qualifying offer with {team}: {what}, then a UFA (§ 3.1).")]
+
+
+def _apply_qualifying_offer(details: QualifyingOfferDetails, txn_date: str, info: dict,
+                            txn_id: Optional[str] = None) -> tuple[str, str, dict]:
+    """Extend or withdraw a QO. Returns ``(team, season, record)``.
+
+    Extending records the decision and, if the QO is larger than the § 3.10
+    hold, raises the hold to it (remembering the old figure). Withdrawing makes
+    the player a UFA — the tag flips, the hold and Bird Rights stay — and puts
+    back any hold the QO had raised."""
+    bios = load_player_bios()
+    bio = bios.get(details.player)
+    team = _build_team_map().get(details.player)
+    if bio is None or not team:
+        raise HTTPException(status_code=422, detail=f"{details.player!r} is not on any roster")
+    season = details.season or _qo_target_season(bio, details.action)
+    if not season:
+        raise HTTPException(status_code=422, detail="No hold season to attach a qualifying offer to")
+    qos = bio.setdefault("qualifying_offers", {})
+    salaries = bio.setdefault("salaries", {})
+
+    if details.action == "extend":
+        cap_levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
+        amount = details.amount if details.amount is not None else _qo_amount(bio, season, cap_levels)
+        two_way = bio.get("type") == "two-way"
+        rec = {"status": "extended", "amount": amount, "two_way": two_way,
+               "date": txn_date, "txn_id": txn_id}
+        hold = _parse_dollar(salaries.get(season) or "")
+        if amount and not two_way and amount > hold:
+            rec["base_hold"] = hold
+            salaries[season] = f"${amount:,}"
+        qos[season] = rec
+    else:
+        rec = qos.get(season) or {}
+        if rec.get("status") != "extended":
+            raise HTTPException(status_code=422, detail=f"No extended {season} qualifying offer to withdraw")
+        rec.update(status="withdrawn", withdrawn_date=txn_date, withdraw_txn_id=txn_id)
+        if rec.get("base_hold") is not None:
+            salaries[season] = f"${rec['base_hold']:,}"
+        bio.setdefault("cap_holds", {})[season] = "UFA"
+
+    save_player_bios(bios)
+    log_write(info, f"TXN qualifying_offer {details.action} — {details.player} ({team}, {season})")
+    return team, season, rec
+
+
+def _apply_accept_qo(details: AcceptQualifyingOfferDetails, txn_date: str, info: dict,
+                     txn_id: Optional[str] = None) -> tuple[str, dict]:
+    """Sign the player to his qualifying offer through `_apply_sign`, so the
+    contract is written exactly as any other signing is — a one-year deal
+    rolling into a UFA hold — then mark the QO accepted. Returns
+    ``(team, record)``."""
+    bios = load_player_bios()
+    bio = bios.get(details.player)
+    team = _build_team_map().get(details.player)
+    cur = _season_for_date(txn_date)
+    rec = _qo_record(bio or {}, cur)
+    if not team or rec.get("status") != "extended" or rec.get("amount") is None:
+        raise HTTPException(status_code=422, detail=f"No extended {cur} qualifying offer to accept")
+    nxt = _season_after(cur)
+    if rec.get("two_way"):
+        # Two-way deals carry "$1" on the trailing hold so the FA pool sees it.
+        contract = ContractIn(type="two-way", salaries={cur: "$0", nxt: "$1"}, cap_holds={nxt: "UFA"})
+    else:
+        contract = ContractIn(type="player", salaries={cur: f"${rec['amount']:,}"}, cap_holds={nxt: "UFA"})
+    _apply_sign(SignDetails(player=details.player, team=team, contract=contract,
+                            signing_method="qualifying_offer"), txn_date, info, txn_id=txn_id)
+
+    bios = load_player_bios()
+    rec = bios[details.player]["qualifying_offers"][cur]
+    rec.update(status="accepted", accepted_date=txn_date, accept_txn_id=txn_id)
+    save_player_bios(bios)
+    log_write(info, f"TXN accept_qo — {details.player} signs his qualifying offer with {team}")
+    return team, rec
+
+
 _VALIDATORS = {
+    "qualifying_offer": _validate_qualifying_offer,
+    "accept_qo":      _validate_accept_qo,
     "sign":           _validate_sign,
     "sign_pick":      _validate_sign_pick,
     "release":        _validate_release,
@@ -7675,6 +8095,41 @@ def apply_with_warning_confirm(apply_fn, *args, confirm_warnings: bool, **kwargs
         raise
 
 
+def apply_accept_qo(details: AcceptQualifyingOfferDetails, txn_date: str, info: dict, *,
+                    description: str = "", force: bool = False,
+                    force_warnings_only: bool = False) -> dict:
+    """Validate, apply, ledger-append and announce a player signing his
+    qualifying offer — create_transaction's accept_qo path as one call, so the
+    PDC's declare-winner can execute a ballot the QO line won (§ 3.1)."""
+    ctx = _validation_ctx()
+    ctx["cur_season"] = _season_for_date(txn_date)
+    ctx["txn_date"] = txn_date
+    checks = _validate_accept_qo(details, ctx)
+    failed = [c for c in checks if not c.passed]
+    blocking = [c for c in failed if c.level == "error"] if force_warnings_only else failed
+    if blocking and not force:
+        raise HTTPException(status_code=422, detail={
+            "validation": True, "checks": [c.model_dump() for c in checks], "can_force": True,
+        })
+    txn_id = secrets.token_hex(8)
+    with _txn_lock:
+        team, rec = _apply_accept_qo(details, txn_date, info, txn_id=txn_id)
+        txn = {
+            "id": txn_id,
+            "type": "accept_qo",
+            "date": txn_date,
+            "created_by": info.get("name", "unknown"),
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "description": description,
+            "details": {**details.model_dump(), "team": team, "amount": rec.get("amount"),
+                        "two_way": rec.get("two_way", False)},
+        }
+        _append_transaction(txn)
+    notify_transaction(txn)
+    announce_roster_move(txn)
+    return txn
+
+
 def apply_trade(details: TradeIn, txn_date: str, info: dict, *,
                 description: str = "", force: bool = False,
                 relay_to_roster_log: bool = False) -> dict:
@@ -7820,7 +8275,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid date; use YYYY-MM-DD")
 
-    if body.type not in ("sign", "pick", "option", "guarantee", "release", "renounce", "rescind_renounce", "trade", "convert_twoway", "sign_pick", "void_player", "stash", "set_hard_cap_level", "offer_sheet", "offer_sheet_decision", "extension"):
+    if body.type not in ("sign", "pick", "option", "guarantee", "release", "renounce", "rescind_renounce", "trade", "convert_twoway", "sign_pick", "void_player", "stash", "set_hard_cap_level", "offer_sheet", "offer_sheet_decision", "extension", "qualifying_offer", "accept_qo"):
         raise HTTPException(status_code=422, detail=f"Unsupported transaction type: {body.type!r}")
 
     if body.historical and body.type not in ("trade", "sign", "option"):
@@ -7843,6 +8298,8 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
         "offer_sheet":       (OfferSheetDetails,  "Invalid offer_sheet details"),
         "offer_sheet_decision": (OfferSheetDecisionDetails, "Invalid offer_sheet_decision details"),
         "extension":      (ExtensionDetails,        "Invalid extension details"),
+        "qualifying_offer": (QualifyingOfferDetails, "Invalid qualifying_offer details"),
+        "accept_qo":      (AcceptQualifyingOfferDetails, "Invalid accept_qo details"),
     }
     model_cls, err_prefix = _detail_models[body.type]
     try:
@@ -7945,6 +8402,14 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             resolved = _apply_offer_sheet_decision(details, body.date, info, txn_id=txn_id)
             stored_details = details.model_dump()
             stored_details.update(resolved)
+        elif body.type == "qualifying_offer":
+            team, season, rec = _apply_qualifying_offer(details, body.date, info, txn_id=txn_id)
+            stored_details = details.model_dump()
+            stored_details.update(team=team, season=season, amount=rec.get("amount"))
+        elif body.type == "accept_qo":
+            team, rec = _apply_accept_qo(details, body.date, info, txn_id=txn_id)
+            stored_details = details.model_dump()
+            stored_details.update(team=team, amount=rec.get("amount"), two_way=rec.get("two_way", False))
 
         forced_checks = [c.check for c in failed] if (body.force and failed) else None
         if forced_checks:
@@ -8574,6 +9039,78 @@ def validate_renounce(body: RenounceDetails):
     if body.player not in ctx["bios"]:
         raise HTTPException(400, f"Unknown player '{body.player}'.")
     return _validation_result(_validate_renounce(body, ctx), _renounce_fact_sheet(body, ctx))
+
+
+@router.post("/api/validate/qualifying_offer")
+def validate_qualifying_offer(body: QualifyingOfferDetails):
+    """Non-mutating § 3.1 check of extending or withdrawing a qualifying offer —
+    what the roster page's confirm dialog shows before an owner commits. Public,
+    no auth, same terms as `/api/validate/renounce`."""
+    ctx = _validation_ctx()
+    if body.player not in ctx["bios"]:
+        raise HTTPException(400, f"Unknown player '{body.player}'.")
+    return _validation_result(_validate_qualifying_offer(body, ctx),
+                              _qualifying_offer_fact_sheet(body, ctx))
+
+
+class SelfQualifyingOfferIn(BaseModel):
+    player: str
+    action: Literal["extend", "withdraw"]
+    description: str = ""
+
+
+@router.post("/api/self/qualifying-offer")
+def self_qualifying_offer(body: SelfQualifyingOfferIn, info: dict = Depends(get_token_info)):
+    """Owner extends or withdraws a qualifying offer from their own roster page
+    (§ 3.1). Same three properties as `self_renounce`: the team comes from the
+    player's roster row, never the caller; no force; the date is the server's.
+    No `amount` override either — an owner gets the formula's figure."""
+    bios = load_player_bios()
+    if body.player not in bios:
+        raise HTTPException(status_code=404, detail=f"Unknown player '{body.player}'.")
+    team = _build_team_map().get(body.player)
+    if not team:
+        raise HTTPException(status_code=422, detail=f"{body.player!r} is not on any roster.")
+    if not is_team_owner(info, team):
+        raise HTTPException(status_code=403,
+                            detail=f"Only {team}'s owner can make {team}'s qualifying offers.")
+
+    txn_date = league_today_str()
+    details = QualifyingOfferDetails(player=body.player, action=body.action)
+    ctx = {
+        "bios":       bios,
+        "team_state": load_team_state(),
+        "cap_levels": json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {},
+        "cur_season": _season_for_date(txn_date),
+        "txn_date":   txn_date,
+        "trade_exceptions": load_trade_exceptions(),
+    }
+    checks = _validate_qualifying_offer(details, ctx)
+    if any(not c.passed and c.level == "error" for c in checks):
+        raise HTTPException(status_code=422, detail={
+            "validation": True,
+            "checks": [c.model_dump() for c in checks],
+            "can_force": False,
+        })
+
+    txn_id = secrets.token_hex(8)
+    name = _display_name(bios[body.player].get("name") or body.player)
+    with _txn_lock:
+        applied_team, season, rec = _apply_qualifying_offer(details, txn_date, info, txn_id=txn_id)
+        verb = "extend" if body.action == "extend" else "withdraw"
+        txn = {
+            "id": txn_id,
+            "type": "qualifying_offer",
+            "date": txn_date,
+            "created_by": info.get("name", "unknown"),
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "description": body.description or f"{applied_team} {verb}s {name}'s {season} qualifying offer",
+            "details": {**details.model_dump(), "team": applied_team, "season": season,
+                        "amount": rec.get("amount"), "_source": "owner_self_serve"},
+        }
+        _append_transaction(txn)
+    _notify_self_serve(txn)
+    return {"ok": True, "transaction": txn, "checks": [c.model_dump() for c in checks]}
 
 
 class SelfRenounceIn(BaseModel):

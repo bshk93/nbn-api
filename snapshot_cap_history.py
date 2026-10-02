@@ -8,12 +8,18 @@
 
 A thin wrapper so the timer does not have to know the module layout, and so a
 person can run the same code by hand. The work is in routers/cap_history.py.
+
+Before snapshotting today it also writes down any qualifying offer that lapsed
+at the July 1 deadline (§ 3.1, `sweep_lapsed_qualifying_offers`), so the day's
+row and every page read the same UFA/RFA tags. Reads already treat a lapsed QO
+as lapsed; this is bookkeeping, and a daily job is the natural place for it.
 """
 import argparse
 import json
 import sys
 
-from routers import cap_history
+from routers import audit, cap_history
+from routers.transactions import sweep_lapsed_qualifying_offers
 
 
 def main() -> int:
@@ -31,6 +37,13 @@ def main() -> int:
             print(json.dumps(row, separators=(",", ":")))
         print(f"-- {len(rows)} rows, nothing written", file=sys.stderr)
         return 0
+
+    if not args.date:
+        audit.begin_request("CLI", "snapshot_cap_history.py: qualifying offer lapse sweep")
+        audit.set_actor("system")
+        lapsed = sweep_lapsed_qualifying_offers()
+        if lapsed:
+            print(json.dumps({"qo_lapsed": lapsed}))
 
     result = cap_history.snapshot(on_date=args.date, force=args.force)
     print(json.dumps(result))

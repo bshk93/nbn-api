@@ -87,6 +87,17 @@ def announcement(txn: dict) -> Optional[tuple[str, str]]:
         return DISCORD_FA_NEWS_CHANNEL, f"{team} stash the draft rights to {player}."
     if kind == "void_player":
         return DISCORD_WAIVERS_CHANNEL, f"{team} void {player}'s contract."
+    if kind == "qualifying_offer":
+        season = f"{d['season']} " if d.get("season") else ""
+        if d.get("action") == "withdraw":
+            return (DISCORD_FA_NEWS_CHANNEL,
+                    f"{team} withdraw {player}'s {season}qualifying offer. {player} becomes an "
+                    f"unrestricted free agent.")
+        return (DISCORD_FA_NEWS_CHANNEL,
+                f"{team} extend a {season}qualifying offer to {player}. {player} becomes a "
+                f"restricted free agent.")
+    if kind == "accept_qo":
+        return DISCORD_FA_NEWS_CHANNEL, f"{player} signs his qualifying offer with {team.replace('The ', 'the ', 1)}."
     return None
 
 
