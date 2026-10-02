@@ -38,7 +38,16 @@ def main():
         },
         "rfa-2nd-round": {
             "type": "player", "draft_round": 2, "draft_year": 2024,
-            "cap_holds": {"26-27": "RFA"}, "salaries": {"26-27": "$2,000,000"},
+            # 26-27 is the hold; the QO prices off 25-26, the year actually played.
+            "cap_holds": {"26-27": "RFA"},
+            "salaries": {"25-26": "$2,000,000", "26-27": "$2,400,000"},
+        },
+        "rfa-hold-above-salary": {
+            # Hardy's shape: a hold three times the last salary. The QO must
+            # come from the $1.6M salary, not the $4.8M hold.
+            "type": "player", "draft_round": 2, "draft_year": 2024,
+            "cap_holds": {"26-27": "RFA"},
+            "salaries": {"25-26": "$1,600,000", "26-27": "$4,800,000"},
         },
         "rfa-1st-round": {
             "type": "player", "draft_round": 1, "draft_year": 2023,
@@ -86,6 +95,13 @@ def main():
           pool["rfa-2nd-round"]["rfa"] is True
           and pool["rfa-2nd-round"]["qo_amount"] == 2500000)  # 125% of 2,000,000
 
+    check("rfa-2nd-round: hold_amount is the hold, prior_salary the year before",
+          pool["rfa-2nd-round"]["hold_amount"] == 2400000
+          and pool["rfa-2nd-round"]["prior_salary"] == 2000000)
+
+    check("rfa-hold-above-salary: QO prices off the salary, not the hold",
+          pool["rfa-hold-above-salary"]["qo_amount"] == 2500000)  # min 2.5M > 125% of 1.6M
+
     check("rfa-1st-round: rfa true but qo_amount None (rookie scale unsourced)",
           pool["rfa-1st-round"]["rfa"] is True
           and pool["rfa-1st-round"]["qo_amount"] is None)
@@ -97,7 +113,8 @@ def main():
     check("non-gtd-then-ufa: skips NON_GTD year, lands on 27-28 UFA",
           pool["non-gtd-then-ufa"]["class_year"] == "27-28"
           and pool["non-gtd-then-ufa"]["hold_type"] == "UFA"
-          and pool["non-gtd-then-ufa"]["prior_salary"] == 3000000)
+          and pool["non-gtd-then-ufa"]["hold_amount"] == 3000000
+          and pool["non-gtd-then-ufa"]["prior_salary"] == 1000000)
 
     check("no-salary-for-hold: excluded (hold with no priced salary, not renounced/unsigned)",
           "no-salary-for-hold" not in pool)

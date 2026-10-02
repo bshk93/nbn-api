@@ -35,7 +35,7 @@ from .constants import (CAP_LEVELS_FILE, FA_BALLOTS_FILE, FA_OFFERS_FILE,
 from .players import load_player_bios, _build_team_map
 from .proposals import _member_current_team
 from .storage import (_current_league_year, _load_json, _parse_dollar,
-                      _save_json, log_write)
+                      _save_json, _season_shift, log_write)
 from .transactions import (ContractIn, OfferSheetDetails, SignDetails,
                            _compute_team_salary, _count_standard_roster,
                            _min_salary_for, _real_empty_roster_charge,
@@ -113,7 +113,14 @@ def _is_current_fa(entry: dict, season: str) -> bool:
 
 
 def _fa_pool(bios: dict, team_map: dict, season: str, cap_levels: Optional[dict] = None) -> dict:
-    """The free-agent pool: `{slug: {class_year, hold_type, prior_salary, rfa, qo_amount}}`.
+    """The free-agent pool: `{slug: {class_year, hold_type, hold_amount, prior_salary, rfa, qo_amount}}`.
+
+    `hold_amount` is what the player is on the books for in `class_year` —
+    for a UFA/RFA that season's `salaries` entry *is* the hold (§ 3.10), for
+    an option it's the option salary. `prior_salary` is the season before it,
+    the last contract year actually played. They used to be one field, so
+    the § 3.9 QO priced off the hold: Jaden Hardy's 300% rookie hold
+    ($12.3M) read as a $12.3M prior salary, three times his real $4.1M.
 
     Ported from `free-agency/index.html`'s page-JS derivation (§ 7.1) —
     behaviour must stay identical, this just moves it server-side. Each
@@ -144,11 +151,12 @@ def _fa_pool(bios: dict, team_map: dict, season: str, cap_levels: Optional[dict]
         if actionable:
             yr, hold_type = actionable[0]
             years_seen.add(yr)
-            prior_salary = _parse_dollar(salaries.get(yr))
+            hold_amount = _parse_dollar(salaries.get(yr))
+            prior_salary = _parse_dollar(salaries.get(_season_shift(yr, -1)) or "")
             rfa, _ = _rfa_eligibility(slug, bios, yr)
             qo = _qo_amount(bio, yr, prior_salary, cap_levels) if rfa else None
             pool[slug] = {
-                "class_year": yr, "hold_type": hold_type,
+                "class_year": yr, "hold_type": hold_type, "hold_amount": hold_amount,
                 "prior_salary": prior_salary, "rfa": rfa, "qo_amount": qo,
             }
             continue
@@ -159,13 +167,13 @@ def _fa_pool(bios: dict, team_map: dict, season: str, cap_levels: Optional[dict]
     target_year = min(years_seen) if years_seen else season
     for slug in renounced:
         pool[slug] = {
-            "class_year": target_year, "hold_type": "RENOUNCED",
+            "class_year": target_year, "hold_type": "RENOUNCED", "hold_amount": 0,
             "prior_salary": _latest_salary(bios[slug].get("salaries") or {}),
             "rfa": False, "qo_amount": None,
         }
     for slug in unsigned:
         pool[slug] = {
-            "class_year": target_year, "hold_type": "UNSIGNED",
+            "class_year": target_year, "hold_type": "UNSIGNED", "hold_amount": 0,
             "prior_salary": 0, "rfa": False, "qo_amount": None,
         }
 
