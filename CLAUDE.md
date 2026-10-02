@@ -549,6 +549,12 @@ only place a file is verified without a test standing in for the gate.
 compensating pass. Both were found as diffs, and both were verified against R
 directly.
 
+**One runtime reader outside the build.** `routers/game_highs.py`
+(`GET /api/game-highs`, behind `/stats/highs`) reads the raw files itself and
+imports `PLAYER_FIXES`, `_season_label` and `player_slug` from `pipeline.py`,
+so its ranks agree with `game-highs-*.csv` (checked equal for all six at
+launch). A change to any of those three changes that page too.
+
 **stdlib only. Don't add pandas/numpy** — a dependency the service never
 imports at runtime, and numpy's float and NaN rendering would fight `csvio`,
 which reproduces `readr::write_csv` byte for byte (NA vs empty are different
