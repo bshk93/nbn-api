@@ -8,7 +8,8 @@ get wrong silently since nothing else checks it:
   involve it, or a stat line for the opponent, is refused.
 - **An edit re-validates the whole merged game**, and replacing `stats`
   replaces every line rather than appending.
-- **Writes are admin-gated; reads are not.**
+- **Writes need the `stats` role (or `admin`); reads are open.** A role
+  that isn't `stats`, `bod` included, is refused.
 
 Writes go to a temp file; nothing here touches live data.
 
@@ -38,7 +39,11 @@ def check(name, cond):
 
 ADMIN_TOKEN = "a" * 64
 PLAIN_TOKEN = "n" * 64
+STATS_TOKEN = "s" * 64
+BOD_TOKEN = "b" * 64
 MEMBERS = {
+    "Stats":  {"token": STATS_TOKEN, "roles": ["stats"], "tenures": []},
+    "Board":  {"token": BOD_TOKEN, "roles": ["bod"], "tenures": []},
     "Boss":   {"token": ADMIN_TOKEN, "roles": ["admin"], "tenures": []},
     "Nobody": {"token": PLAIN_TOKEN, "roles": [], "tenures": []},
 }
@@ -53,6 +58,8 @@ c = TestClient(app)
 
 ADMIN = {"Authorization": "Bearer " + ADMIN_TOKEN}
 PLAIN = {"Authorization": "Bearer " + PLAIN_TOKEN}
+STATS = {"Authorization": "Bearer " + STATS_TOKEN}
+BOD = {"Authorization": "Bearer " + BOD_TOKEN}
 
 
 def base_game(**over):
@@ -77,7 +84,9 @@ r = c.post("/api/nbnfl/games", json=base_game())
 check("post: 401 with no token", r.status_code == 401)
 
 r = c.post("/api/nbnfl/games", json=base_game(), headers=PLAIN)
-check("post: 403 for a non-admin token", r.status_code == 403)
+check("post: 403 for a token with no role", r.status_code == 403)
+r = c.post("/api/nbnfl/games", json=base_game(), headers=BOD)
+check("post: 403 for bod (not stats)", r.status_code == 403)
 
 # ── validation ───────────────────────────────────────────────────────────────
 
@@ -117,11 +126,11 @@ game_id = r.json()["id"]
 check("post: assigns an id", bool(game_id))
 
 r = c.post("/api/nbnfl/games", json=base_game(week=2, home="KC", away="CIN", home_score=17, away_score=24),
-           headers=ADMIN)
-check("post: 200 with the tracked team away", r.status_code == 200)
+           headers=STATS)
+check("post: 200 with the tracked team away, from the stats role", r.status_code == 200)
 
 r = c.put(f"/api/nbnfl/games/{game_id}", json={"home_score": 30}, headers=PLAIN)
-check("put: 403 for a non-admin token", r.status_code == 403)
+check("put: 403 for a token with no role", r.status_code == 403)
 
 r = c.put(f"/api/nbnfl/games/{game_id}", json={"home_score": 30}, headers=ADMIN)
 check("put: 200 on a partial edit", r.status_code == 200)
@@ -143,8 +152,10 @@ r = c.put(f"/api/nbnfl/games/{game_id}", json={"stats": [
     {"player": "Josh Allen", "team": "BUF", "category": "passing", "stats": {"yds": 1}}]}, headers=ADMIN)
 check("put: rejects an opponent stat line on edit", r.status_code == 400)
 
-r = c.delete(f"/api/nbnfl/games/{game_id}", headers=ADMIN)
-check("delete: 200", r.status_code == 200)
+r = c.delete(f"/api/nbnfl/games/{game_id}", headers=PLAIN)
+check("delete: 403 for a token with no role", r.status_code == 403)
+r = c.delete(f"/api/nbnfl/games/{game_id}", headers=STATS)
+check("delete: 200 for the stats role", r.status_code == 200)
 r = c.delete(f"/api/nbnfl/games/{game_id}", headers=ADMIN)
 check("delete: 404 the second time", r.status_code == 404)
 

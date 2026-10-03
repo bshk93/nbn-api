@@ -83,7 +83,7 @@ app.include_router(schedule.router)        # the league game schedule, seeded fr
 app.include_router(coaching_settings.router)  # per-team 2K coach profile, team-submitted, streamer-entered
 app.include_router(streaming_days.router)  # per-date streaming status: day marked done, YouTube VOD link
 app.include_router(donations.router)       # league funding tracker — GET public, POST/PUT gated to bod
-app.include_router(nbnfl.router)           # NBNFL — one team's game log and stats, admin-entered
+app.include_router(nbnfl.router)           # NBNFL — one team's game log and stats, entered by the stats role
 app.include_router(irl.router)             # IRL feed — real-world game logs for a fantasy roster, from ESPN; apart from NBN stats
 app.include_router(trade_requests.router)  # Trade Request Committee — nbn-today/docs/trc-trade-pipeline.md
 app.include_router(markets.router)          # futures markets on /bet

@@ -25,7 +25,7 @@ from pydantic import BaseModel
 
 from .constants import NBNFL_FILE, _nbnfl_lock
 from .storage import _load_json, _save_json, log_write
-from .auth import require_admin
+from .auth import require_role
 
 router = APIRouter()
 
@@ -157,7 +157,7 @@ def list_games(season: Optional[int] = None, week: Optional[int] = None, team: O
 
 
 @router.post("/api/nbnfl/games")
-def add_game(game: GameIn, info: dict = Depends(require_admin)):
+def add_game(game: GameIn, info: dict = Depends(require_role("stats"))):
     _check_game(game.home, game.away, game.date, game.home_score, game.away_score, game.stats)
     row = game.model_dump()
     with _nbnfl_lock:
@@ -170,7 +170,7 @@ def add_game(game: GameIn, info: dict = Depends(require_admin)):
 
 
 @router.put("/api/nbnfl/games/{game_id}")
-def edit_game(game_id: str, patch: GamePatch, info: dict = Depends(require_admin)):
+def edit_game(game_id: str, patch: GamePatch, info: dict = Depends(require_role("stats"))):
     with _nbnfl_lock:
         data = _load()
         idx = next((i for i, g in enumerate(data["games"]) if g["id"] == game_id), None)
@@ -187,7 +187,7 @@ def edit_game(game_id: str, patch: GamePatch, info: dict = Depends(require_admin
 
 
 @router.delete("/api/nbnfl/games/{game_id}")
-def delete_game(game_id: str, info: dict = Depends(require_admin)):
+def delete_game(game_id: str, info: dict = Depends(require_role("stats"))):
     with _nbnfl_lock:
         data = _load()
         before = len(data["games"])
