@@ -11,6 +11,10 @@ undocumented and nothing else checks them:
 - **A closed season is never refetched; the current one always is.**
 - **`max_games` trims newest first across seasons**, and `has_stats` is false
   only for a player with no stat columns at all.
+- **An NBN-sourced roster (NBA) is read live from `{abbr}-roster.csv`**, and
+  auto-mapping a slug to an ESPN id needs an exact name AND date of birth —
+  one match only, and never for unsigned draft rights.
+- **A run skips a player whose file is fresher than `refresh_minutes`.**
 
 No network and no live data: requests are faked, files go to a temp dir.
 
@@ -42,6 +46,9 @@ TMP = Path(tempfile.mkdtemp(prefix="nbn-irl-test-"))
 irl.IRL_DIR = TMP / "irl"
 irl.IRL_ROSTERS_FILE = TMP / "irl-rosters.json"
 irl.REQUEST_GAP_SECONDS = 0
+irl.DATA_DIR = TMP
+irl.PLAYER_BIOS_FILE = TMP / "player-bios.json"
+irl.IRL_IDS_FILE = TMP / "irl-ids.json"
 
 
 def ev(eid, date, home_id, away_id, hs, as_, team_id, note=None):
@@ -181,7 +188,7 @@ app = FastAPI()
 app.include_router(irl.router)
 c = TestClient(app)
 r = c.get("/api/irl/rosters").json()
-check("rosters list skips unknown sports", list(r) == ["nfl"])
+check("rosters list skips unknown sports and empty NBN rosters", list(r) == ["nfl"])
 check("roster summary", r["nfl"]["rosters"] == [{"key": "CIN", "league": "NBNFL", "label": "Bengals", "count": 3}])
 r = c.get("/api/irl/nfl/cin")
 check("roster key is case-insensitive", r.status_code == 200 and r.json()["roster"] == "CIN")
@@ -192,6 +199,75 @@ check("seasons newest first", [s["year"] for s in players[0]["seasons"]] == [202
 check("unfetched player is empty, not an error", players[2]["bio"] is None and players[2]["seasons"] == [])
 check("unknown roster 404s", c.get("/api/irl/nfl/XYZ").status_code == 404)
 check("unknown sport 404s", c.get("/api/irl/mlb/CIN").status_code == 404)
+
+print("NBN-sourced rosters (NBA)")
+(TMP / "bos-roster.csv").write_text("SLUG\noubre-kelly\nmartin-cody\nnew-guy\nrights-only\nno-dob\n")
+irl.PLAYER_BIOS_FILE.write_text(json.dumps({
+    "oubre-kelly": {"name": "OUBRE, KELLY", "dob": "1995-12-09", "type": "player"},
+    "martin-cody": {"name": "MARTIN, CODY", "dob": "1995-09-28", "type": "player"},
+    "new-guy":     {"name": "GUY, NEW", "dob": "2005-01-01", "type": "two-way"},
+    "rights-only": {"name": "ONLY, RIGHTS", "dob": "2006-01-01", "type": "draft-rights"},
+    "no-dob":      {"name": "DOB, NO", "type": "player"},
+}))
+irl.IRL_IDS_FILE.write_text(json.dumps({"nba": {"oubre-kelly": "3133603"}}))
+ESPN_ROSTER = {"athletes": [
+    {"id": 1, "fullName": "Caleb Martin", "dateOfBirth": "1995-09-28T07:00Z"},   # Cody's twin
+    {"id": 2, "fullName": "New Guy Jr.", "dateOfBirth": "2005-01-01T07:00Z"},
+    {"id": 3, "fullName": "Rights Only", "dateOfBirth": "2006-01-01T07:00Z"},
+    {"id": 4, "fullName": "No Dob", "dateOfBirth": "2001-01-01T07:00Z"},
+]}
+calls.clear()
+
+
+def fake_espn(client, url, **params):
+    calls.append(url)
+    if url.endswith("/teams"):
+        return {"sports": [{"leagues": [{"teams": [{"team": {"id": "2"}}]}]}]}
+    if url.endswith("/roster"):
+        return ESPN_ROSTER
+    return fake_get(client, url, **params)
+
+
+irl._get = fake_espn
+m = irl.auto_map(None, "nba")
+check("exact name + DOB is mapped (suffix ignored)", m["added"] == {"new-guy": "2"})
+check("a twin with the same birthday is not", "martin-cody" in m["unmapped"])
+check("no DOB on our side → not mapped", "no-dob" in m["unmapped"])
+check("draft rights are skipped, not reported", "rights-only" not in m["unmapped"] and "rights-only" not in m["added"])
+check("ids file keeps the old id and gains the new",
+      json.loads(irl.IRL_IDS_FILE.read_text())["nba"] == {"oubre-kelly": "3133603", "new-guy": "2"})
+calls.clear()
+irl.IRL_IDS_FILE.write_text(json.dumps({"nba": {"oubre-kelly": "3133603", "new-guy": "2", "martin-cody": "3138161",
+                                                "no-dob": "9"}}))
+check("nothing unmapped → no ESPN roster requests", irl.auto_map(None, "nba") == {"added": {}, "unmapped": []}
+      and calls == [])
+
+r = c.get("/api/irl/nba/bos")
+check("NBA roster read from the roster CSV", r.status_code == 200 and r.json()["roster"] == "BOS")
+ps = r.json()["players"]
+check("every rostered slug listed, in roster order", [p["slug"] for p in ps]
+      == ["oubre-kelly", "martin-cody", "new-guy", "rights-only", "no-dob"])
+check("display name from the bio", ps[0]["name"] == "Kelly Oubre")
+check("unmapped player has no id and no stats", ps[3]["espn_id"] == "" and ps[3]["has_stats"] is False)
+check("NBA rosters listed only where a roster file exists",
+      [x["key"] for x in c.get("/api/irl/rosters").json()["nba"]["rosters"]] == ["BOS"])
+check("a team that isn't one 404s", c.get("/api/irl/nba/XYZ").status_code == 404)
+check("sport_ids: mapped ids only, once each", irl.sport_ids("nba") == ["3133603", "3138161", "2", "9"])
+
+print("refresh_minutes")
+from datetime import datetime, timedelta, timezone  # noqa: E402
+now = datetime.now(timezone.utc)
+irl.player_path("nba", "3133603").parent.mkdir(parents=True, exist_ok=True)
+irl.player_path("nba", "3133603").write_text(json.dumps({"fetched_at": now.isoformat()}))
+irl.player_path("nba", "3138161").write_text(json.dumps({"fetched_at": (now - timedelta(hours=5)).isoformat()}))
+check("a fresh file is fresh", irl._fresh("nba", "3133603"))
+check("an old file is stale", not irl._fresh("nba", "3138161"))
+check("no file is stale", not irl._fresh("nba", "2"))
+irl.current_season = lambda client, sport: 2027
+summary = irl.fetch_all(sports=["nba"])["nba"]
+check("fetch_all refetches only the stale three", (summary["ok"], summary["fresh"]) == (3, 1))
+summary = irl.fetch_all(sports=["nba"], force=True)["nba"]
+check("--force refetches everyone", (summary["ok"], summary["fresh"]) == (4, 0))
 
 print("_trim")
 seasons = [{"year": 2, "games": [1, 2, 3]}, {"year": 1, "games": [4, 5, 6]}]

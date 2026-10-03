@@ -121,6 +121,10 @@ NBNFL_FILE = DATA_DIR / "nbnfl.json"
 # roster key → players with their ESPN id); the cache is one file per player,
 # written by fetch_irl.py and refetchable at any time. See routers/irl.py.
 IRL_ROSTERS_FILE = DATA_DIR / "irl-rosters.json"
+# NBN slug → ESPN id for sports whose rosters are NBN's own (NBA):
+# {"nba": {slug: espn_id}}. Auto-filled on an exact name + DOB match, hand-
+# edited otherwise. Not regenerable as a whole, so it is backed up.
+IRL_IDS_FILE = DATA_DIR / "irl-ids.json"
 IRL_DIR = DATA_DIR / "irl"
 
 PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PLAYER", "PROTECTED", "SWAP_OWNER", "NOTES", "FROZEN", "FROZEN_REASON"]

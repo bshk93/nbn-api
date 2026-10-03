@@ -695,23 +695,27 @@ the timer can fire twice after a reboot. Run it by hand with
 ## IRL feed (`routers/irl.py`)
 
 Real-world game logs and injury news for the players on a fantasy roster,
-served to the IRL tab on `/nbnfl` (`nbn-today/irl-feed.js`). **Kept apart from NBN's stats on purpose** — it
+served to the IRL tabs on `/nbnfl` and the NBN team pages (`nbn-today/irl-feed.js`). **Kept apart from NBN's stats on purpose** — it
 reads no box score, roster CSV or bio, and the stats build never reads it.
 
-- **Rosters** are hand-kept in `irl-rosters.json` (sport → roster key →
-  `[{name, espn_id}]`). Match a new name to an ESPN id once, by hand (team
-  rosters first, then ESPN search for free agents); never match by name at
-  read time. Linemen stay in the file; the page hides any player whose log
-  has no stat columns (`has_stats`).
+- **Rosters**, per sport (`SPORTS[...]["rosters"]`). NFL: hand-kept in
+  `irl-rosters.json` (sport → roster key → `[{name, espn_id}]`). NBA: NBN's own
+  `{abbr}-roster.csv`, read live, with slug → ESPN id in `irl-ids.json`. Each
+  fetch auto-maps a newly rostered player, but only on an exact name AND date
+  of birth (never draft rights); the run's `unmapped` list is who needs a
+  hand-added id. A twin breaks name+DOB (Cody/Caleb Martin), and a nickname
+  breaks name (Bub Carrington). Never match at read time. Players with no stat
+  columns (linemen, the unmapped) are hidden by the page via `has_stats`.
 - **Cache**: `irl/{sport}/{espn_id}.json`, written by `fetch_irl.py` from
-  `nbn-irl.timer` (hourly). A season already over when fetched is `closed`
+  `nbn-irl.timer` (hourly; a player is refetched once older than the sport's
+  `refresh_minutes` — NFL 50, NBA 170). A season already over when fetched is `closed`
   and never refetched (`--force` overrides). Not backed up: `irl/` is in the
   data dir's `.gitignore`, since one run rebuilds it.
 - **Source**: ESPN's unofficial JSON. stats.nba.com and cdn.nba.com 403 this
   server. ESPN's WAF 403s a User-Agent containing a URL; keep `USER_AGENT` a
   plain token.
-- `SPORTS` sets seasons kept and `max_games` per sport; NBA is configured
-  (two seasons, newest 50 games) but has no roster yet.
+- `SPORTS` sets seasons kept and `max_games` per sport (NFL two full
+  seasons; NBA newest 50 games across two).
 
 Pinned by `tests/test_irl.py` (no network).
 
