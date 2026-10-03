@@ -122,5 +122,39 @@ except Exception as e:
     check("empty contract raises (422)", getattr(e, "status_code", None) == 422)
 check("bio untouched by the refused call", BIOS["p"]["salaries"] == {"26-27": "$5,000,000"})
 
+print("\nan extended QO on the replaced season is superseded, and can't be withdrawn after")
+# The bug: the QO stayed "extended", so a later withdrawal wrote the pre-QO
+# hold over the extension's Year 1 and re-tagged the season UFA.
+reset({
+    "salaries": {"25-26": "$5,000,000", "26-27": "$5,000,000", "27-28": "$8,000,000"},
+    "cap_holds": {"27-28": "RFA"}, "guaranteed": {}, "guarantee_dates": {}, "guarantee_schedule": {},
+    "contracts": [],
+    "qualifying_offers": {"27-28": {"status": "extended", "amount": 8000000, "base_hold": 6000000}},
+})
+tx._apply_extension(
+    tx.ExtensionDetails(player="p", team="BOS", kind="veteran",
+                        contract=contract({"27-28": "$9,000,000", "28-29": "$9,500,000"}, {"29-30": "UFA"})),
+    "2026-09-01", INFO, txn_id="tx-qo")
+bio = BIOS["p"]
+check("the QO is marked superseded", bio["qualifying_offers"]["27-28"]["status"] == "superseded")
+check("...by this extension", bio["qualifying_offers"]["27-28"].get("superseded_by_txn") == "tx-qo")
+ctx = {"bios": BIOS, "cur_season": "26-27", "cap_levels": {}}
+wd = tx.QualifyingOfferDetails(player="p", action="withdraw", season="27-28")
+checks = tx._validate_qualifying_offer(wd, ctx)
+check("withdrawing it no longer validates", any(not c.passed for c in checks))
+# Even a stale "extended" record (written before this fix) can't be withdrawn
+# once the season is signed: the RFA tag is what's checked.
+bio["qualifying_offers"]["27-28"]["status"] = "extended"
+checks = tx._validate_qualifying_offer(wd, ctx)
+check("a stale 'extended' record is refused on the missing RFA tag",
+      any(c.check == "qo_withdrawable" and not c.passed and "signed" in c.message for c in checks))
+try:
+    tx._apply_qualifying_offer(wd, "2026-09-02", INFO)
+    check("apply refuses the withdrawal", False)
+except Exception as e:
+    check("apply refuses the withdrawal (422)", getattr(e, "status_code", None) == 422)
+check("the extension's Year 1 survived", bio["salaries"]["27-28"] == "$9,000,000")
+check("...and the season isn't re-tagged UFA", bio["cap_holds"].get("27-28") is None)
+
 print("\n" + ("FAILED: " + ", ".join(FAILS) if FAILS else "all checks passed"))
 sys.exit(1 if FAILS else 0)

@@ -80,6 +80,12 @@ check("submitted -> 1 post, private only", len(SENT) == 1 and SENT[0][0] == "pdc
 check("names the team and player", "SAS" in payload_text(SENT[0][1]) and "Dominick" in payload_text(SENT[0][1]))
 
 reset()
+pn.notify_proposal_submitted({**PROPOSAL, "pitch": "Max years, max respect.",
+                              "promises": {"mpg": 32, "playoffs": True, "role": "starter"}})
+check("the private post carries the pitch", "Max years, max respect." in payload_text(SENT[0][1]))
+check("...and the promises", "32 mpg" in payload_text(SENT[0][1]))
+
+reset()
 pn.notify_proposal_remanded(PROPOSAL, {"by": "headMember", "note": "raise Year 1", "from_version": 1})
 check("remanded -> 1 post, private only", len(SENT) == 1 and SENT[0][0] == "pdc-chan")
 check("names who and the note", "headMember" in payload_text(SENT[0][1]) and "raise Year 1" in payload_text(SENT[0][1]))

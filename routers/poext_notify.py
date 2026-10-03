@@ -40,6 +40,7 @@ from typing import Optional
 
 from . import discord_transport as transport
 from .discord_notify import SITE, _contract_breakdown, _contract_str, _player_name
+from .fa_notify import _promises_str
 from .players import load_player_bios
 
 logger = logging.getLogger(__name__)
@@ -144,6 +145,11 @@ def _proposal_fields(p: dict) -> list[dict]:
     breakdown = _contract_breakdown(contract)
     if breakdown:
         fields.append({"name": "Year by year", "value": breakdown, "inline": False})
+    # pdc-alerts is private, so the pitch and promises belong here — and only
+    # here: nothing below reaches fa-news.
+    fields.append({"name": "Promises", "value": _promises_str(p.get("promises")), "inline": False})
+    if p.get("pitch"):
+        fields.append({"name": "Pitch", "value": _truncate(p["pitch"], 1000), "inline": False})
     return fields
 
 

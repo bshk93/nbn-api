@@ -2745,7 +2745,7 @@ def _rfa_eligibility(player: str, bios: dict, cur_season: str,
 # restricted free agent. Whether he is one is the team's decision, recorded in
 # bio["qualifying_offers"][season] (season = the hold season):
 #
-#   {"status": "extended" | "withdrawn" | "accepted" | "lapsed",
+#   {"status": "extended" | "withdrawn" | "accepted" | "lapsed" | "superseded",
 #    "amount": int | None, "two_way": bool, "date": "YYYY-MM-DD",
 #    "txn_id": str | None, "base_hold": int (only if the QO raised the hold)}
 #
@@ -6848,6 +6848,15 @@ def _extension_contract_years(bio: dict) -> list[str]:
     )
 
 
+def _extension_is_rookie_scale(bio: dict, frame: dict) -> bool:
+    """§ 6.3's rookie-scale bucket, read off the bio rather than taken from
+    the proposal: a first-round pick whose four-year rookie deal is the
+    contract being extended — the same test § 3.1 uses for RFA eligibility,
+    asked about the season after the deal ends."""
+    end = frame.get("contract_end")
+    return bool(end) and _finishes_rookie_scale(bio, _season_shift(end, 1))
+
+
 def _final_guaranteed_year(bio: dict) -> Optional[str]:
     """§ 6.2 rule 10 / extensions.md § 4: the last season of the existing
     contract the extension's new money starts after.
@@ -7067,6 +7076,65 @@ def _validate_extension(details: ExtensionDetails, ctx: dict) -> list[CheckResul
     frame = _extension_frame(player, team, bio, cur_season, details.attested_contract_start)
     checks.append(_extension_eligibility_check(player, frame, cur_season, details.attested_contract_start))
 
+    # ── extension_kind (§ 6.3) ──────────────────────────────────────────────
+    # The kind decides the window, so it can't be the team's word: a rookie
+    # declared "veteran" in his final year would get the expiring-veteran
+    # June 30 deadline instead of the day before opening night.
+    rookie_scale = _extension_is_rookie_scale(bio, frame)
+    name = _display_name(bio.get("name") or player)
+    if details.kind == "rookie_scale" and not rookie_scale:
+        checks.append(CheckResult(
+            check="extension_kind", passed=False, level="error",
+            message=(f"{name} isn't finishing a first-round rookie-scale deal, so this can't be a "
+                     f"rookie-scale extension (§ 6.3). Enter it as a veteran extension."),
+        ))
+    elif details.kind == "veteran" and rookie_scale:
+        checks.append(CheckResult(
+            check="extension_kind", passed=False, level="error",
+            message=(f"{name} is finishing his first-round rookie-scale deal, so this is a rookie-scale "
+                     f"extension (§ 6.3), with its window closing the day before opening night."),
+        ))
+    elif rookie_scale:
+        checks.append(CheckResult(
+            check="extension_kind", passed=True,
+            message=f"{name} is finishing his first-round rookie-scale deal — a rookie-scale extension (§ 6.3)."))
+
+    # ── extension_rfa_hold (§ 3.1) ──────────────────────────────────────────
+    # A trailing RFA tag needs the player to still be RFA-eligible when the
+    # extension ends. After a multi-year extension he almost never is.
+    for hold_season, tag in sorted((details.contract.cap_holds or {}).items(), key=lambda kv: _season_start(kv[0])):
+        if tag != "RFA" or _finishes_rookie_scale(bio, hold_season):
+            continue
+        exp = _qo_years_exp(bio, hold_season)
+        if exp is None:
+            checks.append(CheckResult(
+                check="extension_rfa_hold", passed=False, level="warning",
+                message=(f"{name}'s NBA experience isn't on file, so the {hold_season} RFA hold can't be "
+                         f"checked against § 3.1's under-4-years test — confirm it by hand."),
+            ))
+        elif exp >= 4:
+            checks.append(CheckResult(
+                check="extension_rfa_hold", passed=False, level="error",
+                message=(f"{name} will have {exp} years of experience entering {hold_season}, so he is a "
+                         f"UFA then, not an RFA (§ 3.1). Make the trailing hold UFA."),
+            ))
+        else:
+            checks.append(CheckResult(
+                check="extension_rfa_hold", passed=True,
+                message=f"{name} will have {exp} years of experience entering {hold_season} — RFA-eligible (§ 3.1)."))
+
+    # ── extension_supersedes_qo (§ 3.1) ─────────────────────────────────────
+    # Said out loud so the committee sees it: the extension replaces the RFA
+    # season the QO was attached to, and _apply_extension retires the QO.
+    cutoff = frame["first_extended_season"]
+    for qo_season, rec in sorted((bio.get("qualifying_offers") or {}).items()):
+        if rec.get("status") == "extended" and cutoff and _season_start(qo_season) >= _season_start(cutoff):
+            checks.append(CheckResult(
+                check="extension_supersedes_qo", passed=True, level="info",
+                message=(f"{name} has an extended {qo_season} qualifying offer. The extension replaces "
+                         f"it — the QO is marked superseded and can no longer be withdrawn or accepted."),
+            ))
+
     # ── extension_service (rule 3) ──────────────────────────────────────────
     tenure = _bird_tenure(player, team, cur_season, bio)
     if tenure["terminal_team"] != team:
@@ -7214,7 +7282,8 @@ def _validate_extension(details: ExtensionDetails, ctx: dict) -> list[CheckResul
         ))
 
     # ── extension_window (§ 6.3) ────────────────────────────────────────────
-    if details.kind != "rookie_scale" and frame["contract_end"] and cur_season == frame["contract_end"]:
+    if (details.kind != "rookie_scale" and not rookie_scale
+            and frame["contract_end"] and cur_season == frame["contract_end"]):
         # Expiring veteran: hard June 30 deadline, a real calendar date.
         as_of = details.announced_date or ctx.get("txn_date") or ""
         deadline_year = _season_start(cur_season) + 2000 + 1
@@ -7231,7 +7300,7 @@ def _validate_extension(details: ExtensionDetails, ctx: dict) -> list[CheckResul
         # Rookie-scale and non-expiring veteran: "any time up to the day before
         # the regular season starts" — opening night off the schedule.
         as_of = details.announced_date or ctx.get("txn_date") or league_today_str()
-        kind = "rookie-scale" if details.kind == "rookie_scale" else "non-expiring veteran"
+        kind = "rookie-scale" if (details.kind == "rookie_scale" or rookie_scale) else "non-expiring veteran"
         deadline = season_calendar.day_before_opening_night(cur_season)
         if not deadline:
             checks.append(CheckResult(
@@ -7301,6 +7370,8 @@ def _extension_fact_sheet(details: ExtensionDetails, ctx: dict) -> dict:
             "cap_holds": details.contract.cap_holds,
         },
         "trailing_hold": trailing_hold,
+        # What `extension_kind` holds the proposal to — the forms preselect it.
+        "rookie_scale": _extension_is_rookie_scale(bio, frame),
         "prior_salary": frame["prior_salary"],
         "max_year1_ceiling": round(frame["prior_salary"] * 1.4) if frame["prior_salary"] else None,
         "eaps": cl.get("eaps"),
@@ -7359,6 +7430,13 @@ def _apply_extension(details: ExtensionDetails, txn_date: str, info: dict,
     bio["guaranteed"] = {**past_gtd, **details.contract.guaranteed}
     bio["guarantee_dates"] = {**past_gtd_dates, **details.contract.guarantee_dates}
     bio["guarantee_schedule"] = {**past_gtd_sched, **details.contract.guarantee_schedule}
+
+    # § 3.1: an extended QO on a season the extension now pays is moot. Left
+    # as "extended" it could still be withdrawn, and a withdrawal writes the
+    # pre-QO hold over the extension's Year 1 and re-tags the season UFA.
+    for qo_season, rec in (bio.get("qualifying_offers") or {}).items():
+        if rec.get("status") == "extended" and _season_start(qo_season) >= _season_start(cutoff):
+            rec.update(status="superseded", superseded_date=txn_date, superseded_by_txn=txn_id)
 
     bio["contracts"] = (bio.get("contracts") or []) + [{
         "team": team,
@@ -7620,6 +7698,13 @@ def _validate_qualifying_offer(details: QualifyingOfferDetails, ctx: dict) -> li
             return [CheckResult(
                 check="qo_withdrawable", passed=False,
                 message=f"{name} has no extended qualifying offer to withdraw.")]
+        if (bio.get("cap_holds") or {}).get(season) != "RFA":
+            # He has signed for that season since (an extension, a re-sign):
+            # withdrawing would write the old hold over a real salary.
+            return [CheckResult(
+                check="qo_withdrawable", passed=False,
+                message=(f"{name} no longer holds a {season} RFA hold — he has signed for that "
+                         f"season, so there is no qualifying offer left to withdraw."))]
         checks.append(CheckResult(
             check="qo_withdrawable", passed=True,
             message=(f"Withdrawing {name}'s {season} qualifying offer makes him a UFA. {team} "
@@ -7781,6 +7866,9 @@ def _apply_qualifying_offer(details: QualifyingOfferDetails, txn_date: str, info
         rec = qos.get(season) or {}
         if rec.get("status") != "extended":
             raise HTTPException(status_code=422, detail=f"No extended {season} qualifying offer to withdraw")
+        if (bio.get("cap_holds") or {}).get(season) != "RFA":
+            raise HTTPException(status_code=422,
+                                detail=f"{details.player!r} has signed for {season} — no RFA hold left to withdraw a QO from")
         rec.update(status="withdrawn", withdrawn_date=txn_date, withdraw_txn_id=txn_id)
         if rec.get("base_hold") is not None:
             salaries[season] = f"${rec['base_hold']:,}"

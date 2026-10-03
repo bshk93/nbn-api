@@ -284,6 +284,53 @@ def main():
     check("real thresholds set -> a real verdict, not a warning",
           c and c.level == "error" and not c.passed)
 
+    print("\nextension_kind / extension_rfa_hold / extension_supersedes_qo (§ 6.3, § 3.1)")
+    # A 2023 first-rounder in Year 4 of his rookie deal, rolling into an RFA hold.
+    rookie = {
+        "draft_round": 1, "draft_year": 2023, "draft_pick": 5,
+        "salaries": {"23-24": "$5,000,000", "24-25": "$5,200,000", "25-26": "$5,400,000",
+                     "26-27": "$6,800,000", "27-28": "$20,400,000"},
+        "cap_holds": {"27-28": "RFA"},
+    }
+    rookie_events = (("2023-08-01", "sign", "XXX"),)
+    rs_contract = {"salaries": {"27-28": "$9,000,000", "28-29": "$9,500,000",
+                                "29-30": "$10,000,000", "30-31": "$10,500,000"},
+                   "cap_holds": {"31-32": "UFA"}}
+    # txn_date defaults to 2027-01-15 — after opening night, before June 30.
+    checks, _ = extend(rookie, rs_contract, kind="veteran", events=rookie_events)
+    c = named(checks, "extension_kind")
+    check("a rookie-scale player declared 'veteran' is an error", c and not c.passed and c.level == "error")
+    w = named(checks, "extension_window")
+    check("...and gets the rookie-scale window, not the June 30 one", w and not w.passed and "rookie-scale" in w.message)
+    checks, ctx = extend(rookie, rs_contract, kind="rookie_scale", events=rookie_events)
+    c = named(checks, "extension_kind")
+    check("declared rookie_scale on a rookie-scale player passes", c and c.passed)
+    sheet = T._extension_fact_sheet(T.ExtensionDetails(player="p", team="XXX", kind="rookie_scale",
+                                                       contract=T.ContractIn(**rs_contract)), ctx)
+    check("fact sheet says rookie_scale so the forms can preselect it", sheet.get("rookie_scale") is True)
+
+    vet = {"draft_round": 2, "draft_year": 2018, "draft_pick": 40,
+           "salaries": {"24-25": "$10,000,000", "25-26": "$10,000,000", "26-27": "$10,000,000"},
+           "cap_holds": {}}
+    checks, _ = extend(vet, {"salaries": {"27-28": "$12,000,000", "28-29": "$12,500,000"},
+                             "cap_holds": {"29-30": "UFA"}},
+                       kind="rookie_scale", events=(("2024-08-01", "sign", "XXX"),))
+    c = named(checks, "extension_kind")
+    check("rookie_scale declared on a non-rookie is an error", c and not c.passed and c.level == "error")
+
+    rfa_tail = dict(rs_contract, cap_holds={"31-32": "RFA"})
+    checks, _ = extend(rookie, rfa_tail, kind="rookie_scale", events=rookie_events)
+    c = named(checks, "extension_rfa_hold")
+    check("a trailing RFA hold after 8 years of experience is an error",
+          c and not c.passed and c.level == "error" and "8 years" in c.message)
+    checks, _ = extend(rookie, rs_contract, kind="rookie_scale", events=rookie_events)
+    check("a trailing UFA hold isn't RFA-checked", named(checks, "extension_rfa_hold") is None)
+
+    with_qo = dict(rookie, qualifying_offers={"27-28": {"status": "extended", "amount": 8000000}})
+    checks, _ = extend(with_qo, rs_contract, kind="rookie_scale", events=rookie_events)
+    c = named(checks, "extension_supersedes_qo")
+    check("an extended QO on the replaced season is called out", c and c.passed and "superseded" in c.message)
+
     print("\nintegration smoke check against a real rostered player")
     # Every fixture above pinned _BIRD_LEDGER_CACHE to a synthetic one-player
     # index keyed to the real ledger file's (mtime, size) — since that key

@@ -11,9 +11,9 @@ shared is imported, not re-derived: `_member_teams` (conflict resolution),
 (`_validate_extension`, `_extension_fact_sheet`, `_extension_frame`,
 `_extension_eligibility_check`, `_bird_tenure`) come from elsewhere. Nothing
 here re-implements a rule `POST /api/validate/extension` already enforces —
-`_apply_extension` (also imported) is the one function that ever writes a
-real extension to the ledger, at finalize... except finalize does *not* call
-it (see `finalize_player` below): same manual hand-off free agency uses.
+`apply_extension` (also imported) is the one function that ever writes a
+real extension to the ledger, and finalize calls it on an "agreed" vote (see
+`finalize_player` below).
 
 What's smaller here than free_agency.py, and why:
   * No mode/rounds/FFA clock (§ 2.6) — § 6.3's windows are calendar deadlines
@@ -40,7 +40,7 @@ from . import inbox, poext_notify
 from .auth import get_token_info, has_role, load_members, require_role
 from .constants import (POEXT_PROPOSALS_FILE, POEXT_STATE_FILE,
                         POEXT_VOTES_FILE, VALID_TEAMS)
-from .free_agency import _member_teams
+from .free_agency import PromisesIn, _clean_promises, _member_teams
 from .players import _build_team_map, _display_name, load_player_bios
 from .proposals import _member_current_team
 from .storage import _current_league_year, _load_json, _save_json, log_write
@@ -306,6 +306,11 @@ class ProposalCreate(BaseModel):
     bird_rights_type: Optional[str] = None
     eaps_assumption: Optional[str] = None
     attested_contract_start: Optional[str] = None
+    # The team's case to the player, and what it commits to — same shape as
+    # a free-agency offer's (free_agency.PromisesIn). Committee eyes only:
+    # never in a public post.
+    pitch: str = ""
+    promises: PromisesIn = PromisesIn()
 
 
 class ProposalPatch(BaseModel):
@@ -314,6 +319,8 @@ class ProposalPatch(BaseModel):
     bird_rights_type: Optional[str] = None
     eaps_assumption: Optional[str] = None
     attested_contract_start: Optional[str] = None
+    pitch: Optional[str] = None
+    promises: Optional[PromisesIn] = None
 
 
 def _find_proposal(proposals: list[dict], proposal_id: str) -> tuple[int, dict]:
@@ -366,6 +373,7 @@ def create_proposal(body: ProposalCreate, info: dict = Depends(get_token_info)):
     if team_map.get(body.player) != team:
         raise HTTPException(422, f"'{body.player}' is not on {team}'s roster — "
                                  f"only the incumbent may propose an extension (§ 6.2)")
+    promises = _clean_promises(body.promises)
 
     with _poext_lock:
         state = _load_state()
@@ -388,6 +396,8 @@ def create_proposal(body: ProposalCreate, info: dict = Depends(get_token_info)):
             "bird_rights_type": body.bird_rights_type,
             "eaps_assumption": body.eaps_assumption,
             "attested_contract_start": body.attested_contract_start,
+            "pitch": body.pitch,
+            "promises": promises,
             "validation": None,
             "history": [{"ts": _now(), "actor": info["name"], "from": None, "to": "draft"}],
         }
@@ -413,6 +423,10 @@ def patch_proposal(proposal_id: str, body: ProposalPatch, info: dict = Depends(g
                                      "back, the team may not withdraw it")
         if "contract" in fields:
             p["contract"] = body.contract.model_dump()
+        if "promises" in fields and body.promises is not None:
+            p["promises"] = _clean_promises(body.promises)
+        if "pitch" in fields:
+            p["pitch"] = body.pitch or ""
         for key in ("kind", "bird_rights_type", "eaps_assumption", "attested_contract_start"):
             if key in fields:
                 p[key] = fields[key]
@@ -505,6 +519,8 @@ def remand_proposal(proposal_id: str, body: dict, info: dict = Depends(get_token
                 "version": p["version"], "kind": p["kind"], "contract": dict(p["contract"]),
                 "bird_rights_type": p.get("bird_rights_type"),
                 "eaps_assumption": p.get("eaps_assumption"),
+                "pitch": p.get("pitch") or "",
+                "promises": dict(p.get("promises") or {}),
                 "validation": p.get("validation"),
                 "submitted_at": p.get("submitted_at"), "submitted_by": p.get("submitted_by"),
             })

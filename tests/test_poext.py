@@ -194,6 +194,27 @@ raises("BKN can't propose an extension for a SAS player", 403, lambda: make_prop
 p = make_proposal(SAS)
 check("draft created", p["status"] == "draft" and p["player"] == "barlow-dominick")
 raises("only one live proposal per player", 409, lambda: make_proposal(SAS))
+check("no pitch, no promises by default",
+      p["pitch"] == "" and p["promises"] == {"mpg": None, "playoffs": False, "role": "none"})
+
+print("\npitch and promises")
+reset()
+pp = poext.create_proposal(poext.ProposalCreate(
+    player="barlow-dominick", team="SAS", contract=contract(), pitch="You're our future.",
+    promises=poext.PromisesIn(mpg=30, playoffs=True, role="starter")), SAS)
+check("stored on the proposal", pp["pitch"] == "You're our future."
+      and pp["promises"] == {"mpg": 30, "playoffs": True, "role": "starter"})
+pp = poext.patch_proposal(pp["id"], poext.ProposalPatch(pitch="Rewritten."), SAS)
+check("a patch rewrites the pitch and leaves the promises", pp["pitch"] == "Rewritten."
+      and pp["promises"]["role"] == "starter")
+pp = poext.patch_proposal(pp["id"], poext.ProposalPatch(promises=None), SAS)
+check("an explicit null promises is ignored, not a crash", pp["promises"]["mpg"] == 30)
+reset()
+raises("an unknown promise role is refused", 422, lambda: poext.create_proposal(poext.ProposalCreate(
+    player="barlow-dominick", team="SAS", contract=contract(),
+    promises=poext.PromisesIn(role="mvp")), SAS))
+reset()
+p = make_proposal(SAS)
 
 print("\nsubmit")
 raises("BKN can't submit SAS's proposal", 403,
