@@ -14,6 +14,11 @@ undocumented and nothing else checks them:
 - **An NBN-sourced roster (NBA) is read live from `{abbr}-roster.csv`**, and
   auto-mapping a slug to an ESPN id needs an exact name AND date of birth —
   one match only, and never for unsigned draft rights.
+  Failing that, a name search held to the same date of birth and last name,
+  with two same-birthday hits left to a human. An unplaced player is retried
+  once a day, not every run, and a slug set to null is never tried.
+- **`PUT /api/irl/ids` needs `rosters`**, takes digits or null, and clears the
+  player from the unmapped list.
 - **A run skips a player whose file is fresher than `refresh_minutes`.**
 
 No network and no live data: requests are faked, files go to a temp dir.
@@ -31,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+import routers.auth as auth  # noqa: E402
 import routers.irl as irl  # noqa: E402
 
 FAILS = []
@@ -49,6 +55,12 @@ irl.REQUEST_GAP_SECONDS = 0
 irl.DATA_DIR = TMP
 irl.PLAYER_BIOS_FILE = TMP / "player-bios.json"
 irl.IRL_IDS_FILE = TMP / "irl-ids.json"
+irl.log_write = lambda info, msg: None
+ROSTERS_TOKEN, PLAIN_TOKEN = "r" * 64, "p" * 64
+auth.load_members = lambda: {
+    "Ros":  {"token": ROSTERS_TOKEN, "roles": ["rosters"], "tenures": []},
+    "Pat":  {"token": PLAIN_TOKEN, "roles": [], "tenures": []},
+}
 
 
 def ev(eid, date, home_id, away_id, hs, as_, team_id, note=None):
@@ -269,8 +281,76 @@ check("NBA rosters listed only where a roster file exists",
 check("a team that isn't one 404s", c.get("/api/irl/nba/XYZ").status_code == 404)
 check("sport_ids: mapped ids only, once each", irl.sport_ids("nba") == ["3133603", "3138161", "2", "9"])
 
+print("auto_map — search fallback and daily retry")
+(TMP / "bos-roster.csv").write_text("SLUG\ncarrington-carlton\nmartin-cody\nlost-guy\n")
+irl.PLAYER_BIOS_FILE.write_text(json.dumps({
+    "carrington-carlton": {"name": "CARRINGTON, CARLTON", "dob": "2005-07-21", "type": "player"},
+    "martin-cody":        {"name": "MARTIN, CODY", "dob": "1995-09-28", "type": "player"},
+    "lost-guy":           {"name": "GUY, LOST", "dob": "2000-01-01", "type": "player"},
+}))
+irl.IRL_IDS_FILE.write_text(json.dumps({"nba": {}}))
+irl.unmapped_path("nba").unlink(missing_ok=True)
+SEARCH = {
+    "Carlton Carrington": [],                                         # nickname hides him
+    "Carrington": [("46", "50", "Bub Carrington"), ("23", "51", "Carlton Carrington")],  # 23 = college football
+    "Cody Martin": [("46", "60", "Cody Martin"), ("46", "61", "Caleb Martin")],
+    "Martin": [],
+    "Lost Guy": [], "Guy": [],
+}
+DOB = {"50": "21/7/2005", "60": "28/9/1995", "61": "28/9/1995"}
+calls.clear()
+
+
+def fake_search(client, url, **params):
+    calls.append(url.rsplit("/", 1)[-1] if "search" not in url else "search:" + params["query"])
+    if url.endswith("/teams"):
+        return {"sports": [{"leagues": [{"teams": [{"team": {"id": "2"}}]}]}]}
+    if url.endswith("/roster"):
+        return {"athletes": []}
+    if "search" in url:
+        return {"results": [{"contents": [{"uid": f"s:40~l:{lg}~a:{aid}", "displayName": dn}
+                                          for lg, aid, dn in SEARCH[params["query"]]]}]}
+    aid = url.rsplit("/", 1)[-1]
+    if aid == "51":
+        raise AssertionError("a college-football hit should never be looked up")
+    return {"athlete": {"displayDOB": DOB.get(aid)}}
+
+
+irl._get = fake_search
+m = irl.auto_map(None, "nba")
+check("nickname found by last name + DOB", m["added"] == {"carrington-carlton": "50"})
+check("twins sharing a birthday are left unmapped", "martin-cody" in m["unmapped"])
+check("no hit at all is unmapped", "lost-guy" in m["unmapped"])
+listed = c.get("/api/irl/unmapped/nba").json()["players"]
+check("unmapped list carries team and display name",
+      [(r["slug"], r["team"], r["name"]) for r in listed] == [("lost-guy", "BOS", "Lost Guy"), ("martin-cody", "BOS", "Cody Martin")])
+check("unmapped list stamps when it last tried", all(r["tried"] for r in listed))
+calls.clear()
+m = irl.auto_map(None, "nba")
+check("an unplaced player isn't retried within the day", calls == [] and sorted(m["unmapped"]) == ["lost-guy", "martin-cody"])
+
+print("PUT /api/irl/ids")
+R = {"Authorization": "Bearer " + ROSTERS_TOKEN}
+P = {"Authorization": "Bearer " + PLAIN_TOKEN}
+check("no role → 403", c.put("/api/irl/ids/nba/martin-cody", json={"espn_id": "3138161"}, headers=P).status_code == 403)
+check("not digits → 400", c.put("/api/irl/ids/nba/martin-cody", json={"espn_id": "espn.com/x"}, headers=R).status_code == 400)
+check("unknown player → 404", c.put("/api/irl/ids/nba/nobody", json={"espn_id": "1"}, headers=R).status_code == 404)
+check("a hand-kept sport has no ids → 404", c.put("/api/irl/ids/nfl/martin-cody", json={"espn_id": "1"}, headers=R).status_code == 404)
+r = c.put("/api/irl/ids/nba/martin-cody", json={"espn_id": "3138161"}, headers=R)
+check("rosters sets an id", r.status_code == 200 and json.loads(irl.IRL_IDS_FILE.read_text())["nba"]["martin-cody"] == "3138161")
+r = c.put("/api/irl/ids/nba/lost-guy", json={"espn_id": None}, headers=R)
+check("null records 'no ESPN record'", r.status_code == 200 and json.loads(irl.IRL_IDS_FILE.read_text())["nba"]["lost-guy"] is None)
+check("both leave the unmapped list", c.get("/api/irl/unmapped/nba").json()["players"] == [])
+calls.clear()
+check("a null id is never retried", irl.auto_map(None, "nba") == {"added": {}, "unmapped": []} and calls == [])
+check("a null id isn't fetched", "None" not in irl.sport_ids("nba") and None not in irl.sport_ids("nba"))
+
 print("refresh_minutes")
 from datetime import datetime, timedelta, timezone  # noqa: E402
+(TMP / "bos-roster.csv").write_text("SLUG\noubre-kelly\nmartin-cody\nnew-guy\nno-dob\n")
+irl.IRL_IDS_FILE.write_text(json.dumps({"nba": {"oubre-kelly": "3133603", "new-guy": "2", "martin-cody": "3138161",
+                                                "no-dob": "9"}}))
+irl._get = fake_get
 now = datetime.now(timezone.utc)
 irl.player_path("nba", "3133603").parent.mkdir(parents=True, exist_ok=True)
 irl.player_path("nba", "3133603").write_text(json.dumps({"fetched_at": now.isoformat()}))

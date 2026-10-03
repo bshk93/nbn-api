@@ -701,15 +701,19 @@ reads no box score, roster CSV or bio, and the stats build never reads it.
 - **Rosters**, per sport (`SPORTS[...]["rosters"]`). NFL: hand-kept in
   `irl-rosters.json` (sport → roster key → `[{name, espn_id}]`). NBA: NBN's own
   `{abbr}-roster.csv`, read live, with slug → ESPN id in `irl-ids.json`. Each
-  fetch auto-maps a newly rostered player, but only on an exact name AND date
-  of birth (never draft rights); the run's `unmapped` list is who needs a
-  hand-added id. A twin breaks name+DOB (Cody/Caleb Martin), and a nickname
-  breaks name (Bub Carrington). Never match at read time. Players with no stat
+  fetch auto-maps a newly rostered player (never draft rights): an exact name
+  AND date of birth on ESPN's NBA rosters, else a name search (full, then last
+  name alone — that catches nicknames like Bub Carrington) over the NBA and G
+  League, accepted only when exactly one hit has the same birthday and last
+  name. Who's left is in `irl/unmapped-nba.json`, retried daily, and listed on
+  `/committees/rosters` → Data Quality, where `rosters` sets an id (or `null`,
+  "no ESPN record") via `PUT /api/irl/ids/{sport}/{slug}`. Never match at
+  read time. Players with no stat
   columns (linemen, the unmapped) are hidden by the page via `has_stats`.
   An id with no record in the league (a G League or college player — ESPN
   ids span leagues) is stored with `bio: null` and hidden the same way. Set
   a slug to `null` in `irl-ids.json` to stop auto-mapping retrying it; each
-  retry costs ~31 requests, since it reads every ESPN team roster.
+  retry costs ~31 requests plus a search or two.
 - **Cache**: `irl/{sport}/{espn_id}.json`, written by `fetch_irl.py` from
   `nbn-irl.timer` (hourly; a player is refetched once older than the sport's
   `refresh_minutes` — NFL 50, NBA 170). A season already over when fetched is `closed`

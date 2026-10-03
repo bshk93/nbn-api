@@ -39,17 +39,21 @@ the sport's `refresh_minutes`.
 import csv
 import json
 import re
+import threading
 import time
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
 from .constants import (DATA_DIR, IRL_DIR, IRL_IDS_FILE, IRL_ROSTERS_FILE, PLAYER_BIOS_FILE,
                         VALID_TEAMS, logger)
-from .storage import _atomic_write, _load_json
+from .auth import require_role
+from .storage import _atomic_write, _load_json, log_write
 
 router = APIRouter()
 
@@ -63,8 +67,16 @@ SPORTS = {
     "nfl": {"espn": "football/nfl", "label": "NFL", "rosters": "file",
             "seasons": 2, "max_games": None, "refresh_minutes": 50},
     "nba": {"espn": "basketball/nba", "label": "NBA", "rosters": "nbn",
-            "seasons": 2, "max_games": 50, "refresh_minutes": 170},
+            "seasons": 2, "max_games": 50, "refresh_minutes": 170,
+            # ESPN search league ids worth matching against (uid "~l:46~"), and
+            # where each league's athlete record lives. One ESPN id spans them.
+            "search_leagues": {"46": "basketball/nba", "69": "basketball/nba-development"}},
 }
+
+# A rostered player auto-mapping can't place is retried this often, not every
+# run: each attempt reads every ESPN team roster and runs a search or two.
+UNMAPPED_RETRY_HOURS = 24
+_ids_lock = threading.Lock()
 
 SITE_API = "https://site.api.espn.com/apis/site/v2/sports"
 COMMON_API = "https://site.web.api.espn.com/apis/common/v3/sports"
@@ -283,39 +295,117 @@ def _norm_name(s: str) -> str:
     return "".join(w for w in s.split() if w not in ("jr", "sr", "ii", "iii", "iv", "v"))
 
 
+def unmapped_path(sport: str) -> Path:
+    """Who auto-mapping couldn't place, and when it last tried. A cache like
+    the rest of irl/: losing it only means one early retry."""
+    return IRL_DIR / f"unmapped-{sport}.json"
+
+
+def _dob_from_display(s) -> str:
+    """ESPN's displayDOB, day first: '21/7/2005' → '2005-07-21'."""
+    try:
+        d, m, y = (int(x) for x in str(s).split("/"))
+        return f"{y:04d}-{m:02d}-{d:02d}"
+    except (TypeError, ValueError):
+        return ""
+
+
+def _search_match(client: httpx.Client, sport: str, bio: dict):
+    """The one ESPN id whose name search hit has this player's date of birth
+    and last name, or None. Tries the full name, then the last name alone — a
+    nickname ("Bub" for Carlton Carrington) hides from the first and not the
+    second. Only leagues in `search_leagues` count."""
+    leagues = SPORTS[sport].get("search_leagues") or {}
+    dob = bio.get("dob") or ""
+    last, _, first = (bio.get("name") or "").partition(", ")
+    if not (dob and last and leagues):
+        return None
+    last_key = _norm_name(last)
+    checked: dict = {}
+    for query in (f"{first.title()} {last.title()}".strip(), last.title()):
+        hits = _get(client, "https://site.web.api.espn.com/apis/search/v2",
+                    query=query, limit=10, type="player")
+        for group in hits.get("results") or []:
+            for c in group.get("contents") or []:
+                parts = dict(p.split(":", 1) for p in (c.get("uid") or "").split("~") if ":" in p)
+                league, aid = parts.get("l"), parts.get("a")
+                if league not in leagues or not aid or aid in checked:
+                    continue
+                if last_key not in _norm_name(c.get("displayName") or ""):
+                    continue
+                try:
+                    a = _get(client, f"{COMMON_API}/{leagues[league]}/athletes/{aid}").get("athlete") or {}
+                except httpx.HTTPStatusError:
+                    continue
+                checked[aid] = _dob_from_display(a.get("displayDOB")) == dob
+        found = [aid for aid, ok in checked.items() if ok]
+        if len(found) == 1:
+            return found[0]
+        if len(found) > 1:
+            return None   # two people, one birthday: a human decides
+    return None
+
+
 def auto_map(client: httpx.Client, sport: str) -> dict:
-    """Give an ESPN id to every rostered NBN player who lacks one, where ESPN's
-    current team rosters have exactly one player with the same name and date
-    of birth. Unsigned draft rights are skipped: they have no NBA games. Writes
-    irl-ids.json only when something was added."""
+    """Give an ESPN id to every rostered NBN player who lacks one. First an
+    exact name AND date of birth match on ESPN's current team rosters; failing
+    that, a name search (`_search_match`) — which also reaches the G League —
+    held to the same date of birth. Unsigned draft rights are skipped: they
+    have no NBA games. A player neither finds is listed in unmapped-{sport}.json
+    and retried after UNMAPPED_RETRY_HOURS; a slug set to null in irl-ids.json
+    is never tried (someone decided there is no ESPN record)."""
     if SPORTS[sport]["rosters"] != "nbn":
         return {"added": {}, "unmapped": []}
     bios = _load_json(PLAYER_BIOS_FILE, {})
     all_ids = load_ids()
     ids = all_ids.setdefault(sport, {})
-    want = [s for t in VALID_TEAMS for s in _nbn_roster_slugs(t)
-            if s not in ids and (bios.get(s) or {}).get("type") != "draft-rights"]
-    if not want:
-        return {"added": {}, "unmapped": []}
-    espn = SPORTS[sport]["espn"]
-    index: dict = {}
-    teams = _get(client, f"{SITE_API}/{espn}/teams", limit=40)
-    for t in teams["sports"][0]["leagues"][0]["teams"]:
-        roster = _get(client, f"{SITE_API}/{espn}/teams/{t['team']['id']}/roster")
-        for a in roster.get("athletes") or []:
-            key = (_norm_name(a.get("fullName") or ""), (a.get("dateOfBirth") or "")[:10])
-            index.setdefault(key, []).append(str(a["id"]))
-    added, unmapped = {}, []
-    for slug in dict.fromkeys(want):
-        bio = bios.get(slug) or {}
-        hits = index.get((_norm_name(bio.get("name") or ""), bio.get("dob") or ""), []) if bio.get("dob") else []
-        if len(hits) == 1:
-            ids[slug] = added[slug] = hits[0]
-        else:
-            unmapped.append(slug)
+    team_of = {}
+    for t in sorted(VALID_TEAMS):
+        for slug in _nbn_roster_slugs(t):
+            if slug not in ids and (bios.get(slug) or {}).get("type") != "draft-rights":
+                team_of.setdefault(slug, t)
+    state = _load_json(unmapped_path(sport), {})
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=UNMAPPED_RETRY_HOURS)
+    due = [s for s in team_of
+           if s not in state or datetime.fromisoformat(state[s]["tried"]) < cutoff]
+
+    added = {}
+    if due:
+        espn = SPORTS[sport]["espn"]
+        index: dict = {}
+        teams = _get(client, f"{SITE_API}/{espn}/teams", limit=40)
+        for t in teams["sports"][0]["leagues"][0]["teams"]:
+            roster = _get(client, f"{SITE_API}/{espn}/teams/{t['team']['id']}/roster")
+            for a in roster.get("athletes") or []:
+                key = (_norm_name(a.get("fullName") or ""), (a.get("dateOfBirth") or "")[:10])
+                index.setdefault(key, []).append(str(a["id"]))
+        for slug in due:
+            bio = bios.get(slug) or {}
+            hits = index.get((_norm_name(bio.get("name") or ""), bio.get("dob") or ""), []) if bio.get("dob") else []
+            espn_id = hits[0] if len(hits) == 1 else _search_match(client, sport, bio)
+            if espn_id:
+                added[slug] = espn_id
+            else:
+                state[slug] = {"tried": now.isoformat(timespec="seconds")}
     if added:
-        _atomic_write(IRL_IDS_FILE, json.dumps(all_ids, indent=2, sort_keys=True) + "\n")
-    return {"added": added, "unmapped": unmapped}
+        with _ids_lock:
+            fresh = load_ids()
+            fresh.setdefault(sport, {}).update(added)
+            _atomic_write(IRL_IDS_FILE, json.dumps(fresh, indent=2, sort_keys=True) + "\n")
+
+    # Keep only who is still rostered and still unplaced, with what the page shows.
+    unmapped = {}
+    for slug, team in team_of.items():
+        if slug in added:
+            continue
+        bio = bios.get(slug) or {}
+        unmapped[slug] = {"tried": (state.get(slug) or {}).get("tried"), "team": team,
+                          "name": _nbn_display_name(bio, slug), "dob": bio.get("dob")}
+    if unmapped != _load_json(unmapped_path(sport), {}):
+        unmapped_path(sport).parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(unmapped_path(sport), json.dumps(unmapped, indent=2, sort_keys=True))
+    return {"added": added, "unmapped": sorted(unmapped)}
 
 
 def sport_ids(sport: str) -> list:
@@ -431,6 +521,45 @@ def _trim(seasons: list, max_games) -> list:
         left -= len(games)
         out.append({**s, "games": games})
     return out
+
+
+@router.get("/api/irl/unmapped/{sport}")
+def list_unmapped(sport: str):
+    """Rostered players with no ESPN id, as of the last fetch. Shown on the
+    Rosters committee page, where `rosters` can set one by hand."""
+    sport = sport.lower()
+    if sport not in SPORTS or SPORTS[sport]["rosters"] != "nbn":
+        raise HTTPException(status_code=404, detail=f"No NBN-roster IRL feed for {sport!r}")
+    rows = [{"slug": slug, **row} for slug, row in _load_json(unmapped_path(sport), {}).items()]
+    rows.sort(key=lambda r: (r.get("team") or "", r["slug"]))   # slugs are last-name first
+    return {"sport": sport, "players": rows}
+
+
+class IdIn(BaseModel):
+    # An ESPN athlete id, or null for "this player has no ESPN record" (stops
+    # auto-mapping from retrying).
+    espn_id: Optional[str] = None
+
+
+@router.put("/api/irl/ids/{sport}/{slug}")
+def set_id(sport: str, slug: str, body: IdIn, info: dict = Depends(require_role("rosters"))):
+    sport = sport.lower()
+    if sport not in SPORTS or SPORTS[sport]["rosters"] != "nbn":
+        raise HTTPException(status_code=404, detail=f"No NBN-roster IRL feed for {sport!r}")
+    if slug not in _load_json(PLAYER_BIOS_FILE, {}):
+        raise HTTPException(status_code=404, detail=f"No player {slug!r}")
+    espn_id = (body.espn_id or "").strip() or None
+    if espn_id is not None and not re.fullmatch(r"\d{1,12}", espn_id):
+        raise HTTPException(status_code=400, detail="espn_id must be the number in the player's ESPN URL")
+    with _ids_lock:
+        all_ids = load_ids()
+        all_ids.setdefault(sport, {})[slug] = espn_id
+        _atomic_write(IRL_IDS_FILE, json.dumps(all_ids, indent=2, sort_keys=True) + "\n")
+        state = _load_json(unmapped_path(sport), {})
+        if state.pop(slug, None) is not None:
+            _atomic_write(unmapped_path(sport), json.dumps(state, indent=2, sort_keys=True))
+    log_write(info, f"PUT irl/ids/{sport}/{slug} = {espn_id}")
+    return {"sport": sport, "slug": slug, "espn_id": espn_id}
 
 
 @router.get("/api/irl/rosters")
