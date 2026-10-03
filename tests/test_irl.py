@@ -174,6 +174,21 @@ calls.clear()
 irl.fetch_player(None, "nfl", "100", current=2027, force=True)
 check("--force refetches closed seasons", ("gamelog", 2026) in calls)
 
+print("fetch_player — no record in this league")
+import httpx  # noqa: E402
+
+
+def fake_404_bio(client, url, **params):
+    if url.endswith("/gamelog"):
+        return {}
+    raise httpx.HTTPStatusError("404", request=httpx.Request("GET", url), response=httpx.Response(404))
+
+
+irl._get = fake_404_bio
+out = irl.fetch_player(None, "nba", "777", current=2027)
+check("a 404 bio is stored as None, not a failure", out["bio"] is None and set(out["seasons"]) == {"2027", "2026"})
+irl._get = fake_get
+
 print("routes")
 irl.IRL_ROSTERS_FILE.write_text(json.dumps({
     "nfl": {"CIN": {"league": "NBNFL", "label": "Bengals",

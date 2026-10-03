@@ -706,6 +706,10 @@ reads no box score, roster CSV or bio, and the stats build never reads it.
   hand-added id. A twin breaks name+DOB (Cody/Caleb Martin), and a nickname
   breaks name (Bub Carrington). Never match at read time. Players with no stat
   columns (linemen, the unmapped) are hidden by the page via `has_stats`.
+  An id with no record in the league (a G League or college player — ESPN
+  ids span leagues) is stored with `bio: null` and hidden the same way. Set
+  a slug to `null` in `irl-ids.json` to stop auto-mapping retrying it; each
+  retry costs ~31 requests, since it reads every ESPN team roster.
 - **Cache**: `irl/{sport}/{espn_id}.json`, written by `fetch_irl.py` from
   `nbn-irl.timer` (hourly; a player is refetched once older than the sport's
   `refresh_minutes` — NFL 50, NBA 170). A season already over when fetched is `closed`

@@ -370,7 +370,15 @@ def fetch_player(client: httpx.Client, sport: str, espn_id: str, current: int,
                 raise
             raw = {}
         seasons[str(year)] = normalize_gamelog(raw, sport, year, closed=year < current)
-    bio = normalize_bio(_get(client, f"{COMMON_API}/{cfg['espn']}/athletes/{espn_id}"))
+    try:
+        bio = normalize_bio(_get(client, f"{COMMON_API}/{cfg['espn']}/athletes/{espn_id}"))
+    except httpx.HTTPStatusError as e:
+        # The id is real but has no record in this league yet: a G League or
+        # college player on an NBN roster (ESPN ids span leagues). Stored with
+        # no bio, so the page hides them until they reach the league.
+        if e.response.status_code != 404:
+            raise
+        bio = None
     out = {"espn_id": espn_id, "sport": sport,
            "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
            "bio": bio, "seasons": seasons}
