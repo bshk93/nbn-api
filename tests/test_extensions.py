@@ -200,7 +200,26 @@ def main():
     checks, _ = extend(bio, {"type": "player", "salaries": {"27-28": "$7,000,001"}, "cap_holds": {}},
                        cur_season=cur, events=(("2024-08-01", "sign", "XXX"),))
     c = named(checks, "extension_max_year1")
-    check("$1 over the 140% ceiling -> error", c and not c.passed)
+    check("$1 over 140% of prior salary, EAPS unset -> warns (the EAPS half might be greater)",
+          c and not c.passed and c.level == "warning")
+
+    over = {"type": "player", "salaries": {"27-28": "$7,000,001"}, "cap_holds": {}}
+    checks, _ = extend(bio, over, cur_season=cur, events=(("2024-08-01", "sign", "XXX"),),
+                       cap_levels={"27-28": {"eaps": 4_000_000}})
+    c = named(checks, "extension_max_year1")
+    check("$1 over, EAPS set and lower -> error against the greater (prior-salary) half",
+          c and not c.passed and c.level == "error")
+
+    checks, ctx = extend(bio, {"type": "player", "salaries": {"27-28": "$13,000,000"}, "cap_holds": {}},
+                         cur_season=cur, events=(("2024-08-01", "sign", "XXX"),),
+                         cap_levels={"27-28": {"eaps": 10_000_000}})
+    c = named(checks, "extension_max_year1")
+    check("whichever is greater: 140% of a $10M EAPS ($14M) beats 140% of $5M prior",
+          c and c.passed and "EAPS" in c.message)
+    sheet = T._extension_fact_sheet(T.ExtensionDetails(player="p", team="XXX",
+        contract=T.ContractIn(type="player", salaries={"27-28": "$13,000,000"})), ctx)
+    check("...and the fact sheet reports the same ceiling and basis",
+          sheet["max_year1_ceiling"] == 14_000_000 and sheet["max_year1_basis"] == "eaps")
 
     # No prior-salary figure on file (fresh bio, no contract_end) -> EAPS-unset warn.
     bare_bio = {"salaries": {}, "guaranteed": {}, "cap_holds": {}}
@@ -305,9 +324,13 @@ def main():
     checks, ctx = extend(rookie, rs_contract, kind="rookie_scale", events=rookie_events)
     c = named(checks, "extension_kind")
     check("declared rookie_scale on a rookie-scale player passes", c and c.passed)
+    c = named(checks, "extension_max_year1")
+    check("a rookie-scale extension has no 140% ceiling ($9M on a $6.8M salary passes)",
+          c and c.passed and c.level == "info")
     sheet = T._extension_fact_sheet(T.ExtensionDetails(player="p", team="XXX", kind="rookie_scale",
                                                        contract=T.ContractIn(**rs_contract)), ctx)
     check("fact sheet says rookie_scale so the forms can preselect it", sheet.get("rookie_scale") is True)
+    check("...and shows no 140% ceiling", sheet["max_year1_ceiling"] is None)
 
     vet = {"draft_round": 2, "draft_year": 2018, "draft_pick": 40,
            "salaries": {"24-25": "$10,000,000", "25-26": "$10,000,000", "26-27": "$10,000,000"},

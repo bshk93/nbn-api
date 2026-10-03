@@ -6848,6 +6848,23 @@ def _extension_contract_years(bio: dict) -> list[str]:
     )
 
 
+def _extension_year1_ceiling(prior_salary: int, cl: dict) -> dict:
+    """§ 6.2's Year 1 ceiling for a veteran extension: the greater of 140% of
+    prior salary and 140% of the first extended season's EAPS. One helper so
+    the validator and the fact sheet can't disagree. `ceiling` is None when
+    neither half can be priced."""
+    eaps = cl.get("eaps") or None
+    halves = []
+    if prior_salary:
+        halves.append((round(prior_salary * 1.4), "prior_salary",
+                       f"140% of prior salary ${prior_salary:,}"))
+    if eaps:
+        halves.append((round(eaps * 1.4), "eaps", f"140% of EAPS ${eaps:,}"))
+    best = max(halves, key=lambda h: h[0]) if halves else (None, None, None)
+    return {"ceiling": best[0], "basis": best[1], "label": best[2],
+            "eaps_set": bool(eaps), "eaps_estimate": bool(eaps and cl.get("is_estimate"))}
+
+
 def _extension_is_rookie_scale(bio: dict, frame: dict) -> bool:
     """§ 6.3's rookie-scale bucket, read off the bio rather than taken from
     the proposal: a first-round pick whose four-year rookie deal is the
@@ -7197,36 +7214,47 @@ def _validate_extension(details: ExtensionDetails, ctx: dict) -> list[CheckResul
             message=f"Can't determine {player}'s final guaranteed year from the bio — start season not verified.",
         ))
 
-    # ── extension_max_year1 (rule 7: <= 140% of prior salary or EAPS) ───────
+    # ── extension_max_year1 (§ 6.2: the greater of 140% of prior salary and
+    # 140% of EAPS; a rookie-scale extension is outside it) ─────────────────
     yr1_season = frame["first_extended_season"] or submitted_first
     yr1_salary = _parse_dollar(details.contract.salaries.get(yr1_season, "")) if yr1_season else 0
-    if frame["prior_salary"]:
-        ceiling = round(frame["prior_salary"] * 1.4)
-        if yr1_salary > ceiling:
-            checks.append(CheckResult(
-                check="extension_max_year1", passed=False, level="error",
-                message=(
-                    f"§ 6.2 rule 7: Year 1 (${yr1_salary:,}) exceeds 140% of prior salary "
-                    f"(${frame['prior_salary']:,} → ${ceiling:,})."
-                ),
-            ))
-        else:
-            checks.append(CheckResult(
-                check="extension_max_year1", passed=True,
-                message=f"Year 1 (${yr1_salary:,}) is within 140% of prior salary (${ceiling:,} ceiling).",
-            ))
-    else:
-        yr1_cl = cap_levels.get(yr1_season, {}) if yr1_season else {}
-        eaps = yr1_cl.get("eaps")
-        estimate_note = " (ESTIMATED — not yet finalized)" if yr1_cl.get("is_estimate") else ""
+    yr1_cl = cap_levels.get(yr1_season, {}) if yr1_season else {}
+    cap1 = _extension_year1_ceiling(frame["prior_salary"], yr1_cl)
+    if rookie_scale:
+        checks.append(CheckResult(
+            check="extension_max_year1", passed=True, level="info",
+            message=("A rookie-scale extension has no 140% ceiling (§ 6.2) — Year 1 is limited "
+                     "only by the maximum salary (§ 3.11)."),
+        ))
+    elif cap1["ceiling"] is None:
         checks.append(CheckResult(
             check="extension_max_year1", passed=True, level="warning",
-            message=(
-                "No prior-salary figure on file to check the 140% ceiling against"
-                + (f", and EAPS for {yr1_season} is unset" if not eaps
-                   else f"; EAPS ceiling would be ${round(eaps * 1.4):,}{estimate_note}")
-                + "."
-            ),
+            message=(f"No prior-salary figure on file and EAPS for {yr1_season} is unset — the "
+                     f"140% ceiling can't be checked."),
+        ))
+    elif yr1_salary <= cap1["ceiling"]:
+        checks.append(CheckResult(
+            check="extension_max_year1", passed=True,
+            **({"level": "warning"} if cap1["basis"] == "eaps" and cap1["eaps_estimate"] else {}),
+            message=f"Year 1 (${yr1_salary:,}) is within the § 6.2 ceiling of ${cap1['ceiling']:,} "
+                    f"({cap1['label']}).",
+        ))
+    elif not cap1["eaps_set"]:
+        # Over 140% of prior salary, but the EAPS half can't be priced yet,
+        # and it might be the greater one — so this can't be called illegal.
+        checks.append(CheckResult(
+            check="extension_max_year1", passed=False, level="warning",
+            message=(f"Year 1 (${yr1_salary:,}) is over 140% of prior salary (${cap1['ceiling']:,}). "
+                     f"§ 6.2 allows the greater of that and 140% of EAPS, and EAPS for {yr1_season} "
+                     f"is unset — so this can't be confirmed either way."),
+        ))
+    else:
+        checks.append(CheckResult(
+            check="extension_max_year1", passed=False,
+            level="warning" if cap1["eaps_estimate"] else "error",
+            message=(f"{'ESTIMATED — not yet finalized: ' if cap1['eaps_estimate'] else ''}"
+                     f"Year 1 (${yr1_salary:,}) is over the § 6.2 ceiling of ${cap1['ceiling']:,} "
+                     f"({cap1['label']})."),
         ))
 
     # ── extension_raises (rule 8: <= 8%, or 5% for extend-and-trade) ────────
@@ -7341,6 +7369,9 @@ def _extension_fact_sheet(details: ExtensionDetails, ctx: dict) -> dict:
         min(details.contract.salaries, key=_season_start) if details.contract.salaries else None)
     cl = ctx["cap_levels"].get(yr1_season, {}) if yr1_season else {}
     team_salary = _compute_team_salary(team, bios, yr1_season) if yr1_season else None
+    rookie_scale = _extension_is_rookie_scale(bio, frame)
+    cap1 = ({"ceiling": None, "basis": None} if rookie_scale
+            else _extension_year1_ceiling(frame["prior_salary"], cl))
     # Same helper `_signing_fact_sheet` uses — an extension's trailing UFA/RFA
     # hold is auto-priced by `_apply_extension` through the same
     # `_autofill_fa_hold_amounts` a signing goes through, so the office needs
@@ -7371,9 +7402,11 @@ def _extension_fact_sheet(details: ExtensionDetails, ctx: dict) -> dict:
         },
         "trailing_hold": trailing_hold,
         # What `extension_kind` holds the proposal to — the forms preselect it.
-        "rookie_scale": _extension_is_rookie_scale(bio, frame),
+        "rookie_scale": rookie_scale,
         "prior_salary": frame["prior_salary"],
-        "max_year1_ceiling": round(frame["prior_salary"] * 1.4) if frame["prior_salary"] else None,
+        # Both None for a rookie-scale extension, which has no 140% ceiling (§ 6.2).
+        "max_year1_ceiling": cap1["ceiling"],
+        "max_year1_basis": cap1["basis"],
         "eaps": cl.get("eaps"),
         "team_salary_first_extended_season": team_salary,
         "cap_first_extended_season": cl.get("cap") or None,
