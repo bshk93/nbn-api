@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh the IRL feed every hour
+
+[Timer]
+# Hourly is plenty: ESPN posts a game log within minutes of the final whistle,
+# and one run is two requests per rostered player (a 53-man NFL roster is ~110
+# requests, spaced 0.2s apart). Nothing depends on a run landing on time, so a
+# missed one is simply caught by the next.
+OnCalendar=hourly
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

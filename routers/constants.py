@@ -116,6 +116,12 @@ STREAMING_DAYS_FILE = DATA_DIR / "streaming-days.json"
 # away_score, stats: [{player, team, category, stats: {...}}]}] }. Every stat
 # line is that team's; totals are computed by the page. See routers/nbnfl.py.
 NBNFL_FILE = DATA_DIR / "nbnfl.json"
+# IRL feed — real-world game logs for the players on a fantasy roster, kept
+# entirely apart from NBN's own stats. The rosters are hand-kept (sport →
+# roster key → players with their ESPN id); the cache is one file per player,
+# written by fetch_irl.py and refetchable at any time. See routers/irl.py.
+IRL_ROSTERS_FILE = DATA_DIR / "irl-rosters.json"
+IRL_DIR = DATA_DIR / "irl"
 
 PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PLAYER", "PROTECTED", "SWAP_OWNER", "NOTES", "FROZEN", "FROZEN_REASON"]
 

@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from routers import audit as audit_ctx
-from routers import auth, players, roster_picks, transactions, boxscores, game_highs, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, og, discord, trade_finder, picks_preview, suggestions, google_sheets, free_agency, roster_log_relay, waivers, inbox, poext, themes, cap_history, poopoo, schedule, coaching_settings, streaming_days, donations, nbnfl, trade_requests, nbyen, markets
+from routers import auth, players, roster_picks, transactions, boxscores, game_highs, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, og, discord, trade_finder, picks_preview, suggestions, google_sheets, free_agency, roster_log_relay, waivers, inbox, poext, themes, cap_history, poopoo, schedule, coaching_settings, streaming_days, donations, nbnfl, irl, trade_requests, nbyen, markets
 from routers.picks_scheduler import start_picks_horizon_scheduler
 from routers.roster_log_relay import start_roster_log_relay
 
@@ -84,6 +84,7 @@ app.include_router(coaching_settings.router)  # per-team 2K coach profile, team-
 app.include_router(streaming_days.router)  # per-date streaming status: day marked done, YouTube VOD link
 app.include_router(donations.router)       # league funding tracker — GET public, POST/PUT gated to bod
 app.include_router(nbnfl.router)           # NBNFL — one team's game log and stats, admin-entered
+app.include_router(irl.router)             # IRL feed — real-world game logs for a fantasy roster, from ESPN; apart from NBN stats
 app.include_router(trade_requests.router)  # Trade Request Committee — nbn-today/docs/trc-trade-pipeline.md
 app.include_router(markets.router)          # futures markets on /bet
 app.include_router(nbyen.router)           # public read of NB¥ balances and the ledger, for /nbyen

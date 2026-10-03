@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh the IRL feed's real-world game logs from ESPN
+Documentation=file:///home/skim/projects/nbn-api/routers/irl.py
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=skim
+WorkingDirectory=/home/skim/projects/nbn-api
+ExecStart=/home/skim/projects/nbn-api/venv/bin/python /home/skim/projects/nbn-api/fetch_irl.py
+StandardOutput=journal
+StandardError=journal
