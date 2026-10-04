@@ -3940,8 +3940,8 @@ def _check_contract_raises(
     bio: Optional[dict] = None, cap_levels: Optional[dict] = None,
     pct: Optional[float] = None,
 ) -> Optional[CheckResult]:
-    """§ 3.9 / § 3.13: no year-over-year change above 5% (8% with Full Bird)
-    of Year 1.
+    """§ 3.9 / § 3.13: no year-over-year change above 5% (8% with Full or
+    Early Bird) of Year 1.
 
     **Minimum-scale years are exempt.** § 3.12 says a multi-year minimum deal
     pays "the scale for the player's years of experience that season," and the
