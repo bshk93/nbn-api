@@ -23,8 +23,10 @@ What's smaller here than free_agency.py, and why:
     ones. `LIVE_STATUSES` still matters (draft/submitted/returned), but
     there's no "which of several" indexing anywhere.
   * No pending-cap-hold tracking (D7) — a live proposal holds no room.
-  * Ballot is accept/reject majority (D6), not 1,000 balls — much less
-    machinery, and the "revisit D6 later" flag lives in the spec, not here.
+  * Ballot is 1,000 balls split between accept and reject — the
+    constitution's PO-Ext method (Article V), replacing D6's majority vote on
+    2026-10-04. Over 85% for one side decides it; otherwise the head runs the
+    lottery draw off-site, as FA does, and finalizes with its result.
   * `finalize` has no agent-uncontested shortcut (§ 2.9a) — always head-only,
     since an extension never has FA's contested/uncontested axis to collapse.
 """
@@ -813,25 +815,66 @@ def review_player(slug: str, info: dict = Depends(get_token_info)):
     }
 
 
+# The constitution's PO-Ext method (Article V): members allocate lottery
+# balls, "same methodology as the FAC", and a decision is automatic when one
+# option takes more than 85%. Otherwise the outcome is a lottery draw weighted
+# by the balls — run off-site for now, like FA's, and recorded by the head.
+BALLOT_TOTAL = 1000
+AUTO_SHARE = 0.85
+BALLOT_OPTIONS = ("accept", "reject")
+
+
 class VoteIn(BaseModel):
-    vote: str    # "accept" | "reject"
+    balls: dict[str, int]    # {"accept": n, "reject": m}, totalling BALLOT_TOTAL
     note: str = ""
 
 
 class FinalizeBody(BaseModel):
     # See apply_with_warning_confirm (transactions.py): the first finalize
-    # call on an "agreed" vote with warning-level checks comes back asking
+    # call on an "agreed" outcome with warning-level checks comes back asking
     # for this instead of writing anything; a real error is never
     # confirmable this way.
     confirm_warnings: bool = False
+    # The result of the off-site lottery draw, "agreed" or "rejected".
+    # Required when no option took more than 85%; refused when one did,
+    # since then the ballot has already decided.
+    outcome: Optional[str] = None
+
+
+def _ballot_totals(node: dict) -> dict:
+    totals = {k: 0 for k in BALLOT_OPTIONS}
+    for cast in node["votes"].values():
+        for k, n in (cast.get("balls") or {}).items():
+            totals[k] = totals.get(k, 0) + n
+    return totals
+
+
+def _automatic_outcome(totals: dict) -> Optional[str]:
+    """'agreed'/'rejected' when one side took strictly more than 85% of the
+    balls cast ("exceeds 85%"), else None — the lottery decides."""
+    cast = sum(totals.values())
+    if not cast:
+        return None
+    if totals["accept"] > AUTO_SHARE * cast:
+        return "agreed"
+    if totals["reject"] > AUTO_SHARE * cast:
+        return "rejected"
+    return None
 
 
 @router.put("/api/poext/players/{slug}/vote")
 def cast_vote(slug: str, body: VoteIn, info: dict = Depends(get_token_info)):
-    """Own vote only, and only if assigned — never admin-waved (D6, mirrors
-    free_agency.cast_ballot: a vote is not an administrative action)."""
-    if body.vote not in ("accept", "reject"):
-        raise HTTPException(422, "vote must be 'accept' or 'reject'")
+    """Own ballot only, and only if assigned — never admin-waved (mirrors
+    free_agency.cast_ballot: a vote is not an administrative action). A
+    ballot splits exactly BALLOT_TOTAL balls between accept and reject."""
+    unknown = sorted(set(body.balls) - set(BALLOT_OPTIONS))
+    if unknown:
+        raise HTTPException(422, f"Not options on this ballot: {unknown} — use 'accept' and 'reject'")
+    if any(v < 0 for v in body.balls.values()):
+        raise HTTPException(422, "Ball counts can't be negative")
+    if sum(body.balls.values()) != BALLOT_TOTAL:
+        raise HTTPException(422, f"A ballot must total exactly {BALLOT_TOTAL} — "
+                                 f"this one totals {sum(body.balls.values())}")
     state = _load_state()
     if not _is_assigned(state, slug, info["name"]):
         raise HTTPException(403, "You aren't on this player's sub-committee")
@@ -847,11 +890,12 @@ def cast_vote(slug: str, body: VoteIn, info: dict = Depends(get_token_info)):
             raise HTTPException(409, "This proposal is finalized — voting is locked")
         live = _live_proposal_for(proposals, slug)
         node["votes"][info["name"]] = {
-            "vote": body.vote, "note": body.note.strip(), "updated_at": _now(),
+            "balls": {k: body.balls.get(k, 0) for k in BALLOT_OPTIONS},
+            "note": body.note.strip(), "updated_at": _now(),
             "conflict": _proposal_conflict(info["name"], live) if live else None,
         }
         _save_votes(votes)
-    log_write(info, f"PUT poext/players/{slug}/vote — {body.vote}")
+    log_write(info, f"PUT poext/players/{slug}/vote")
     return node["votes"][info["name"]]
 
 
@@ -899,12 +943,25 @@ def finalize_player(slug: str, body: FinalizeBody = FinalizeBody(),
             raise HTTPException(422, "No live proposal on this player to finalize")
 
         assigned = _player_entry(state, slug).get("subcommittee") or []
-        accept = sum(1 for v in node["votes"].values() if v["vote"] == "accept")
-        reject = sum(1 for v in node["votes"].values() if v["vote"] == "reject")
-        if accept == reject:
-            raise HTTPException(409, f"No majority ({accept} accept, {reject} reject) — "
-                                     f"cast more votes or resolve it manually before finalizing")
-        outcome = "agreed" if accept > reject else "rejected"
+        totals = _ballot_totals(node)
+        cast = sum(totals.values())
+        if not cast:
+            raise HTTPException(409, "No ballots cast yet")
+        auto = _automatic_outcome(totals)
+        if body.outcome is not None and body.outcome not in ("agreed", "rejected"):
+            raise HTTPException(422, "outcome must be 'agreed' or 'rejected'")
+        if auto:
+            if body.outcome and body.outcome != auto:
+                raise HTTPException(409, f"The ballot already decided this: over 85% for "
+                                         f"{'accept' if auto == 'agreed' else 'reject'}")
+            outcome, path = auto, "automatic"
+        else:
+            if not body.outcome:
+                odds = round(100 * totals["accept"] / cast)
+                raise HTTPException(409, f"No option took more than 85% — run the lottery draw "
+                                         f"({odds}% accept, {100 - odds}% reject) and finalize "
+                                         f"with its outcome")
+            outcome, path = body.outcome, "lottery"
 
         txn = None
         if outcome == "agreed":
@@ -932,7 +989,8 @@ def finalize_player(slug: str, body: FinalizeBody = FinalizeBody(),
 
         node["final"] = {
             "locked_at": _now(), "locked_by": info["name"],
-            "outcome": outcome, "accept": accept, "reject": reject,
+            "outcome": outcome, "path": path, "totals": totals,
+            "accept_share": round(totals["accept"] / cast, 4),
             "voters": sorted(node["votes"]),
             "abstained": [m for m in assigned if m not in node["votes"]],
             "rejections_total": rejections, "rejection_limit": limited, "exhausted": exhausted,

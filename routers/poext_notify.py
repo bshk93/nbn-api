@@ -229,7 +229,11 @@ def notify_player_finalized(slug: str, proposal: dict, final: dict) -> None:
     def build():
         embed = {
             "title": f"{_name(slug)} — extension {outcome}",
-            "description": f"{final['accept']}–{final['reject']} · locked by {final['locked_by']}" + exhausted_note,
+            "description": (f"{(final.get('totals') or {}).get('accept', 0)} accept – "
+                            f"{(final.get('totals') or {}).get('reject', 0)} reject balls · "
+                            + ("over 85%, decided by the ballot" if final.get("path") == "automatic"
+                               else "decided by lottery draw")
+                            + f" · locked by {final['locked_by']}" + exhausted_note),
             "color": color,
             "fields": [{"name": "Team", "value": team, "inline": True}]
                       # § 6.3's three-proposal limit is an expiring veteran's only.

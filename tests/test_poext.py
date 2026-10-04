@@ -289,14 +289,16 @@ raises("can't advance twice (caught by _require_curator first)", 403,
 print("\nassignment + votes")
 poext.assign_subcommittee("barlow-dominick", {"subcommittee": ["memberA", "memberB", "memberC"]}, HEAD)
 raises("unassigned member can't vote", 403,
-       lambda: poext.cast_vote("barlow-dominick", poext.VoteIn(vote="accept"), UNASSIGNED))
-raises("bad vote value rejected", 422,
-       lambda: poext.cast_vote("barlow-dominick", poext.VoteIn(vote="maybe"), MEM_A))
-poext.cast_vote("barlow-dominick", poext.VoteIn(vote="accept"), MEM_A)
-poext.cast_vote("barlow-dominick", poext.VoteIn(vote="accept"), MEM_B)
+       lambda: poext.cast_vote("barlow-dominick", poext.VoteIn(balls={"accept": 1000}), UNASSIGNED))
+raises("a ballot naming something other than accept/reject is refused", 422,
+       lambda: poext.cast_vote("barlow-dominick", poext.VoteIn(balls={"maybe": 1000}), MEM_A))
+raises("a ballot that doesn't total 1,000 is refused", 422,
+       lambda: poext.cast_vote("barlow-dominick", poext.VoteIn(balls={"accept": 600, "reject": 300}), MEM_A))
+poext.cast_vote("barlow-dominick", poext.VoteIn(balls={"accept": 1000}), MEM_A)
+poext.cast_vote("barlow-dominick", poext.VoteIn(balls={"accept": 1000}), MEM_B)
 check("2 votes recorded", len(vote_node("barlow-dominick")["votes"]) == 2)
 
-print("\nfinalize — head only, majority accept")
+print("\nfinalize — head only, over 85% accept decides it")
 # The head-only gate here is Depends(require_role("poext_head")) — a plain
 # FastAPI dependency, invisible to a direct call the way every route in this
 # suite is exercised (matches test_fa_offers.py's own gap around
@@ -305,7 +307,8 @@ print("\nfinalize — head only, majority accept")
 # without going through real HTTP). What direct calls CAN and do pin is every
 # check finalize makes on its own — see finalize's other cases below.
 final = poext.finalize_player("barlow-dominick", poext.FinalizeBody(), HEAD)
-check("agreed, 2-0", final["outcome"] == "agreed" and final["accept"] == 2 and final["reject"] == 0)
+check("agreed automatically, 2,000 balls to 0", final["outcome"] == "agreed"
+      and final["path"] == "automatic" and final["totals"] == {"accept": 2000, "reject": 0})
 check("an agreed extension is applied for real, not hand-typed", len(APPLIED_EXTENSIONS) == 1)
 check("applied for the right player/team", APPLIED_EXTENSIONS[0]["details"]["player"] == "barlow-dominick"
       and APPLIED_EXTENSIONS[0]["details"]["team"] == "SAS")
@@ -323,8 +326,8 @@ poext.submit_proposal(p_w["id"], SAS)
 poext.claim_player("warny", AGENT)
 poext.advance_player("warny", {"note": ""}, AGENT)
 poext.assign_subcommittee("warny", {"subcommittee": ["memberA", "memberB"]}, HEAD)
-poext.cast_vote("warny", poext.VoteIn(vote="accept"), MEM_A)
-poext.cast_vote("warny", poext.VoteIn(vote="accept"), MEM_B)
+poext.cast_vote("warny", poext.VoteIn(balls={"accept": 1000}), MEM_A)
+poext.cast_vote("warny", poext.VoteIn(balls={"accept": 1000}), MEM_B)
 PENDING_CHECKS[:] = [{"check": "extension_not_minimum", "passed": False, "level": "warning", "message": "double check"}]
 before = len(APPLIED_EXTENSIONS)
 raises("a warning-only failure asks for confirmation instead of writing", 422,
@@ -344,8 +347,8 @@ poext.submit_proposal(p_e["id"], SAS)
 poext.claim_player("errory", AGENT)
 poext.advance_player("errory", {"note": ""}, AGENT)
 poext.assign_subcommittee("errory", {"subcommittee": ["memberA", "memberB"]}, HEAD)
-poext.cast_vote("errory", poext.VoteIn(vote="accept"), MEM_A)
-poext.cast_vote("errory", poext.VoteIn(vote="accept"), MEM_B)
+poext.cast_vote("errory", poext.VoteIn(balls={"accept": 1000}), MEM_A)
+poext.cast_vote("errory", poext.VoteIn(balls={"accept": 1000}), MEM_B)
 PENDING_CHECKS[:] = [{"check": "extension_max_year1", "passed": False, "level": "error", "message": "over the cap"}]
 before = len(APPLIED_EXTENSIONS)
 raises("a real error blocks with no confirm_warnings escape hatch", 422,
@@ -365,8 +368,8 @@ def run_one_rejected_round(slug="rejectee"):
     poext.claim_player(slug, AGENT)
     poext.advance_player(slug, {"note": ""}, AGENT)
     poext.assign_subcommittee(slug, {"subcommittee": ["memberA", "memberB"]}, HEAD)
-    poext.cast_vote(slug, poext.VoteIn(vote="reject"), MEM_A)
-    poext.cast_vote(slug, poext.VoteIn(vote="reject"), MEM_B)
+    poext.cast_vote(slug, poext.VoteIn(balls={"reject": 1000}), MEM_A)
+    poext.cast_vote(slug, poext.VoteIn(balls={"reject": 1000}), MEM_B)
     return poext.finalize_player(slug, poext.FinalizeBody(), HEAD)
 
 reset()
@@ -380,16 +383,41 @@ check("round 3: 3 total, exhausted", f3["rejections_total"] == 3 and f3["exhaust
 raises("a 4th proposal is refused — opportunities exhausted", 422,
        lambda: make_proposal(SAS, player="rejectee"))
 
-print("\ntie refuses to finalize rather than picking a side")
+print("\nunder 85% either way: the off-site lottery decides, and the head records it")
 reset()
 p = make_proposal(SAS)
 poext.submit_proposal(p["id"], SAS)
 poext.claim_player("barlow-dominick", AGENT)
 poext.advance_player("barlow-dominick", {"note": ""}, AGENT)
 poext.assign_subcommittee("barlow-dominick", {"subcommittee": ["memberA", "memberB"]}, HEAD)
-poext.cast_vote("barlow-dominick", poext.VoteIn(vote="accept"), MEM_A)
-poext.cast_vote("barlow-dominick", poext.VoteIn(vote="reject"), MEM_B)
-raises("1-1 tie can't finalize", 409, lambda: poext.finalize_player("barlow-dominick", poext.FinalizeBody(), HEAD))
+poext.cast_vote("barlow-dominick", poext.VoteIn(balls={"accept": 800, "reject": 200}), MEM_A)
+poext.cast_vote("barlow-dominick", poext.VoteIn(balls={"accept": 600, "reject": 400}), MEM_B)
+try:
+    poext.finalize_player("barlow-dominick", poext.FinalizeBody(), HEAD)
+    check("70% accept with no drawn outcome -> refused, naming the odds", False)
+except HTTPException as e:
+    check("70% accept with no drawn outcome -> refused, naming the odds",
+          e.status_code == 409 and "70% accept" in str(e.detail))
+raises("a bad outcome value is refused", 422,
+       lambda: poext.finalize_player("barlow-dominick", poext.FinalizeBody(outcome="maybe"), HEAD))
+final = poext.finalize_player("barlow-dominick", poext.FinalizeBody(outcome="rejected"), HEAD)
+check("the head records the draw's result, even against the odds",
+      final["outcome"] == "rejected" and final["path"] == "lottery" and final["accept_share"] == 0.7)
+
+print("\nexactly 85% is not 'more than 85%'")
+check("850 of 1,000 -> lottery", poext._automatic_outcome({"accept": 850, "reject": 150}) is None)
+check("851 of 1,000 -> automatic", poext._automatic_outcome({"accept": 851, "reject": 149}) == "agreed")
+check("reject side too", poext._automatic_outcome({"accept": 100, "reject": 900}) == "rejected")
+
+reset()
+p = make_proposal(SAS)
+poext.submit_proposal(p["id"], SAS)
+poext.claim_player("barlow-dominick", AGENT)
+poext.advance_player("barlow-dominick", {"note": ""}, AGENT)
+poext.assign_subcommittee("barlow-dominick", {"subcommittee": ["memberA"]}, HEAD)
+poext.cast_vote("barlow-dominick", poext.VoteIn(balls={"accept": 1000}), MEM_A)
+raises("an outcome that contradicts an automatic decision is refused", 409,
+       lambda: poext.finalize_player("barlow-dominick", poext.FinalizeBody(outcome="rejected"), HEAD))
 
 print("\nunlock decrements the rejection count it undid")
 reset()

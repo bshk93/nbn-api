@@ -102,7 +102,7 @@ check("restored -> 1 post, private only", len(SENT) == 1 and SENT[0][0] == "pdc-
 print("\nfinalize: agreed reaches pdc-alerts + fa-news, rejected reaches only pdc-alerts")
 reset()
 pn.notify_player_finalized("barlow-dominick", PROPOSAL, {
-    "outcome": "agreed", "accept": 3, "reject": 0, "locked_by": "headMember", "rejections_total": 0,
+    "outcome": "agreed", "path": "automatic", "totals": {"accept": 3000, "reject": 0}, "locked_by": "headMember", "rejections_total": 0,
     "exhausted": False, "txn_id": "deadbeef",
 })
 check("agreed -> exactly 2 posts (pdc-alerts, fa-news) — no direct roster-log post", len(SENT) == 2, SENT)
@@ -118,7 +118,7 @@ check("fa-news names the player", "Dominick" in fa_news_text)
 
 reset()
 pn.notify_player_finalized("barlow-dominick", PROPOSAL, {
-    "outcome": "rejected", "accept": 1, "reject": 3, "locked_by": "headMember", "rejections_total": 3, "exhausted": True,
+    "outcome": "rejected", "path": "lottery", "totals": {"accept": 1500, "reject": 2500}, "locked_by": "headMember", "rejections_total": 3, "exhausted": True,
 })
 check("rejected -> exactly 1 post (pdc-alerts only)", len(SENT) == 1 and SENT[0][0] == "pdc-chan", SENT)
 check("exhaustion is stated in the private post", "§ 6.3" in payload_text(SENT[0][1]))
@@ -138,7 +138,7 @@ print("\nfa-news is independently inert without its own config")
 reset()
 pn.DISCORD_FA_NEWS_CHANNEL = ""
 pn.notify_player_finalized("barlow-dominick", PROPOSAL, {
-    "outcome": "agreed", "accept": 3, "reject": 0, "locked_by": "headMember", "rejections_total": 0, "exhausted": False,
+    "outcome": "agreed", "path": "automatic", "totals": {"accept": 3000, "reject": 0}, "locked_by": "headMember", "rejections_total": 0, "exhausted": False,
 })
 check("no fa-news channel -> pdc-alerts still posts, fa-news doesn't",
       len(by_channel("pdc-chan")) == 1 and not by_channel("fa-news-chan"))
