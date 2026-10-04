@@ -118,7 +118,11 @@ fa._live_pool = lambda: POOL
 fa._current_league_year = lambda: "26-27"
 fa.load_members = lambda: MEMBERS
 fa.log_write = lambda info, msg: None
-fa.inbox.notify_member = lambda *a, **k: None
+# Every inbox delivery, as (member, text).
+INBOX: list = []
+fa.inbox.notify_member = lambda member, text, link=None: INBOX.append((member, text))
+OFFER_SHEET_NOTICES: list = []
+fa.notify_offer_sheet_received = lambda details: OFFER_SHEET_NOTICES.append(details)
 fa._member_current_team = lambda name, members=None: CURRENT_TEAM.get(name)
 
 # The validator is exercised by its own suites (test_signing_eligibility,
@@ -1129,7 +1133,23 @@ print("\ndeclare-winner — UFA, an offer wins")
 fa.open_round(fa.RoundIn(name="Declare-winner UFA"), HEAD)
 fa.set_player_state("decl-ufa", fa.PlayerStateIn(status="open"), HEAD)
 du_offer = fa.submit_offer(make_offer(PHX_OWNER, player="decl-ufa", y1="$4,000,000")["id"], PHX_OWNER)
+MEMBERS["facHead2"] = {"roles": ["fac_head"]}
+INBOX.clear()
 fa.finalize_player("decl-ufa", HEAD)
+check("finalize asks the other heads to declare, not the one who locked it",
+      [m for m, _ in INBOX] == ["facHead2"] and "declare the result" in INBOX[0][1])
+check("...and tells the bidders nothing yet — there's no result to tell",
+      not any(m == "phxOwner" for m, _ in INBOX))
+del MEMBERS["facHead2"]
+check("a fresh lock is flagged as needing a result",
+      fa.get_state(HEAD)["players"]["decl-ufa"]["needs_result"] is True)
+opts = {o["key"]: o for o in fa.get_ballots("decl-ufa", HEAD)["declare_options"]}
+check("the head is shown each option and what it writes",
+      opts[du_offer["id"]]["writes"] == "sign" and opts["NO_SIGNING"]["writes"] is None)
+check("...with no QO for an unrestricted free agent", "QO" not in opts)
+check("...and no draw odds on a round locked with no ballots",
+      opts[du_offer["id"]]["share"] is None and opts[du_offer["id"]]["refusal"] is None)
+INBOX.clear()
 raises("a key that wasn't on this round's ballot is rejected", 422,
        lambda: fa.declare_winner("decl-ufa", fa.DeclareWinnerIn(key="not-a-real-offer"), HEAD))
 won = fa.declare_winner("decl-ufa", fa.DeclareWinnerIn(key=du_offer["id"]), HEAD)
@@ -1142,6 +1162,10 @@ check("no warnings here, so nothing needed confirming",
       APPLIED_SIGNS[0]["force_warnings_only"] is False)
 check("declare_winner's record matches the applied txn",
       won["winner"]["key"] == du_offer["id"] and won["winner"]["txn_id"] == APPLIED_SIGNS[0]["id"])
+check("the winning bidder is told", INBOX == [("phxOwner", "Your offer won: decl-ufa signs with PHX.")])
+check("once declared, the round no longer needs a result",
+      fa.get_state(HEAD)["players"]["decl-ufa"]["needs_result"] is False
+      and "declare_options" not in fa.get_ballots("decl-ufa", HEAD))
 raises("a winner can't be declared twice for the same round", 409,
        lambda: fa.declare_winner("decl-ufa", fa.DeclareWinnerIn(key=du_offer["id"]), HEAD))
 raises("can't declare a winner before finalize", 422,
@@ -1157,6 +1181,17 @@ check("a rival's offer on an RFA becomes an offer_sheet, not a completed sign",
       len(APPLIED_OFFER_SHEETS) == 1 and len(APPLIED_SIGNS) == 1)  # the 1 sign is decl-ufa's, above
 check("offer_sheet names the rival as offering_team, MIA untouched by this write",
       APPLIED_OFFER_SHEETS[0]["details"]["offering_team"] == "PHX")
+check("MIA is told an offer sheet landed, the same notice the office's entry sends",
+      len(OFFER_SHEET_NOTICES) == 1)
+check("the winning bidder is told it's an offer sheet MIA can match",
+      any(m == "phxOwner" and "MIA has 48 hours to match" in t for m, t in INBOX))
+
+print("\ndeclare-winner — the draw can't land on an option with no balls")
+locked = {"totals": {"o1": 700, "NO_SIGNING": 300}}
+check("an option with balls can be declared", fa._declare_refusal("o1", locked) is None)
+check("one with none can't", fa._declare_refusal("o2", locked) is not None)
+check("a round locked with no ballots allows any option",
+      fa._declare_refusal("o2", {"totals": {}}) is None)
 
 print("\ndeclare-winner — warning-level checks need explicit confirmation, never silent")
 fa.open_round(fa.RoundIn(name="Declare-winner warning-confirm"), HEAD)
@@ -1186,13 +1221,12 @@ raises("a real error blocks with no confirm_warnings escape hatch", 422,
 check("still nothing applied", len(APPLIED_SIGNS) == before)
 PENDING_CHECKS[:] = []
 
-print("\ndeclare-winner — RFA: QO is never auto-executed (BACKLOG.md [P1])")
+print("\ndeclare-winner — RFA: a QO that was never extended is refused")
 fa.open_round(fa.RoundIn(name="Declare-winner RFA QO"), HEAD)
 fa.set_player_state("decl-rfa", fa.PlayerStateIn(status="open"), HEAD)
 fa.finalize_player("decl-rfa", HEAD)
 before_signs = len(APPLIED_SIGNS)
-raises("QO always 422s — the § 3.9 formula is unratified, so no real dollar "
-       "figure derived from it may reach the ledger yet", 422,
+raises("accept_qo refuses a QO with no record on the bio", 422,
        lambda: fa.declare_winner("decl-rfa", fa.DeclareWinnerIn(key="QO"), HEAD))
 check("nothing was applied", len(APPLIED_SIGNS) == before_signs)
 

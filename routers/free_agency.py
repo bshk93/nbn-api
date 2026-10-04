@@ -32,7 +32,8 @@ from .auth import (get_token_info, has_role, load_members,
                    require_any_role, require_role)
 from .constants import (CAP_LEVELS_FILE, FA_BALLOTS_FILE, FA_OFFERS_FILE,
                         FA_STATE_FILE, VALID_TEAMS)
-from .players import load_player_bios, _build_team_map
+from .league_time import league_today_str
+from .players import load_player_bios, _build_team_map, _display_name
 from .proposals import _member_current_team
 from .storage import (_current_league_year, _load_json, _parse_dollar,
                       _save_json, _season_shift, log_write)
@@ -43,7 +44,7 @@ from .transactions import (AcceptQualifyingOfferDetails, ContractIn, OfferSheetD
                            _qo_amount, _qo_record, _qo_status,
                            _signee_existing_hold, _signing_fact_sheet,
                            _validate_sign, _validation_ctx, apply_offer_sheet,
-                           _refuse_unlock_over_txn,
+                           _refuse_unlock_over_txn, notify_offer_sheet_received,
                            apply_accept_qo, apply_sign, apply_with_warning_confirm)
 
 router = APIRouter()
@@ -203,6 +204,12 @@ FFA_WINDOW_MAX_HOURS = 168
 BALLOT_TOTAL = 1000
 QO = "QO"                    # § 4.4 synthetic ballot option, RFAs only
 NO_SIGNING = "NO_SIGNING"    # § 4.4 synthetic ballot option, always offered
+PANEL_LINK = "/committees/pdc"
+
+
+def _player_name(slug: str) -> str:
+    """'curry-stephen' -> 'Stephen Curry', for text a member reads."""
+    return _display_name((load_player_bios().get(slug) or {}).get("name", "")) or slug
 
 
 def _now() -> str:
@@ -922,6 +929,7 @@ def get_state(info: dict = Depends(require_any_role("fac", "agent", "poext"))):
             "mine": info["name"] in (entry.get("subcommittee") or []),
             "balloted": info["name"] in cast,
             "finalized": finalized,
+            "needs_result": _needs_result(node.get("final")),
             # § 4.7 — derived, never stored.
             "stage": _agent_stage(state, slug, pool, finalized),
             "claimed_by": _claim_holder(state, slug),
@@ -1981,6 +1989,71 @@ def _ballot_options(slug: str, live: list[dict], pool: dict) -> list[dict]:
     return opts
 
 
+# ── declaring the result ─────────────────────────────────────────────────────
+
+def _round_offers(offers: list[dict], slug: str, final: dict) -> list[dict]:
+    """The offers a locked round's ballot covered — matched by the exact
+    `archived_at` stamp finalize gave them, not "any offer ever made for this
+    player" (a later round can reopen the same slug). Voided offers left play
+    before the vote closed (§ 4.3b) and were never an option to win."""
+    return [o for o in offers
+            if o["player"] == slug and o.get("archived_at") == final["locked_at"]
+            and o["status"] in ("submitted", "returned")]
+
+
+def _declare_writes(offer: dict, is_rfa: bool, incumbent: Optional[str]) -> str:
+    """What declaring this offer writes: a rival's offer on an RFA is an
+    offer sheet (§ 3.15 — the incumbent still gets to match), anything else a
+    plain sign. `_validate_sign` has no guard against a rival signing
+    another team's RFA outright, so this is where that is decided."""
+    if is_rfa and incumbent and offer["team"].upper() != incumbent.upper():
+        return "offer_sheet"
+    return "sign"
+
+
+def _declare_refusal(key: str, final: dict) -> Optional[str]:
+    """Why this option can't be declared the winner, or None. The draw is
+    weighted by the balls, so an option nobody put a ball on can't come out
+    of it. A round locked with no ballots (an agent's uncontested finalize)
+    has no draw, and any option may be declared."""
+    totals = final.get("totals") or {}
+    if sum(totals.values()) and not totals.get(key):
+        return "No balls were cast for this option, so the draw can't pick it."
+    return None
+
+
+def _declare_options(slug: str, final: dict, offers: list[dict], pool: dict,
+                     team_map: dict) -> list[dict]:
+    """Everything the head chooses between at declare-winner, composed here
+    so the dashboard shows what the endpoint will actually do: each option's
+    balls and share of the draw, what it writes, and why it can't be picked
+    when it can't."""
+    totals = final.get("totals") or {}
+    cast = sum(totals.values())
+    is_rfa = pool.get(slug, {}).get("rfa", False)
+    incumbent = team_map.get(slug)
+    opts = [{"key": o["id"], "kind": "offer", "team": o["team"], "number": o["number"],
+             "contract": o["offer"]["contract"],
+             "writes": _declare_writes(o, is_rfa, incumbent)}
+            for o in _round_offers(offers, slug, final)]
+    if is_rfa:
+        opts.append({"key": QO, "kind": "qo", "team": incumbent, "writes": "accept_qo",
+                     "amount": pool[slug].get("qo_amount")})
+    opts.append({"key": NO_SIGNING, "kind": "no_signing", "writes": None})
+    for o in opts:
+        o["balls"] = totals.get(o["key"], 0)
+        o["share"] = round(o["balls"] / cast, 4) if cast else None
+        o["refusal"] = _declare_refusal(o["key"], final)
+    return opts
+
+
+def _needs_result(final: Optional[dict]) -> bool:
+    """A locked round still waiting on declare-winner. Only rounds locked
+    since `result_required` was stamped count — the earlier ones were signed
+    by hand on /transactions and are left as they are."""
+    return bool(final and final.get("result_required") and not final.get("winner"))
+
+
 # ── ballots ───────────────────────────────────────────────────────────────────
 
 def _ballot_node(ballots: dict, slug: str, round_id: str, create: bool = False) -> dict:
@@ -2065,6 +2138,14 @@ def get_ballots(slug: str, info: dict = Depends(get_token_info)):
                     for name, cast in node["ballots"].items()},
         "outstanding": [m for m in assigned if m not in node["ballots"]],
         "final": node["final"],
+        # Finalize archives the round's offers, so `review` no longer lists
+        # them — without these the locked totals have no team to name.
+        "locked_offers": [{"id": o["id"], "team": o["team"], "number": o["number"]}
+                          for o in _round_offers(all_offers, slug, node["final"])]
+                         if node["final"] else [],
+        **({"declare_options": _declare_options(slug, node["final"], all_offers,
+                                                _live_pool(), _build_team_map())}
+           if _is_head(info) and _needs_result(node["final"]) else {}),
     }
 
 
@@ -2198,6 +2279,9 @@ def finalize_player(slug: str, info: dict = Depends(get_token_info)):
             # never later mistaken for a ballot nobody filled in.
             "path": "committee" if advanced else "agent",
             "agent": _claim_holder(state, slug),
+            # The head still has to declare which option won (declare-winner);
+            # that is the step that writes the transaction.
+            "result_required": True,
         }
         # Voided offers are archived with the round too — they belong to it, and
         # leaving them unarchived would carry a dead bid into the next one and
@@ -2210,56 +2294,43 @@ def finalize_player(slug: str, info: dict = Depends(get_token_info)):
         _save_state(state)
     log_write(info, f"POST fa/players/{slug}/finalize")
     fa_notify.notify_player_finalized(slug, node["final"], live)
-    # Neutral on purpose — finalize never names a winner (that's
-    # declare_winner, below, a separate fac_head-only step), so this tells
-    # each bidder voting closed without claiming who it favored.
-    for o in live:
-        recipient = o.get("submitted_by") or o.get("created_by")
-        if recipient:
-            inbox.notify_member(recipient, f"Voting closed on {slug} — check the result",
-                                 link="/free-agency")
+    # The bidders hear at declare-winner, when there is a result to tell them.
+    # The heads hear now, since declaring it is theirs — except whoever just
+    # locked it, who is looking at the next step already.
+    for name, m in load_members().items():
+        if "fac_head" in (m.get("roles") or []) and name != info["name"]:
+            inbox.notify_member(name, f"{_player_name(slug)} is locked — declare the result.",
+                                link=PANEL_LINK)
     return node["final"]
 
 
 @router.post("/api/fa/players/{slug}/declare-winner")
 def declare_winner(slug: str, body: DeclareWinnerIn, info: dict = Depends(require_role("fac_head"))):
     """The step finalize deliberately doesn't take (see finalize_player's
-    docstring: "finalize never names a winner"). This is where the head names
-    the outcome the ballot actually produced and, where that means a real
-    signing, executes it — replacing the hand-typed /transactions entry that
-    otherwise followed every FA round.
+    docstring: "finalize never names a winner"). The head runs the lottery
+    draw off-site (BACKLOG "Committee lottery draws happen off the site"),
+    then names the option it picked here, and where that means a contract,
+    this writes it.
 
-    `key` is one of `_ballot_options`'s three shapes for this round:
+    `key` is one of the round's ballot options (`_declare_options` lists
+    them for the dashboard, with what each one writes):
 
-    - A real offer id -> a plain `sign` if the offering team is (or becomes,
-      for a UFA/unsigned-rights player) the signing team, or an `offer_sheet`
-      if the player is RFA and the offer came from a team other than the
-      incumbent (§ 3.15 — this only extends the offer; the incumbent's match
-      decision is a separate, later offer_sheet_decision, same as every other
-      offer sheet). Getting this branch wrong in the sign direction would
-      silently let a rival sign another team's RFA with no incumbent match
-      opportunity at all — `_validate_sign` has no guard against that, so the
-      RFA/incumbent check happens here, not there.
-    - `"QO"` -> the incumbent would retain an RFA on the § 3.9 qualifying
-      offer, but this is **never auto-executed**: `BACKLOG.md`'s [P1]
-      ("Qualifying Offers don't exist in the system at all") is explicit that
-      the § 3.9 formula needs BOD ratification and a real transaction type
-      before any real dollar figure derived from it gets written to the
-      ledger. Declaring "QO" here always 422s pointing at manual
-      /transactions entry — closing this branch out the same way as the other
-      two would be exactly the "doing it the other way round" the backlog
-      item warns against.
-    - `"NO_SIGNING"` -> nobody signs him this round. No transaction — the
-      player just stays in the pool.
+    - An offer id -> a plain `sign`, or an `offer_sheet` when the player is
+      an RFA and the offer is a rival's (`_declare_writes`; § 3.15 — the
+      incumbent's match decision is a separate, later offer_sheet_decision).
+    - `"QO"` (RFAs only) -> `accept_qo`: one year at the recorded QO amount
+      with his own team (§ 3.1). Refused, like any error, if the QO was never
+      extended or was withdrawn.
+    - `"NO_SIGNING"` -> no transaction; the player stays in the pool.
 
-    The two branches that do write go through `apply_with_warning_confirm`
-    (transactions.py): a first call with `confirm_warnings: false` that fails
-    on warnings alone comes back asking to confirm instead of writing
-    anything — there's no submit screen for a committee action to tick the
-    office's own force box, so the caller has to see the warning and
-    explicitly pass `confirm_warnings: true` before it's cleared. A real
-    error still hard-blocks with no override regardless of that flag,
-    falling back to the manual /transactions entry as before.
+    An option with no balls is refused when ballots were cast
+    (`_declare_refusal`): the draw is weighted by them, so it can't land
+    there.
+
+    Writes go through `apply_with_warning_confirm` (transactions.py): a first
+    call with `confirm_warnings: false` that fails on warnings alone comes
+    back asking to confirm instead of writing; the head sees the warnings and
+    calls again with `confirm_warnings: true`. A real error always blocks.
     """
     with _fa_lock:
         state = _load_state()
@@ -2278,38 +2349,29 @@ def declare_winner(slug: str, body: DeclareWinnerIn, info: dict = Depends(requir
         if slug not in bios:
             raise HTTPException(404, f"Unknown player {slug!r}")
 
-        # The same offers this round's ballot actually covered — matched by
-        # the exact archived_at stamp finalize gave them, not just "any offer
-        # ever made for this player" (a later round could reopen the same
-        # slug). Voided offers are excluded: they left play before the vote
-        # closed (§ 4.3b) and were never a live option to win.
         offers = _load_offers()
-        round_offers = [o for o in offers
-                        if o["player"] == slug and o.get("archived_at") == final["locked_at"]
-                        and o["status"] in ("submitted", "returned")]
-        valid_keys = {o["id"] for o in round_offers} | {QO, NO_SIGNING}
-        if body.key not in valid_keys:
-            raise HTTPException(422, f"{body.key!r} was not an option on this round's ballot")
-
+        round_offers = _round_offers(offers, slug, final)
         team_map = _build_team_map()
-        txn_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         pool = _live_pool()
         is_rfa = pool.get(slug, {}).get("rfa", False)
         incumbent = team_map.get(slug)
+        valid_keys = {o["id"] for o in round_offers} | {NO_SIGNING} | ({QO} if is_rfa else set())
+        if body.key not in valid_keys:
+            raise HTTPException(422, f"{body.key!r} was not an option on this round's ballot")
+        refusal = _declare_refusal(body.key, final)
+        if refusal:
+            raise HTTPException(422, refusal)
 
+        txn_date = league_today_str()
         txn = None
-        if body.key == NO_SIGNING:
-            pass
-        elif body.key == QO:
-            # The player takes his qualifying offer (§ 3.1): a one-year deal at
-            # the recorded QO amount with his own team. Refused, like any
-            # error, if the QO was never extended or was withdrawn.
+        offer = next((o for o in round_offers if o["id"] == body.key), None)
+        writes = _declare_writes(offer, is_rfa, incumbent) if offer else None
+        if body.key == QO:
             txn = apply_with_warning_confirm(
                 apply_accept_qo, AcceptQualifyingOfferDetails(player=slug), txn_date, info,
                 description=f"FA round {round_id} — the qualifying offer won the ballot",
                 confirm_warnings=body.confirm_warnings)
-        else:
-            offer = next(o for o in round_offers if o["id"] == body.key)
+        elif offer:
             # The SignDetails-shaped payload lives under offer["offer"] (per
             # this module's own "offer is a verbatim SignDetails" rule) — the
             # top-level record only duplicates player/team for indexing.
@@ -2322,7 +2384,7 @@ def declare_winner(slug: str, body: DeclareWinnerIn, info: dict = Depends(requir
                 eaps_assumption=terms.get("eaps_assumption"),
             )
             description = f"FA round {round_id} — offer #{offer['number']} won the ballot"
-            if is_rfa and incumbent and offering_team != incumbent.upper():
+            if writes == "offer_sheet":
                 txn = apply_with_warning_confirm(
                     apply_offer_sheet,
                     OfferSheetDetails(player=slug, offering_team=offering_team, contract=contract, **common_kwargs),
@@ -2339,7 +2401,38 @@ def declare_winner(slug: str, body: DeclareWinnerIn, info: dict = Depends(requir
         }
         _save_ballots(ballots)
     log_write(info, f"POST fa/players/{slug}/declare-winner — {body.key}")
+    if writes == "offer_sheet":
+        notify_offer_sheet_received(txn["details"])
+    _notify_bidders_of_result(slug, round_offers, body.key, writes, incumbent)
     return final
+
+
+def _notify_bidders_of_result(slug: str, round_offers: list[dict], key: str,
+                              writes: Optional[str], incumbent: Optional[str]):
+    """Each team that bid in the round hears how it came out. The result is
+    public the moment it's written (the transaction posts to #transactions),
+    so naming the winning team here tells a loser nothing new."""
+    name = _player_name(slug)
+    winner = next((o for o in round_offers if o["id"] == key), None)
+    if winner and writes == "offer_sheet":
+        outcome = f"{winner['team']}'s offer won and is now an offer sheet; {incumbent} can match"
+    elif winner:
+        outcome = f"{winner['team']}'s offer won"
+    elif key == QO:
+        outcome = "he stays with his team on his qualifying offer"
+    else:
+        outcome = "the committee chose no signing"
+    for o in round_offers:
+        recipient = o.get("submitted_by") or o.get("created_by")
+        if not recipient:
+            continue
+        if o is winner:
+            text = (f"Your offer won the ballot for {name}. It's now an offer sheet — "
+                    f"{incumbent} has 48 hours to match (§ 3.15)." if writes == "offer_sheet"
+                    else f"Your offer won: {name} signs with {o['team']}.")
+        else:
+            text = f"Your offer for {name} didn't win — {outcome}."
+        inbox.notify_member(recipient, text, link="/free-agency")
 
 
 @router.post("/api/fa/players/{slug}/unlock")

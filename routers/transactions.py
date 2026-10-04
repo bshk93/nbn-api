@@ -8216,6 +8216,18 @@ def apply_sign(details: SignDetails, txn_date: str, info: dict, *,
     return txn
 
 
+def notify_offer_sheet_received(stored_details: dict) -> None:
+    """Tell the retaining team an offer sheet landed on their RFA. Addressed
+    to the team, not a member: the office or the FAC enters it on the
+    offering team's behalf, so there's no one submitter to reach."""
+    inbox.notify_team(
+        stored_details["retaining_team"],
+        f"{stored_details['teams'][0]} submitted an offer sheet on your restricted free agent "
+        f"{stored_details.get('player')} — you have 48 hours to match (§ 3.15).",
+        link="/transactions",
+    )
+
+
 def apply_offer_sheet(details: OfferSheetDetails, txn_date: str, info: dict, *,
                       description: str = "", force: bool = False,
                       force_warnings_only: bool = False,
@@ -8687,15 +8699,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
         # how the void reaches the office's log (roster_move_notify).
         announce_roster_move(txn)
     if body.type == "offer_sheet":
-        # No submitted_by/created_by to address the way a self-serve PDC offer
-        # has — this is entered by an office member on the team's behalf, so
-        # it's the retaining team's business generally, not one member's.
-        inbox.notify_team(
-            stored_details["retaining_team"],
-            f"{stored_details['teams'][0]} submitted an offer sheet on your restricted free agent "
-            f"{stored_details.get('player')} — you have 48 hours to match (§ 3.15).",
-            link="/transactions",
-        )
+        notify_offer_sheet_received(stored_details)
     elif body.type == "offer_sheet_decision":
         matched = stored_details.get("outcome") == "matched"
         text = (f"{stored_details.get('retaining_team')} matched your offer sheet for "
