@@ -83,6 +83,7 @@ CHECK_SECTIONS: dict[str, tuple[str, ...]] = {
     "extension_trade_freeze_{}":  ("4.5", "6.2"),
     "extension_window":           ("6.3",),
     "extension_kind":             ("6.3",),
+    "extension_max_salary":       ("3.11", "6.2"),
     "extension_rfa_hold":         ("3.1",),
     "extension_supersedes_qo":    ("3.1",),
     "fa_signing_trade_freeze_{}": ("4.5",),

@@ -1,3 +1,4 @@
+import csv
 import json
 import logging
 import os
@@ -12,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from .constants import (
-    DATA_DIR, CAP_LEVELS_FILE, TRANSACTIONS_FILE, VALID_TEAMS, ROOM_ZONE_BASELINE_FILE,
+    DATA_DIR, DERIVED_DIR, CAP_LEVELS_FILE, TRANSACTIONS_FILE, VALID_TEAMS, ROOM_ZONE_BASELINE_FILE,
     ROOKIE_SCALE_FILE, ATTRIBUTES_FILE, FA_STATE_FILE,
     _txn_lock, _deadcap_lock, _state_lock, _picks_lock, _trade_exc_lock,
     ROSTER_MAX, ROSTER_OFFSEASON_MAX, ROSTER_MIN, ROSTER_CHARGE_MIN, TWO_WAY_MAX,
@@ -6848,6 +6849,72 @@ def _extension_contract_years(bio: dict) -> list[str]:
     )
 
 
+def _player_awards(slug: str) -> dict[str, set]:
+    """{season: {award, ...}} from the build's players/player_awards.csv."""
+    path = DERIVED_DIR / "players" / "player_awards.csv"
+    out: dict[str, set] = {}
+    if not path.exists():
+        return out
+    with path.open(newline="") as f:
+        for row in csv.DictReader(f):
+            if row.get("SLUG") == slug:
+                out.setdefault(row.get("SEASON", ""), set()).add(row.get("AWARD", ""))
+    return out
+
+
+_ALL_NBN = {"All-NBN First Team", "All-NBN Second Team", "All-NBN Third Team"}
+
+
+def _rose_rule(slug: str, first_season: str, cur_season: str, awards: Optional[dict] = None) -> dict:
+    """§ 6.2's rookie-scale exception (the NBA's "Rose rule"): up to 30% of
+    the cap, not 25%, for a player who was MVP in any of the three seasons
+    before the extension starts, or All-NBN or Defensive Player of the Year
+    in the season just before it or in two of those three. `possible` is
+    True while the season just before it hasn't had its awards yet."""
+    awards = _player_awards(slug) if awards is None else awards
+    prior = [_season_shift(first_season, -i) for i in (1, 2, 3)]
+    got = [awards.get(sz, set()) for sz in prior]
+    mvp = any("Most Valuable Player" in a for a in got)
+    nbn = [bool(a & _ALL_NBN) for a in got]
+    dpoy = ["Defensive Player of the Year" in a for a in got]
+    met = mvp or nbn[0] or sum(nbn) >= 2 or dpoy[0] or sum(dpoy) >= 2
+    return {"met": met, "possible": not met and _season_start(prior[0]) >= _season_start(cur_season),
+            "decides": prior[0]}
+
+
+def _extension_max_salary(slug: str, bio: dict, first_season: Optional[str], cur_season: str,
+                          cap_levels: dict, rookie_scale: bool) -> dict:
+    """§ 3.11's maximum for Year 1 of an extension: the first extended
+    season's cap and the player's experience entering it. While that cap is
+    unset, the current season's stands in (as § 1.4 projects an unset
+    season), which only understates it — so a breach then is a warning."""
+    none = {"amount": None, "rose": None, "rose_amount": None}
+    if not first_season:
+        return {**none, "why": "the first extended season is unknown"}
+    cl = cap_levels.get(first_season) or {}
+    cap, cap_basis = cl.get("cap"), ("estimate" if cl.get("is_estimate") else "real")
+    if not cap:
+        cap, cap_basis = (cap_levels.get(cur_season) or {}).get("cap"), "stand-in"
+    if not cap:
+        return {**none, "why": f"no Salary Cap is set for {first_season} or {cur_season}"}
+    exp = _qo_years_exp(bio, first_season)
+    if exp is None:
+        return {**none, "why": "the player's years of experience aren't on file"}
+    pct = _max_salary_pct(exp)
+    rose = _rose_rule(slug, first_season, cur_season) if rookie_scale else None
+    if rose and rose["met"]:
+        pct = max(pct, 0.30)
+    return {
+        "amount": int(cap * pct),
+        "label": (f"{round(pct * 100)}% of the cap, {exp} years of experience"
+                  + (", meets the § 6.2 rookie-scale criteria" if rose and rose["met"] else "")),
+        "basis_note": {"real": "", "estimate": f" — on the ESTIMATED {first_season} cap",
+                       "stand-in": f" — on the {cur_season} cap, standing in until {first_season}'s is set"}[cap_basis],
+        "cap_basis": cap_basis, "rose": rose,
+        "rose_amount": int(cap * 0.30) if rose else None,
+    }
+
+
 def _extension_year1_ceiling(prior_salary: int, cl: dict) -> dict:
     """§ 6.2's Year 1 ceiling for a veteran extension: the greater of 140% of
     prior salary and 140% of the first extended season's EAPS. One helper so
@@ -7257,6 +7324,42 @@ def _validate_extension(details: ExtensionDetails, ctx: dict) -> list[CheckResul
                      f"({cap1['label']})."),
         ))
 
+    # ── extension_max_salary (§ 3.11; § 6.2's rookie-scale 30% exception) ───
+    mx = _extension_max_salary(player, bio, yr1_season, cur_season, cap_levels, rookie_scale)
+    if mx["amount"] is None:
+        checks.append(CheckResult(
+            check="extension_max_salary", passed=True, level="warning",
+            message=f"Can't check the § 3.11 maximum: {mx['why']}.",
+        ))
+    else:
+        basis = mx["basis_note"]
+        if yr1_salary <= mx["amount"]:
+            checks.append(CheckResult(
+                check="extension_max_salary", passed=True,
+                message=(f"Year 1 (${yr1_salary:,}) is within the maximum of ${mx['amount']:,} "
+                         f"({mx['label']}){basis}."),
+            ))
+        else:
+            soft = mx["cap_basis"] != "real"
+            # A rookie-scale deal between 25% and 30% is legal only if he
+            # meets the Rose criteria — still open while his final rookie
+            # season's awards aren't out.
+            rose_open = rookie_scale and mx["rose"] and mx["rose"]["possible"] and \
+                yr1_salary <= mx["rose_amount"]
+            if rose_open:
+                level, tail = "warning", (f" It would be legal at up to ${mx['rose_amount']:,} (30%) "
+                                          f"if he meets the § 6.2 criteria in {mx['rose']['decides']}.")
+            elif soft or not rookie_scale:
+                # Veterans: experience is inferred, same as signings (§ 3.11).
+                level, tail = "warning", ""
+            else:
+                level, tail = "error", ""
+            checks.append(CheckResult(
+                check="extension_max_salary", passed=False, level=level,
+                message=(f"Year 1 (${yr1_salary:,}) is over the maximum of ${mx['amount']:,} "
+                         f"({mx['label']}){basis}.{tail}"),
+            ))
+
     # ── extension_raises (rule 8: <= 8%, or 5% for extend-and-trade) ────────
     pct = 0.05 if details.kind == "extend_and_trade" else 0.08
     r = _check_contract_raises(details.contract, bird_pct=False, cur_season=yr1_season or cur_season,
@@ -7372,6 +7475,7 @@ def _extension_fact_sheet(details: ExtensionDetails, ctx: dict) -> dict:
     rookie_scale = _extension_is_rookie_scale(bio, frame)
     cap1 = ({"ceiling": None, "basis": None} if rookie_scale
             else _extension_year1_ceiling(frame["prior_salary"], cl))
+    mx = _extension_max_salary(player, bio, yr1_season, ctx["cur_season"], ctx["cap_levels"], rookie_scale)
     # Same helper `_signing_fact_sheet` uses — an extension's trailing UFA/RFA
     # hold is auto-priced by `_apply_extension` through the same
     # `_autofill_fa_hold_amounts` a signing goes through, so the office needs
@@ -7407,6 +7511,8 @@ def _extension_fact_sheet(details: ExtensionDetails, ctx: dict) -> dict:
         # Both None for a rookie-scale extension, which has no 140% ceiling (§ 6.2).
         "max_year1_ceiling": cap1["ceiling"],
         "max_year1_basis": cap1["basis"],
+        # § 3.11's maximum for Year 1, the same figure extension_max_salary checks.
+        "max_salary": {k: mx.get(k) for k in ("amount", "label", "cap_basis", "rose", "rose_amount", "why")},
         "eaps": cl.get("eaps"),
         "team_salary_first_extended_season": team_salary,
         "cap_first_extended_season": cl.get("cap") or None,

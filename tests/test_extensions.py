@@ -354,6 +354,47 @@ def main():
     c = named(checks, "extension_supersedes_qo")
     check("an extended QO on the replaced season is called out", c and c.passed and "superseded" in c.message)
 
+    print("\nextension_max_salary (§ 3.11; § 6.2's rookie-scale 30% exception)")
+    caps = {"26-27": {"cap": 160_000_000}, "27-28": {"cap": 170_000_000}}
+    real_awards = T._player_awards
+    T._player_awards = lambda slug: {}
+    def rs(y1, cap_levels=caps):
+        c = {"salaries": {"27-28": f"${y1:,}", "28-29": f"${y1:,}"}, "cap_holds": {"29-30": "UFA"}}
+        checks, _ = extend(rookie, c, kind="rookie_scale", events=rookie_events, cap_levels=cap_levels)
+        return named(checks, "extension_max_salary")
+    c = rs(42_500_000)
+    check("rookie at exactly 25% of the 27-28 cap passes", c and c.passed)
+    c = rs(42_500_001)
+    check("over 25% but under 30%, final rookie season's awards not out -> warning (Rose still open)",
+          c and not c.passed and c.level == "warning" and "26-27" in c.message)
+    c = rs(51_000_001)
+    check("over 30% -> error", c and not c.passed and c.level == "error")
+    T._player_awards = lambda slug: {"25-26": {"Most Valuable Player"}}
+    c = rs(51_000_000)
+    check("an MVP in the prior three seasons lifts the max to 30%", c and c.passed and "criteria" in c.message)
+    T._player_awards = lambda slug: {}
+    c = rs(42_000_000, cap_levels={"26-27": {"cap": 160_000_000}})
+    check("27-28 cap unset: the 26-27 cap stands in, and says so",
+          c and not c.passed and c.level == "warning" and "standing in" in c.message)
+
+    rr = lambda awards: T._rose_rule("p", "27-28", "26-27", awards)
+    check("Rose: All-NBN in the season just before -> met", rr({"26-27": {"All-NBN Third Team"}})["met"])
+    check("Rose: All-NBN once, two seasons back -> not met",
+          not rr({"25-26": {"All-NBN First Team"}})["met"])
+    check("Rose: DPOY in two of three -> met",
+          rr({"25-26": {"Defensive Player of the Year"}, "24-25": {"Defensive Player of the Year"}})["met"])
+    check("Rose: still possible while 26-27's awards aren't out", rr({})["possible"])
+    check("Rose: not possible once that season is past",
+          not T._rose_rule("p", "27-28", "27-28", {})["possible"])
+
+    checks, _ = extend(vet, {"salaries": {"27-28": "$60,000,000", "28-29": "$60,000,000"},
+                             "cap_holds": {"29-30": "UFA"}},
+                       events=(("2024-08-01", "sign", "XXX"),), cap_levels=caps)
+    c = named(checks, "extension_max_salary")
+    check("a veteran over his max warns (experience is inferred, as for signings)",
+          c and not c.passed and c.level == "warning")
+    T._player_awards = real_awards
+
     print("\nintegration smoke check against a real rostered player")
     # Every fixture above pinned _BIRD_LEDGER_CACHE to a synthetic one-player
     # index keyed to the real ledger file's (mtime, size) — since that key
