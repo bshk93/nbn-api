@@ -780,6 +780,17 @@ class RemandIn(BaseModel):
     note: str
 
 
+class AmendIn(BaseModel):
+    """The terms a negotiation ended on, entered by the head. Same contract
+    fields as an offer; the pitch and promises are the team's own words and
+    stay as they wrote them."""
+    contract: ContractIn
+    signing_method: Optional[str] = None
+    bird_rights_type: Optional[str] = None
+    eaps_assumption: Optional[str] = None
+    note: str
+
+
 class BallotIn(BaseModel):
     balls: dict[str, int]
     note: str = ""
@@ -1421,16 +1432,7 @@ def remand_offer(offer_id: str, body: RemandIn, info: dict = Depends(get_token_i
         # as if it were the thing the committee objected to, and the diff § 4.3a
         # promises would compare v(n) against itself. Guarded by version number
         # so a second, additive remand doesn't freeze the same version twice.
-        if not any(v["version"] == offer["version"] for v in offer["versions"]):
-            offer["versions"].append({
-                "version": offer["version"],
-                "offer": json.loads(json.dumps(offer["offer"])),
-                "pitch": offer["pitch"],
-                "promises": dict(offer["promises"]),
-                "validation": offer.get("validation"),
-                "submitted_at": offer.get("submitted_at"),
-                "submitted_by": offer.get("submitted_by"),
-            })
+        _freeze_version(offer)
         entry = {
             "at": _now(), "by": info["name"], "note": note,
             "from_version": offer["version"],
@@ -1455,6 +1457,87 @@ def remand_offer(offer_id: str, body: RemandIn, info: dict = Depends(get_token_i
     if recipient:
         inbox.notify_member(recipient, f"Your offer for {offer['player']} was sent back: {note}",
                              link="/free-agency")
+    return offer
+
+
+def _freeze_version(offer: dict):
+    """Keep the current terms as a past version before they change — at the
+    remand or the amendment, not at the resubmit: a returned offer is
+    editable, so by resubmit time `offer["offer"]` already holds the new
+    figures, and the § 4.3a diff would compare a version with itself.
+    Guarded by version number, so a second remand doesn't freeze it twice."""
+    if not any(v["version"] == offer["version"] for v in offer["versions"]):
+        offer["versions"].append({
+            "version": offer["version"],
+            "offer": json.loads(json.dumps(offer["offer"])),
+            "pitch": offer["pitch"],
+            "promises": dict(offer["promises"]),
+            "validation": offer.get("validation"),
+            "submitted_at": offer.get("submitted_at"),
+            "submitted_by": offer.get("submitted_by"),
+        })
+
+
+@router.post("/api/fa/offers/{offer_id}/amend")
+def amend_offer(offer_id: str, body: AmendIn, info: dict = Depends(require_role("fac_head"))):
+    """The head enters the terms a negotiation ended on. Negotiation happens
+    in Discord (§ 4.7, D27); this records where it landed without a round
+    trip through the team's form. The agreement is the team's consent, so it
+    applies at once — the team is told, and the old terms stay on record as
+    a past version, diffed like any revision (§ 4.3a).
+
+    Same legality bar as a team's submit: the new terms are checked by
+    `_validate_sign`, an error refuses them, warnings are stored. Ballots
+    already cast are flagged `revised_since`, never changed. A remand the
+    team hadn't answered is answered by this.
+    """
+    note = body.note.strip()
+    if not note:
+        raise HTTPException(422, "Say where these terms were agreed, e.g. \"agreed in Discord 10/4\"")
+    with _fa_lock:
+        offers = _load_offers()
+        idx, offer = _find_offer(offers, offer_id)
+        if not _is_live(offer) or offer["status"] not in ("submitted", "returned"):
+            raise HTTPException(409, f"Offer is {offer['status']} — only a submitted offer can be amended")
+        ballots = _load_ballots()
+        node = (ballots.get(offer["player"]) or {}).get(offer["round_id"] or "") or {}
+        if node.get("final"):
+            raise HTTPException(409, "This player is finalized — unlock him before changing an offer")
+
+        candidate = json.loads(json.dumps(offer))
+        candidate["offer"].update(
+            contract=body.contract.model_dump(), signing_method=body.signing_method,
+            bird_rights_type=body.bird_rights_type, eaps_assumption=body.eaps_assumption)
+        validation = _run_validation(candidate, _validation_ctx())
+        if not validation["legal"]:
+            failing = [c["check"] for c in validation["checks"]
+                       if not c["passed"] and c["level"] == "error"]
+            raise HTTPException(422, {"detail": "These terms fail a rule check", "checks": failing,
+                                      "validation": validation})
+
+        _freeze_version(offer)
+        prev_status = offer["status"]
+        entry = {"at": _now(), "by": info["name"], "note": note,
+                 "from_version": offer["version"], "to_version": offer["version"] + 1}
+        offer["offer"] = candidate["offer"]
+        offer["version"] += 1
+        offer["status"] = "submitted"
+        # What `revised_since` compares a ballot against — moving it is what
+        # flags ballots cast on the old terms.
+        offer["submitted_at"] = entry["at"]
+        offer["updated_at"] = entry["at"]
+        offer["validation"] = validation
+        offer.setdefault("amendments", []).append(entry)
+        offer["history"].append({"ts": entry["at"], "actor": info["name"], "from": prev_status,
+                                 "to": "submitted", "version": offer["version"], "amended": True})
+        offers[idx] = offer
+        _save_offers(offers)
+    log_write(info, f"POST fa/offers/{offer_id}/amend — v{offer['version']}")
+    recipient = offer.get("submitted_by") or offer.get("created_by")
+    if recipient:
+        inbox.notify_member(recipient, f"The FAC head entered the agreed terms on your offer for "
+                                       f"{_player_name(offer['player'])}: {note}",
+                            link="/free-agency")
     return offer
 
 

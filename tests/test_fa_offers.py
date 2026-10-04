@@ -1259,6 +1259,42 @@ fa.unlock_player("decl-ufa", HEAD)
 check("once the office deleted the entry, unlock goes through",
       fa._ballot_node(fa._load_ballots(), "decl-ufa", fa._round_id_for(fa._load_state(), "decl-ufa"))["final"] is None)
 
+print("\namend — the head enters the terms a Discord negotiation ended on")
+fa.finalize_player("decl-ufa", HEAD)   # close out the round the unlock reopened
+fa.open_round(fa.RoundIn(name="Amend"), HEAD)
+fa.set_player_state("decl-ufa", fa.PlayerStateIn(status="open"), HEAD)
+am = fa.submit_offer(make_offer(PHX_OWNER, player="decl-ufa", y1="$4,000,000")["id"], PHX_OWNER)
+agreed = fa.AmendIn(contract=contract("$4,600,000"), signing_method="cap_space",
+                    note="agreed in Discord 10/4")
+raises("a note saying where it was agreed is required", 422,
+       lambda: fa.amend_offer(am["id"], fa.AmendIn(**{**agreed.model_dump(), "note": "  "}), HEAD))
+LEGAL["legal"] = False
+raises("terms that fail a rule check are refused", 422, lambda: fa.amend_offer(am["id"], agreed, HEAD))
+check("...and the offer is untouched", am["version"] == 1
+      and am["offer"]["contract"]["salaries"] == {"26-27": "$4,000,000"})
+LEGAL["legal"] = True
+INBOX.clear()
+out = fa.amend_offer(am["id"], agreed, HEAD)
+check("the new terms apply at once, as a new version",
+      out["version"] == 2 and out["status"] == "submitted"
+      and out["offer"]["contract"]["salaries"] == {"26-27": "$4,600,000"})
+check("the old terms stay on record", out["versions"][0]["version"] == 1
+      and out["versions"][0]["offer"]["contract"]["salaries"] == {"26-27": "$4,000,000"})
+check("who, when and why are recorded", out["amendments"][0]["by"] == "facHead"
+      and out["amendments"][0]["note"] == "agreed in Discord 10/4")
+check("the pitch and promises stay the team's", out["pitch"] == "Come win here")
+check("the team is told", [m for m, _ in INBOX] == ["phxOwner"] and "agreed in Discord 10/4" in INBOX[0][1])
+
+fa.remand_offer(am["id"], fa.RemandIn(note="Year 1 is short"), HEAD)
+out = fa.amend_offer(am["id"], fa.AmendIn(**{**agreed.model_dump(), "note": "settled on $4.6M"}), HEAD)
+check("amending a sent-back offer answers the remand",
+      out["status"] == "submitted" and out["version"] == 3
+      and not [r for r in out["remands"] if r["from_version"] >= out["version"]])
+check("...without freezing a version twice", [v["version"] for v in out["versions"]] == [1, 2])
+
+fa.finalize_player("decl-ufa", HEAD)
+raises("a finalized player's offer can't be amended", 409, lambda: fa.amend_offer(am["id"], agreed, HEAD))
+
 print("\n" + ("=" * 40))
 if FAILS:
     print(f"FAILURES: {FAILS}")
