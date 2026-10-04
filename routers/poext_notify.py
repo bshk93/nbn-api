@@ -231,8 +231,11 @@ def notify_player_finalized(slug: str, proposal: dict, final: dict) -> None:
             "title": f"{_name(slug)} — extension {outcome}",
             "description": f"{final['accept']}–{final['reject']} · locked by {final['locked_by']}" + exhausted_note,
             "color": color,
-            "fields": [{"name": "Team", "value": team, "inline": True},
-                      {"name": "Rejections on record", "value": str(final.get("rejections_total", 0)) + "/3", "inline": True}],
+            "fields": [{"name": "Team", "value": team, "inline": True}]
+                      # § 6.3's three-proposal limit is an expiring veteran's only.
+                      + ([{"name": "Rejections this negotiation",
+                           "value": str(final.get("rejections_total", 0)) + "/3", "inline": True}]
+                         if final.get("rejection_limit") else []),
             "url": _link(slug),
         }
         if outcome == "agreed":

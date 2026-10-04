@@ -14,8 +14,10 @@ CRUD:
     propose, so there's no "which of several" the way FA has).
   * **A remand is free; only a majority-reject burns one of the three**
     (§ 2.5, D4) — no standalone reject action exists.
-  * **After the third rejection, no further proposal may be drafted**
-    (§ 6.3) — checked at both create and submit, and unlock decrements it.
+  * **After an expiring veteran's third rejection, no further proposal may
+    be drafted** (§ 6.3) — checked at both create and submit, and unlock
+    takes it back. Counted per negotiation (league year + bucket); rookie-
+    scale and non-expiring veterans have no limit, only their deadline.
   * **Claim is refused outright when the agent shares the proposing team**
     (this pipeline's own answer to § 2.9's self-dealing question — see the
     docstring on `claim_player`), not a permanent post-hoc bar the way FA's
@@ -99,6 +101,11 @@ poext.inbox.notify_role = lambda *a, **k: None
 poext._member_current_team = lambda name, members=None: (
     "SAS" if name in ("sasOwner", "agentSas") else "BKN" if name == "bknOwner" else None)
 poext._current_league_year = lambda: "26-27"
+# § 6.3 bucket per player; the real one reads the bio (test_extensions.py
+# covers that). Default: an expiring veteran, the bucket with the limit.
+BUCKET: dict = {}
+poext._negotiation = lambda slug: (SEASON["now"], BUCKET.get(slug, "expiring"))
+SEASON = {"now": "26-27"}
 
 
 def vote_node(slug):
@@ -238,7 +245,7 @@ poext.submit_proposal(p["id"], SAS)
 raises("remand needs a note", 422, lambda: poext.remand_proposal(p["id"], {"note": ""}, HEAD))
 r = poext.remand_proposal(p["id"], {"note": "raise Year 1"}, HEAD)
 check("returned, one remand recorded", r["status"] == "returned" and len(r["remands"]) == 1)
-check("no rejection counted", STATE["players"].get("barlow-dominick", {}).get("rejections", 0) == 0)
+check("no rejection counted", not STATE["players"].get("barlow-dominick", {}).get("rejection_log"))
 resub = poext.submit_proposal(p["id"], SAS)
 check("resubmit bumps version", resub["version"] == 2)
 
@@ -388,9 +395,34 @@ print("\nunlock decrements the rejection count it undid")
 reset()
 f1 = run_one_rejected_round("unlockee")
 TEAM_MAP["unlockee"] = "SAS"
-check("1 rejection recorded", STATE["players"]["unlockee"]["rejections"] == 1)
+check("1 rejection recorded", len(STATE["players"]["unlockee"]["rejection_log"]) == 1)
 poext.unlock_player("unlockee", HEAD)
-check("unlock rolled the rejection back", STATE["players"]["unlockee"]["rejections"] == 0)
+check("unlock rolled the rejection back", STATE["players"]["unlockee"]["rejection_log"] == [])
+
+print("\nthe three-proposal limit is an expiring veteran's only (§ 6.3)")
+reset()
+BUCKET["rookie"] = "rookie_scale"
+for i in range(4):
+    f = run_one_rejected_round("rookie")
+check("a rookie-scale player rejected four times is never exhausted",
+      not f["exhausted"] and f["rejection_limit"] is False)
+pr = make_proposal(SAS, player="rookie")
+check("...and can still propose before his deadline", pr["status"] == "draft")
+
+reset()
+BUCKET["vet"] = "veteran"
+run_one_rejected_round("vet")
+run_one_rejected_round("vet")
+f = run_one_rejected_round("vet")
+check("a non-expiring veteran isn't exhausted by three", not f["exhausted"])
+BUCKET["vet"] = "expiring"
+SEASON["now"] = "27-28"
+check("...and those rejections don't count against his expiring year",
+      not poext._is_exhausted(STATE, "vet"))
+f = run_one_rejected_round("vet")
+check("his expiring negotiation starts at 1 of 3", f["rejections_total"] == 1 and f["rejection_limit"])
+SEASON["now"] = "26-27"
+BUCKET.clear()
 
 print("\nlist_proposals visibility")
 reset()

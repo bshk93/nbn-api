@@ -47,6 +47,7 @@ from .storage import _current_league_year, _load_json, _save_json, log_write
 from .transactions import (ContractIn, ExtensionDetails,
                            _bird_tenure, _extension_eligibility_check,
                            _extension_fact_sheet, _extension_frame,
+                           _extension_is_rookie_scale,
                            _require_validatable, _validate_extension,
                            _validation_ctx, apply_extension,
                            apply_with_warning_confirm)
@@ -61,7 +62,7 @@ _poext_lock = threading.RLock()
 
 LIVE_STATUSES = {"draft", "submitted", "returned"}
 VOIDABLE_STATUSES = {"submitted", "returned"}
-MAX_REJECTIONS = 3   # § 6.3: "no further extension opportunities arise" after the third
+MAX_REJECTIONS = 3   # § 6.3: an expiring veteran's negotiation allows three proposals
 
 
 def _now() -> str:
@@ -229,8 +230,36 @@ def _require_team_role(info: dict, team: str):
         raise HTTPException(403, f"Requires the {team} role")
 
 
+def _negotiation(slug: str) -> tuple[str, str]:
+    """(league year, bucket) of the player's extension negotiation right now.
+    The bucket is § 6.3's: "rookie_scale", "expiring" (a veteran in his final
+    contract year) or "veteran" (not expiring). Read off the bio, never the
+    proposal's declared kind."""
+    season = _current_league_year()
+    team = _build_team_map().get(slug)
+    if not team:
+        return season, "veteran"
+    bio = load_player_bios().get(slug) or {}
+    frame = _extension_frame(slug, team, bio, season)
+    if _extension_is_rookie_scale(bio, frame):
+        return season, "rookie_scale"
+    return season, ("expiring" if frame["contract_end"] == season else "veteran")
+
+
+def _rejections_in(state: dict, slug: str, season: str, bucket: str) -> int:
+    """Rejections in one negotiation: that league year, that bucket. § 6.3
+    counts proposals "for any one negotiation", so a rejection from an
+    earlier season, or from a non-expiring attempt, never carries over."""
+    log = _player_entry(state, slug).get("rejection_log") or []
+    return sum(1 for r in log if r.get("season") == season and r.get("bucket") == bucket)
+
+
 def _is_exhausted(state: dict, slug: str) -> bool:
-    return _player_entry(state, slug).get("rejections", 0) >= MAX_REJECTIONS
+    """§ 6.3 caps only the expiring-veteran negotiation at three proposals.
+    Rookie-scale and non-expiring veterans may resubmit until their window
+    closes, and the window check (in the validator) is what ends them."""
+    season, bucket = _negotiation(slug)
+    return bucket == "expiring" and _rejections_in(state, slug, season, bucket) >= MAX_REJECTIONS
 
 
 def _vote_node(votes: dict, slug: str, cycle: Optional[str], create: bool = False) -> dict:
@@ -772,7 +801,10 @@ def review_player(slug: str, info: dict = Depends(get_token_info)):
             "claimed_by": _claim_holder(state, slug, cycle),
             "is_agent": _claim_holder(state, slug, cycle) == info.get("name"),
             "exhausted": _is_exhausted(state, slug),
-            "rejections": _player_entry(state, slug).get("rejections", 0),
+            # In the current negotiation only; the limit applies to an
+            # expiring veteran alone (§ 6.3).
+            "rejections": _rejections_in(state, slug, *_negotiation(slug)),
+            "rejection_limit_applies": _negotiation(slug)[1] == "expiring",
         },
         "votes": node["votes"] if _is_head(info) or (has_role(info, "poext") and _is_assigned(state, slug, info["name"])) else {},
         "assigned": assigned,
@@ -890,18 +922,20 @@ def finalize_player(slug: str, body: FinalizeBody = FinalizeBody(),
             if p["player"] == slug and p["status"] == "voided" and p.get("archived_at") is None:
                 p["archived_at"] = live["archived_at"]
 
-        rejections = _player_entry(state, slug).get("rejections", 0)
+        season, bucket = _negotiation(slug)
         if outcome == "rejected":
-            rejections += 1
-        state["players"].setdefault(slug, {})["rejections"] = rejections
-        exhausted = rejections >= MAX_REJECTIONS
+            state["players"].setdefault(slug, {}).setdefault("rejection_log", []).append(
+                {"season": season, "bucket": bucket, "proposal_id": live["id"], "at": _now()})
+        rejections = _rejections_in(state, slug, season, bucket)
+        limited = bucket == "expiring"
+        exhausted = limited and rejections >= MAX_REJECTIONS
 
         node["final"] = {
             "locked_at": _now(), "locked_by": info["name"],
             "outcome": outcome, "accept": accept, "reject": reject,
             "voters": sorted(node["votes"]),
             "abstained": [m for m in assigned if m not in node["votes"]],
-            "rejections_total": rejections, "exhausted": exhausted,
+            "rejections_total": rejections, "rejection_limit": limited, "exhausted": exhausted,
             "txn_id": txn["id"] if txn else None,
         }
         _save_proposals(proposals)
@@ -929,8 +963,9 @@ def unlock_player(slug: str, info: dict = Depends(require_role("poext_head"))):
             raise HTTPException(409, "Not finalized")
         if final["outcome"] == "rejected":
             state = _load_state()
-            rejections = _player_entry(state, slug).get("rejections", 0)
-            state["players"].setdefault(slug, {})["rejections"] = max(0, rejections - 1)
+            entry = state["players"].setdefault(slug, {})
+            entry["rejection_log"] = [r for r in entry.get("rejection_log") or []
+                                      if r.get("proposal_id") != cycle]
             _save_state(state)
         node["final"] = None
         node.setdefault("unlocks", []).append({"at": _now(), "by": info["name"], "undid": final})
