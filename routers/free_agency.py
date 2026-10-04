@@ -43,6 +43,7 @@ from .transactions import (AcceptQualifyingOfferDetails, ContractIn, OfferSheetD
                            _qo_amount, _qo_record, _qo_status,
                            _signee_existing_hold, _signing_fact_sheet,
                            _validate_sign, _validation_ctx, apply_offer_sheet,
+                           _refuse_unlock_over_txn,
                            apply_accept_qo, apply_sign, apply_with_warning_confirm)
 
 router = APIRouter()
@@ -2353,6 +2354,7 @@ def unlock_player(slug: str, info: dict = Depends(require_role("fac_head"))):
         final = node.get("final")
         if not final:
             raise HTTPException(409, "Not finalized")
+        _refuse_unlock_over_txn((final.get("winner") or {}).get("txn_id"))
         node["final"] = None
         node.setdefault("unlocks", []).append(
             {"at": _now(), "by": info["name"], "undid": final})

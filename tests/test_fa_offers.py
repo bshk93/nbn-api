@@ -1207,6 +1207,24 @@ check("no sign or offer_sheet gets applied", len(APPLIED_SIGNS) == before_signs
 check("the record still shows what was decided, with no txn_id",
       won["winner"]["key"] == "NO_SIGNING" and won["winner"]["txn_id"] is None)
 
+print("\nunlock refuses while the declared signing is on the ledger")
+import routers.transactions as _txns  # noqa: E402
+_txns._load_transactions = lambda: APPLIED_SIGNS + APPLIED_OFFER_SHEETS
+fa.unlock_player("decl-rfa", HEAD)
+check("NO_SIGNING wrote nothing, so it unlocks freely",
+      fa._ballot_node(fa._load_ballots(), "decl-rfa", fa._round_id_for(fa._load_state(), "decl-rfa"))["final"] is None)
+fa.open_round(fa.RoundIn(name="Declare-winner unlock"), HEAD)
+fa.set_player_state("decl-ufa", fa.PlayerStateIn(status="open"), HEAD)
+u_offer = fa.submit_offer(make_offer(PHX_OWNER, player="decl-ufa", y1="$4,500,000")["id"], PHX_OWNER)
+fa.finalize_player("decl-ufa", HEAD)
+fa.declare_winner("decl-ufa", fa.DeclareWinnerIn(key=u_offer["id"]), HEAD)
+raises("a signing still on the ledger blocks the unlock", 409,
+       lambda: fa.unlock_player("decl-ufa", HEAD))
+APPLIED_SIGNS.pop()
+fa.unlock_player("decl-ufa", HEAD)
+check("once the office deleted the entry, unlock goes through",
+      fa._ballot_node(fa._load_ballots(), "decl-ufa", fa._round_id_for(fa._load_state(), "decl-ufa"))["final"] is None)
+
 print("\n" + ("=" * 40))
 if FAILS:
     print(f"FAILURES: {FAILS}")

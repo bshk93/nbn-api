@@ -75,8 +75,17 @@ def notify_role(role: str, text: str, link: Optional[str] = None) -> None:
     (e.g. an extension proposal reaching the queue, scoped to `poext` holders
     per nbn-today/docs/poext-extension-pipeline.md D13) that's every holder of
     that role's business, not one team's or one member's."""
+    notify_roles([role], text, link)
+
+
+def notify_roles(roles: list[str], text: str, link: Optional[str] = None) -> None:
+    """notify_role for several roles at once, delivered once per member — a
+    member holding two of them gets one notification, not two. Roles are
+    matched literally, not through ROLE_IMPLIES, so name every role that
+    should hear it."""
+    wanted = set(roles)
     for name, m in load_members().items():
-        if role in (m.get("roles") or []):
+        if wanted & set(m.get("roles") or []):
             notify_member(name, text, link)
 
 

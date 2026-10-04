@@ -55,7 +55,8 @@ def make_ctx(bio, cur_season="26-27", cap_levels=None, txn_date=None):
 
 
 def extend(bio, contract, team="XXX", cur_season="26-27", cap_levels=None,
-          kind="veteran", events=(("2020-08-01", "sign", "XXX"),), holder=None):
+          kind="veteran", events=(("2020-08-01", "sign", "XXX"),), holder=None,
+          txn_date=None, submitted_date=None):
     pin_ledger(events)
     # _validate_extension checks the player is actually on `team`'s roster
     # (§ 2.4) — "p" is a synthetic test player with no real roster entry, so
@@ -63,8 +64,9 @@ def extend(bio, contract, team="XXX", cur_season="26-27", cap_levels=None,
     # defaults to `team` (the common case: the request names the real
     # holder) but can be overridden to deliberately construct a mismatch.
     T._build_team_map = lambda: {"p": holder if holder is not None else team}
-    details = T.ExtensionDetails(player="p", team=team, contract=T.ContractIn(**contract), kind=kind)
-    ctx = make_ctx(bio, cur_season=cur_season, cap_levels=cap_levels)
+    details = T.ExtensionDetails(player="p", team=team, contract=T.ContractIn(**contract), kind=kind,
+                                 submitted_date=submitted_date)
+    ctx = make_ctx(bio, cur_season=cur_season, cap_levels=cap_levels, txn_date=txn_date)
     return T._validate_extension(details, ctx), ctx
 
 
@@ -302,6 +304,24 @@ def main():
     c = named(checks, "extension_cap_position")
     check("real thresholds set -> a real verdict, not a warning",
           c and c.level == "error" and not c.passed)
+
+    print("\nextension_window: a PO-EXT proposal is judged as of its submission")
+    # An expiring veteran (deal ends 26-27), proposed June 20 and voted on
+    # July 3 — after the rollover, when he is no longer in his final year.
+    bio, _ = deal("24-25", "26-27", "26-27")
+    ext = {"type": "player", "salaries": {"27-28": "$6,000,000", "28-29": "$6,300,000"}, "cap_holds": {}}
+    late = dict(cur_season="27-28", txn_date="2027-07-03", events=(("2024-08-01", "sign", "XXX"),))
+    checks, _ = extend(bio, ext, **late)
+    check("judged on the vote date, the deal has already run out",
+          not T._validation_result(checks, {}).legal)
+    checks, _ = extend(bio, ext, submitted_date="2027-06-20", **late)
+    w = named(checks, "extension_window")
+    check("judged on the submission date, it was on time",
+          w and w.passed and "expiring-veteran" in w.message)
+    check("...and it is legal", T._validation_result(checks, {}).legal)
+    checks, _ = extend(bio, ext, submitted_date="2027-07-01", **late)
+    check("a proposal first submitted after June 30 is late",
+          not T._validation_result(checks, {}).legal)
 
     print("\nextension_kind / extension_rfa_hold / extension_supersedes_qo (§ 6.3, § 3.1)")
     # A 2023 first-rounder in Year 4 of his rookie deal, rolling into an RFA hold.

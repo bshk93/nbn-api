@@ -45,8 +45,9 @@ from .constants import (POEXT_PROPOSALS_FILE, POEXT_STATE_FILE,
 from .free_agency import PromisesIn, _clean_promises, _member_teams
 from .players import _build_team_map, _display_name, load_player_bios
 from .proposals import _member_current_team
-from .storage import _current_league_year, _load_json, _save_json, log_write
-from .transactions import (ContractIn, ExtensionDetails,
+from .league_time import league_today_str
+from .storage import _current_league_year, _load_json, _save_json, _season_for_date, log_write
+from .transactions import (ContractIn, ExtensionDetails, _refuse_unlock_over_txn,
                            _bird_tenure, _extension_eligibility_check,
                            _extension_fact_sheet, _extension_frame,
                            _extension_is_rookie_scale,
@@ -65,6 +66,7 @@ _poext_lock = threading.RLock()
 LIVE_STATUSES = {"draft", "submitted", "returned"}
 VOIDABLE_STATUSES = {"submitted", "returned"}
 MAX_REJECTIONS = 3   # § 6.3: an expiring veteran's negotiation allows three proposals
+PANEL_LINK = "/committees/pdc#poext"
 
 
 def _now() -> str:
@@ -232,12 +234,17 @@ def _require_team_role(info: dict, team: str):
         raise HTTPException(403, f"Requires the {team} role")
 
 
-def _negotiation(slug: str) -> tuple[str, str]:
-    """(league year, bucket) of the player's extension negotiation right now.
-    The bucket is § 6.3's: "rookie_scale", "expiring" (a veteran in his final
+def _negotiation(slug: str, proposal: Optional[dict] = None) -> tuple[str, str]:
+    """(league year, bucket) of the player's extension negotiation. The
+    bucket is § 6.3's: "rookie_scale", "expiring" (a veteran in his final
     contract year) or "veteran" (not expiring). Read off the bio, never the
-    proposal's declared kind."""
-    season = _current_league_year()
+    proposal's declared kind.
+
+    Given a submitted proposal, it is the negotiation that proposal was
+    submitted in: one decided after the July 1 rollover still counts
+    against the season it was filed in."""
+    submitted = (proposal or {}).get("submitted_date")
+    season = _season_for_date(submitted) if submitted else _current_league_year()
     team = _build_team_map().get(slug)
     if not team:
         return season, "veteran"
@@ -256,11 +263,11 @@ def _rejections_in(state: dict, slug: str, season: str, bucket: str) -> int:
     return sum(1 for r in log if r.get("season") == season and r.get("bucket") == bucket)
 
 
-def _is_exhausted(state: dict, slug: str) -> bool:
+def _is_exhausted(state: dict, slug: str, proposal: Optional[dict] = None) -> bool:
     """§ 6.3 caps only the expiring-veteran negotiation at three proposals.
     Rookie-scale and non-expiring veterans may resubmit until their window
     closes, and the window check (in the validator) is what ends them."""
-    season, bucket = _negotiation(slug)
+    season, bucket = _negotiation(slug, proposal)
     return bucket == "expiring" and _rejections_in(state, slug, season, bucket) >= MAX_REJECTIONS
 
 
@@ -376,6 +383,7 @@ def _extension_details(p: dict) -> ExtensionDetails:
         bird_rights_type=p.get("bird_rights_type"),
         eaps_assumption=p.get("eaps_assumption"),
         attested_contract_start=p.get("attested_contract_start"),
+        submitted_date=p.get("submitted_date"),
     )
 
 
@@ -421,7 +429,7 @@ def create_proposal(body: ProposalCreate, info: dict = Depends(get_token_info)):
             "status": "draft", "version": 1, "versions": [], "remands": [],
             "created_by": info["name"], "submitted_by": None,
             "created_at": _now(), "updated_at": _now(), "submitted_at": None,
-            "archived_at": None, "void": None,
+            "submitted_date": None, "archived_at": None, "void": None,
             "kind": body.kind,
             "contract": body.contract.model_dump(),
             "bird_rights_type": body.bird_rights_type,
@@ -493,7 +501,7 @@ def submit_proposal(proposal_id: str, info: dict = Depends(get_token_info)):
         if not _is_live(p) or p["status"] not in ("draft", "returned"):
             raise HTTPException(409, f"Proposal is {p['status']}, not submittable")
         state = _load_state()
-        if _is_exhausted(state, p["player"]):
+        if _is_exhausted(state, p["player"], p):
             raise HTTPException(422, f"§ 6.3: three proposals on {p['player']} have already "
                                      f"been rejected — no further opportunities arise")
 
@@ -508,6 +516,11 @@ def submit_proposal(proposal_id: str, info: dict = Depends(get_token_info)):
         resubmit = p["status"] == "returned"
         if resubmit:
             p["version"] += 1
+        # § 6.3's deadline is met by the first submission. A remand is the
+        # committee asking for changes, so answering one after the deadline
+        # doesn't make the proposal late.
+        if not p.get("submitted_date"):
+            p["submitted_date"] = league_today_str()
         p["status"] = "submitted"
         p["submitted_by"] = info["name"]
         p["submitted_at"] = _now()
@@ -523,10 +536,16 @@ def submit_proposal(proposal_id: str, info: dict = Depends(get_token_info)):
     # one endpoint, one announcement path, same as fa_notify.notify_offer_submitted.
     poext_notify.notify_proposal_submitted(p)
     if not resubmit:
-        # D13: scoped to poext holders, not the wider committee ecosystem —
-        # mirrors the public/private Discord split at the individual level.
-        inbox.notify_role("poext", f"{p['team']} submitted an extension proposal for "
-                          f"{p['player']} — claim it to start negotiating.", link="/pdc")
+        # The people who can act on it: agents claim, and the head can act as
+        # agent. Not `poext` members — they have nothing to do until the
+        # proposal is advanced and they're assigned to vote on it.
+        inbox.notify_roles(["agent", "poext_head"],
+                           f"{p['team']} submitted an extension proposal for "
+                           f"{_player_display_name(p['player'])} — claim it to start negotiating.",
+                           link=PANEL_LINK)
+    elif (agent := _claim_holder(_load_state(), p["player"], p["id"])):
+        inbox.notify_member(agent, f"{p['team']} resubmitted {_player_display_name(p['player'])}'s "
+                                   f"extension proposal after your remand.", link=PANEL_LINK)
     return p
 
 
@@ -568,7 +587,8 @@ def remand_proposal(proposal_id: str, body: dict, info: dict = Depends(get_token
     poext_notify.notify_proposal_remanded(p, entry)
     recipient = p.get("submitted_by") or p.get("created_by")
     if recipient:
-        inbox.notify_member(recipient, f"Your extension proposal for {p['player']} was sent back: {note}",
+        inbox.notify_member(recipient, f"Your extension proposal for {_player_display_name(p['player'])} "
+                                       f"was sent back: {note}",
                             link="/extensions")
     return p
 
@@ -601,7 +621,8 @@ def void_proposal(proposal_id: str, body: dict, info: dict = Depends(get_token_i
     poext_notify.notify_proposal_voided(p)
     recipient = p.get("submitted_by") or p.get("created_by")
     if recipient:
-        inbox.notify_member(recipient, f"Your extension proposal for {p['player']} was voided: {reason}",
+        inbox.notify_member(recipient, f"Your extension proposal for {_player_display_name(p['player'])} "
+                                       f"was voided: {reason}",
                             link="/extensions")
     return p
 
@@ -632,7 +653,8 @@ def restore_proposal(proposal_id: str, info: dict = Depends(get_token_info)):
     poext_notify.notify_proposal_restored(p)
     recipient = p.get("submitted_by") or p.get("created_by")
     if recipient:
-        inbox.notify_member(recipient, f"Your extension proposal for {p['player']} was restored — it's live again",
+        inbox.notify_member(recipient, f"Your extension proposal for {_player_display_name(p['player'])} "
+                                       f"was restored — it's live again",
                             link="/extensions")
     return p
 
@@ -658,7 +680,7 @@ def claim_player(slug: str, info: dict = Depends(require_role("agent"))):
         live = _live_proposal_for(proposals, slug)
         if not live or live["status"] != "submitted":
             raise HTTPException(422, "No submitted proposal on this player to claim")
-        if _is_exhausted(state, slug):
+        if _is_exhausted(state, slug, live):
             raise HTTPException(422, "This player's extension opportunities are exhausted")
         cycle = live["id"]
         holder = _claim_holder(state, slug, cycle)
@@ -727,6 +749,13 @@ def advance_player(slug: str, body: dict, info: dict = Depends(get_token_info)):
         node["note"] = note
         _save_state(state)
     log_write(info, f"POST poext/players/{slug}/advance")
+    name = _player_display_name(slug)
+    assigned = _player_entry(state, slug).get("subcommittee") or []
+    for member in assigned:
+        inbox.notify_member(member, f"Voting is open on {name}'s extension.", link=PANEL_LINK)
+    if not assigned:
+        inbox.notify_role("poext_head", f"{name}'s extension is ready for a vote — "
+                                        f"assign a sub-committee.", link=PANEL_LINK)
     return {"player": slug, "agent": node, "proposal": live["id"]}
 
 
@@ -747,6 +776,9 @@ def return_to_agent(slug: str, body: dict, info: dict = Depends(require_role("po
         node["advanced_by"] = None
         _save_state(state)
     log_write(info, f"POST poext/players/{slug}/return-to-agent")
+    if node.get("claimed_by"):
+        inbox.notify_member(node["claimed_by"], f"{_player_display_name(slug)}'s extension was sent "
+                                                f"back to you: {reason}", link=PANEL_LINK)
     return {"player": slug, "agent": node}
 
 
@@ -762,9 +794,18 @@ def assign_subcommittee(slug: str, body: dict, info: dict = Depends(require_role
     with _poext_lock:
         state = _load_state()
         entry = state["players"].setdefault(slug, {})
+        before = set(entry.get("subcommittee") or [])
         entry["subcommittee"] = list(dict.fromkeys(members_body))
         _save_state(state)
+        advanced = _is_advanced(state, slug, _current_cycle(_load_proposals(), slug))
     log_write(info, f"PUT poext/players/{slug}/assign — {entry['subcommittee']}")
+    name = _player_display_name(slug)
+    for member in entry["subcommittee"]:
+        if member not in before:
+            inbox.notify_member(member, f"You're on the sub-committee for {name}'s extension — "
+                                        + ("voting is open." if advanced
+                                           else "voting opens when the agent advances it."),
+                                link=PANEL_LINK)
     return {"player": slug, "subcommittee": entry["subcommittee"]}
 
 
@@ -777,6 +818,10 @@ def review_player(slug: str, info: dict = Depends(get_token_info)):
     cycle = _current_cycle(proposals, slug)
     _require_reviewer(info, state, slug, cycle)
     live = _live_proposal_for(proposals, slug)
+    if live and live["status"] == "draft":
+        # A draft is the team's own until they submit it (list_proposals
+        # hides it too) — the committee has nothing to review yet.
+        live = None
     votes_all = _load_votes()
     node = _vote_node(votes_all, slug, cycle)
 
@@ -802,11 +847,11 @@ def review_player(slug: str, info: dict = Depends(get_token_info)):
             "stage": _stage(state, slug, cycle, live is not None, bool(node.get("final"))),
             "claimed_by": _claim_holder(state, slug, cycle),
             "is_agent": _claim_holder(state, slug, cycle) == info.get("name"),
-            "exhausted": _is_exhausted(state, slug),
+            "exhausted": _is_exhausted(state, slug, live),
             # In the current negotiation only; the limit applies to an
             # expiring veteran alone (§ 6.3).
-            "rejections": _rejections_in(state, slug, *_negotiation(slug)),
-            "rejection_limit_applies": _negotiation(slug)[1] == "expiring",
+            "rejections": _rejections_in(state, slug, *_negotiation(slug, live)),
+            "rejection_limit_applies": _negotiation(slug, live)[1] == "expiring",
         },
         "votes": node["votes"] if _is_head(info) or (has_role(info, "poext") and _is_assigned(state, slug, info["name"])) else {},
         "assigned": assigned,
@@ -973,13 +1018,15 @@ def finalize_player(slug: str, body: FinalizeBody = FinalizeBody(),
 
         idx = next(i for i, p in enumerate(proposals) if p["id"] == live["id"])
         live["status"] = outcome
+        # One stamp for the lock and the archive: unlock finds the proposals
+        # to bring back by matching it.
         live["archived_at"] = _now()
         proposals[idx] = live
         for p in proposals:
             if p["player"] == slug and p["status"] == "voided" and p.get("archived_at") is None:
                 p["archived_at"] = live["archived_at"]
 
-        season, bucket = _negotiation(slug)
+        season, bucket = _negotiation(slug, live)
         if outcome == "rejected":
             state["players"].setdefault(slug, {}).setdefault("rejection_log", []).append(
                 {"season": season, "bucket": bucket, "proposal_id": live["id"], "at": _now()})
@@ -988,7 +1035,7 @@ def finalize_player(slug: str, body: FinalizeBody = FinalizeBody(),
         exhausted = limited and rejections >= MAX_REJECTIONS
 
         node["final"] = {
-            "locked_at": _now(), "locked_by": info["name"],
+            "locked_at": live["archived_at"], "locked_by": info["name"],
             "outcome": outcome, "path": path, "totals": totals,
             "accept_share": round(totals["accept"] / cast, 4),
             "voters": sorted(node["votes"]),
@@ -1019,6 +1066,7 @@ def unlock_player(slug: str, info: dict = Depends(require_role("poext_head"))):
         final = node.get("final")
         if not final:
             raise HTTPException(409, "Not finalized")
+        _refuse_unlock_over_txn(final.get("txn_id"))
         if final["outcome"] == "rejected":
             state = _load_state()
             entry = state["players"].setdefault(slug, {})

@@ -286,6 +286,18 @@ def _load_transactions() -> list[dict]:
     return _load_json(TRANSACTIONS_FILE, [])
 
 
+def _refuse_unlock_over_txn(txn_id: Optional[str]):
+    """A committee unlock (FA's after declare-winner, PO-EXT's after an
+    agreed finalize) reopens a vote whose result was already written. While
+    that transaction is on the ledger, reopening would leave the contract on
+    the books with no vote behind it, and a second finalize would write it
+    again. So unlock waits until the office has undone it."""
+    if txn_id and any(t.get("id") == txn_id for t in _load_transactions()):
+        raise HTTPException(409, f"This result was written to the ledger as transaction {txn_id}. "
+                                 f"Take the contract off the player's bio and delete that entry "
+                                 f"on /transactions first, then unlock.")
+
+
 def _append_transaction(txn: dict):
     txns = _load_transactions()
     txns.append(txn)
@@ -339,6 +351,11 @@ class ExtensionDetails(BaseModel):
     eaps_assumption: Optional[str] = None
     # § 4.5 six-month trade-freeze clock; defaults to the transaction date.
     announced_date: Optional[str] = None
+    # The day a PO-EXT proposal was first submitted. § 6.3's windows are
+    # submission deadlines, so a proposal the committee decides after its
+    # window closed is still judged as of this day — the window, and the
+    # league year that says whether the player is an expiring veteran.
+    submitted_date: Optional[str] = None
     # Season string. Required by the UI (not the schema) only when the player
     # has no ledger acquisition record — see _extension_frame / D15
     # (nbn-today/docs/poext-extension-pipeline.md § 2.3a). Never trusted as a
@@ -7117,6 +7134,14 @@ def _extension_eligibility_check(player: str, frame: dict, cur_season: str,
     )
 
 
+def _extension_season(details: ExtensionDetails, ctx: dict) -> str:
+    """The league year an extension is judged in: the one it was submitted
+    in, when it came through PO-EXT, else the context's current one."""
+    if details.submitted_date:
+        return _season_for_date(details.submitted_date)
+    return ctx["cur_season"]
+
+
 def _validate_extension(details: ExtensionDetails, ctx: dict) -> list[CheckResult]:
     """§ 6.2 / § 6.3. See nbn-today/docs/poext-extension-pipeline.md § 5 for
     the full information flow this mirrors.
@@ -7132,7 +7157,7 @@ def _validate_extension(details: ExtensionDetails, ctx: dict) -> list[CheckResul
     team = details.team.upper()
     player = details.player
     bio = bios.get(player) or {}
-    cur_season = ctx["cur_season"]
+    cur_season = _extension_season(details, ctx)
     cap_levels = ctx["cap_levels"]
 
     # § 2.4: only the incumbent may extend — checked here too, not just in
@@ -7416,7 +7441,7 @@ def _validate_extension(details: ExtensionDetails, ctx: dict) -> list[CheckResul
     if (details.kind != "rookie_scale" and not rookie_scale
             and frame["contract_end"] and cur_season == frame["contract_end"]):
         # Expiring veteran: hard June 30 deadline, a real calendar date.
-        as_of = details.announced_date or ctx.get("txn_date") or ""
+        as_of = details.submitted_date or details.announced_date or ctx.get("txn_date") or ""
         deadline_year = _season_start(cur_season) + 2000 + 1
         deadline = f"{deadline_year}-06-30"
         if as_of and as_of > deadline:
@@ -7430,7 +7455,7 @@ def _validate_extension(details: ExtensionDetails, ctx: dict) -> list[CheckResul
     else:
         # Rookie-scale and non-expiring veteran: "any time up to the day before
         # the regular season starts" — opening night off the schedule.
-        as_of = details.announced_date or ctx.get("txn_date") or league_today_str()
+        as_of = details.submitted_date or details.announced_date or ctx.get("txn_date") or league_today_str()
         kind = "rookie-scale" if (details.kind == "rookie_scale" or rookie_scale) else "non-expiring veteran"
         deadline = season_calendar.day_before_opening_night(cur_season)
         if not deadline:
@@ -7467,7 +7492,7 @@ def _extension_fact_sheet(details: ExtensionDetails, ctx: dict) -> dict:
     team = details.team.upper()
     player = details.player
     bio = bios.get(player) or {}
-    frame = _extension_frame(player, team, bio, ctx["cur_season"], details.attested_contract_start)
+    frame = _extension_frame(player, team, bio, _extension_season(details, ctx), details.attested_contract_start)
     yr1_season = frame["first_extended_season"] or (
         min(details.contract.salaries, key=_season_start) if details.contract.salaries else None)
     cl = ctx["cap_levels"].get(yr1_season, {}) if yr1_season else {}
@@ -7475,7 +7500,7 @@ def _extension_fact_sheet(details: ExtensionDetails, ctx: dict) -> dict:
     rookie_scale = _extension_is_rookie_scale(bio, frame)
     cap1 = ({"ceiling": None, "basis": None} if rookie_scale
             else _extension_year1_ceiling(frame["prior_salary"], cl))
-    mx = _extension_max_salary(player, bio, yr1_season, ctx["cur_season"], ctx["cap_levels"], rookie_scale)
+    mx = _extension_max_salary(player, bio, yr1_season, _extension_season(details, ctx), ctx["cap_levels"], rookie_scale)
     # Same helper `_signing_fact_sheet` uses — an extension's trailing UFA/RFA
     # hold is auto-priced by `_apply_extension` through the same
     # `_autofill_fa_hold_amounts` a signing goes through, so the office needs

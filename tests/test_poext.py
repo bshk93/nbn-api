@@ -96,15 +96,25 @@ poext._save_votes = lambda v: None
 poext._build_team_map = lambda: TEAM_MAP
 poext.load_members = lambda: MEMBERS
 poext.log_write = lambda info, msg: None
-poext.inbox.notify_member = lambda *a, **k: None
-poext.inbox.notify_role = lambda *a, **k: None
+# Every inbox delivery, as (member, text) — notify_role/notify_roles fan out
+# through notify_member against MEMBERS, so patching the one leaf records all.
+INBOX: list = []
+poext.inbox.notify_member = lambda member, text, link=None: INBOX.append((member, text))
+poext.inbox.load_members = lambda: MEMBERS
+poext._player_display_name = lambda slug: slug
+# The ledger unlock consults; finalize's fake apply_extension appends to it.
+LEDGER: list = []
+import routers.transactions as _txns  # noqa: E402
+_txns._load_transactions = lambda: LEDGER
+poext.league_today_str = lambda: TODAY["date"]
+TODAY = {"date": "2027-06-20"}
 poext._member_current_team = lambda name, members=None: (
     "SAS" if name in ("sasOwner", "agentSas") else "BKN" if name == "bknOwner" else None)
 poext._current_league_year = lambda: "26-27"
 # § 6.3 bucket per player; the real one reads the bio (test_extensions.py
 # covers that). Default: an expiring veteran, the bucket with the limit.
 BUCKET: dict = {}
-poext._negotiation = lambda slug: (SEASON["now"], BUCKET.get(slug, "expiring"))
+poext._negotiation = lambda slug, proposal=None: (SEASON["now"], BUCKET.get(slug, "expiring"))
 SEASON = {"now": "26-27"}
 
 
@@ -170,6 +180,7 @@ def fake_apply_extension(details, txn_date, info, description="", force=False,
     txn = {"id": f"txn{len(APPLIED_EXTENSIONS) + 1}", "type": "extension",
            "details": details.model_dump(), "force_warnings_only": force_warnings_only}
     APPLIED_EXTENSIONS.append(txn)
+    LEDGER.append(txn)
     return txn
 
 
@@ -191,6 +202,8 @@ def reset():
     PROPOSALS.clear()
     VOTES.clear()
     LEGAL["legal"] = True
+    INBOX.clear()
+    LEDGER.clear()
 
 
 # ══ proposal creation and lifecycle ═══════════════════════════════════════════
@@ -468,6 +481,80 @@ check("once submitted, any agent can see it in the queue",
       any(x["id"] == p["id"] for x in submitted_visible_to_agent))
 submitted_visible_to_bkn = poext.list_proposals(info=BKN)
 check("...but a team with no committee role still can't", not any(x["id"] == p["id"] for x in submitted_visible_to_bkn))
+
+print("\n§ 6.3's deadline is met by the first submission, not by the vote")
+reset()
+TODAY["date"] = "2027-06-20"
+p = make_proposal(SAS)
+check("a draft has no submission date", p["submitted_date"] is None)
+poext.submit_proposal(p["id"], SAS)
+check("the first submit stamps the league date", p["submitted_date"] == "2027-06-20")
+check("...and the validator is handed it", poext._extension_details(p).submitted_date == "2027-06-20")
+poext.remand_proposal(p["id"], {"note": "raise Year 1"}, HEAD)
+TODAY["date"] = "2027-07-03"
+poext.submit_proposal(p["id"], SAS)
+check("answering a remand after the deadline keeps the original date",
+      p["submitted_date"] == "2027-06-20")
+TODAY["date"] = "2027-06-20"
+
+print("\nunlock refuses while the result it would reopen is on the ledger")
+reset()
+p = make_proposal(SAS)
+poext.submit_proposal(p["id"], SAS)
+poext.claim_player("barlow-dominick", AGENT)
+poext.advance_player("barlow-dominick", {"note": ""}, AGENT)
+poext.assign_subcommittee("barlow-dominick", {"subcommittee": ["memberA"]}, HEAD)
+poext.cast_vote("barlow-dominick", poext.VoteIn(balls={"accept": 1000}), MEM_A)
+final = poext.finalize_player("barlow-dominick", poext.FinalizeBody(), HEAD)
+check("the lock and the archive share one stamp",
+      final["locked_at"] == next(x for x in PROPOSALS if x["id"] == p["id"])["archived_at"])
+raises("an agreed extension still on the ledger can't be unlocked", 409,
+       lambda: poext.unlock_player("barlow-dominick", HEAD))
+LEDGER.clear()
+poext.unlock_player("barlow-dominick", HEAD)
+check("once the office deleted the entry, unlock goes through",
+      next(x for x in PROPOSALS if x["id"] == p["id"])["status"] == "submitted")
+
+print("\nthe committee doesn't see a team's draft")
+reset()
+p = make_proposal(SAS)
+rv = poext.review_player("barlow-dominick", HEAD)
+check("review shows no proposal for a draft", rv["proposal"] is None and rv["state"]["stage"] == "open")
+poext.submit_proposal(p["id"], SAS)
+rv = poext.review_player("barlow-dominick", HEAD)
+check("...and shows it once submitted", rv["proposal"]["id"] == p["id"]
+      and rv["state"]["stage"] == "awaiting_agent")
+
+print("\ninbox: each step reaches the people who act next")
+reset()
+p = make_proposal(SAS)
+poext.submit_proposal(p["id"], SAS)
+told = {m for m, _ in INBOX}
+check("a new proposal goes to the agents and the head", told == {"agentA", "agentSas", "poextHead"})
+check("...not to poext members, who have nothing to do yet", "memberA" not in told)
+check("...with the player's name in it", "barlow-dominick" in INBOX[0][1])
+poext.claim_player("barlow-dominick", AGENT)
+poext.remand_proposal(p["id"], {"note": "raise Year 1"}, AGENT)
+INBOX.clear()
+poext.submit_proposal(p["id"], SAS)
+check("a resubmission goes to the claiming agent alone", [m for m, _ in INBOX] == ["agentA"])
+INBOX.clear()
+poext.advance_player("barlow-dominick", {"note": ""}, AGENT)
+check("advancing with nobody assigned asks the head to assign", [m for m, _ in INBOX] == ["poextHead"])
+INBOX.clear()
+poext.assign_subcommittee("barlow-dominick", {"subcommittee": ["memberA", "memberB"]}, HEAD)
+check("assignment tells each new member voting is open",
+      sorted(m for m, _ in INBOX) == ["memberA", "memberB"] and "voting is open" in INBOX[0][1])
+INBOX.clear()
+poext.assign_subcommittee("barlow-dominick", {"subcommittee": ["memberA", "memberB", "memberC"]}, HEAD)
+check("re-assigning only tells the member who was added", [m for m, _ in INBOX] == ["memberC"])
+INBOX.clear()
+poext.return_to_agent("barlow-dominick", {"reason": "Year 2 is short"}, HEAD)
+check("a return goes to the claiming agent", [m for m, _ in INBOX] == ["agentA"])
+INBOX.clear()
+poext.advance_player("barlow-dominick", {"note": ""}, AGENT)
+check("advancing to an assigned sub-committee tells its members",
+      sorted(m for m, _ in INBOX) == ["memberA", "memberB", "memberC"])
 
 print("\n" + ("=" * 40))
 if FAILS:
