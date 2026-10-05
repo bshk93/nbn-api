@@ -38,7 +38,8 @@ MODULES = ["test_route_bindings",
            "test_allstats_guard", "test_allstats_files", "test_stats_integrity",
            "test_stats_checks", "test_allstats_edit",
            "test_boxscore_provenance", "test_boxscore_upload_format",
-           "test_boxscore_player_slugs", "test_game_highs",
+           "test_boxscore_player_slugs", "test_boxscore_commit_gate",
+           "test_boxscore_screenshots", "test_game_day_notify", "test_game_highs",
            "test_drive_backup",
            "test_data_paths"]
 

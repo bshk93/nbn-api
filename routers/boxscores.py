@@ -1,9 +1,11 @@
 import json
+import os
+import re
 import shutil
 import subprocess
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
@@ -11,13 +13,15 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 import allstats_files
+import season_clock
+from stats_build import checks as stats_checks
 
 from .constants import (
     DATA_DIR, PLAYER_BIOS_FILE, PENDING_BOXSCORES_DIR, MANUAL_QUEUE_FILE,
     BUILD_STATUS_FILE, BUILD_SCRIPT, VALID_TEAMS, _manual_queue_lock,
     _build_trigger_lock, logger,
 )
-from .storage import read_csv, log_write, _current_league_year
+from .storage import read_csv, log_write, _current_league_year, _atomic_write
 from .allstats_guard import write_allstats, AllstatsGuardError
 from .boxscore_provenance import record_commit
 from . import boxscore_shots as shots
@@ -168,7 +172,11 @@ def _checked_image_ext(data: bytes, label: str) -> str:
 
 # ── Build status/trigger ──────────────────────────────────────────────────────
 
-def _read_build_status() -> dict:
+# A build takes under a minute. One still "running" after this long is not.
+BUILD_STALE_AFTER = timedelta(minutes=30)
+
+
+def _load_build_status() -> dict:
     if BUILD_STATUS_FILE.exists():
         try:
             return json.loads(BUILD_STATUS_FILE.read_text())
@@ -177,46 +185,112 @@ def _read_build_status() -> dict:
     return {"status": "idle"}
 
 
-def _trigger_build():
+def _save_build_status(status: dict) -> None:
+    _atomic_write(BUILD_STATUS_FILE, json.dumps(status))
+
+
+def _pid_alive(pid) -> bool:
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, ValueError, TypeError):
+        return True
+    return True
+
+
+def _build_is_live(status: dict) -> bool:
+    """A "running" status that really is running.
+
+    The status file outlives the process that wrote it. `deploy.sh` restarts
+    the API, which kills a build mid-run, and the file then says "running"
+    forever — and every later commit used to read that and skip its build.
+    So "running" only counts while the build's process exists and is younger
+    than BUILD_STALE_AFTER.
+    """
+    if status.get("status") != "running":
+        return False
+    pid = status.get("pid")
+    if pid is not None and not _pid_alive(pid):
+        return False
+    try:
+        started = datetime.fromisoformat(status["started_at"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return datetime.now(timezone.utc) - started < BUILD_STALE_AFTER
+
+
+def _read_build_status() -> dict:
+    status = _load_build_status()
+    if status.get("status") == "running" and not _build_is_live(status):
+        return {
+            "status": "error",
+            "started_at": status.get("started_at"),
+            "error": "The build was interrupted (most likely the API restarted "
+                     "mid-build). The next commit or a manual trigger rebuilds.",
+        }
+    return status
+
+
+def _run_build_once(started: str) -> dict:
+    """Run build.sh once and return the status it finished with."""
+    try:
+        proc = subprocess.Popen(
+            ["bash", str(BUILD_SCRIPT), "build"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        with _build_trigger_lock:
+            st = _load_build_status()
+            st["pid"] = proc.pid
+            _save_build_status(st)
+        out, err = proc.communicate()
+        finished = datetime.now(timezone.utc).isoformat()
+        if proc.returncode == 0:
+            return {"status": "done", "started_at": started, "finished_at": finished}
+        return {"status": "error", "started_at": started, "finished_at": finished,
+                "error": (err or out or "unknown error")[-500:]}
+    except Exception as e:
+        return {"status": "error", "started_at": started,
+                "finished_at": datetime.now(timezone.utc).isoformat(), "error": str(e)}
+
+
+def _build_loop(started: str) -> None:
+    while True:
+        result = _run_build_once(started)
+        # Deciding to stop and publishing the final status are one step, under
+        # the same lock `_trigger_build` takes — otherwise a commit could land
+        # between them, see "running", ask for a rerun, and never get one.
+        with _build_trigger_lock:
+            if not _load_build_status().get("rerun"):
+                _save_build_status(result)
+                return
+            started = datetime.now(timezone.utc).isoformat()
+            _save_build_status({"status": "running", "started_at": started})
+
+
+def _trigger_build() -> bool:
+    """Make sure a build that includes everything on disk now will run.
+
+    Starts one, or — when one is already running — asks it to go round again
+    when it finishes. That build read the raw files before this commit was
+    written, so without the rerun the game would wait for the next commit,
+    which for the last game of a night is the next day. Returns True either
+    way: the caller's data will be built.
+    """
     # The check and the "claim it" write have to happen as one step — two
     # requests landing close together must not both read "not running" and
     # both spawn a build.
     with _build_trigger_lock:
-        status = _read_build_status()
-        if status.get("status") == "running":
-            return False
-        now = datetime.now(timezone.utc).isoformat()
-        BUILD_STATUS_FILE.write_text(json.dumps({"status": "running", "started_at": now}))
+        status = _load_build_status()
+        if _build_is_live(status):
+            if not status.get("rerun"):
+                status["rerun"] = True
+                _save_build_status(status)
+            return True
+        started = datetime.now(timezone.utc).isoformat()
+        _save_build_status({"status": "running", "started_at": started})
 
-    def _run():
-        try:
-            result = subprocess.run(
-                ["bash", str(BUILD_SCRIPT), "build"],
-                capture_output=True, text=True,
-            )
-            finished = datetime.now(timezone.utc).isoformat()
-            if result.returncode == 0:
-                BUILD_STATUS_FILE.write_text(json.dumps({
-                    "status": "done",
-                    "started_at": now,
-                    "finished_at": finished,
-                }))
-            else:
-                BUILD_STATUS_FILE.write_text(json.dumps({
-                    "status": "error",
-                    "started_at": now,
-                    "finished_at": finished,
-                    "error": (result.stderr or result.stdout or "unknown error")[-500:],
-                }))
-        except Exception as e:
-            BUILD_STATUS_FILE.write_text(json.dumps({
-                "status": "error",
-                "started_at": now,
-                "finished_at": datetime.now(timezone.utc).isoformat(),
-                "error": str(e),
-            }))
-
-    threading.Thread(target=_run, daemon=True).start()
+    threading.Thread(target=_build_loop, args=(started,), daemon=True).start()
     return True
 
 
@@ -280,7 +354,9 @@ def _remove_from_manual_queue(date: str, home_team: str, away_team: str):
 # ── Pydantic models ───────────────────────────────────────────────────────────
 
 class BoxscorePlayerRow(BaseModel):
-    player: str
+    # Informational only. The PLAYER written to the file is the bio's name for
+    # `slug` — see `_resolve_players`.
+    player: str = ""
     slug: str
     min: int
     pts: int
@@ -324,6 +400,86 @@ class BoxscoreQueueRequest(BaseModel):
     game_type: str
 
 
+# ── Commit checks ─────────────────────────────────────────────────────────────
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+GAME_TYPES = ("REG", "PLAYOFF")
+
+
+def _check_game_meta(date: str, season: str, game_type: str) -> str:
+    """422 unless the date, season and game type agree. Returns the game type
+    upper-cased.
+
+    The season is not taken on trust. Which file a game goes into follows the
+    season, and while that season's file exists nothing else would notice a
+    wrong one: a 26-27 game sent as "25-26" would append to last season's file,
+    which can't be undone through the API. So it must be the season the date
+    falls in, on the same clock everything else uses.
+    """
+    if not _DATE_RE.match(date or ""):
+        raise HTTPException(status_code=422, detail=f"Date {date!r} is not YYYY-MM-DD.")
+    try:
+        want = season_clock.season_for_date(date)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Date {date!r} is not a real date.")
+    gt = (game_type or "").upper()
+    if gt not in GAME_TYPES:
+        raise HTTPException(status_code=422,
+                            detail=f"Game type {game_type!r} must be REG or PLAYOFF.")
+    if season != want:
+        raise HTTPException(status_code=422,
+                            detail=f"{date} is in the {want} season, not {season}.")
+    return gt
+
+
+def _resolve_players(body: "BoxscoreCommitRequest", bios: dict) -> dict[str, str]:
+    """slug -> the name to write, or 422 listing every slug that won't do.
+
+    The raw files key players by name, and the name used to be whatever the
+    caller typed. Every case of one player's line filed under another's name
+    came in that way, and once written it reads as a perfectly legal line. Now
+    the slug must be a real bio, the name comes from that bio, and no player
+    can appear twice in one game, on either side.
+    """
+    problems, names, seen = [], {}, {}
+    for team, rows in ((body.home_team.upper(), body.home_rows),
+                       (body.away_team.upper(), body.away_rows)):
+        for r in rows:
+            label = f"{r.slug!r}" + (f" ({r.player})" if r.player else "")
+            name = (bios.get(r.slug) or {}).get("name", "").strip()
+            if not name:
+                problems.append(f"{team}: {label} is not a player bio — create the bio first")
+                continue
+            if r.slug in seen:
+                problems.append(f"{name} is listed twice ({seen[r.slug]} and {team})")
+                continue
+            seen[r.slug] = team
+            names[r.slug] = name
+    if problems:
+        raise HTTPException(status_code=422, detail="Box score refused: " + "; ".join(problems))
+    return names
+
+
+def _game_findings(filename: str, rows: list[dict], home_team: str, away_team: str) -> list[str]:
+    """Everything wrong with one game's rows, using the same checks the weekly
+    integrity job runs over the whole corpus — so a game that would be flagged
+    next week is refused now instead. Plus the two that need both teams: the
+    same number of overtimes, and no player past the game's length."""
+    out = [str(f) for f in stats_checks.check_rows(filename, rows)
+           + stats_checks.check_games(filename, rows)]
+    minutes = {t: sum(int(r["M"]) for r in rows if r["TEAM"] == t) for t in (home_team, away_team)}
+    ots = {t: stats_checks.overtimes(m) for t, m in minutes.items()}
+    if None not in ots.values():
+        if ots[home_team] != ots[away_team]:
+            out.append(f"overtime mismatch: {home_team} minutes imply {ots[home_team]} OT, "
+                       f"{away_team} minutes imply {ots[away_team]}")
+        else:
+            cap = 48 + 5 * ots[home_team]
+            out += [f"too many minutes: {r['TEAM']} {r['PLAYER']} played {r['M']}, "
+                    f"the game was {cap}" for r in rows if int(r["M"]) > cap]
+    return out
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.post("/api/boxscore/commit")
@@ -332,9 +488,44 @@ def commit_boxscore(body: BoxscoreCommitRequest, info: dict = Depends(require_an
     away_team = body.away_team.upper()
     if home_team not in VALID_TEAMS or away_team not in VALID_TEAMS:
         raise HTTPException(status_code=422, detail="Invalid team abbreviation")
+    if home_team == away_team:
+        raise HTTPException(status_code=422, detail="A team cannot play itself")
+    game_type = _check_game_meta(body.date, body.season, body.game_type)
+    is_playoff = game_type == "PLAYOFF"
 
-    if _game_in_data(body.date, home_team, away_team, body.season, body.game_type):
+    if _game_in_data(body.date, home_team, away_team, body.season, game_type):
         raise HTTPException(status_code=409, detail=f"{home_team} vs {away_team} on {body.date} is already committed.")
+
+    bios = json.loads(PLAYER_BIOS_FILE.read_text()) if PLAYER_BIOS_FILE.exists() else {}
+    names = _resolve_players(body, bios)
+
+    new_rows = []
+    for r in body.home_rows:
+        new_rows.append(_build_allstats_row(
+            home_team, away_team, body.date, names[r.slug], r.slug,
+            r.min, r.pts, r.reb, r.oreb, r.dreb,
+            r.ast, r.stl, r.blk, r.tov, r.pf,
+            r.fgm, r.fga, r.tpm, r.tpa, r.ftm, r.fta,
+            body.home_pts, body.away_pts,
+            "W" if body.home_pts > body.away_pts else "L",
+            game_type, body.game_num, body.round_num, bios,
+        ))
+    for r in body.away_rows:
+        new_rows.append(_build_allstats_row(
+            away_team, f"@{home_team}", body.date, names[r.slug], r.slug,
+            r.min, r.pts, r.reb, r.oreb, r.dreb,
+            r.ast, r.stl, r.blk, r.tov, r.pf,
+            r.fgm, r.fga, r.tpm, r.tpa, r.ftm, r.fta,
+            body.away_pts, body.home_pts,
+            "W" if body.away_pts > body.home_pts else "L",
+            game_type, body.game_num, body.round_num, bios,
+        ))
+
+    path = allstats_path(body.season, game_type)
+    findings = _game_findings(path.name, new_rows, home_team, away_team)
+    if findings:
+        raise HTTPException(status_code=422, detail=f"Box score refused, {len(findings)} "
+                            f"problem{'s' if len(findings) != 1 else ''}: " + "; ".join(findings))
 
     # The first game of a season, and the first game of a postseason, arrive
     # before their raw file exists — the season clock rolls in July and nothing
@@ -343,8 +534,8 @@ def commit_boxscore(body: BoxscoreCommitRequest, info: dict = Depends(require_an
     # on the caller's side could get past. `allstats_files` refuses if the
     # previous season is missing too (an unmounted data dir), and only the
     # current season is ever created: a commit against some older season whose
-    # file is absent is a mistake, not a rollover.
-    path = allstats_path(body.season, body.game_type)
+    # file is absent is a mistake, not a rollover. This runs after the checks,
+    # so a refused game never creates a file.
     if not path.exists():
         if body.season != _current_league_year():
             raise HTTPException(
@@ -353,39 +544,14 @@ def commit_boxscore(body: BoxscoreCommitRequest, info: dict = Depends(require_an
                        f"season's file is created on demand.")
         try:
             path, created = allstats_files.ensure_season_file(
-                DATA_DIR, body.season, body.game_type)
+                DATA_DIR, body.season, game_type)
         except (allstats_files.RawFileMissing, ValueError) as exc:
             raise HTTPException(status_code=500, detail=str(exc))
         if created:
             logger.info("Created %s for the first game of %s", path.name, body.season)
 
-    headers, existing = read_csv(path)
-    is_playoff = body.game_type.upper() == "PLAYOFF"
+    _, existing = read_csv(path)
     expected_headers = PLAYOFF_ALLSTATS_HEADERS if is_playoff else REG_ALLSTATS_HEADERS
-
-    bios = json.loads(PLAYER_BIOS_FILE.read_text()) if PLAYER_BIOS_FILE.exists() else {}
-
-    new_rows = []
-    for r in body.home_rows:
-        new_rows.append(_build_allstats_row(
-            home_team, away_team, body.date, r.player, r.slug,
-            r.min, r.pts, r.reb, r.oreb, r.dreb,
-            r.ast, r.stl, r.blk, r.tov, r.pf,
-            r.fgm, r.fga, r.tpm, r.tpa, r.ftm, r.fta,
-            body.home_pts, body.away_pts,
-            "W" if body.home_pts > body.away_pts else "L",
-            body.game_type, body.game_num, body.round_num, bios,
-        ))
-    for r in body.away_rows:
-        new_rows.append(_build_allstats_row(
-            away_team, f"@{home_team}", body.date, r.player, r.slug,
-            r.min, r.pts, r.reb, r.oreb, r.dreb,
-            r.ast, r.stl, r.blk, r.tov, r.pf,
-            r.fgm, r.fga, r.tpm, r.tpa, r.ftm, r.fta,
-            body.away_pts, body.home_pts,
-            "W" if body.away_pts > body.home_pts else "L",
-            body.game_type, body.game_num, body.round_num, bios,
-        ))
 
     # Through the guard, never write_csv directly: this is the one write path to
     # the files that cannot be rebuilt, and it must only ever append.
@@ -399,7 +565,7 @@ def commit_boxscore(body: BoxscoreCommitRequest, info: dict = Depends(require_an
     # The screenshots are kept only 14 days after this, so this line is the
     # lasting answer to "where did this game come from?". Never raises.
     record_commit(
-        season=body.season, date=body.date, game_type=body.game_type,
+        season=body.season, date=body.date, game_type=game_type,
         home_team=home_team, away_team=away_team,
         home_pts=body.home_pts, away_pts=body.away_pts,
         rows_added=len(new_rows), file_rows_after=len(existing) + len(new_rows),
@@ -730,15 +896,20 @@ async def _read_image(upload: UploadFile, label: str) -> tuple[bytes, str]:
     return data, _checked_image_ext(data, label)
 
 
-def _check_game_open(date: str, home_team: str, away_team: str, season: str, game_type: str):
+def _check_game_open(date: str, home_team: str, away_team: str, season: str, game_type: str) -> str:
+    """422/409 unless this game can still be uploaded. Returns the game type
+    upper-cased. The date and season are checked here, at upload, so a wrong
+    season is caught by whoever can see the game rather than at parse time."""
     if home_team not in VALID_TEAMS or away_team not in VALID_TEAMS:
         raise HTTPException(status_code=422, detail="Invalid team abbreviation")
     if home_team == away_team:
         raise HTTPException(status_code=422, detail="A team cannot play itself")
+    game_type = _check_game_meta(date, season, game_type)
     if _game_in_data(date, home_team, away_team, season, game_type):
         raise HTTPException(status_code=409, detail=f"{home_team} vs {away_team} on {date} is already committed.")
     if _game_in_manual_queue(date, home_team, away_team):
         raise HTTPException(status_code=409, detail=f"A manual entry is already queued for {home_team} vs {away_team} on {date}.")
+    return game_type
 
 
 @router.post("/api/boxscore/upload")
@@ -758,7 +929,7 @@ async def upload_boxscore(
     The Stats dashboard uploads a side at a time through /upload/side."""
     home_team = home_team.upper()
     away_team = away_team.upper()
-    _check_game_open(date, home_team, away_team, season, game_type)
+    game_type = _check_game_open(date, home_team, away_team, season, game_type)
     if _game_in_pending_screenshots(date, home_team, away_team):
         raise HTTPException(status_code=409, detail=f"A screenshot is already pending for {home_team} vs {away_team} on {date}.")
 
@@ -801,7 +972,7 @@ async def upload_boxscore_side(
     team = team.upper()
     home_team = home_team.upper()
     away_team = away_team.upper()
-    _check_game_open(date, home_team, away_team, season, game_type)
+    game_type = _check_game_open(date, home_team, away_team, season, game_type)
     if team not in (home_team, away_team):
         raise HTTPException(status_code=422, detail=f"{team} is not in {away_team} @ {home_team}")
     data, ext = await _read_image(image, team)
@@ -876,8 +1047,9 @@ def register_boxscore_queue(body: BoxscoreQueueRequest, info: dict = Depends(req
     away_team = body.away_team.upper()
     if home_team not in VALID_TEAMS or away_team not in VALID_TEAMS:
         raise HTTPException(status_code=422, detail="Invalid team abbreviation")
+    game_type = _check_game_meta(body.date, body.season, body.game_type)
 
-    if _game_in_data(body.date, home_team, away_team, body.season, body.game_type):
+    if _game_in_data(body.date, home_team, away_team, body.season, game_type):
         raise HTTPException(status_code=409, detail=f"{home_team} vs {away_team} on {body.date} is already committed.")
     if _game_in_pending_screenshots(body.date, home_team, away_team):
         raise HTTPException(status_code=409, detail=f"A screenshot is already pending for {home_team} vs {away_team} on {body.date}.")
@@ -893,7 +1065,7 @@ def register_boxscore_queue(body: BoxscoreQueueRequest, info: dict = Depends(req
             "home_team": home_team,
             "away_team": away_team,
             "season": body.season,
-            "game_type": body.game_type,
+            "game_type": game_type,
             "queued_by": info.get("name"),
             "queued_at": datetime.now(timezone.utc).isoformat(),
         })

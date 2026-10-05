@@ -46,8 +46,14 @@ from dataclasses import dataclass
 from stats_build.pipeline import PLAYER_FIXES
 
 # A team plays 240 player-minutes in regulation and 25 more per overtime period.
-# The R check hardcoded exactly these four; a fifth OT has never been seen.
-LEGAL_TEAM_MINUTES = (240, 265, 290, 315)
+# The R check hardcoded 240/265/290/315. Nothing past three OT has been seen, but
+# the commit route runs this check too, so a real fourth OT must not be refused.
+def overtimes(team_minutes: int) -> int | None:
+    """How many OT periods a team-minute total means, or None if it is not legal."""
+    extra = team_minutes - 240
+    if extra < 0 or extra % 25:
+        return None
+    return extra // 25
 
 # Blank in any of these makes the row unusable. R's `bad_missing` list, verbatim.
 REQUIRED = ("DATE", "PLAYER", "M", "P", "R", "A", "S", "B", "TO",
@@ -149,10 +155,10 @@ def check_games(filename: str, rows: list[dict]) -> list[Finding]:
         where = f"{filename} {team} {date} vs {opp}"
 
         minutes = sum(_int(r, "M") or 0 for r in game)
-        if minutes not in LEGAL_TEAM_MINUTES:
+        if overtimes(minutes) is None:
             out.append(Finding("bad_minutes", where,
-                               f"team minutes {minutes}, expected one of "
-                               f"{', '.join(map(str, LEGAL_TEAM_MINUTES))}"))
+                               f"team minutes {minutes}, expected 240 plus 25 "
+                               f"per overtime period"))
 
         # A name appearing twice in one team-game is not a duplicated row — the
         # minutes and points still reconcile — it is one player entered under

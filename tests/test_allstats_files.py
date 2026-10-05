@@ -17,6 +17,7 @@ Nothing here touches the live data directory; every case runs in a tmp dir.
 """
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -160,17 +161,22 @@ def check_commit_path():
 
     from routers import boxscores as bs
 
-    def row(player, slug):
+    # A legal game: five 48-minute players a side, every line adding up, so
+    # the commit route's checks pass and this test is about the file alone.
+    def row(slug, fgm):
         return bs.BoxscorePlayerRow(
-            player=player, slug=slug, min=48, pts=10, reb=5, oreb=1, dreb=4,
-            ast=3, stl=1, blk=0, tov=2, pf=3, fgm=4, fga=9, tpm=1, tpa=3,
+            slug=slug, min=48, pts=(fgm - 1) * 2 + 3 + 1, reb=5, oreb=1, dreb=4,
+            ast=3, stl=1, blk=0, tov=2, pf=3, fgm=fgm, fga=9, tpm=1, tpa=3,
             ftm=1, fta=2)
+
+    home = [row(f"phx-{i}", 4) for i in range(5)]   # 10 each
+    away = [row(f"lal-{i}", 5) for i in range(5)]   # 12 each
+    bios = {r.slug: {"name": r.slug.upper()} for r in home + away}
 
     body = bs.BoxscoreCommitRequest(
         date="2026-10-20", home_team="PHX", away_team="LAL", season="26-27",
-        game_type="REG", home_pts=10, away_pts=10,
-        home_rows=[row("DURANT, KEVIN", "durant-kevin")],
-        away_rows=[row("JAMES, LEBRON", "james-lebron")],
+        game_type="REG", home_pts=50, away_pts=60,
+        home_rows=home, away_rows=away,
         skip_build=True, skip_reward=True)
 
     with tempfile.TemporaryDirectory() as td:
@@ -185,13 +191,14 @@ def check_commit_path():
             bs._current_league_year = lambda: "26-27"
 
             (tmp / "allstats-25-26.csv").write_text(HEADER)
+            (tmp / "player-bios.json").write_text(json.dumps(bios))
 
             result = bs.commit_boxscore(body, info={"name": "test"})
             check("the season's first game commits without a pre-made file",
-                  result.get("ok") and result.get("rows_added") == 2, result)
+                  result.get("ok") and result.get("rows_added") == 10, result)
             written = (tmp / "allstats-26-27.csv").read_text().splitlines()
             check("it created the file and appended both teams",
-                  len(written) == 3, f"{len(written)} lines")
+                  len(written) == 11, f"{len(written)} lines")
             check("with last season's header",
                   written[0] + "\n" == HEADER)
 
@@ -199,7 +206,7 @@ def check_commit_path():
             # mistake, not a rollover — an old 404 is the right answer, since
             # seeding it from a neighbour's header could silently drop a column
             # that season actually has.
-            old = body.model_copy(update={"season": "21-22"})
+            old = body.model_copy(update={"season": "21-22", "date": "2022-01-10"})
             try:
                 bs.commit_boxscore(old, info={"name": "test"})
                 check("a past season with no file still 404s", False, "no HTTPException")

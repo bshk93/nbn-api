@@ -172,11 +172,18 @@ check("a bad id is a 404", c.get("/api/boxscore/screenshots/..%2F..%2Fx/home-1.p
 print("commit")
 bp.DATA_DIR = TMP
 (TMP / "allstats-26-27.csv").write_text(",".join(bx.REG_ALLSTATS_HEADERS) + "\n")
-row = {"player": "X, Y", "slug": "x-y", "min": 48, "pts": 10, "reb": 0, "oreb": 0, "dreb": 0,
-       "ast": 0, "stl": 0, "blk": 0, "tov": 0, "pf": 0, "fgm": 5, "fga": 5, "tpm": 0, "tpa": 0,
-       "ftm": 0, "fta": 0}
+# The commit route refuses an illegal game and any slug without a bio, so this
+# is a legal one: five 48-minute players a side, each line adding up.
+bx.PLAYER_BIOS_FILE = TMP / "player-bios.json"
+def row(slug, fgm):
+    return {"slug": slug, "min": 48, "pts": 2 * fgm, "reb": 0, "oreb": 0, "dreb": 0,
+            "ast": 0, "stl": 0, "blk": 0, "tov": 0, "pf": 0, "fgm": fgm, "fga": fgm,
+            "tpm": 0, "tpa": 0, "ftm": 0, "fta": 0}
+home = [row(f"phx-{i}", 5) for i in range(5)]
+away = [row(f"lal-{i}", 4) for i in range(5)]
+bx.PLAYER_BIOS_FILE.write_text(json.dumps({r["slug"]: {"name": r["slug"].upper()} for r in home + away}))
 r = c.post("/api/boxscore/commit", headers=STATS, json={
-    **GAME, "home_pts": 10, "away_pts": 8, "home_rows": [row], "away_rows": [{**row, "pts": 8, "fgm": 4}],
+    **GAME, "home_pts": 50, "away_pts": 40, "home_rows": home, "away_rows": away,
     "skip_build": True, "skip_reward": True})
 check("the game commits", r.status_code == 200, r.text)
 prov = [json.loads(l) for l in (TMP / "boxscore-provenance-26-27.jsonl").read_text().splitlines()]

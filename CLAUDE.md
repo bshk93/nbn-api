@@ -415,6 +415,20 @@ file. Overriding is per-call (`allow_shrink=True`) or per-process
 the file is outside the guard by construction — it covers the code paths,
 which is where the accidents are.
 
+**The commit checks the game before the guard sees it** (`commit_boxscore`,
+since 2026-10-05). The guard protects rows already on disk; this keeps a bad
+game from becoming one. A 422 names every problem, and nothing is written:
+
+- The season must be the one the date falls in (`season_clock`). While a
+  season's file exists, nothing else would stop a game landing in it. Uploads
+  are held to the same rule.
+- Each row's slug must be a real bio, and PLAYER is written from that bio's
+  name, not from what the caller sent. No player twice in one game.
+- The game must pass `stats_build/checks.py`'s per-row and per-game checks, the
+  same ones the weekly job runs, plus matching OT on both sides and no player
+  past the game's length. Don't add an override: a game that fails these is
+  one the weekly check would flag, and the file can't be fixed through the API.
+
 **2. Weekly integrity check — `check_stats_integrity.py`** (`nbs-integrity.timer`,
 Mondays). Row counts only ever go up; a **closed season never changes at all**,
 so its `sha256` must match forever. State is `stats-integrity.json` in the data
