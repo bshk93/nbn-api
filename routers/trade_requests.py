@@ -402,7 +402,10 @@ def finalize_trade_request(request_id: str, body: FinalizeBody = FinalizeBody(),
         # is, and relaying both would put the trade in #roster-log twice.
         txn = apply_trade(
             trade_in, datetime.now(timezone.utc).strftime("%Y-%m-%d"), info,
-            description=description, force=body.force)
+            description=description, force=body.force,
+            # Same rule as _live_check's `legal`: only an error blocks. The
+            # committee voted with the warnings in front of it.
+            force_warnings_only=True)
 
         numbers[league_year] = trade_number
 

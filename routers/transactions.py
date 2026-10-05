@@ -8396,6 +8396,7 @@ def apply_accept_qo(details: AcceptQualifyingOfferDetails, txn_date: str, info: 
 
 def apply_trade(details: TradeIn, txn_date: str, info: dict, *,
                 description: str = "", force: bool = False,
+                force_warnings_only: bool = False,
                 relay_to_roster_log: bool = False) -> dict:
     """Validate, apply, ledger-append and announce a trade — the exact slice
     of create_transaction's type=="trade" path, factored out so a second
@@ -8405,7 +8406,12 @@ def apply_trade(details: TradeIn, txn_date: str, info: dict, *,
     entry to whoever is actually executing it — for TRC that's the trc_head
     who clicked Finalize, not whoever originally proposed the trade. Trade
     has no post-append special handling (unlike release's waiver-wire notify
-    or offer_sheet's inbox ping), so this is the whole path end to end."""
+    or offer_sheet's inbox ping), so this is the whole path end to end.
+
+    `force_warnings_only` is `apply_sign`'s: warnings pass, errors still block.
+    TRC's finalize needs it. Without it a warning (a roster over 15 in the
+    offseason, say) blocked the trade even though finalize had already called
+    it legal, and the head got a 422 with no way through but a forced override."""
     val_ctx = {
         "bios":        load_player_bios(),
         "team_state":  load_team_state(),
@@ -8426,7 +8432,8 @@ def apply_trade(details: TradeIn, txn_date: str, info: dict, *,
             "checks": [c.model_dump() for c in checks],
             "can_force": False,
         })
-    if failed and not force:
+    blocking = [c for c in failed if c.level == "error"] if force_warnings_only else failed
+    if blocking and not force:
         raise HTTPException(status_code=422, detail={
             "validation": True,
             "checks": [c.model_dump() for c in checks],
@@ -8438,7 +8445,7 @@ def apply_trade(details: TradeIn, txn_date: str, info: dict, *,
         teams = _apply_trade(details, txn_date, info, txn_id=txn_id)
         stored_details = details.model_dump()
         stored_details["teams"] = teams
-        forced_checks = [c.check for c in failed] if (force and failed) else None
+        forced_checks = [c.check for c in failed] if (failed and (force or force_warnings_only)) else None
         if forced_checks:
             stored_details["_forced_checks"] = forced_checks
         txn = {

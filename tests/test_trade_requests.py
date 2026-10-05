@@ -133,9 +133,11 @@ tr._trade_leg_ownership_problems = lambda *a, **k: OWNERSHIP_PROBLEMS["value"]
 APPLIED = []
 
 
-def fake_apply_trade(details, date, info, description="", force=False, relay_to_roster_log=False):
+def fake_apply_trade(details, date, info, description="", force=False,
+                     force_warnings_only=False, relay_to_roster_log=False):
     txn = {"id": f"txn{len(APPLIED) + 1}", "type": "trade", "details": details.model_dump(),
-           "relay_to_roster_log": relay_to_roster_log, "description": description}
+           "relay_to_roster_log": relay_to_roster_log, "description": description,
+           "force_warnings_only": force_warnings_only}
     APPLIED.append(txn)
     return txn
 
@@ -286,6 +288,10 @@ final = tr.finalize_trade_request(rid, tr.FinalizeBody(), TRC_HEAD)
 check("finalize applies the trade for real", len(APPLIED) == 2)
 check("status is finalized", final["status"] == "finalized")
 check("txn_id recorded", final["finalized"]["txn_id"] == APPLIED[-1]["id"])
+# Finalize calls a trade with only warnings legal, so apply_trade must not
+# then block on those warnings. It did, and the head got a bare 422 (2026-10-05).
+check("finalize lets warnings through to apply_trade, like its own legality check",
+      APPLIED[-1]["force_warnings_only"] is True)
 check("the #roster-log-nbn-today post isn't relayed (the #transactions post is)",
       APPLIED[-1]["relay_to_roster_log"] is False)
 check("numbered at finalization: request #1, finalized second, is trade 53 (26-27 starts after 51)",
