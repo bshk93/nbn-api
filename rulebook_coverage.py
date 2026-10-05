@@ -142,6 +142,10 @@ CHECK_SECTIONS: dict[str, tuple[str, ...]] = {
     "stash_grounds":              ("7.1", "7.4"),
     "stash_not_in_2k":            ("7.1",),
     "stepien_rule_{}":            ("7.2",),
+    "void_rights_grounds":        ("7.4",),
+    "void_rights_recent_pick":    ("7.4",),
+    "void_rights_signed":         ("7.4",),
+    "void_rights_window":         ("7.4",),
     "trade_min_legs":             ("4.1",),
     "two_way_consecutive":        ("2.2",),
     "two_way_experience":         ("2.2",),
@@ -213,8 +217,10 @@ SECTION_REVIEW: dict[str, str] = {
     "7.1":  "the rookie scale and draft rights are checked; the rest of the "
             "draft format is run by hand",
     "7.3":  "the second-apron pick freeze is not computed",
-    "7.4":  "a stash is checked for unsigned rights and a stated reason; the "
-            "overseas contract itself and the 30-day window are tracked by hand",
+    "7.4":  "a stash is checked for unsigned rights and a stated reason, and a "
+            "void that keeps a new pick's rights for being a recent pick before "
+            "opening night; the overseas contract itself and the 30-day window "
+            "are tracked by hand",
 }
 
 

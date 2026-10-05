@@ -113,6 +113,60 @@ check("carries the stash basis and season",
 check("an unstashed pick reads null", rows[1]["stash"] is None)
 
 
+print("\n_validate_void_player (§ 7.4, a new pick gone overseas)")
+VB = {
+    "rookie": {"name": "ROOKIE, NEW", "type": "player", "draft_year": 2026, "draft_round": 1,
+               "salaries": {"25-26": "$1", "26-27": "$5,000,000", "27-28": "$5,250,000"},
+               "guaranteed": {"26-27": "$5,000,000", "27-28": "$5,250,000"},
+               "cap_holds": {"28-29": "TEAM_OPT"}},
+    "old": {"name": "OLD, PICK", "type": "player", "draft_year": 2025},
+    "udfa": {"name": "UNDRAFTED, GUY", "type": "player"},
+    "rights": {"name": "RIGHTS, ONLY", "type": "draft-rights", "draft_year": 2026},
+}
+T._build_team_map = lambda: {"rookie": "LAL", "old": "LAL", "udfa": "LAL", "rights": "LAL"}
+T.season_calendar.opening_night = lambda season: "2026-10-20"
+
+
+def vv(player, date="2026-10-05", reason="Real Madrid, two years", keep=True):
+    return T._validate_void_player(
+        T.VoidPlayerDetails(player=player, reason=reason, keep_rights=keep),
+        {"bios": VB, "cur_season": "26-27", "txn_date": date})
+
+
+check("a plain void has no checks", vv("udfa", keep=False) == [])
+r = vv("rookie")
+check("a 2026 pick before opening night, with a club named: legal", not errors(r))
+check("...and says the overseas contract is manual",
+      "by hand" in find(r, "void_rights_grounds", True)[0].message)
+check("a 2025 pick is refused", find(vv("old"), "void_rights_recent_pick", False))
+check("an undrafted player is refused", find(vv("udfa"), "void_rights_recent_pick", False))
+check("unsigned rights are pointed at a stash",
+      "Stash" in find(vv("rights"), "void_rights_signed", False)[0].message)
+check("on opening night it is too late", find(vv("rookie", date="2026-10-20"), "void_rights_window", False))
+check("a blank club is refused", find(vv("rookie", reason=" "), "void_rights_grounds", False))
+T.season_calendar.opening_night = lambda season: None
+r = find(vv("rookie"), "void_rights_window", True)
+check("no schedule yet: passes, and says the date is by hand", bool(r) and "by hand" in r[0].message)
+check("void_player is a registered validator", T._VALIDATORS.get("void_player") is T._validate_void_player)
+
+
+print("\n_apply_void_player with keep_rights")
+T.load_player_bios = lambda: VB
+team = T._apply_void_player(T.VoidPlayerDetails(player="rookie", reason=" Real Madrid ", keep_rights=True),
+                            "2026-10-05", {"name": "x"}, txn_id="def")
+b = VB["rookie"]
+check("returns the team", team == "LAL")
+check("he is draft rights again", b["type"] == "draft-rights")
+check("the contract is gone, earlier seasons kept",
+      b["salaries"] == {"25-26": "$1"} and b["guaranteed"] == {} and b["cap_holds"] == {})
+check("a § 7.4 stash is recorded",
+      b.get("stash") == {"basis": "7.4", "season": "26-27", "date": "2026-10-05",
+                         "note": "Real Madrid", "txn_id": "def"})
+body = src.split("def _apply_void_player(", 1)[1].split("\ndef ", 1)[0]
+check("the rights path returns before the roster row is removed",
+      body.index("if details.keep_rights:") < body.index("write_csv(path"))
+
+
 if FAILS:
     print(f"\n{len(FAILS)} FAILED")
     sys.exit(1)

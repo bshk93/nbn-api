@@ -86,6 +86,9 @@ def announcement(txn: dict) -> Optional[tuple[str, str]]:
     if kind == "stash":
         return DISCORD_FA_NEWS_CHANNEL, f"{team} stash the draft rights to {player}."
     if kind == "void_player":
+        if d.get("keep_rights"):
+            return (DISCORD_WAIVERS_CHANNEL,
+                    f"{team} void {player}'s contract and keep his draft rights while he plays overseas.")
         return DISCORD_WAIVERS_CHANNEL, f"{team} void {player}'s contract."
     if kind == "qualifying_offer":
         season = f"{d['season']} " if d.get("season") else ""

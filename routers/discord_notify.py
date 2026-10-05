@@ -325,6 +325,9 @@ def _describe(txn: dict, bios: dict) -> str:
         return f"{line}\n{d['note']}" if d.get("note") else line
 
     if t == "void_player":
+        if d.get("keep_rights"):
+            line = "Voided — went overseas, draft rights kept (§ 7.4)"
+            return f"{line}\n{d['reason']}" if d.get("reason") else line
         return f"Voided — {d['reason']}" if d.get("reason") else "Voided — no cap hit"
 
     if t == "set_hard_cap_level":

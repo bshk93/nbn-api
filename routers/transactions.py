@@ -492,6 +492,11 @@ class OfferSheetDecisionDetails(BaseModel):
 class VoidPlayerDetails(BaseModel):
     player: str
     reason: str = ""
+    # § 7.4: a pick from the most recent draft who signed and then went
+    # overseas before opening night. The contract is voided, but the team keeps
+    # him as stashed draft rights instead of losing him. `reason` names the
+    # club and contract, as a § 7.4 stash's note does.
+    keep_rights: bool = False
 
 
 class StashDetails(BaseModel):
@@ -1280,12 +1285,16 @@ def _apply_stash(details: StashDetails, txn_date: str, info: dict,
     return team
 
 
-def _apply_void_player(details: VoidPlayerDetails, txn_date: str, info: dict) -> str:
+def _apply_void_player(details: VoidPlayerDetails, txn_date: str, info: dict,
+                       txn_id: Optional[str] = None) -> str:
     """Removes a player from their roster with no dead cap and no remaining
     obligation (rulebook §5.1 void circumstances: real-life retirement, not
     present in the current game build, or an unwanted 2nd-rounder/UDFA before
     the July 31 deadline). Unlike release, no dead_cap CSV entry is written —
-    the team owes nothing. Returns the player's former team."""
+    the team owes nothing. Returns the player's former team.
+
+    With `keep_rights` (§ 7.4, a new pick gone overseas) the player stays on
+    the roster as stashed draft rights instead of leaving it."""
     bios = load_player_bios()
     if details.player not in bios:
         raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
@@ -1297,6 +1306,25 @@ def _apply_void_player(details: VoidPlayerDetails, txn_date: str, info: dict) ->
 
     cur_season = _season_for_date(txn_date)
     bio = bios[details.player]
+    if details.keep_rights:
+        # He never played a game of this contract, so none of it is earnings
+        # history: everything from the current season on goes, guaranteed or not.
+        keep = lambda s: s < cur_season
+        for f in ("salaries", "guaranteed", "guarantee_dates", "guarantee_schedule"):
+            bio[f] = {k: v for k, v in (bio.get(f) or {}).items() if keep(k)}
+        bio["cap_holds"] = {}
+        bio["type"] = "draft-rights"
+        bio["stash"] = {
+            "basis": "7.4",
+            "season": cur_season,
+            "date": txn_date,
+            "note": details.reason.strip(),
+            "txn_id": txn_id,
+        }
+        save_player_bios(bios)
+        log_write(info, f"TXN void_player — {details.player} ({team}), rights kept (§ 7.4)")
+        return team
+
     past, past_gtd, past_gtd_dates, past_gtd_sched = _retained_history(bio, cur_season)
     bio["salaries"] = past
     bio["guaranteed"] = past_gtd
@@ -7791,6 +7819,88 @@ def _validate_stash(details: StashDetails, ctx: dict) -> list[CheckResult]:
     return checks
 
 
+def _validate_void_player(details: VoidPlayerDetails, ctx: dict) -> list[CheckResult]:
+    """§ 7.4's signed-pick-gone-overseas void, the one void that keeps the
+    player's rights. A plain § 5.1 void has no automated check.
+
+    Eligible: a signed player from the most recent draft (never a UDFA), voided
+    before opening night. That he actually signed overseas is checked by hand,
+    as for any § 7.4 stash."""
+    if not details.keep_rights:
+        return []
+    checks = []
+    bio = ctx["bios"].get(details.player) or {}
+    name = _display_name(bio.get("name") or "") or details.player
+    team = _build_team_map().get(details.player)
+    season = ctx["cur_season"]
+    draft_year = 2000 + int(season[:2])
+
+    if bio.get("type") == "draft-rights":
+        checks.append(CheckResult(
+            check="void_rights_signed", passed=False, level="error",
+            message=(f"{name} is unsigned draft rights, so there is no contract to "
+                     f"void. Stash him on § 7.4 grounds instead."),
+        ))
+    elif bio.get("type") not in ("player", "two-way") or not team:
+        checks.append(CheckResult(
+            check="void_rights_signed", passed=False, level="error",
+            message=f"{name} is not a signed player on a roster (§ 7.4).",
+        ))
+    else:
+        checks.append(CheckResult(
+            check="void_rights_signed", passed=True, level="info",
+            message=(f"{team} keeps {name} as stashed draft rights, with no cap hold "
+                     f"and off the roster count (§ 7.4)."),
+        ))
+
+    if not bio.get("draft_year"):
+        checks.append(CheckResult(
+            check="void_rights_recent_pick", passed=False, level="error",
+            message=(f"{name} was not drafted. An undrafted free agent who goes overseas "
+                     f"can be voided, but his rights are not kept (§ 7.4)."),
+        ))
+    elif bio["draft_year"] != draft_year:
+        checks.append(CheckResult(
+            check="void_rights_recent_pick", passed=False, level="error",
+            message=(f"{name} is from the {bio['draft_year']} draft. Only a pick from "
+                     f"the most recent draft ({draft_year}) keeps his rights (§ 7.4)."),
+        ))
+    else:
+        checks.append(CheckResult(
+            check="void_rights_recent_pick", passed=True, level="info",
+            message=f"{name} is a {draft_year} pick (§ 7.4).",
+        ))
+
+    opening = season_calendar.opening_night(season)
+    if opening and ctx["txn_date"] >= opening:
+        checks.append(CheckResult(
+            check="void_rights_window", passed=False, level="error",
+            message=(f"Opening night was {opening}. A signed pick's rights can only be "
+                     f"kept if he goes overseas before then (§ 7.4)."),
+        ))
+    else:
+        when = f"before opening night ({opening})" if opening else \
+            "before opening night (no schedule yet, so the date is checked by hand)"
+        checks.append(CheckResult(
+            check="void_rights_window", passed=True, level="info",
+            message=f"This is {when} (§ 7.4).",
+        ))
+
+    if not details.reason.strip():
+        checks.append(CheckResult(
+            check="void_rights_grounds", passed=False, level="error",
+            message="Name the overseas club and his contract there (§ 7.4).",
+        ))
+    else:
+        checks.append(CheckResult(
+            check="void_rights_grounds", passed=True, level="info",
+            message=("The overseas contract is checked by hand (§ 7.4). If he signs "
+                     "an NBA contract in real life, the team has 30 days to sign him "
+                     "or let him go."),
+        ))
+    return checks
+
+
 def _check_rookie_scale_terms(contract: ContractIn, scale: dict,
                               bio: dict) -> CheckResult:
     """§ 7.1: a first-rounder's deal is the scale — every year, to the dollar.
@@ -8090,6 +8200,7 @@ _VALIDATORS = {
     "offer_sheet_decision": _validate_offer_sheet_decision,
     "extension":      _validate_extension,
     "stash":          _validate_stash,
+    "void_player":    _validate_void_player,
 }
 
 
@@ -8658,7 +8769,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             stored_details = details.model_dump()
             stored_details["team"] = team
         elif body.type == "void_player":
-            team = _apply_void_player(details, body.date, info)
+            team = _apply_void_player(details, body.date, info, txn_id=txn_id)
             stored_details = details.model_dump()
             stored_details["team"] = team
         elif body.type == "stash":
