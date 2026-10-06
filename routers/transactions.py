@@ -7,7 +7,7 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Literal, Optional
+from typing import Literal, NamedTuple, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -4742,6 +4742,48 @@ def _signee_existing_hold(team: str, player: str, bios: dict, season: str) -> tu
     )
 
 
+class SigningBooks(NamedTuple):
+    """A team's books for one signing, before and after. See `_signing_books`."""
+    current: int             # Team Salary, holds included (§ 3.10)
+    current_ex_holds: int    # Team Salary without UFA/RFA holds
+    existing_hold: int       # the signee's own figure already on the books
+    is_fa_hold: bool         # ...and whether it's a UFA/RFA hold (so not in ex-holds)
+    new_sal: int             # the contract's figure for this season
+    other_holds: int         # UFA/RFA holds left for *other* players
+    projected_ex_holds: int  # ex-holds Team Salary after the signing
+
+
+def _signing_books(team: str, player: str, salaries: Optional[dict],
+                   bios: dict, season: str) -> SigningBooks:
+    """The one place a signing's salary projection is computed.
+
+    `_validate_sign`, `_validate_offer_sheet`, `_validate_offer_sheet_decision`
+    and `_signing_fact_sheet` all read their figures from here. Each used to
+    carry its own copy of these lines, and the fact sheet has to agree with the
+    validators exactly (it shows the room the validator credits), so a fix made
+    in one copy and not the others would put the simulator and the office at
+    odds. Change the math here, never at a caller.
+
+    The signee's own hold is backed out of the projection unless it's a UFA/RFA
+    hold, which ex-holds salary never contained — the contract replaces the
+    hold rather than stacking on it (§ 3.10)."""
+    current = _compute_team_salary(team, bios, season)
+    current_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
+    existing_hold, is_fa_hold = _signee_existing_hold(team, player, bios, season)
+    new_sal = _parse_dollar((salaries or {}).get(season, ""))
+    return SigningBooks(
+        current=current,
+        current_ex_holds=current_ex_holds,
+        existing_hold=existing_hold,
+        is_fa_hold=is_fa_hold,
+        new_sal=new_sal,
+        # Both salary figures include dead cap, so the difference is exactly
+        # the UFA/RFA holds.
+        other_holds=(current - current_ex_holds) - (existing_hold if is_fa_hold else 0),
+        projected_ex_holds=current_ex_holds - (0 if is_fa_hold else existing_hold) + new_sal,
+    )
+
+
 def _check_trailing_hold(contract) -> Optional[CheckResult]:
     """§ 3.10: a contract rolls into a free-agent hold the season after it
     ends, carried as a UFA/RFA tag on that season. Nothing adds the tag for
@@ -4786,10 +4828,9 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
             message="This contract has no salary years — nothing would actually be signed. Add at least one season.",
         ))
 
-    current_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
-    existing_hold, is_fa_hold = _signee_existing_hold(team, details.player, bios, season)
-    new_sal = _parse_dollar(details.contract.salaries.get(season, ""))
-    projected_ex_holds = current_ex_holds - (0 if is_fa_hold else existing_hold) + new_sal
+    books = _signing_books(team, details.player, details.contract.salaries, bios, season)
+    current_ex_holds, new_sal = books.current_ex_holds, books.new_sal
+    projected_ex_holds = books.projected_ex_holds
     # Both the apron-triggered hard cap and the league-wide Hard Cap (§ 1.3)
     # are computed on the ex-holds figure — a free-agent hold isn't an active
     # player salary. A two-way sits outside Team Salary entirely (§ 2.2), so
@@ -4814,20 +4855,17 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
     # § 3.1–§ 3.6: the declared funding method must actually be available.
     # Cap room is measured with holds included (§ 3.10), net of the signee's own
     # hold — the contract replaces that hold rather than stacking on it.
-    current_with_holds = _compute_team_salary(team, bios, season)
-    # Free-agent holds still on the books for *other* players. Both salary
-    # figures include dead cap, so the difference is exactly the UFA/RFA holds.
-    # The league sheet routinely runs ahead of this ledger, so a team that has
-    # really renounced its way to cap room can read as capped-out here — say so
-    # instead of only reporting no room (DET/Gordon 2026-07-26: five renounces
-    # applied on the sheet, never entered, made a legal cap-space signing look
-    # like it had no funding method at all).
-    other_holds = (current_with_holds - current_ex_holds) - (existing_hold if is_fa_hold else 0)
+    # `other_holds` (free-agent holds still on the books for other players) is
+    # passed because the league sheet routinely runs ahead of this ledger, so a
+    # team that has really renounced its way to cap room can read as
+    # capped-out here — say so instead of only reporting no room (DET/Gordon
+    # 2026-07-26: five renounces applied on the sheet, never entered, made a
+    # legal cap-space signing look like it had no funding method at all).
     r = _check_signing_method_funding(
         team, details.signing_method, new_sal,
-        current_with_holds - existing_hold,
+        books.current - books.existing_hold,
         current_ex_holds, season, ctx["cap_levels"], ctx["team_state"],
-        unrenounced_holds=other_holds, bios=bios,
+        unrenounced_holds=books.other_holds, bios=bios,
     )
     if r:
         checks.append(r)
@@ -5617,25 +5655,20 @@ def _validate_offer_sheet(details: OfferSheetDetails, ctx: dict) -> list[CheckRe
                      f"resolve that one before extending another."),
         ))
 
-    current_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
-    existing_hold, is_fa_hold = _signee_existing_hold(team, details.player, bios, season)
-    new_sal = _parse_dollar(details.contract.salaries.get(season, ""))
-    projected_ex_holds = current_ex_holds - (0 if is_fa_hold else existing_hold) + new_sal
+    books = _signing_books(team, details.player, details.contract.salaries, bios, season)
 
-    r = _hard_cap_check(team, projected_ex_holds, season, ctx["team_state"], ctx["cap_levels"])
+    r = _hard_cap_check(team, books.projected_ex_holds, season, ctx["team_state"], ctx["cap_levels"])
     if r:
         checks.append(r)
-    r = _universal_hard_cap_check(team, projected_ex_holds, season, ctx["cap_levels"])
+    r = _universal_hard_cap_check(team, books.projected_ex_holds, season, ctx["cap_levels"])
     if r:
         checks.append(r)
 
-    current_with_holds = _compute_team_salary(team, bios, season)
-    other_holds = (current_with_holds - current_ex_holds) - (existing_hold if is_fa_hold else 0)
     r = _check_signing_method_funding(
-        team, details.signing_method, new_sal,
-        current_with_holds - existing_hold,
-        current_ex_holds, season, ctx["cap_levels"], ctx["team_state"],
-        unrenounced_holds=other_holds, bios=bios,
+        team, details.signing_method, books.new_sal,
+        books.current - books.existing_hold,
+        books.current_ex_holds, season, ctx["cap_levels"], ctx["team_state"],
+        unrenounced_holds=books.other_holds, bios=bios,
     )
     if r:
         checks.append(r)
@@ -5705,11 +5738,8 @@ def _validate_offer_sheet_decision(details: OfferSheetDecisionDetails, ctx: dict
 
     team = offer["retaining_team"] if details.outcome == "matched" else offer["offering_team"]
     contract = offer["contract"] or {}
-    new_sal = _parse_dollar((contract.get("salaries") or {}).get(season, ""))
-
-    current_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
-    existing_hold, is_fa_hold = _signee_existing_hold(team, offer["player"], bios, season)
-    projected_ex_holds = current_ex_holds - (0 if is_fa_hold else existing_hold) + new_sal
+    books = _signing_books(team, offer["player"], contract.get("salaries"), bios, season)
+    new_sal, projected_ex_holds = books.new_sal, books.projected_ex_holds
 
     for check_fn in (
         lambda: _hard_cap_check(team, projected_ex_holds, season, ctx["team_state"], ctx["cap_levels"]),
@@ -9106,12 +9136,10 @@ def _signing_fact_sheet(team: str, player: str, contract, ctx: dict, *,
     bios = ctx["bios"]; season = ctx["cur_season"]
     cl = ctx["cap_levels"].get(season, {})
 
-    current = _compute_team_salary(team, bios, season)
-    current_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
-    existing_hold, is_fa_hold = _signee_existing_hold(team, player, bios, season)
-    new_sal = _parse_dollar((contract.salaries or {}).get(season, ""))
-
-    projected_ex_holds = current_ex_holds - (0 if is_fa_hold else existing_hold) + new_sal
+    books = _signing_books(team, player, contract.salaries, bios, season)
+    current, current_ex_holds = books.current, books.current_ex_holds
+    existing_hold, is_fa_hold = books.existing_hold, books.is_fa_hold
+    new_sal, projected_ex_holds = books.new_sal, books.projected_ex_holds
     # What the § 3.1 cap-room test actually measures against: Team Salary with
     # holds included (§ 3.10), net of the signee's own hold.
     salary_before_net = current - existing_hold
@@ -9119,7 +9147,7 @@ def _signing_fact_sheet(team: str, player: str, contract, ctx: dict, *,
     cap_room = (cap - salary_before_net) if cap is not None else None
     # Free-agent holds still on the books for *other* players — the figure the
     # funding check cites when it explains that renouncing would create room.
-    other_holds = (current - current_ex_holds) - (existing_hold if is_fa_hold else 0)
+    other_holds = books.other_holds
 
     ts = get_season_state(ctx["team_state"], team, season)
     hard_cap_level = ts.get("hard_cap")
