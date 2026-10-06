@@ -180,15 +180,17 @@ SECTION_REVIEW: dict[str, str] = {
     "2.2":  "experience is reported off the draft-year proxy, which is not NBA "
             "service, so eligibility is confirmed by hand; the 50-game limit is "
             "not tracked",
-    "3.1":  "eligibility and the declared method are checked, but the method "
-            "itself is self-declared and never verified against tenure; a "
+    "3.1":  "eligibility and the declared method are checked, and a Bird "
+            "method against ledger tenure, but where the ledger has no answer "
+            "the team's declaration stands with a warning; a "
             "qualifying offer's under-4-years test falls back to a human for "
             "an undrafted player, and the NBA's starter criteria are not modeled",
     "3.6":  "availability is checked when the Room Exception is the declared "
             "method; whether the team actually used room to get there is not",
     "3.7":  "no DPE exception type exists in the system at all",
-    "3.8":  "Bird tenure is self-declared on the submission; the ledger scan "
-            "backing it still has gaps",
+    "3.8":  "a declared tier is checked against tenure derived from the "
+            "ledger, but the ledger still has gaps, and where it has no answer "
+            "the declaration stands with a warning",
     "3.10": "renounce and rescind are checked; the hold amounts themselves are "
             "priced from the fact sheet and reviewed",
     "3.11": "the max is checked against the scale, but the 25/30/35% tier a "
@@ -212,7 +214,8 @@ SECTION_REVIEW: dict[str, str] = {
             "consequences; a PLAYER_OPT decision is PDC's own judgment call "
             "and has no automated check at all",
     "6.2":  "the eight extension rules are checked, but eligibility rests on an "
-            "acquisition record 116 rostered players are still missing",
+            "acquisition record many rostered players are still missing; for "
+            "those it runs off the team's own statement of when the deal began",
     "6.3":  "the window is checked; the approval process around it is human",
     "7.1":  "the rookie scale and draft rights are checked; the rest of the "
             "draft format is run by hand",
