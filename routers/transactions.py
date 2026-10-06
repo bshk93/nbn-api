@@ -4995,6 +4995,22 @@ def _minimum_year_ceiling(bio: dict, season: str, cap_levels: dict,
     return max(scale.values())
 
 
+def _signed_after_opening_night(txn_date: Optional[str]) -> bool:
+    """Whether a signing on `txn_date` came after its league year's opening
+    night, so a Year 1 salary could be prorated (§ 3.12).
+
+    Opening night is read off that league year's schedule — the league year
+    the *date* falls in, not the contract's first season, which can differ.
+    A league year with no schedule on file falls back to the old month rule
+    (Jul–Sep is the offseason), so a past season still gets an answer."""
+    if not txn_date:
+        return False
+    bounds = season_calendar.regular_season_bounds(_season_for_date(txn_date))
+    if bounds:
+        return txn_date >= bounds[0]
+    return int(txn_date[5:7]) not in (7, 8, 9)
+
+
 def _check_minimum_salary(contract, player: str, bios: dict, season: str,
                           cap_levels: dict, txn_date: Optional[str] = None,
                           signing_method: Optional[str] = None) -> Optional[CheckResult]:
@@ -5029,11 +5045,7 @@ def _check_minimum_salary(contract, player: str, bios: dict, season: str,
         return None
     check_name = "minimum_salary"
     is_one_year_min = signing_method == "minimum" and len(contract.salaries or {}) == 1
-    # The league year starts July 1; games start in the autumn. A signing in
-    # Jul-Sep therefore precedes the season and cannot be prorated. Deliberately
-    # a coarse rule — proration isn't in the rulebook yet, so there is no
-    # authoritative season-start date to key off.
-    in_season = bool(txn_date) and int(txn_date[5:7]) not in (7, 8, 9)
+    in_season = _signed_after_opening_night(txn_date)
 
     for yr, raw in sorted((contract.salaries or {}).items()):
         floor = _min_salary_floor(yr, cap_levels)

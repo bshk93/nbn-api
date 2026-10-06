@@ -82,6 +82,12 @@ def main():
     print("\nminimum salary")
     bios2 = {"vet": {"draft_year": 2016}, "unknown": {}}
 
+    # Pin the schedule rather than read the live one: 26-27 opens 2026-10-20,
+    # and 25-26 has no schedule on file, so it takes the month fallback.
+    orig_bounds = T.season_calendar.regular_season_bounds
+    T.season_calendar.regular_season_bounds = (
+        lambda s: ("2026-10-20", "2027-04-15") if s == "26-27" else None)
+
     def mins(salaries, player="unknown", ctype="standard", date="2026-08-07", exp=None):
         return T._check_minimum_salary(Contract(salaries, ctype, exp), player, bios2,
                                        SEASON, CAP_LEVELS, txn_date=date)
@@ -118,6 +124,19 @@ def main():
     check("...but the same figure in the OFFSEASON is an error",
           r is not None and not r.passed and r.level == "error")
 
+    # The season starts at opening night off the schedule, not at a month.
+    # The old Jul–Sep rule called any October signing in-season.
+    r = mins({"26-27": "$39,820"}, date="2026-10-05")
+    check("below floor in October but BEFORE opening night is an error",
+          r is not None and not r.passed and r.level == "error")
+    r = mins({"26-27": "$39,820"}, date="2026-10-20")
+    check("...and from opening night on it warns (may be prorated)",
+          r is not None and not r.passed and r.level == "warning")
+    check("a league year with no schedule falls back to the month rule",
+          T._signed_after_opening_night("2026-04-11")
+          and not T._signed_after_opening_night("2025-08-01"))
+    check("no date is never in-season", not T._signed_after_opening_night(None))
+
     r = mins({"26-27": "$3,000,000", "27-28": "$1,000"}, date="2026-04-11")
     check("a later year below the floor errors even for an in-season signing",
           r is not None and not r.passed and r.level == "error")
@@ -135,6 +154,8 @@ def main():
 
     check("two-way contracts are exempt from the scale",
           mins({"26-27": "$500,000"}, ctype="two-way") is None)
+
+    T.season_calendar.regular_season_bounds = orig_bounds
 
     print("\n" + ("=" * 40))
     if FAILS:
