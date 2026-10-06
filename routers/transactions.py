@@ -4750,11 +4750,16 @@ class SigningBooks(NamedTuple):
     is_fa_hold: bool         # ...and whether it's a UFA/RFA hold (so not in ex-holds)
     new_sal: int             # the contract's figure for this season
     other_holds: int         # UFA/RFA holds left for *other* players
+    standard_after: int      # standard roster count after the signing
+    erc_after: int           # § 2.1a charge on the slots still empty after it
+    funding_base: int        # what the cap-room test starts from (holds in)
+    funding_base_ex_holds: int  # ...and the apron/exception tests (holds out)
     projected_ex_holds: int  # ex-holds Team Salary after the signing
 
 
 def _signing_books(team: str, player: str, salaries: Optional[dict],
-                   bios: dict, season: str) -> SigningBooks:
+                   bios: dict, season: str, cap_levels: dict, *,
+                   two_way: bool = False) -> SigningBooks:
     """The one place a signing's salary projection is computed.
 
     `_validate_sign`, `_validate_offer_sheet`, `_validate_offer_sheet_decision`
@@ -4766,11 +4771,23 @@ def _signing_books(team: str, player: str, salaries: Optional[dict],
 
     The signee's own hold is backed out of the projection unless it's a UFA/RFA
     hold, which ex-holds salary never contained — the contract replaces the
-    hold rather than stacking on it (§ 3.10)."""
+    hold rather than stacking on it (§ 3.10).
+
+    § 2.1a: a team below 12 standard players carries the rookie minimum for
+    each empty slot, as guaranteed salary in every comparison ("exactly as a
+    real player contract would") — cap room included. It is priced on the
+    count *after* the signing, since the slot this signing fills stops
+    costing anything. The salary helpers leave it out on purpose (see
+    `_compute_team_salary`), so it is added here and only here. The signee is
+    excluded before adding him back, because a team's own free agent already
+    sits on the roster CSV and re-signing him reuses his slot."""
     current = _compute_team_salary(team, bios, season)
     current_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
     existing_hold, is_fa_hold = _signee_existing_hold(team, player, bios, season)
     new_sal = _parse_dollar((salaries or {}).get(season, ""))
+    standard_after = (_count_standard_roster(team, excluding=player, bios=bios)
+                      + (0 if two_way else 1))
+    _, erc_after = _real_empty_roster_charge(standard_after, season, cap_levels)
     return SigningBooks(
         current=current,
         current_ex_holds=current_ex_holds,
@@ -4780,7 +4797,12 @@ def _signing_books(team: str, player: str, salaries: Optional[dict],
         # Both salary figures include dead cap, so the difference is exactly
         # the UFA/RFA holds.
         other_holds=(current - current_ex_holds) - (existing_hold if is_fa_hold else 0),
-        projected_ex_holds=current_ex_holds - (0 if is_fa_hold else existing_hold) + new_sal,
+        standard_after=standard_after,
+        erc_after=erc_after,
+        funding_base=current - existing_hold + erc_after,
+        funding_base_ex_holds=current_ex_holds + erc_after,
+        projected_ex_holds=(current_ex_holds - (0 if is_fa_hold else existing_hold)
+                            + new_sal + erc_after),
     )
 
 
@@ -4828,7 +4850,8 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
             message="This contract has no salary years — nothing would actually be signed. Add at least one season.",
         ))
 
-    books = _signing_books(team, details.player, details.contract.salaries, bios, season)
+    books = _signing_books(team, details.player, details.contract.salaries, bios, season,
+                           ctx["cap_levels"], two_way=details.contract.type == "two-way")
     current_ex_holds, new_sal = books.current_ex_holds, books.new_sal
     projected_ex_holds = books.projected_ex_holds
     # Both the apron-triggered hard cap and the league-wide Hard Cap (§ 1.3)
@@ -4863,8 +4886,8 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
     # legal cap-space signing look like it had no funding method at all).
     r = _check_signing_method_funding(
         team, details.signing_method, new_sal,
-        books.current - books.existing_hold,
-        current_ex_holds, season, ctx["cap_levels"], ctx["team_state"],
+        books.funding_base,
+        books.funding_base_ex_holds, season, ctx["cap_levels"], ctx["team_state"],
         unrenounced_holds=books.other_holds, bios=bios,
     )
     if r:
@@ -5655,7 +5678,8 @@ def _validate_offer_sheet(details: OfferSheetDetails, ctx: dict) -> list[CheckRe
                      f"resolve that one before extending another."),
         ))
 
-    books = _signing_books(team, details.player, details.contract.salaries, bios, season)
+    books = _signing_books(team, details.player, details.contract.salaries, bios, season,
+                           ctx["cap_levels"], two_way=details.contract.type == "two-way")
 
     r = _hard_cap_check(team, books.projected_ex_holds, season, ctx["team_state"], ctx["cap_levels"])
     if r:
@@ -5666,8 +5690,8 @@ def _validate_offer_sheet(details: OfferSheetDetails, ctx: dict) -> list[CheckRe
 
     r = _check_signing_method_funding(
         team, details.signing_method, books.new_sal,
-        books.current - books.existing_hold,
-        books.current_ex_holds, season, ctx["cap_levels"], ctx["team_state"],
+        books.funding_base,
+        books.funding_base_ex_holds, season, ctx["cap_levels"], ctx["team_state"],
         unrenounced_holds=books.other_holds, bios=bios,
     )
     if r:
@@ -5738,7 +5762,8 @@ def _validate_offer_sheet_decision(details: OfferSheetDecisionDetails, ctx: dict
 
     team = offer["retaining_team"] if details.outcome == "matched" else offer["offering_team"]
     contract = offer["contract"] or {}
-    books = _signing_books(team, offer["player"], contract.get("salaries"), bios, season)
+    books = _signing_books(team, offer["player"], contract.get("salaries"), bios, season,
+                           ctx["cap_levels"], two_way=contract.get("type") == "two-way")
     new_sal, projected_ex_holds = books.new_sal, books.projected_ex_holds
 
     for check_fn in (
@@ -9125,8 +9150,7 @@ def _require_trade_validatable(body: "TradeValidateInput", ctx: dict) -> None:
 def _signing_fact_sheet(team: str, player: str, contract, ctx: dict, *,
                         signing_method: Optional[str],
                         bird_rights_type: Optional[str] = None,
-                        eaps_assumption: Optional[str] = None,
-                        adds_roster_spot: bool = True) -> dict:
+                        eaps_assumption: Optional[str] = None) -> dict:
     """Financial snapshot for a signing, rendered by the simulator alongside
     the checks. Every figure here is produced by the same helpers
     `_validate_sign` uses (`_signee_existing_hold`, `_resolve_mle_bucket`,
@@ -9136,13 +9160,15 @@ def _signing_fact_sheet(team: str, player: str, contract, ctx: dict, *,
     bios = ctx["bios"]; season = ctx["cur_season"]
     cl = ctx["cap_levels"].get(season, {})
 
-    books = _signing_books(team, player, contract.salaries, bios, season)
+    books = _signing_books(team, player, contract.salaries, bios, season,
+                           ctx["cap_levels"], two_way=contract.type == "two-way")
     current, current_ex_holds = books.current, books.current_ex_holds
     existing_hold, is_fa_hold = books.existing_hold, books.is_fa_hold
     new_sal, projected_ex_holds = books.new_sal, books.projected_ex_holds
     # What the § 3.1 cap-room test actually measures against: Team Salary with
-    # holds included (§ 3.10), net of the signee's own hold.
-    salary_before_net = current - existing_hold
+    # holds included (§ 3.10), net of the signee's own hold, plus any § 2.1a
+    # charge left after the signing.
+    salary_before_net = books.funding_base
     cap = cl.get("cap")
     cap_room = (cap - salary_before_net) if cap is not None else None
     # Free-agent holds still on the books for *other* players — the figure the
@@ -9165,7 +9191,10 @@ def _signing_fact_sheet(team: str, player: str, contract, ctx: dict, *,
 
     # Remaining balance in whichever exception bucket this method draws on.
     exception = None
-    bucket = _resolve_mle_bucket(signing_method, ts, current, current_ex_holds, cl)
+    # Same figures the funding check resolves the bucket from, so the two
+    # can't name different exceptions.
+    bucket = _resolve_mle_bucket(signing_method, ts, books.funding_base,
+                                 books.funding_base_ex_holds, cl)
     if bucket:
         _resolved, amount_key, label = bucket
         amount = cl.get(amount_key)
@@ -9176,9 +9205,8 @@ def _signing_fact_sheet(team: str, player: str, contract, ctx: dict, *,
                 "used": used, "remaining": amount - used,
             }
 
-    before = _count_standard_roster(team)
-    is_standard = (contract.type != "two-way")
-    after = before + (1 if (is_standard and adds_roster_spot) else 0)
+    before = _count_standard_roster(team, bios=bios)
+    after = books.standard_after
 
     trailing_hold = _preview_fa_hold(
         bios.get(player) or {}, team, contract, ctx["cap_levels"],
@@ -9214,6 +9242,7 @@ def _signing_fact_sheet(team: str, player: str, contract, ctx: dict, *,
         "exception": exception,
         "standard_count_before": before,
         "standard_count_after": after,
+        "empty_roster_charge_after": books.erc_after,
     }
 
 
@@ -9262,9 +9291,6 @@ def validate_sign_pick(body: SignPickDetails):
         signing_method="draft_pick",
         bird_rights_type=body.bird_rights_type,
         eaps_assumption=body.eaps_assumption,
-        # Draft rights are roster-exempt, so a standard deal is what consumes
-        # the slot — which is exactly what `adds_roster_spot` already means.
-        adds_roster_spot=True,
     )
     bio = ctx["bios"].get(body.player) or {}
     fact_sheet["rookie_scale"] = _rookie_scale_contract(
@@ -10223,11 +10249,6 @@ def validate_offer_sheet(body: OfferSheetDetails):
         signing_method=body.signing_method,
         bird_rights_type=body.bird_rights_type,
         eaps_assumption=body.eaps_assumption,
-        # Mirrors the roster_size branch in _validate_offer_sheet, which counts
-        # the body unconditionally: a team shouldn't extend an offer it has no
-        # room to honour, and the incumbent's choice can't create room. The
-        # fact sheet has to agree with the validator, not second-guess it.
-        adds_roster_spot=True,
     )
     fact_sheet.update({
         "offering_team": body.offering_team.upper(),

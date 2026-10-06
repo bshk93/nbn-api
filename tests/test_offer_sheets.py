@@ -231,7 +231,7 @@ def validate(outcome, ledger, salary_by_team, hard_cap_team_state=None):
     txn._compute_team_salary_ex_holds = lambda t, b, s: salary_by_team.get(t, 0)
     txn._compute_team_salary = lambda t, b, s: salary_by_team.get(t, 0)
     txn._signee_existing_hold = lambda t, p, b, s: (0, False)
-    txn._count_standard_roster = lambda t: 14
+    txn._count_standard_roster = lambda t, excluding=None, bios=None: 14
     ctx = {"bios": {"curry-stephen": {"name": "CURRY, STEPHEN"}}, "cur_season": SEASON,
            "cap_levels": CAP_LEVELS, "team_state": hard_cap_team_state or {},
            "txn_date": "2026-08-09", "trade_exceptions": {}}
