@@ -49,7 +49,7 @@ from .constants import (
     DATA_DIR, CAP_LEVELS_FILE, TRANSACTIONS_FILE, VALID_TEAMS,
     _txn_lock, _deadcap_lock,
 )
-from .storage import read_csv, write_csv, _parse_dollar, _season_for_date
+from .storage import read_csv, write_csv, _season_for_date
 from .auth import get_token_info, require_role, has_role, _resolve_token
 from .players import load_player_bios
 from .roster_picks import load_team_state
@@ -57,7 +57,7 @@ from .boxscores import allstats_path
 from .transactions import (
     CheckResult, ContractIn, SignDetails,
     _load_transactions, _append_transaction,
-    _apply_sign, _compute_team_salary, _compute_team_salary_ex_holds,
+    _apply_sign, _signing_books,
     _hard_cap_check, _universal_hard_cap_check, _check_bae_eligibility,
     _check_signing_method_funding, _check_signing_method_declared,
     _roster_size_check, _count_standard_roster, _buyout_salary_above_ntmle,
@@ -213,14 +213,16 @@ def _validate_waiver_claim(claim: dict, release_txn: dict, ctx: dict) -> list[Ch
     player = release_txn["details"]["player"]
     snapshot = release_txn["details"].get("_snapshot") or {}
     contract_type = snapshot.get("type") or "player"
-    new_sal = _parse_dollar((snapshot.get("salaries") or {}).get(season, ""))
+    # The same projection a signing uses, § 2.1a charge included. A released
+    # player isn't on the claiming team's roster, so there's no hold to back out.
+    books = _signing_books(team, player, snapshot.get("salaries"), bios, season,
+                           ctx["cap_levels"], two_way=contract_type == "two-way")
+    new_sal, current_ex_holds = books.new_sal, books.current_ex_holds
 
-    current_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
-    projected_ex_holds = current_ex_holds + new_sal
-    r = _hard_cap_check(team, projected_ex_holds, season, ctx["team_state"], ctx["cap_levels"])
+    r = _hard_cap_check(team, books.projected_ex_holds, season, ctx["team_state"], ctx["cap_levels"])
     if r:
         checks.append(r)
-    r = _universal_hard_cap_check(team, projected_ex_holds, season, ctx["cap_levels"])
+    r = _universal_hard_cap_check(team, books.projected_ex_holds, season, ctx["cap_levels"])
     if r:
         checks.append(r)
 
@@ -230,9 +232,8 @@ def _validate_waiver_claim(claim: dict, release_txn: dict, ctx: dict) -> list[Ch
         if r:
             checks.append(r)
 
-    current_with_holds = _compute_team_salary(team, bios, season)
     r = _check_signing_method_funding(
-        team, claim.get("signing_method"), new_sal, current_with_holds, current_ex_holds,
+        team, claim.get("signing_method"), new_sal, books.funding_base, books.funding_base_ex_holds,
         season, ctx["cap_levels"], ctx["team_state"], bios=bios,
     )
     if r:
