@@ -165,8 +165,15 @@ def _maybe_award_bio_reward(member: str, slug: str, old_bio: dict, new_bio: dict
 # ── Player routes ─────────────────────────────────────────────────────────────
 
 @router.get("/api/players")
-def get_players():
-    return load_player_bios()
+def get_players(slugs: Optional[str] = None):
+    # `?slugs=a,b,c` returns only those bios. The whole file is ~85KB gzipped,
+    # which a page naming a dozen players (the homepage feed) shouldn't pay.
+    # Unknown slugs are simply absent from the result.
+    bios = load_player_bios()
+    if slugs is None:
+        return bios
+    wanted = {s.strip() for s in slugs.split(",") if s.strip()}
+    return {s: bios[s] for s in wanted if s in bios}
 
 
 @router.post("/api/players")
