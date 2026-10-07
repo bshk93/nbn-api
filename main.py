@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from routers import audit as audit_ctx
-from routers import auth, players, roster_picks, transactions, boxscores, game_highs, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, og, discord, trade_finder, picks_preview, suggestions, google_sheets, free_agency, roster_log_relay, waivers, inbox, poext, themes, cap_history, poopoo, schedule, coaching_settings, streaming_days, donations, nbnfl, irl, trade_requests, nbyen, markets
+from routers import auth, players, roster_picks, transactions, boxscores, game_highs, player_insights, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, og, discord, trade_finder, picks_preview, suggestions, google_sheets, free_agency, roster_log_relay, waivers, inbox, poext, themes, cap_history, poopoo, schedule, coaching_settings, streaming_days, donations, nbnfl, irl, trade_requests, nbyen, markets
 from routers.picks_scheduler import start_picks_horizon_scheduler
 from routers.roster_log_relay import start_roster_log_relay
 
@@ -56,6 +56,7 @@ app.include_router(picks_preview.router)   # additive: GET /api/picks-preview (c
 app.include_router(transactions.router)
 app.include_router(boxscores.router)
 app.include_router(game_highs.router)    # GET /api/game-highs, behind /stats/highs
+app.include_router(player_insights.router)  # GET /api/players/{slug}/insights — feats, streaks, teammates
 app.include_router(bets.router)
 app.include_router(proposals.router)
 app.include_router(misc.router)

@@ -32,3 +32,10 @@ def test_unknown_and_blank_slugs_are_skipped():
 
 def test_empty_filter_returns_nothing():
     assert _get("") == {}
+
+
+if __name__ == "__main__":
+    for name, fn in list(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+            print(f"  [ok] {name}")
