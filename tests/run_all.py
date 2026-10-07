@@ -40,7 +40,7 @@ MODULES = ["test_route_bindings",
            "test_boxscore_provenance", "test_boxscore_upload_format",
            "test_boxscore_player_slugs", "test_boxscore_commit_gate",
            "test_boxscore_screenshots", "test_game_day_notify", "test_game_highs",
-           "test_player_insights", "test_players_slugs_filter",
+           "test_player_insights", "test_players_slugs_filter", "test_playoff_odds",
            "test_drive_backup",
            "test_data_paths"]
 
