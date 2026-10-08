@@ -841,6 +841,9 @@ def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[
                     dead_cap[season] = guaranteed[season]
             continue
         dead_cap[season] = guaranteed.get(season, salary)
+    # A two-way's $0 years leave no dead cap, and a $0 row in the deadcap CSV
+    # would only be noise (§ 2.2).
+    dead_cap = {s: v for s, v in dead_cap.items() if _parse_dollar(v)}
 
     # Stretch provision (§5.1 method 2): re-flatten the same total obligation
     # computed above evenly across `stretch_years` seasons starting at the
@@ -4963,6 +4966,10 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
     if r:
         checks.append(r)
 
+    r = _check_declared_experience(details.contract, details.player, bios)
+    if r:
+        checks.append(r)
+
     r = _check_minimum_contract_cap_hit(details, bios, season, ctx["cap_levels"])
     if r:
         checks.append(r)
@@ -5177,6 +5184,41 @@ def _check_minimum_salary(contract, player: str, bios: dict, season: str,
     )
 
 
+def _check_declared_experience(contract, player: str, bios: dict) -> Optional[CheckResult]:
+    """§ 3.12: a contract's declared years of experience, against the
+    draft-year count. Declaring fewer years than the draft year gives prices a
+    minimum on a cheaper tier, and can read a player as two-way eligible
+    (§ 2.2) when he isn't, so it is a warning a person has to confirm.
+
+    Not an error: the draft year is a proxy, and for some players it is wrong.
+    Declaring more years than the draft year gives only costs the team, so
+    that passes. Added after Blake Hinson's ORL minimum (2026-10-08): it
+    declared 0 against a 2024 draft class, which priced it two tiers low and
+    let it clear a hard cap the correct price breached.
+
+    None when the contract declares nothing or there is no draft year."""
+    declared = getattr(contract, "years_experience", None)
+    bio = bios.get(player) or {}
+    draft_year = bio.get("draft_year")
+    first = _contract_first_season(contract)
+    if declared is None or not draft_year or not first:
+        return None
+    expected = max(0, _season_start(first) + 2000 - int(draft_year))
+    name = _display_name(bio.get("name") or "") or player
+    if int(declared) < expected:
+        return CheckResult(
+            check="declared_experience", passed=False, level="warning",
+            message=(f"The contract gives {name} {int(declared)} years of experience in {first}, "
+                     f"but the {draft_year} draft year gives {expected} (§ 3.12). Fewer years "
+                     f"means a cheaper minimum tier. Use {expected} unless the draft year is wrong."),
+        )
+    return CheckResult(
+        check="declared_experience", passed=True, level="info",
+        message=(f"Declared experience ({int(declared)} in {first}) is not below the "
+                 f"{draft_year} draft year's {expected} (§ 3.12)."),
+    )
+
+
 def _min_salary_for(bio: dict, season: str, cap_levels: dict,
                     contract=None) -> Optional[int]:
     """That season's minimum for this player's experience tier, or None when
@@ -5279,12 +5321,19 @@ def _release_contract_years(bio: dict, cur_season: str) -> list[str]:
     A player whose every remaining season is a bare UFA/RFA/TEAM_OPT hold (or
     who has no salaries at all) has none — they're renounceable instead
     (§ 3.10), and releasing them would just ceremonially reproduce a renounce
-    through the wrong transaction."""
+    through the wrong transaction.
+
+    A two-way's contract years count even though they pay $0 (§ 2.2). Testing
+    for salary alone left a two-way with no way off a roster: release said
+    "nothing to release, renounce instead", and renounce said "under contract,
+    release instead"."""
     holds = bio.get("cap_holds") or {}
     salaries = bio.get("salaries") or {}
+    two_way = bio.get("type") == "two-way"
     return [
         s for s, sal in salaries.items()
-        if s >= cur_season and holds.get(s) not in ("UFA", "RFA", "TEAM_OPT") and _parse_dollar(sal)
+        if s >= cur_season and holds.get(s) not in ("UFA", "RFA", "TEAM_OPT")
+        and (two_way or _parse_dollar(sal))
     ]
 
 
@@ -5730,6 +5779,10 @@ def _validate_offer_sheet(details: OfferSheetDetails, ctx: dict) -> list[CheckRe
 
     r = _check_minimum_salary(details.contract, details.player, bios, season, ctx["cap_levels"],
                               txn_date=ctx.get("txn_date"), signing_method=details.signing_method)
+    if r:
+        checks.append(r)
+
+    r = _check_declared_experience(details.contract, details.player, bios)
     if r:
         checks.append(r)
 
@@ -6954,6 +7007,10 @@ def _validate_convert_twoway(details: ConvertTwoWayDetails, ctx: dict) -> list[C
     # own two-way exemption doesn't apply — this genuinely checks the new deal.
     r = _check_minimum_salary(details.contract, details.player, bios, season, ctx["cap_levels"],
                               txn_date=ctx.get("txn_date"), signing_method=details.signing_method)
+    if r:
+        checks.append(r)
+
+    r = _check_declared_experience(details.contract, details.player, bios)
     if r:
         checks.append(r)
 

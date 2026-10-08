@@ -69,6 +69,7 @@ CHECK_SECTIONS: dict[str, tuple[str, ...]] = {
     "buyout_signing_{}":          ("1.5",),
     "byc_{}":                     ("4.2",),
     "contract_has_salary_years":  ("3.13",),
+    "declared_experience":        ("3.12",),
     "draft_rights":               ("7.1",),
     "empty_roster_charge_{}":     ("2.1a",),
     "extension_cap_position":     ("6.2",),
