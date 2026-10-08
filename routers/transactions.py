@@ -5225,9 +5225,9 @@ def _check_minimum_contract_cap_hit(details: SignDetails, bios: dict, season: st
     else:
         basis = f"his own minimum tier (${expected:,})"
     if _contract_years_exp(details.contract, season) is not None:
-        source = "from the experience stated on the contract"
+        source = "stated on the contract"
     else:
-        source = "from his real NBA draft year"
+        source = "inferred from his real NBA draft year"
     if submitted == expected:
         return CheckResult(
             check="minimum_contract_cap_hit", passed=True,
@@ -5238,7 +5238,7 @@ def _check_minimum_contract_cap_hit(details: SignDetails, bios: dict, season: st
         passed=False,
         level="warning",
         message=(f"Submitted salary (${submitted:,}) doesn't match the § 3.12 1-yr minimum. "
-                 f"A 1-year minimum counts at {basis}. Experience was taken {source}."),
+                 f"A 1-year minimum counts at {basis}. His experience was {source}."),
     )
 
 
