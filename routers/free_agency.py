@@ -28,6 +28,7 @@ from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from . import fa_notify, inbox
+from .roster_move_notify import announce_fa_result
 from .auth import (get_token_info, has_role, load_members,
                    require_any_role, require_role)
 from .constants import (CAP_LEVELS_FILE, FA_BALLOTS_FILE, FA_OFFERS_FILE,
@@ -2467,16 +2468,20 @@ def declare_winner(slug: str, body: DeclareWinnerIn, info: dict = Depends(requir
                 eaps_assumption=terms.get("eaps_assumption"),
             )
             description = f"FA round {round_id} — offer #{offer['number']} won the ballot"
+            # The #fa-news line below is a bot post, which the #roster-log
+            # relay skips, so the embed is what reaches #roster-log.
             if writes == "offer_sheet":
                 txn = apply_with_warning_confirm(
                     apply_offer_sheet,
                     OfferSheetDetails(player=slug, offering_team=offering_team, contract=contract, **common_kwargs),
-                    txn_date, info, description=description, confirm_warnings=body.confirm_warnings)
+                    txn_date, info, description=description, confirm_warnings=body.confirm_warnings,
+                    relay_to_roster_log=True)
             else:
                 txn = apply_with_warning_confirm(
                     apply_sign,
                     SignDetails(player=slug, team=offering_team, contract=contract, **common_kwargs),
-                    txn_date, info, description=description, confirm_warnings=body.confirm_warnings)
+                    txn_date, info, description=description, confirm_warnings=body.confirm_warnings,
+                    relay_to_roster_log=True)
 
         final["winner"] = {
             "key": body.key, "declared_at": _now(), "declared_by": info["name"],
@@ -2484,6 +2489,10 @@ def declare_winner(slug: str, body: DeclareWinnerIn, info: dict = Depends(requir
         }
         _save_ballots(ballots)
     log_write(info, f"POST fa/players/{slug}/declare-winner — {body.key}")
+    if txn and writes:
+        # Nobody posts a site-written signing by hand. The QO path announces
+        # inside apply_accept_qo.
+        announce_fa_result(txn)
     if writes == "offer_sheet":
         notify_offer_sheet_received(txn["details"])
     _notify_bidders_of_result(slug, round_offers, body.key, writes, incumbent)

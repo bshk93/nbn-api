@@ -36,7 +36,7 @@ from typing import Optional
 
 from . import discord_transport as transport
 from .constants import TEAM_NAMES
-from .discord_notify import _player_name
+from .discord_notify import _contract_str, _player_name
 from .players import load_player_bios
 
 logger = logging.getLogger("nbn-api")
@@ -104,10 +104,43 @@ def announcement(txn: dict) -> Optional[tuple[str, str]]:
     return None
 
 
+def fa_result_announcement(txn: dict) -> Optional[tuple[str, str]]:
+    """`(channel, text)` for the signing a PDC declare-winner wrote, or None.
+
+    Separate from `announcement` on purpose: an office-entered `sign` is
+    usually recording a signing a human already posted in #fa-news, so it
+    stays quiet. A declare-winner signing is written by the site, and nobody
+    else will post it. Unlike the moves above, the line carries the contract,
+    because the humans' signing posts always did ("…to a 1+TO min").
+    """
+    d = txn.get("details") or {}
+    kind = txn.get("type")
+    player = _name(d.get("player") or "")
+    contract = _contract_str(d.get("contract") or {})
+    terms = f" — {contract}" if contract else ""
+    if kind == "sign":
+        return DISCORD_FA_NEWS_CHANNEL, f"The {_team(d.get('team'))} sign {player}{terms}."
+    if kind == "offer_sheet":
+        offering, retaining = (d.get("teams") or [d.get("offering_team"), d.get("retaining_team")])[:2]
+        return (DISCORD_FA_NEWS_CHANNEL,
+                f"The {_team(offering)} sign {player} to an offer sheet{terms}. "
+                f"The {_team(retaining)} have 48 hours to match.")
+    return None
+
+
+def announce_fa_result(txn: dict) -> bool:
+    """Post a declare-winner signing to #fa-news. False if it wasn't sent."""
+    return _send(fa_result_announcement, txn)
+
+
 def announce(txn: dict) -> bool:
     """Post the move's line to its channel. False if it wasn't sent."""
+    return _send(announcement, txn)
+
+
+def _send(render, txn: dict) -> bool:
     try:
-        found = announcement(txn)
+        found = render(txn)
         if not found:
             return False
         channel, text = found

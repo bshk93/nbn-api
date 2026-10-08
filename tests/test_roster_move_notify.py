@@ -83,6 +83,23 @@ for kind in ("release", "trade", "sign", "extension"):
     check(f"{kind} is not announced here", said(txn(kind)) is None)
 
 
+print("\nfa_result_announcement — a PDC declare-winner signing")
+
+contract = {"salaries": {"26-27": "$4,000,000", "27-28": "$4,200,000"}, "cap_holds": {"27-28": "TEAM_OPT"}}
+got = rm.fa_result_announcement(txn("sign", contract=contract))
+check("a declared sign → #fa-news with its terms",
+      got == ("fa-news", "The Milwaukee Bucks sign Vsevolod Ishchenko — 1+1 TO · $8.2M."), got)
+got = rm.fa_result_announcement({"id": "t2", "type": "offer_sheet", "details": {
+    "player": "ishchenko-vsevolod", "teams": ["MIL", "BOS"], "contract": contract}})
+check("a declared offer sheet names both teams and the match window",
+      got == ("fa-news", "The Milwaukee Bucks sign Vsevolod Ishchenko to an offer sheet — 1+1 TO · $8.2M. "
+                         "The Boston Celtics have 48 hours to match."), got)
+check("anything else is not a declare-winner result", rm.fa_result_announcement(txn("renounce")) is None)
+SENT.clear()
+check("announce_fa_result queues it", rm.announce_fa_result(txn("sign", contract=contract)) is True
+      and SENT and SENT[0][0] == "fa-news", SENT)
+
+
 print("\nannounce — sends, and stays inert without a channel")
 
 SENT.clear()

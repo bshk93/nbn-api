@@ -8579,7 +8579,9 @@ def apply_accept_qo(details: AcceptQualifyingOfferDetails, txn_date: str, info: 
                         "two_way": rec.get("two_way", False)},
         }
         _append_transaction(txn)
-    notify_transaction(txn)
+    # Its #fa-news line is a bot post, which the #roster-log relay skips, so
+    # the embed is relayed instead (same as _notify_self_serve).
+    notify_transaction(txn, relay_to_roster_log=True)
     announce_roster_move(txn)
     return txn
 

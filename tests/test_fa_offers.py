@@ -192,7 +192,8 @@ def fake_apply_sign(details, txn_date, info, description="", force=False,
     if blocking:
         raise HTTPException(422, {"validation": True, "checks": PENDING_CHECKS, "can_force": True})
     txn = {"id": f"sign{len(APPLIED_SIGNS) + 1}", "type": "sign",
-           "details": details.model_dump(), "force_warnings_only": force_warnings_only}
+           "details": details.model_dump(), "force_warnings_only": force_warnings_only,
+           "relay_to_roster_log": relay_to_roster_log}
     APPLIED_SIGNS.append(txn)
     return txn
 
@@ -204,13 +205,17 @@ def fake_apply_offer_sheet(details, txn_date, info, description="", force=False,
     if blocking:
         raise HTTPException(422, {"validation": True, "checks": PENDING_CHECKS, "can_force": True})
     txn = {"id": f"os{len(APPLIED_OFFER_SHEETS) + 1}", "type": "offer_sheet",
-           "details": details.model_dump(), "force_warnings_only": force_warnings_only}
+           "details": details.model_dump(), "force_warnings_only": force_warnings_only,
+           "relay_to_roster_log": relay_to_roster_log}
     APPLIED_OFFER_SHEETS.append(txn)
     return txn
 
 
 fa.apply_sign = fake_apply_sign
 fa.apply_offer_sheet = fake_apply_offer_sheet
+# The #fa-news line for a declared signing — nobody posts it by hand.
+FA_NEWS_RESULTS: list = []
+fa.announce_fa_result = lambda txn: FA_NEWS_RESULTS.append(txn["id"]) or True
 
 
 def contract(y1="$40,000,000"):
@@ -1163,6 +1168,9 @@ check("no warnings here, so nothing needed confirming",
 check("declare_winner's record matches the applied txn",
       won["winner"]["key"] == du_offer["id"] and won["winner"]["txn_id"] == APPLIED_SIGNS[0]["id"])
 check("the winning bidder is told", INBOX == [("phxOwner", "Your offer won: decl-ufa signs with PHX.")])
+check("the signing is announced in #fa-news", FA_NEWS_RESULTS == [APPLIED_SIGNS[0]["id"]])
+check("...and its embed is relayed, since the #roster-log relay skips bot posts in #fa-news",
+      APPLIED_SIGNS[0]["relay_to_roster_log"] is True)
 check("once declared, the round no longer needs a result",
       fa.get_state(HEAD)["players"]["decl-ufa"]["needs_result"] is False
       and "declare_options" not in fa.get_ballots("decl-ufa", HEAD))
@@ -1181,6 +1189,9 @@ check("a rival's offer on an RFA becomes an offer_sheet, not a completed sign",
       len(APPLIED_OFFER_SHEETS) == 1 and len(APPLIED_SIGNS) == 1)  # the 1 sign is decl-ufa's, above
 check("offer_sheet names the rival as offering_team, MIA untouched by this write",
       APPLIED_OFFER_SHEETS[0]["details"]["offering_team"] == "PHX")
+check("the offer sheet is announced in #fa-news, its embed relayed",
+      FA_NEWS_RESULTS[-1] == APPLIED_OFFER_SHEETS[0]["id"]
+      and APPLIED_OFFER_SHEETS[0]["relay_to_roster_log"] is True)
 check("MIA is told an offer sheet landed, the same notice the office's entry sends",
       len(OFFER_SHEET_NOTICES) == 1)
 check("the winning bidder is told it's an offer sheet MIA can match",
