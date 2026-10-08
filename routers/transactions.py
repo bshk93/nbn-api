@@ -5215,18 +5215,30 @@ def _check_minimum_contract_cap_hit(details: SignDetails, bios: dict, season: st
     if expected is None:
         return None
     submitted = _parse_dollar(salaries[season])
+    # Say which rule produced the figure: a 2+ year veteran is capped at the
+    # 2-year minimum, a 0/1-year player is priced at his own tier. And say
+    # where his experience came from, since a declared figure is not inferred.
+    two_yr_amt = ((cap_levels.get(season, {}) or {}).get("min_salary_scale") or {}).get("2", 0)
+    if expected == two_yr_amt:
+        basis = (f"the 2-year veteran minimum (${expected:,}), whatever his experience; "
+                 f"the league covers any difference")
+    else:
+        basis = f"his own minimum tier (${expected:,})"
+    if _contract_years_exp(details.contract, season) is not None:
+        source = "from the experience stated on the contract"
+    else:
+        source = "from his real NBA draft year"
     if submitted == expected:
         return CheckResult(
             check="minimum_contract_cap_hit", passed=True,
-            message=f"1-yr minimum cap hit (${expected:,}) matches the 2-yr veteran minimum (§ 3.12).",
+            message=f"1-yr minimum cap hit matches {basis} (§ 3.12).",
         )
     return CheckResult(
         check="minimum_contract_cap_hit",
         passed=False,
         level="warning",
-        message=(f"Submitted salary (${submitted:,}) doesn't match the § 3.12 1-yr minimum cap hit "
-                 f"of ${expected:,} (2-year veteran minimum) inferred from this player's real NBA "
-                 f"draft year — double check before submitting."),
+        message=(f"Submitted salary (${submitted:,}) doesn't match the § 3.12 1-yr minimum. "
+                 f"A 1-year minimum counts at {basis}. Experience was taken {source}."),
     )
 
 

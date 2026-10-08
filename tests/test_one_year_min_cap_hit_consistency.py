@@ -81,6 +81,32 @@ def main():
     check("paying the full uncapped tier also still passes (it's above the floor)",
           r_over is not None and r_over.passed)
 
+    print("\nthe cap-hit warning explains itself (2026-10-08, Bruce Brown)")
+    warn = tx._check_minimum_contract_cap_hit(
+        tx.SignDetails(player="hyland-nahshon", team="GSW", contract=contract_over,
+                       signing_method="minimum"),
+        {"hyland-nahshon": FIVE_YR_VET}, "26-27", CAP_LEVELS,
+    )
+    check("his own tier figure warns", warn is not None and not warn.passed)
+    check("...names the 2-year minimum and why",
+          "2-year veteran minimum ($2,449,421), whatever his experience" in warn.message)
+    check("...and says the experience was stated, not inferred",
+          "stated on the contract" in warn.message and "draft year" not in warn.message)
+    inferred = tx._check_minimum_contract_cap_hit(
+        tx.SignDetails(player="p", team="GSW", signing_method="minimum",
+                       contract=tx.ContractIn(salaries={"26-27": f"${SCALE['5']:,}"})),
+        {"p": {"draft_year": 2018}}, "26-27", CAP_LEVELS,
+    )
+    check("with nothing stated, it says it used the draft year",
+          inferred is not None and "draft year" in inferred.message)
+    rookie = tx._check_minimum_contract_cap_hit(
+        tx.SignDetails(player="p", team="GSW", signing_method="minimum",
+                       contract=tx.ContractIn(salaries={"26-27": "$1"}, years_experience=0)),
+        {"p": {}}, "26-27", CAP_LEVELS,
+    )
+    check("a 0-year player is priced at his own tier, not the 2-year cap",
+          rookie is not None and "his own minimum tier ($1,357,763)" in rookie.message)
+
     print("\nbelow the capped floor still errors")
     contract_low = tx.ContractIn(
         salaries={"26-27": f"${SCALE['1']:,}"}, cap_holds={"27-28": "UFA"},
