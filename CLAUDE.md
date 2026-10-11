@@ -741,6 +741,30 @@ reads no box score, roster CSV or bio, and the stats build never reads it.
 
 Pinned by `tests/test_irl.py` (no network).
 
+## League lore (`routers/lore.py`)
+
+The league's history, compiled from all of #leaguetalk (2020 on), for NBN Today
+writers — people and agents. Plain markdown in `$DATA_DIR/lore/`, one file per
+document, named by its stem: `lore` (the storyline digest — start here),
+`sagas` (the big stories in full), and the season notes (`2020`, `2020-21`, …).
+
+- `GET /api/lore` lists the documents with their `## ` sections;
+  `GET /api/lore/{name}` returns one document's markdown;
+  `GET /api/lore/search?q=&doc=&limit=` returns every block (a list item with its
+  continuation lines, a paragraph, or a table) containing all the query words,
+  digest first, then sagas, then the notes.
+- **Reads need a member token, not public.** Writes (`PUT /api/lore/{name}`, whole
+  document) need `curator` or `bod`.
+- **No content filtering, by design.** The banned members, the alt scandal, the
+  DJ/Embiid saga and the rest are the point: writers are meant to bring them up.
+  Don't add a "safe" layer. The one standing exclusion is in how the notes were
+  written, not in code: no off-topic politics, and no members' private lives
+  (health, family, work).
+- History is kept by the data dir's git backup (every 10 min), not an in-app log.
+  `log_write` records who replaced which document.
+
+Pinned by `tests/test_lore.py`.
+
 ## Docs discipline
 
 Keep `CLAUDE.md` and `docs/` in sync with every code change. If a change affects an endpoint, a data field, a transaction type, or any behavior described in the docs, update the relevant doc in the same commit.
