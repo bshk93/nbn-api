@@ -34,7 +34,7 @@ from routers.transactions import (  # noqa: E402
     _renounce_eligibility, _validate_renounce, _RENOUNCE_SNAPSHOT_FIELDS,
     RenounceDetails, _validate_option, OptionDetails,
     _validate_release, ReleaseDetails,
-    _self_convert_twoway_contract, _self_sign_pick_contract,
+    _self_convert_twoway_contract, _self_convert_twoway_holds, _self_sign_pick_contract,
 )
 from fastapi import HTTPException  # noqa: E402
 
@@ -350,6 +350,15 @@ check("year 1 prices at the tier for this season",
 check("year 2 prices at the NEXT season's tier-1 figure — the draft-year proxy "
       "climbs a season later, unlike a flat declared years_experience",
       s2[NEXT] == "$2,281,457")
+
+s3 = build_contract([{"salaries": {SEASON: "$0", NEXT: "$0", "28-29": "$1"},
+                      "cap_holds": {"28-29": "RFA"}}])  # a 2-year deal plus its RFA hold
+check("a trailing RFA hold is not a contract year — a 2-year deal with its hold builds 2 years",
+      list(s3) == [SEASON, NEXT])
+check("...and the converted deal keeps rolling into that RFA hold, after its own last year",
+      _self_convert_twoway_holds({"contracts": [{"cap_holds": {"28-29": "RFA"}}]}, s3) == {"28-29": "RFA"})
+check("a two-way that ended in no hold gets none added",
+      _self_convert_twoway_holds({"contracts": [{"cap_holds": {}}]}, s3) == {})
 
 raises_http("a 3-year prior deal is refused — § 2.2 caps a two-way at 2", 422,
            lambda: build_contract([{"salaries": {SEASON: "$1", NEXT: "$1", "28-29": "$1"}}]))
