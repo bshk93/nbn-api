@@ -16,6 +16,36 @@ router = APIRouter()
 
 VALID_POSITIONS = {"PG", "SG", "SF", "PF", "C"}
 
+# Rulebook § 2.3. Positions in floor order: a secondary position is one step
+# up or down from the player's 2K primary, so a PG can only add SG and a C
+# only PF. The primary itself always stays the 2K one.
+POSITION_ORDER = ["PG", "SG", "SF", "PF", "C"]
+
+
+def _primary_pos(slug: str) -> Optional[str]:
+    """The player's 2K-designated primary position, from the latest scrape."""
+    entries = load_attributes().get(slug) or []
+    pos = entries[-1].get("2k_pos") if entries else None
+    return pos[0] if isinstance(pos, list) and pos and pos[0] in POSITION_ORDER else None
+
+
+def secondary_pos_options(primary: Optional[str]) -> list[str]:
+    if primary not in POSITION_ORDER:
+        return []
+    i = POSITION_ORDER.index(primary)
+    return [POSITION_ORDER[j] for j in (i - 1, i + 1) if 0 <= j < len(POSITION_ORDER)]
+
+
+def _check_secondary_pos(slug: str, secondary: Optional[str]):
+    if not secondary:
+        return
+    primary = _primary_pos(slug)
+    if primary is None:
+        raise HTTPException(status_code=422, detail="This player has no 2K primary position yet, so no secondary position can be set (§ 2.3)")
+    options = secondary_pos_options(primary)
+    if secondary not in options:
+        raise HTTPException(status_code=422, detail=f"A {primary}'s secondary position must be {' or '.join(options)} (§ 2.3): got {secondary}")
+
 
 def load_player_bios() -> dict:
     return _load_json(PLAYER_BIOS_FILE, {})
@@ -184,8 +214,7 @@ def create_player(body: PlayerCreate, info: dict = Depends(require_any_role("ros
     invalid_pos = [p for p in body.pos if p not in VALID_POSITIONS]
     if invalid_pos:
         raise HTTPException(status_code=422, detail=f"Invalid positions: {invalid_pos}")
-    if body.secondary_pos and body.secondary_pos not in body.pos:
-        raise HTTPException(status_code=422, detail=f"secondary_pos must be one of the player's eligible positions {body.pos}: got {body.secondary_pos}")
+    _check_secondary_pos(slug, body.secondary_pos)
     bios = load_player_bios()
     if slug in bios:
         raise HTTPException(status_code=409, detail="Player already exists")
@@ -206,12 +235,10 @@ def update_player(slug: str, body: PlayerBio, info: dict = Depends(require_any_r
     existed = slug in bios
     old_bio = dict(bios.get(slug, {}))
 
-    # secondary_pos must be one of the player's eligible positions (bio.pos) —
-    # use the pos this request is setting if it explicitly sets one, else fall
-    # back to the player's existing pos on file.
-    effective_pos = body.pos if 'pos' in body.model_fields_set else old_bio.get('pos', [])
-    if body.secondary_pos and body.secondary_pos not in effective_pos:
-        raise HTTPException(status_code=422, detail=f"secondary_pos must be one of the player's eligible positions {effective_pos}: got {body.secondary_pos}")
+    # § 2.3 applies only when this write changes secondary_pos, so a bio edit
+    # that carries an older, now-invalid value along doesn't fail on it.
+    if 'secondary_pos' in body.model_fields_set and body.secondary_pos != old_bio.get('secondary_pos'):
+        _check_secondary_pos(slug, body.secondary_pos)
     if has_role(info, "curator") and not has_role(info, "rosters") and not has_role(info, "admin"):
         existing = bios.get(slug, {})
         update_data = body.model_dump()
@@ -254,9 +281,7 @@ def update_team_settings(slug: str, body: TeamSettingsUpdate, info: dict = Depen
 
     if body.jersey_number is not None and not re.fullmatch(r'\d{1,2}', body.jersey_number):
         raise HTTPException(status_code=422, detail="jersey_number must be 1–2 digits")
-    eligible_pos = bios[slug].get("pos", [])
-    if body.secondary_pos and body.secondary_pos not in eligible_pos:
-        raise HTTPException(status_code=422, detail=f"secondary_pos must be one of this player's eligible positions {eligible_pos}: got {body.secondary_pos}")
+    _check_secondary_pos(slug, body.secondary_pos)
 
     bios[slug]["jersey_number"] = body.jersey_number
     bios[slug]["secondary_pos"] = body.secondary_pos
