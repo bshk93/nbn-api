@@ -177,6 +177,10 @@ COMMANDS = [
         "description": "Every season's NBN champion and runner-up",
     },
     {
+        "name": "nbntv-schedule",
+        "description": "Upcoming games the stream committee has flagged to be streamed",
+    },
+    {
         "name": "whoami",
         "description": "Show your Discord ID and which NBN member you're linked to",
     },

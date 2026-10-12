@@ -1357,6 +1357,43 @@ def mh2h_response(discord_id1: str, discord_id2: str) -> dict:
     return h2h_members_response(m1, m2)
 
 
+# ── /nbntv-schedule ───────────────────────────────────────────────────────────
+
+NBNTV_SCHEDULE_LIMIT = 15
+
+
+def nbntv_schedule_response() -> dict:
+    """Upcoming games the stream committee has flagged as streams (`stream` on
+    the schedule, set from /committees/stream or bought with NB¥). Reads the
+    current league year's schedule only."""
+    from datetime import date as _date
+    from .schedule import _load, _public
+    from .league_time import league_today_str
+
+    season = _current_league_year()
+    today = league_today_str()
+    games = [_public(g) for g in _load(season)["games"]
+             if g.get("stream") and g["date"] >= today]
+    if not games:
+        return _embed("📺 NBNTV Schedule", "No upcoming streams are scheduled.",
+                      url="https://nbn.today/calendar")
+    shown = games[:NBNTV_SCHEDULE_LIMIT]
+    rows = []
+    for g in shown:
+        day = _date.fromisoformat(g["date"]).strftime("%a %b %-d")
+        who = g["streamer"] or "TBD"
+        if g["stream_buyer"]:
+            who += f" (bought: {g['stream_buyer']})"
+        rows.append([day, g.get("time_et") or "", f"{g['away_team']} @ {g['home_team']}", who])
+    table = _grid([("DATE", True), ("ET", False), ("GAME", True), ("STREAMER", True)], rows)
+    desc = "```\n" + table + "\n```"
+    extra = len(games) - len(shown)
+    if extra > 0:
+        desc += f"\n+{extra} more on [the calendar](https://nbn.today/calendar)"
+    return _embed("📺 NBNTV Schedule", desc, url="https://nbn.today/calendar",
+                  footer=f"{season} · upcoming streams")
+
+
 # ── /champions ────────────────────────────────────────────────────────────────
 
 def champions_response() -> dict:
@@ -1523,6 +1560,7 @@ _HELP_GROUPS = [
         "`/mh2h @member1 @member2` — all-time H2H between two members",
         "`/playoff-series year team1 team2` — series result, games, leaders",
         "`/champions` — every season's champion + runner-up",
+        "`/nbntv-schedule` — upcoming games flagged to be streamed",
     ]),
     ("NB¥ Economy", [
         "`/nbyen` — your balance (private)",
@@ -1611,6 +1649,8 @@ def dispatch(data: dict, invoker: dict) -> dict:
         return mh2h_response(str(u1), str(u2))
     if cmd == "champions":
         return champions_response()
+    if cmd == "nbntv-schedule":
+        return nbntv_schedule_response()
     return _error(f"Unknown command: {cmd}")
 
 
