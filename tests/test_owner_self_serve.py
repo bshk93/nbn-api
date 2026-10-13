@@ -386,6 +386,21 @@ check("...and the converted deal keeps rolling into that RFA hold, after its own
 check("a two-way that ended in no hold gets none added",
       _self_convert_twoway_holds({"contracts": [{"cap_holds": {}}]}, s3) == {})
 
+# § 2.2: Year 2 of a 2-year conversion may be a team option or non-guaranteed.
+rfa_bio = {"contracts": [{"cap_holds": {"28-29": "RFA"}}]}
+check("Year 2 defaults to fully guaranteed (no tag)",
+      _self_convert_twoway_holds(rfa_bio, s3, "guaranteed") == {"28-29": "RFA"})
+check("Year 2 as a team option tags the second season TEAM_OPT, keeping the trailing hold",
+      _self_convert_twoway_holds(rfa_bio, s3, "team_option") == {NEXT: "TEAM_OPT", "28-29": "RFA"})
+check("Year 2 non-guaranteed tags it NON_GTD",
+      _self_convert_twoway_holds(rfa_bio, s3, "non_guaranteed") == {NEXT: "NON_GTD", "28-29": "RFA"})
+check("Year 1 is never tagged",
+      SEASON not in _self_convert_twoway_holds(rfa_bio, s3, "team_option"))
+raises_http("a 1-year conversion has no Year 2 to make an option", 422,
+           lambda: _self_convert_twoway_holds(rfa_bio, {SEASON: "$1"}, "team_option"))
+raises_http("an unknown Year 2 term is refused", 422,
+           lambda: _self_convert_twoway_holds(rfa_bio, s3, "player_option"))
+
 raises_http("a 3-year prior deal is refused — § 2.2 caps a two-way at 2", 422,
            lambda: build_contract([{"salaries": {SEASON: "$1", NEXT: "$1", "28-29": "$1"}}]))
 

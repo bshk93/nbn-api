@@ -9970,22 +9970,41 @@ def _self_convert_twoway_contract(bio: dict, player: str, cap_levels: dict, cur_
     return salaries
 
 
-def _self_convert_twoway_holds(bio: dict, salaries: dict[str, str]) -> dict[str, str]:
-    """The trailing UFA/RFA hold the converted deal rolls into: the same tag
-    the two-way deal ended in, moved to the season after the new deal's last
-    year. `_apply_convert_twoway` replaces the bio's `cap_holds` with the new
-    contract's, so a deal built without this drops the hold entirely. The
-    amount is left to `_autofill_fa_hold_amounts`, which prices a hold coming
-    off a minimum contract at the minimum (§ 3.10)."""
+# § 2.2: the second year of a converted 2-year deal may be fully guaranteed,
+# a team option or non-guaranteed. The key is what the owner picks; the value
+# is the year's cap_holds tag (None for plain guaranteed money).
+SELF_CONVERT_YEAR2_TERMS = {"guaranteed": None, "team_option": "TEAM_OPT", "non_guaranteed": "NON_GTD"}
+
+
+def _self_convert_twoway_holds(bio: dict, salaries: dict[str, str],
+                               year2: str = "guaranteed") -> dict[str, str]:
+    """The new deal's cap_holds: the Year 2 term (§ 2.2), plus the trailing
+    UFA/RFA hold the converted deal rolls into — the same tag the two-way deal
+    ended in, moved to the season after the new deal's last year.
+    `_apply_convert_twoway` replaces the bio's `cap_holds` with the new
+    contract's, so a deal built without the trailing hold drops it entirely.
+    Its amount is left to `_autofill_fa_hold_amounts`, which prices a hold
+    coming off a minimum contract at the minimum (§ 3.10)."""
+    if year2 not in SELF_CONVERT_YEAR2_TERMS:
+        raise HTTPException(status_code=422, detail=f"Unknown Year 2 term {year2!r}.")
+    holds: dict[str, str] = {}
+    tag = SELF_CONVERT_YEAR2_TERMS[year2]
+    if tag:
+        if len(salaries) != 2:
+            raise HTTPException(
+                status_code=422,
+                detail="Only the second year of a 2-year conversion can be a team option or non-guaranteed (§ 2.2).",
+            )
+        holds[max(salaries)] = tag
     prior_holds = ((bio.get("contracts") or [{}])[-1].get("cap_holds")) or {}
     trailing = [t for _, t in sorted(prior_holds.items()) if t in _FA_HOLD_TYPES]
-    if not trailing:
-        return {}
-    return {_season_after(max(salaries)): trailing[-1]}
+    if trailing:
+        holds[_season_after(max(salaries))] = trailing[-1]
+    return holds
 
 
 @router.get("/api/self/convert_twoway/preview/{slug}")
-def preview_self_convert_twoway(slug: str):
+def preview_self_convert_twoway(slug: str, year2: str = "guaranteed"):
     """Read-only preview of what `POST /api/self/convert_twoway` would
     submit for this player right now — the contract it would build and the
     § 2.2/§ 3.12 checks against it. Public, no auth, writes nothing, same
@@ -9998,10 +10017,10 @@ def preview_self_convert_twoway(slug: str):
     cap_levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
     cur_season = _current_league_year()
     salaries = _self_convert_twoway_contract(bio, slug, cap_levels, cur_season)
+    cap_holds = _self_convert_twoway_holds(bio, salaries, year2)
     details = ConvertTwoWayDetails(
         player=slug,
-        contract=ContractIn(type="player", salaries=salaries,
-                            cap_holds=_self_convert_twoway_holds(bio, salaries)),
+        contract=ContractIn(type="player", salaries=salaries, cap_holds=cap_holds),
         signing_method="minimum",
     )
     ctx = {
@@ -10017,12 +10036,14 @@ def preview_self_convert_twoway(slug: str):
         "legal": not any(not c.passed and c.level == "error" for c in checks),
         "checks": [c.model_dump() for c in checks],
         "salaries": salaries,
+        "cap_holds": cap_holds,
     }
 
 
 class SelfConvertTwoWayIn(BaseModel):
     player: str
     description: str = ""
+    year2: str = "guaranteed"   # a SELF_CONVERT_YEAR2_TERMS key
 
 
 @router.post("/api/self/convert_twoway")
@@ -10070,7 +10091,7 @@ def self_convert_twoway(body: SelfConvertTwoWayIn, info: dict = Depends(get_toke
     details = ConvertTwoWayDetails(
         player=player,
         contract=ContractIn(type="player", salaries=salaries,
-                            cap_holds=_self_convert_twoway_holds(bio, salaries)),
+                            cap_holds=_self_convert_twoway_holds(bio, salaries, body.year2)),
         signing_method="minimum",
     )
     ctx = {
