@@ -146,6 +146,11 @@ check("by file finds both writes", len(audit.read_entries(file="team-state.json"
 check("by key", len(audit.read_entries(key="mle_used")) == 1)
 check("by a key nothing has", audit.read_entries(key="no-such-slug") == [])
 check("limit is honoured", len(audit.read_entries(limit=1)) == 1)
+_save_json(TMP / "coaching-settings.json", {"ATL": {"values": {"offensive_focus": "Post"}}})
+check("coaching settings are audited", len(audit.read_entries(file="coaching-settings.json")) == 1)
+check("but kept out of the public log",
+      audit.read_entries(file="coaching-settings.json", public=True) == []
+      and all(e["file"] != "coaching-settings.json" for e in audit.read_entries(public=True)))
 
 print("the actor survives middleware → dependency → endpoint")
 reset()

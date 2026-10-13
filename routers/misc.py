@@ -124,9 +124,11 @@ def get_edits(limit: int = Query(200, ge=1, le=1000),
     `actor` match exactly, `key` is a substring of a diff entry's key —
     `key=curry-stephen` answers "what has anyone changed about this player",
     `file=uta-roster.csv` answers "who moved UTA's roster". Newest first. See
-    routers/audit.py.
+    routers/audit.py. Coaching settings are left out: they are private to
+    each team.
     """
-    return {"entries": audit.read_entries(limit=limit, file=file, actor=actor, key=key)}
+    return {"entries": audit.read_entries(limit=limit, file=file, actor=actor, key=key,
+                                          public=True)}
 
 
 @router.get("/api/cap-levels")

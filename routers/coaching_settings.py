@@ -19,12 +19,12 @@ client-side only, same as the § 4.4 PDC ballot widget it borrows its UI from.
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
 from .constants import COACHING_SETTINGS_FILE, VALID_TEAMS, _coaching_lock
 from .storage import _load_json, _save_json, log_write
-from .auth import get_token_info, has_role, require_role
+from .auth import _resolve_token, get_token_info, has_role, require_role
 from . import game_day_notify
 
 router = APIRouter()
@@ -57,8 +57,21 @@ class EnterBody(BaseModel):
 
 
 @router.get("/api/coaching-settings")
-def get_coaching_settings():
-    return load_coaching_settings()
+def get_coaching_settings(authorization: Optional[str] = Header(None)):
+    """A team's coach profile is private to that team.
+
+    `streamer` (and admin) get every team, since entering them into 2K is
+    their job. Anyone else gets only the teams they hold the role for, and a
+    visitor with no token gets nothing. Not a 401: pages fetch this alongside
+    public data and should just see no settings.
+    """
+    data = load_coaching_settings()
+    info = _resolve_token(authorization)
+    if not info:
+        return {}
+    if has_role(info, "streamer") or has_role(info, "admin"):
+        return data
+    return {team: rec for team, rec in data.items() if has_role(info, team.lower())}
 
 
 @router.put("/api/coaching-settings/{team}")

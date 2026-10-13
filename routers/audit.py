@@ -55,6 +55,10 @@ _AUDITED_NAMES = {
 }
 _AUDITED_SUFFIXES = ("-roster.csv", "-deadcap.csv", "-picks.csv")
 
+# Audited, but kept out of the public edit log: a team's coach profile is
+# private to that team (GET /api/coaching-settings scopes it the same way).
+PRIVATE_NAMES = {"coaching-settings.json"}
+
 # Never audited, whatever else says otherwise — a diff would embed credentials.
 _NEVER = {"members.json", "tokens.json", "sessions.json", "google-oauth.json"}
 
@@ -240,8 +244,13 @@ def record(path: Path, old_text: Optional[str], new_text: str):
 
 
 def read_entries(limit: int = 200, file: Optional[str] = None,
-                 actor: Optional[str] = None, key: Optional[str] = None) -> list:
-    """Most recent entries first. Filters are plain substring/equality matches."""
+                 actor: Optional[str] = None, key: Optional[str] = None,
+                 public: bool = False) -> list:
+    """Most recent entries first. Filters are plain substring/equality matches.
+
+    `public` drops the files in `PRIVATE_NAMES`, for the unauthenticated
+    `GET /api/edits`.
+    """
     if not EDITS_FILE.exists():
         return []
     out: list = []
@@ -254,6 +263,8 @@ def read_entries(limit: int = 200, file: Optional[str] = None,
         try:
             entry = json.loads(raw)
         except json.JSONDecodeError:
+            continue
+        if public and entry.get("file") in PRIVATE_NAMES:
             continue
         if file and entry.get("file") != file:
             continue

@@ -79,14 +79,14 @@ PLAIN  = {"Authorization": "Bearer " + PLAIN_TOKEN}
 
 
 def rec(team):
-    return c.get("/api/coaching-settings").json().get(team)
+    return c.get("/api/coaching-settings", headers=ADMIN).json().get(team)
 
 
 # ── reading ───────────────────────────────────────────────────────────────────
 
 print("reading")
 check("an empty store reads as {}", c.get("/api/coaching-settings").json() == {})
-check("reading needs no token", c.get("/api/coaching-settings").status_code == 200)
+check("reading with no token is a 200, not a 401", c.get("/api/coaching-settings").status_code == 200)
 
 # ── writing ───────────────────────────────────────────────────────────────────
 
@@ -143,11 +143,25 @@ r3 = c.post("/api/coaching-settings/ATL/enter",
 check("entering against a stale updated_at is a 409", r3.status_code == 409)
 check("pending was not cleared by the stale attempt", rec("ATL")["pending"] is True)
 
+# ── who can read ──────────────────────────────────────────────────────────────
+
+print("reading is scoped to the team")
+c.put("/api/coaching-settings/BOS", json=BODY, headers=BOS)
+def read(h=None):
+    return c.get("/api/coaching-settings", headers=h or {}).json()
+check("no token sees nothing", read() == {})
+check("a member with no team role sees nothing", read(PLAIN) == {})
+check("a bad token sees nothing", read({"Authorization": "Bearer " + "z" * 64}) == {})
+check("a team role sees only its own team", set(read(ATL)) == {"ATL"})
+check("the other team likewise", set(read(BOS)) == {"BOS"})
+check("a streamer sees every team", set(read(STREAM)) == {"ATL", "BOS"})
+check("admin sees every team", set(read(ADMIN)) == {"ATL", "BOS"})
+
 # ── the file on disk ─────────────────────────────────────────────────────────
 
 print("the file on disk")
 raw = json.loads(cs.COACHING_SETTINGS_FILE.read_text())
-check("only teams that were saved appear", set(raw.keys()) == {"ATL"})
+check("only teams that were saved appear", set(raw.keys()) == {"ATL", "BOS"})
 
 print()
 if FAILS:
