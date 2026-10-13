@@ -34,7 +34,7 @@ from routers.transactions import (  # noqa: E402
     _renounce_eligibility, _validate_renounce, _RENOUNCE_SNAPSHOT_FIELDS,
     RenounceDetails, _validate_option, OptionDetails,
     _validate_release, ReleaseDetails,
-    _self_convert_twoway_contract, _self_convert_twoway_holds, _self_sign_pick_contract,
+    _self_convert_twoway_contract, _self_convert_twoway_holds, _self_convert_twoway_guarantee_dates, _self_sign_pick_contract,
 )
 from fastapi import HTTPException  # noqa: E402
 
@@ -396,6 +396,10 @@ check("Year 2 non-guaranteed tags it NON_GTD",
       _self_convert_twoway_holds(rfa_bio, s3, "non_guaranteed") == {NEXT: "NON_GTD", "28-29": "RFA"})
 check("Year 1 is never tagged",
       SEASON not in _self_convert_twoway_holds(rfa_bio, s3, "team_option"))
+check("a non-guaranteed Year 2 guarantees on January 10 of that season at the latest",
+      _self_convert_twoway_guarantee_dates({NEXT: "NON_GTD", "28-29": "RFA"}) == {NEXT: "2028-01-10"})
+check("a team option or guaranteed Year 2 carries no guarantee date",
+      _self_convert_twoway_guarantee_dates({NEXT: "TEAM_OPT", "28-29": "RFA"}) == {})
 raises_http("a 1-year conversion has no Year 2 to make an option", 422,
            lambda: _self_convert_twoway_holds(rfa_bio, {SEASON: "$1"}, "team_option"))
 raises_http("an unknown Year 2 term is refused", 422,

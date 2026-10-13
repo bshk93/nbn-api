@@ -10003,6 +10003,14 @@ def _self_convert_twoway_holds(bio: dict, salaries: dict[str, str],
     return holds
 
 
+def _self_convert_twoway_guarantee_dates(cap_holds: dict[str, str]) -> dict[str, str]:
+    """A non-guaranteed Year 2 (§ 2.2) becomes guaranteed on January 10 of
+    that season at the latest. The team can guarantee it sooner with a
+    `guarantee` transaction; a release before the date leaves no dead cap
+    for that year (§ 5.1)."""
+    return {season: f"20{season[3:]}-01-10" for season, tag in cap_holds.items() if tag == "NON_GTD"}
+
+
 @router.get("/api/self/convert_twoway/preview/{slug}")
 def preview_self_convert_twoway(slug: str, year2: str = "guaranteed"):
     """Read-only preview of what `POST /api/self/convert_twoway` would
@@ -10018,9 +10026,11 @@ def preview_self_convert_twoway(slug: str, year2: str = "guaranteed"):
     cur_season = _current_league_year()
     salaries = _self_convert_twoway_contract(bio, slug, cap_levels, cur_season)
     cap_holds = _self_convert_twoway_holds(bio, salaries, year2)
+    guarantee_dates = _self_convert_twoway_guarantee_dates(cap_holds)
     details = ConvertTwoWayDetails(
         player=slug,
-        contract=ContractIn(type="player", salaries=salaries, cap_holds=cap_holds),
+        contract=ContractIn(type="player", salaries=salaries, cap_holds=cap_holds,
+                            guarantee_dates=guarantee_dates),
         signing_method="minimum",
     )
     ctx = {
@@ -10037,6 +10047,7 @@ def preview_self_convert_twoway(slug: str, year2: str = "guaranteed"):
         "checks": [c.model_dump() for c in checks],
         "salaries": salaries,
         "cap_holds": cap_holds,
+        "guarantee_dates": guarantee_dates,
     }
 
 
@@ -10087,11 +10098,12 @@ def self_convert_twoway(body: SelfConvertTwoWayIn, info: dict = Depends(get_toke
     cap_levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
     cur_season = _season_for_date(txn_date)
     salaries = _self_convert_twoway_contract(bio, player, cap_levels, cur_season)
+    cap_holds = _self_convert_twoway_holds(bio, salaries, body.year2)
 
     details = ConvertTwoWayDetails(
         player=player,
-        contract=ContractIn(type="player", salaries=salaries,
-                            cap_holds=_self_convert_twoway_holds(bio, salaries, body.year2)),
+        contract=ContractIn(type="player", salaries=salaries, cap_holds=cap_holds,
+                            guarantee_dates=_self_convert_twoway_guarantee_dates(cap_holds)),
         signing_method="minimum",
     )
     ctx = {
