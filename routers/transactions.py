@@ -921,7 +921,7 @@ def _season_after(season: str) -> str:
     return f"{(int(a) + 1) % 100:02d}-{(int(b) + 1) % 100:02d}"
 
 
-def _renounce_eligibility(player: str, bios: dict, cur_season: str) -> dict:
+def _renounce_eligibility(player: str, bios: dict, cur_season: str, txn_date: str) -> dict:
     """Whether `player` is a renounceable free-agent hold — or unsigned draft
     rights (§ 7.1) — as ``{ok, team, cutoff, hold_type, reason}``.
 
@@ -973,6 +973,20 @@ def _renounce_eligibility(player: str, bios: dict, cur_season: str) -> dict:
         )
         return out
 
+    # A hold for next season means the contract still runs through this one.
+    # That player is only a free agent once this season's games are over;
+    # before that he is under contract and leaves by release (§ 5.1), with
+    # dead cap. Unknown season end (no schedule yet) counts as not over.
+    if fa_years[0] == next_season:
+        bounds = season_calendar.regular_season_bounds(cur_season)
+        if not bounds or txn_date <= bounds[1]:
+            out["reason"] = (
+                f"Player {player!r} is under contract for {cur_season}. Renounce "
+                f"applies once that season ends; use Release to waive a player "
+                f"under contract (§ 3.10, § 5.1)."
+            )
+            return out
+
     out.update(ok=True, cutoff=fa_years[0], hold_type=holds[fa_years[0]])
     return out
 
@@ -995,7 +1009,7 @@ def _apply_renounce(details: RenounceDetails, txn_date: str, info: dict) -> tupl
     otherwise destroys contract state with nothing to reconstruct it from.
     """
     bios = load_player_bios()
-    elig = _renounce_eligibility(details.player, bios, _season_for_date(txn_date))
+    elig = _renounce_eligibility(details.player, bios, _season_for_date(txn_date), txn_date)
     if not elig["ok"]:
         raise HTTPException(status_code=422, detail=elig["reason"])
     team = elig["team"]
@@ -5488,7 +5502,7 @@ def _validate_renounce(details: RenounceDetails, ctx: dict) -> list[CheckResult]
     checks: list[CheckResult] = []
     bios = ctx["bios"]; season = ctx["cur_season"]
 
-    elig = _renounce_eligibility(details.player, bios, season)
+    elig = _renounce_eligibility(details.player, bios, season, ctx["txn_date"])
     if not elig["ok"]:
         checks.append(CheckResult(
             check="renounce_eligible", passed=False, level="error", message=elig["reason"],
@@ -5578,7 +5592,7 @@ def _renounce_fact_sheet(details: RenounceDetails, ctx: dict) -> dict:
     validators use — so this can't credit a team with room the validator didn't.
     """
     bios = ctx["bios"]; season = ctx["cur_season"]
-    elig = _renounce_eligibility(details.player, bios, season)
+    elig = _renounce_eligibility(details.player, bios, season, ctx["txn_date"])
     team = elig["team"]
     bio = bios.get(details.player) or {}
 

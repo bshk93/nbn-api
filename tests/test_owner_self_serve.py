@@ -100,13 +100,18 @@ import routers.transactions as txn  # noqa: E402
 
 SEASON = "26-27"      # so the FA window is 27-28
 NEXT = "27-28"
+# 26-27's regular season, fixed here so the test doesn't read the live schedule.
+BOUNDS = ("2026-10-20", "2027-04-11")
+txn.season_calendar.regular_season_bounds = lambda s: BOUNDS if s == SEASON else None
+# A hold for NEXT is only renounceable once 26-27 is played out.
+AFTER_SEASON = "2027-05-01"
 
 
-def elig(holds, on_roster=True, team="PHX", player_type=""):
+def elig(holds, on_roster=True, team="PHX", player_type="", date=AFTER_SEASON):
     txn._build_team_map = lambda: ({"p": team} if on_roster else {})
     bios = {"p": {"name": "TEST, PLAYER", "cap_holds": holds, "type": player_type,
                   "salaries": {NEXT: "$10,000,000"}}}
-    return _renounce_eligibility("p", bios, SEASON)
+    return _renounce_eligibility("p", bios, SEASON, date)
 
 
 check("a UFA hold for the upcoming season is renounceable",
@@ -132,7 +137,28 @@ check("...reported with a DRAFT_RIGHTS hold_type, not a UFA/RFA one",
 check("a free agent on nobody's roster is not renounceable",
       not elig({NEXT: "UFA"}, on_roster=False)["ok"])
 check("an unknown slug is rejected, not scored",
-      not _renounce_eligibility("ghost", {}, SEASON)["ok"])
+      not _renounce_eligibility("ghost", {}, SEASON, AFTER_SEASON)["ok"])
+
+# A contract that runs through this season is not a free-agent hold until the
+# season's games are over (CLE / D'Angelo Russell, renounced 2026-10-13 with
+# 26-27 unplayed — a release with no dead cap).
+check("a hold for next season is not renounceable before this season starts",
+      not elig({NEXT: "UFA"}, date="2026-10-13")["ok"])
+check("...and says to release instead",
+      "Release" in elig({NEXT: "UFA"}, date="2026-10-13")["reason"])
+check("...nor during it",
+      not elig({NEXT: "UFA"}, date="2027-01-15")["ok"])
+check("...nor on the last regular-season day",
+      not elig({NEXT: "UFA"}, date=BOUNDS[1])["ok"])
+check("...but is the day after", elig({NEXT: "UFA"}, date="2027-04-12")["ok"])
+txn.season_calendar.regular_season_bounds = lambda s: None
+check("with no schedule on file the season is not assumed over",
+      not elig({NEXT: "UFA"})["ok"])
+check("...which never affects a hold already in the current season",
+      elig({SEASON: "UFA"})["ok"])
+txn.season_calendar.regular_season_bounds = lambda s: BOUNDS if s == SEASON else None
+check("a current-season hold is renounceable mid-season",
+      elig({SEASON: "UFA"}, date="2027-01-15")["ok"])
 
 # cutoff drives what the apply path trims — getting it wrong either strands a
 # hold-season salary on the bio or eats a real prior-season earnings row.
@@ -157,7 +183,7 @@ def validate(holds, roster_count, bird=None, on_roster=True, bio_type="player"):
     bios = {"p": {"name": "TEST, PLAYER", "cap_holds": holds, "type": bio_type,
                   "salaries": {NEXT: "$10,000,000"}}}
     ctx = {"bios": bios, "cur_season": SEASON, "cap_levels": CAP_LEVELS,
-           "team_state": {}, "txn_date": TODAY, "trade_exceptions": {}}
+           "team_state": {}, "txn_date": AFTER_SEASON, "trade_exceptions": {}}
     return _validate_renounce(RenounceDetails(player="p"), ctx)
 
 
