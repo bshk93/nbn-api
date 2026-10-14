@@ -803,6 +803,11 @@ class DeclareWinnerIn(BaseModel):
     # this false that fails on warnings alone comes back asking for
     # confirmation instead of writing; a real error is never confirmable.
     confirm_warnings: bool = False
+    # "above" / "below": whether the signing's salary is above next season's
+    # EAPS, for a Full Bird trailing hold priced before that EAPS is set
+    # (§ 3.10). The head answers it when the declare call asks for it; an
+    # offer's own answer, when it carries one, wins.
+    eaps_assumption: Optional[str] = None
 
 
 class AdvanceIn(BaseModel):
@@ -2452,7 +2457,9 @@ def declare_winner(slug: str, body: DeclareWinnerIn, info: dict = Depends(requir
         writes = _declare_writes(offer, is_rfa, incumbent) if offer else None
         if body.key == QO:
             txn = apply_with_warning_confirm(
-                apply_accept_qo, AcceptQualifyingOfferDetails(player=slug), txn_date, info,
+                apply_accept_qo,
+                AcceptQualifyingOfferDetails(player=slug, eaps_assumption=body.eaps_assumption),
+                txn_date, info,
                 description=f"FA round {round_id} — the qualifying offer won the ballot",
                 confirm_warnings=body.confirm_warnings)
         elif offer:
@@ -2465,7 +2472,7 @@ def declare_winner(slug: str, body: DeclareWinnerIn, info: dict = Depends(requir
             common_kwargs = dict(
                 signing_method=terms.get("signing_method"),
                 bird_rights_type=terms.get("bird_rights_type"),
-                eaps_assumption=terms.get("eaps_assumption"),
+                eaps_assumption=terms.get("eaps_assumption") or body.eaps_assumption,
             )
             description = f"FA round {round_id} — offer #{offer['number']} won the ballot"
             # The #fa-news line below is a bot post, which the #roster-log

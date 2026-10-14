@@ -455,6 +455,9 @@ class AcceptQualifyingOfferDetails(BaseModel):
     """§ 3.1: the player signs his qualifying offer — a one-year deal at the QO
     amount with his own team. Decided by the PDC ballot, not the team."""
     player: str
+    # "above" / "below" — see SignDetails. Needed only when the deal's trailing
+    # UFA hold is Full Bird and next season has no EAPS on file yet (§ 3.10).
+    eaps_assumption: Optional[str] = None
 
 
 class OfferSheetDetails(BaseModel):
@@ -8251,9 +8254,34 @@ def _validate_accept_qo(details: AcceptQualifyingOfferDetails, ctx: dict) -> lis
             message=f"{name}'s qualifying offer has no amount on file — the office has to set it first.")]
     what = ("a one-year two-way contract" if rec.get("two_way")
             else f"one year at ${rec['amount']:,}")
-    return [CheckResult(
+    checks = [CheckResult(
         check="qo_acceptable", passed=True,
         message=f"{name} signs his qualifying offer with {team}: {what}, then a UFA (§ 3.1).")]
+    # The deal rolls into a UFA hold next season, priced at signing (§ 3.10).
+    # A Full Bird hold needs that season's EAPS; with none on file, signing
+    # 422s unless someone says which side of it the QO falls. Ask here, where
+    # it can be answered, instead of failing at apply (Agbaji, 2026-10-14).
+    hold = _preview_fa_hold(bio, team, _qo_contract(rec, cur), ctx.get("cap_levels") or {},
+                            eaps_assumption=details.eaps_assumption, slug=details.player,
+                            signing_method="qualifying_offer")
+    if hold and hold.get("needs_eaps"):
+        checks.append(CheckResult(
+            check="qo_hold_eaps", passed=False,
+            message=(f"His {hold['season']} UFA hold is Full Bird, which is 150% or 190% of "
+                     f"${rec['amount']:,} depending on {hold['season']}'s EAPS, and that EAPS "
+                     f"isn't set yet (§ 3.10). Say whether ${rec['amount']:,} is above or "
+                     f"below it; the hold is a placeholder until the EAPS is set.")))
+    return checks
+
+
+def _qo_contract(rec: dict, cur: str) -> ContractIn:
+    """The contract a qualifying offer signs: one year at its amount (or a
+    one-year two-way), rolling into a UFA hold."""
+    nxt = _season_after(cur)
+    if rec.get("two_way"):
+        # Two-way deals carry "$1" on the trailing hold so the FA pool sees it.
+        return ContractIn(type="two-way", salaries={cur: "$0", nxt: "$1"}, cap_holds={nxt: "UFA"})
+    return ContractIn(type="player", salaries={cur: f"${rec['amount']:,}"}, cap_holds={nxt: "UFA"})
 
 
 def _apply_qualifying_offer(details: QualifyingOfferDetails, txn_date: str, info: dict,
@@ -8316,14 +8344,9 @@ def _apply_accept_qo(details: AcceptQualifyingOfferDetails, txn_date: str, info:
     rec = _qo_record(bio or {}, cur)
     if not team or rec.get("status") != "extended" or rec.get("amount") is None:
         raise HTTPException(status_code=422, detail=f"No extended {cur} qualifying offer to accept")
-    nxt = _season_after(cur)
-    if rec.get("two_way"):
-        # Two-way deals carry "$1" on the trailing hold so the FA pool sees it.
-        contract = ContractIn(type="two-way", salaries={cur: "$0", nxt: "$1"}, cap_holds={nxt: "UFA"})
-    else:
-        contract = ContractIn(type="player", salaries={cur: f"${rec['amount']:,}"}, cap_holds={nxt: "UFA"})
-    _apply_sign(SignDetails(player=details.player, team=team, contract=contract,
-                            signing_method="qualifying_offer"), txn_date, info, txn_id=txn_id)
+    _apply_sign(SignDetails(player=details.player, team=team, contract=_qo_contract(rec, cur),
+                            signing_method="qualifying_offer",
+                            eaps_assumption=details.eaps_assumption), txn_date, info, txn_id=txn_id)
 
     bios = load_player_bios()
     rec = bios[details.player]["qualifying_offers"][cur]

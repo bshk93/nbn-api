@@ -207,6 +207,29 @@ def main():
     check("…and marks the QO accepted",
           store["bios"]["hardy-jaden"]["qualifying_offers"]["26-27"]["status"] == "accepted")
 
+    # Ochai Agbaji, 2026-10-14: a Full Bird trailing hold with no 27-28 EAPS
+    # made _apply_sign 422 at declare-winner, with no way to answer it.
+    print("\nAccept: a Full Bird hold before next season's EAPS is set")
+    b = bios_fixture()
+    b["hardy-jaden"]["qualifying_offers"] = {"26-27": {"status": "extended", "amount": 5_910_028,
+                                                       "two_way": False}}
+    patch_world(b)
+    real_tier = tx._derive_bird_tier
+    tx._derive_bird_tier = lambda *a, **k: "QVFA"
+    try:
+        c = _validate_accept_qo(AcceptQualifyingOfferDetails(player="hardy-jaden"), ctx(b, "26-27"))
+        check("asks which side of EAPS the QO falls, as a blocking check", failed(c, "qo_hold_eaps"))
+        c = _validate_accept_qo(AcceptQualifyingOfferDetails(player="hardy-jaden", eaps_assumption="below"),
+                                ctx(b, "26-27"))
+        check("…and is satisfied once it's answered",
+              not any(not x.passed for x in c), [x.check for x in c if not x.passed])
+        signed.clear()
+        tx._apply_accept_qo(AcceptQualifyingOfferDetails(player="hardy-jaden", eaps_assumption="below"),
+                            "2026-10-02", {"name": "t"}, txn_id="x4")
+        check("the answer reaches the signing", signed["details"].eaps_assumption == "below")
+    finally:
+        tx._derive_bird_tier = real_tier
+
     print("\nLapse sweep")
     b = bios_fixture()
     b["hardy-jaden"]["qualifying_offers"] = {"26-27": {"status": "extended", "amount": 1}}
