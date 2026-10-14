@@ -65,7 +65,7 @@ from routers import audit                                              # noqa: E
 from routers.constants import CAP_LEVELS_FILE                          # noqa: E402
 from routers.players import load_player_bios, save_player_bios         # noqa: E402
 from routers.storage import _load_json, _parse_dollar, _season_start, _current_league_year  # noqa: E402
-from routers.transactions import _min_salary_for, _one_year_min_cap_hit  # noqa: E402
+from routers.transactions import _min_salary_for, _one_year_min_cap_hit, _years_exp_basis  # noqa: E402
 
 EXEMPT_TYPES = {"two-way", "dead"}
 
@@ -80,7 +80,7 @@ def _contract_target(bio: dict, season: str, cap_levels: dict, entry: dict):
     plain dict from `bio["contracts"]`, but both helpers read the tier via
     `getattr(contract, "years_experience", None)` — a plain dict never has
     that attribute, so it must be wrapped or the persisted value is silently
-    ignored and every contract falls through to the draft_year proxy."""
+    ignored and every contract falls through to the player's own figure."""
     # salaries/cap_holds too: a declared tier climbs one row per contract year
     # from the contract's first season, so the helper needs to know which that is.
     contract = SimpleNamespace(years_experience=entry.get("years_experience"),
@@ -147,15 +147,17 @@ def build_plan(bios: dict, cap_levels: dict, players: set[str] | None = None):
                 if target is None:
                     skips.append({
                         "player": slug, "season": season,
-                        "reason": "can't establish an experience tier (no declared "
-                                  "years_experience, no draft_year, or no scale configured)",
+                        "reason": "can't establish an experience tier (none on the "
+                                  "contract, the bio or the draft year, or no scale configured)",
                     })
                     continue
                 before_amt = _parse_dollar(raw)
                 if before_amt == target:
                     continue
-                basis = ("declared years_experience" if entry.get("years_experience") is not None
-                         else "draft_year proxy")
+                basis = _years_exp_basis(bio, season, SimpleNamespace(
+                    years_experience=entry.get("years_experience"),
+                    salaries=entry.get("salaries") or {},
+                    cap_holds=entry.get("cap_holds") or {}))[1]
                 changes.append({
                     "player": slug, "contract_idx": idx, "season": season,
                     "before": raw, "after": _fmt_dollar(target), "basis": basis,

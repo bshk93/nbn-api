@@ -2,7 +2,7 @@ import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .constants import (
     DATA_DIR, PLAYER_BIOS_FILE, OVR_FILE, ATTRIBUTES_FILE, VALID_TEAMS,
@@ -115,6 +115,15 @@ def _scrub_trading_block(removals: dict[str, set[str]], bios: dict) -> None:
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
 
+class NbaExperience(BaseModel):
+    """Years of NBA experience the player has in `season`; it moves one a
+    season from there. Overrides the draft-year proxy wherever experience is
+    read (`_years_exp` in transactions.py), for a player whose draft year
+    doesn't reflect his NBA service — years overseas, a late debut."""
+    years: int = Field(ge=0, le=30)
+    season: str = Field(pattern=r"^\d{2}-\d{2}$")
+
+
 class PlayerBio(BaseModel):
     name: str
     pos: list[str] = []
@@ -139,6 +148,7 @@ class PlayerBio(BaseModel):
     contracts: list[dict] = []
     jersey_number: Optional[str] = None
     secondary_pos: Optional[str] = None
+    nba_experience: Optional[NbaExperience] = None
     retired: bool = False
     notes: str = ""
 

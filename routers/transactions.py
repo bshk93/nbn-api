@@ -315,7 +315,7 @@ class ContractIn(BaseModel):
     # it — `draft_year` is the NBN draft for identity purposes and is null for
     # every player who entered the league before it (and forever, for UDFAs),
     # which silently priced multi-year minimums flat at the rookie tier.
-    # Optional: absent, the draft_year proxy applies exactly as before.
+    # Optional: absent, the player's own figure applies (`_years_exp`).
     years_experience: Optional[int] = None
     cap_holds: dict[str, str] = {}
     guaranteed: dict[str, str] = {}
@@ -2407,8 +2407,8 @@ def _check_two_way_terms(contract: "ContractIn", player: str, team: Optional[str
     5-year two-way for a veteran at $3M would have gone straight through.
 
     Salary and length are exact and are errors. Experience is **not** enforced:
-    the only proxy on file is the draft-year one § 3.12 prices minimums with,
-    and years since the draft is not NBA service. 10 of the 71 two-ways on the
+    for most players the only figure on file is the draft-year proxy, and years
+    since the draft is not NBA service (the bio's `nba_experience` corrects it). 10 of the 71 two-ways on the
     books when this was written read over 3 on it (Duop Reath reads 8) — real
     two-way deals the league mirrors, for players who spent those years overseas
     or in the G League. So it reports, and a human decides (§ 2.2 is 👁 for it).
@@ -2434,21 +2434,17 @@ def _check_two_way_terms(contract: "ContractIn", player: str, team: Optional[str
         ))
 
     name = bio.get("name") or player
-    declared = getattr(contract, "years_experience", None)
-    draft_year = bio.get("draft_year")
-    if declared is not None:
-        exp, basis = int(declared), "declared on the contract"
-    elif draft_year:
-        exp, basis = _season_start(season) + 2000 - int(draft_year), f"{draft_year} draft class"
-    else:
-        exp, basis = None, None
+    exp, basis = _years_exp_basis(bio, season, contract)
     if exp is None:
         msg = (f"{name}'s NBA experience isn't on file — confirm by hand that it's "
                f"{TWO_WAY_MAX_EXPERIENCE} years or fewer (§ 2.2).")
     elif exp > TWO_WAY_MAX_EXPERIENCE:
+        caveat = (" — but years since the draft aren't NBA service. Confirm by hand that "
+                  f"they've played {TWO_WAY_MAX_EXPERIENCE} NBA seasons or fewer, and set "
+                  "their NBA experience on their bio if not"
+                  if "draft year" in basis else "")
         msg = (f"{name} reads {exp} years of experience ({basis}), over § 2.2's "
-               f"{TWO_WAY_MAX_EXPERIENCE} — but years since the draft aren't NBA service. "
-               f"Confirm by hand that they've played {TWO_WAY_MAX_EXPERIENCE} NBA seasons or fewer.")
+               f"{TWO_WAY_MAX_EXPERIENCE}{caveat}.")
     else:
         msg = f"{name} reads {exp} years of experience ({basis}), within § 2.2's {TWO_WAY_MAX_EXPERIENCE}."
     checks.append(CheckResult(check="two_way_experience", passed=True, level="info", message=msg))
@@ -2716,8 +2712,7 @@ def _contract_years_exp(contract, season: str) -> Optional[int]:
     (the "2026 Rookie Contracts" tab). See `_SECOND_ROUND_SCALE_TIERS`.
 
     Returns None when nothing is declared, which callers must read as "fall
-    back to the draft_year proxy" (which climbs with the calendar anyway), not
-    as zero experience.
+    back to the player's own figure" (`_years_exp`), not as zero experience.
     """
     declared = getattr(contract, "years_experience", None) if contract else None
     if declared is None:
@@ -2725,6 +2720,51 @@ def _contract_years_exp(contract, season: str) -> Optional[int]:
     first = _contract_first_season(contract)
     offset = max(0, _season_start(season) - _season_start(first)) if first else 0
     return max(0, int(declared)) + offset
+
+
+def _bio_nba_experience(bio: dict, season: str) -> Optional[int]:
+    """The bio's own `nba_experience` figure for `season`, or None when it has
+    none. Stored as `{"years": N, "season": "YY-YY"}` — N years of NBA
+    experience in that season — and it moves one a season in either direction,
+    like the draft-year proxy it overrides."""
+    rec = (bio or {}).get("nba_experience") or {}
+    years, base = rec.get("years"), rec.get("season")
+    if years is None or not base:
+        return None
+    return max(0, int(years) + _season_start(season) - _season_start(base))
+
+
+def _years_exp_basis(bio: dict, season: str, contract=None) -> tuple[Optional[int], Optional[str]]:
+    """Years of NBA experience in `season`, and where the figure came from.
+    This is the one place that decides it. First match wins:
+
+    1. the contract being priced, when it states its experience (§ 3.12);
+    2. the bio's `nba_experience`, set by the rosters office for a player whose
+       draft year doesn't reflect his NBA service (years overseas, a late
+       debut, an undrafted player);
+    3. the experience stated on the player's most recent recorded contract;
+    4. the draft-year proxy, `season start − draft_year`.
+
+    (None, None) when none of them exists — callers read that as "can't tell",
+    never as zero. Each figure climbs one a season (§ 3.12)."""
+    exp = _contract_years_exp(contract, season)
+    if exp is not None:
+        return exp, "stated on the contract"
+    exp = _bio_nba_experience(bio, season)
+    if exp is not None:
+        return exp, "set on his bio"
+    exp = _contract_years_exp(_last_contract_ns(bio or {}), season)
+    if exp is not None:
+        return exp, "stated on his last contract"
+    draft_year = (bio or {}).get("draft_year")
+    if draft_year:
+        return max(0, _season_start(season) + 2000 - int(draft_year)), f"{draft_year} draft year"
+    return None, None
+
+
+def _years_exp(bio: dict, season: str, contract=None) -> Optional[int]:
+    """`_years_exp_basis` without the source."""
+    return _years_exp_basis(bio, season, contract)[0]
 
 
 def _max_salary_pct(years_exp: int) -> float:
@@ -2739,18 +2779,17 @@ def _max_salary_pct(years_exp: int) -> float:
     return 0.25
 
 
-def _max_salary(bio: dict, season: str, cap_levels: dict) -> Optional[int]:
-    """§ 3.11: the player's maximum Year 1 salary for `season`, derived from
-    the season's cap and the player's real NBA draft_year (same experience
-    proxy as _one_year_min_cap_hit). Returns None if experience or the
-    season's cap can't be determined (undrafted player, cap not configured
-    yet) — callers should treat that as "can't check," not "no cap applies."
+def _max_salary(bio: dict, season: str, cap_levels: dict, contract=None) -> Optional[int]:
+    """§ 3.11: the player's maximum Year 1 salary for `season`, from the
+    season's cap and his years of experience (`_years_exp`). Returns None if
+    experience or the season's cap can't be determined (cap not configured
+    yet, nothing to judge experience by) — callers should treat that as
+    "can't check," not "no cap applies."
     """
-    draft_year = bio.get("draft_year")
     cap = (cap_levels.get(season, {}) or {}).get("cap")
-    if not draft_year or not cap:
+    years_exp = _years_exp(bio, season, contract)
+    if years_exp is None or not cap:
         return None
-    years_exp = _season_start(season) + 2000 - int(draft_year)
     return int(cap * _max_salary_pct(years_exp))
 
 
@@ -2850,14 +2889,9 @@ def _last_contract_ns(bio: dict):
 
 
 def _qo_years_exp(bio: dict, hold_season: str) -> Optional[int]:
-    """Years of NBA experience entering `hold_season` (§ 3.1): the experience
-    declared on the contract, climbing a row a year, else the draft-year proxy.
-    None when neither exists — an undrafted player is judged by hand."""
-    declared = _contract_years_exp(_last_contract_ns(bio), hold_season)
-    if declared is not None:
-        return declared
-    dy = bio.get("draft_year")
-    return _season_start(hold_season) + 2000 - int(dy) if dy else None
+    """Years of NBA experience entering `hold_season` (§ 3.1), by `_years_exp`.
+    None when there is nothing to judge it by — that player is judged by hand."""
+    return _years_exp(bio, hold_season)
 
 
 def _qo_amount(bio: dict, hold_season: str, cap_levels: dict) -> Optional[int]:
@@ -2882,7 +2916,7 @@ def _qo_amount(bio: dict, hold_season: str, cap_levels: dict) -> Optional[int]:
         if int(bio["draft_year"]) >= _ROOKIE_QO_BUMP_FROM_CLASS:
             pct += _ROOKIE_QO_BUMP
         return round(prior * (1 + pct))
-    min_amt = _min_salary_for(bio, hold_season, cap_levels, _last_contract_ns(bio))
+    min_amt = _min_salary_for(bio, hold_season, cap_levels)
     raise_amt = round(prior * 1.25) if prior else None
     candidates = [v for v in (min_amt, raise_amt) if v]
     return max(candidates) if candidates else None
@@ -3528,16 +3562,10 @@ def _minimum_contract_hold(bio: dict, season: str, cap_levels: dict) -> Optional
     """§ 3.10: a player coming off a minimum contract carries a hold of the
     minimum salary, capped at the 2-year veteran minimum — the same figure
     § 3.12 charges for a 1-year minimum deal, so it is that helper's answer
-    for the hold season. Experience comes from the contract the hold follows
-    when it declared one (climbing a row per year, `_contract_years_exp`),
-    else the draft_year proxy. None when the season has no scale yet."""
-    last = (bio.get("contracts") or [None])[-1] or {}
-    contract = None
-    if last.get("years_experience") is not None:
-        contract = SimpleNamespace(years_experience=last["years_experience"],
-                                   salaries=last.get("salaries") or {},
-                                   cap_holds=last.get("cap_holds") or {})
-    return _one_year_min_cap_hit(bio, season, cap_levels, contract=contract)
+    for the hold season. Experience is the player's own figure (`_years_exp`),
+    which reaches the contract the hold follows when that contract stated one.
+    None when the season has no scale yet."""
+    return _one_year_min_cap_hit(bio, season, cap_levels)
 
 
 def _preview_fa_hold(
@@ -3621,21 +3649,17 @@ def _one_year_min_cap_hit(bio: dict, season: str, cap_levels: dict,
     """§ 3.12: a 1-year minimum contract's cap hit is capped at the 2-year
     veteran minimum, regardless of the player's actual NBA experience tier —
     the league reimburses the difference, mirroring the NBA's veteran-minimum
-    hardship exception. `draft_year` on the bio is the player's real NBA
-    draft year (not the NBN fantasy draft), so it's a reasonable proxy for
-    years of NBA experience. Returns None if experience or the season's scale
-    can't be determined (e.g. undrafted player, scale not configured yet) —
+    hardship exception. Experience comes from `_years_exp`. Returns None if
+    experience or the season's scale can't be determined (e.g. nothing to
+    judge experience by, scale not configured yet) —
     callers should treat that as "can't check," not "no cap applies."
     """
     scale = (cap_levels.get(season, {}) or {}).get("min_salary_scale") or {}
     if not scale:
         return None
-    years_exp = _contract_years_exp(contract, season)
+    years_exp = _years_exp(bio, season, contract)
     if years_exp is None:
-        draft_year = bio.get("draft_year")
-        if not draft_year:
-            return None
-        years_exp = _season_start(season) + 2000 - int(draft_year)
+        return None
     tier_amt = scale.get(_min_salary_scale_tier(years_exp), 0)
     two_yr_amt = scale.get("2", 0)
     if tier_amt <= 0:
@@ -5065,11 +5089,7 @@ def _minimum_year_ceiling(bio: dict, season: str, cap_levels: dict,
     scale = _min_scale_for_season(season, cap_levels)
     if not scale:
         return None
-    years_exp = _contract_years_exp(contract, season)
-    if years_exp is None:
-        draft_year = (bio or {}).get("draft_year")
-        if draft_year:
-            years_exp = _season_start(season) + 2000 - int(draft_year)
+    years_exp = _years_exp(bio, season, contract)
     if years_exp is not None:
         amt = scale.get(_min_salary_scale_tier(years_exp))
         if amt:
@@ -5109,8 +5129,8 @@ def _check_minimum_salary(contract, player: str, bios: dict, season: str,
       * Year 1, signed in-season   -> below floor is a *warning* (likely prorated)
       * Year 1, signed in the offseason, or any later year -> *error*
       * between the league floor and the player's own experience tier ->
-        warning, since experience is inferred from `draft_year` rather than
-        verified (same treatment § 3.11 gives it)
+        warning, since experience (`_years_exp`) is usually inferred rather
+        than verified (same treatment § 3.11 gives it)
 
     A genuine 1-year `minimum` deal (a single salary year) is checked against
     the § 3.12 veteran-minimum hardship cap (`_one_year_min_cap_hit`) instead
@@ -5158,10 +5178,8 @@ def _check_minimum_salary(contract, player: str, bios: dict, season: str,
                      if is_one_year_min else
                      _min_salary_for(bios.get(player) or {}, yr, cap_levels, contract))
         if tier_floor and amount < tier_floor:
-            declared = _contract_years_exp(contract, yr)
-            basis = (f"{declared} years of experience in {yr}, per the contract"
-                     if declared is not None else
-                     "experience inferred from their real NBA draft year")
+            exp, source = _years_exp_basis(bios.get(player) or {}, yr, contract)
+            basis = f"{exp} years of experience in {yr}, {source}"
             return CheckResult(
                 check=check_name, passed=False, level="warning",
                 message=(
@@ -5173,11 +5191,11 @@ def _check_minimum_salary(contract, player: str, bios: dict, season: str,
 
     # Experience unknown *and* the deal is priced in minimum territory: say so
     # rather than passing clean. This is the hole a flat multi-year minimum went
-    # through — no draft_year meant no tier to compare against, so a 12-year
+    # through — no experience meant no tier to compare against, so a 12-year
     # veteran signed at the rookie minimum for every year reported "meets the
     # § 3.12 minimum salary." Only fires when it could actually be a minimum
     # deal, so ordinary signings stay quiet.
-    if _contract_years_exp(contract, season) is None and not (bios.get(player) or {}).get("draft_year"):
+    if _years_exp(bios.get(player) or {}, season, contract) is None:
         first = min((contract.salaries or {}), key=_season_start, default=None)
         vet_min = _min_scale_for_season(first, cap_levels).get("10+", 0) if first else 0
         if first and vet_min and _parse_dollar(contract.salaries[first]) <= vet_min:
@@ -5185,8 +5203,8 @@ def _check_minimum_salary(contract, player: str, bios: dict, season: str,
                 check=check_name, passed=False, level="warning",
                 message=(
                     f"This is priced as a minimum contract, but {player}'s years of NBA "
-                    f"experience can't be established — no draft year on file and none "
-                    f"declared on the contract — so no year could be checked against its "
+                    f"experience can't be established — none on the contract, his bio or "
+                    f"his draft year — so no year could be checked against its "
                     f"tier on the Minimum Salary Scale (§ 3.12). Set the contract's years "
                     f"of experience so each year is priced and validated on its own tier."
                 ),
@@ -5199,37 +5217,42 @@ def _check_minimum_salary(contract, player: str, bios: dict, season: str,
 
 
 def _check_declared_experience(contract, player: str, bios: dict) -> Optional[CheckResult]:
-    """§ 3.12: a contract's declared years of experience, against the
-    draft-year count. Declaring fewer years than the draft year gives prices a
-    minimum on a cheaper tier, and can read a player as two-way eligible
-    (§ 2.2) when he isn't, so it is a warning a person has to confirm.
+    """§ 3.12: a contract's declared years of experience, against the player's
+    own figure (`_years_exp` without the contract: his bio's `nba_experience`,
+    else his last contract's, else the draft year). Declaring fewer years
+    prices a minimum on a cheaper tier, and can read a player as two-way
+    eligible (§ 2.2) when he isn't, so it is a warning a person has to confirm.
 
     Not an error: the draft year is a proxy, and for some players it is wrong.
-    Declaring more years than the draft year gives only costs the team, so
-    that passes. Added after Blake Hinson's ORL minimum (2026-10-08): it
-    declared 0 against a 2024 draft class, which priced it two tiers low and
+    The fix for a wrong one is the bio's `nba_experience`, which then stops
+    this warning for every later contract. Declaring more years only costs the
+    team, so that passes. Added after Blake Hinson's ORL minimum (2026-10-08):
+    it declared 0 against a 2024 draft class, which priced it two tiers low and
     let it clear a hard cap the correct price breached.
 
-    None when the contract declares nothing or there is no draft year."""
+    None when the contract declares nothing or the player has no figure."""
     declared = getattr(contract, "years_experience", None)
     bio = bios.get(player) or {}
-    draft_year = bio.get("draft_year")
     first = _contract_first_season(contract)
-    if declared is None or not draft_year or not first:
+    if declared is None or not first:
         return None
-    expected = max(0, _season_start(first) + 2000 - int(draft_year))
+    expected, source = _years_exp_basis(bio, first)
+    if expected is None:
+        return None
     name = _display_name(bio.get("name") or "") or player
     if int(declared) < expected:
+        fix = ("unless the draft year is wrong — if it is, set his NBA experience on his bio"
+               if "draft year" in source else "unless that figure is wrong")
         return CheckResult(
             check="declared_experience", passed=False, level="warning",
             message=(f"The contract gives {name} {int(declared)} years of experience in {first}, "
-                     f"but the {draft_year} draft year gives {expected} (§ 3.12). Fewer years "
-                     f"means a cheaper minimum tier. Use {expected} unless the draft year is wrong."),
+                     f"but his {source} gives {expected} (§ 3.12). Fewer years "
+                     f"means a cheaper minimum tier. Use {expected} {fix}."),
         )
     return CheckResult(
         check="declared_experience", passed=True, level="info",
         message=(f"Declared experience ({int(declared)} in {first}) is not below the "
-                 f"{draft_year} draft year's {expected} (§ 3.12)."),
+                 f"{expected} his {source} gives (§ 3.12)."),
     )
 
 
@@ -5241,12 +5264,9 @@ def _min_salary_for(bio: dict, season: str, cap_levels: dict,
     scale = (cap_levels.get(season, {}) or {}).get("min_salary_scale") or {}
     if not scale:
         return None
-    years_exp = _contract_years_exp(contract, season)
+    years_exp = _years_exp(bio, season, contract)
     if years_exp is None:
-        draft_year = bio.get("draft_year")
-        if not draft_year:
-            return None
-        years_exp = _season_start(season) + 2000 - int(draft_year)
+        return None
     return scale.get(_min_salary_scale_tier(years_exp)) or None
 
 
@@ -5259,7 +5279,7 @@ def _check_minimum_contract_cap_hit(details: SignDetails, bios: dict, season: st
     scale per-year instead and isn't checked here. This is advisory (a
     warning, force-through-able) since § 3.12 is manual review, not
     system-enforced — the player's real NBA experience isn't independently
-    verified, just inferred from draft_year.
+    verified — usually inferred (`_years_exp`).
     """
     if details.signing_method != "minimum":
         return None
@@ -5280,10 +5300,7 @@ def _check_minimum_contract_cap_hit(details: SignDetails, bios: dict, season: st
                  f"the league covers any difference")
     else:
         basis = f"his own minimum tier (${expected:,})"
-    if _contract_years_exp(details.contract, season) is not None:
-        source = "stated on the contract"
-    else:
-        source = "inferred from his real NBA draft year"
+    source = _years_exp_basis(bios.get(details.player, {}), season, details.contract)[1]
     if submitted == expected:
         return CheckResult(
             check="minimum_contract_cap_hit", passed=True,
@@ -5302,19 +5319,21 @@ def _check_max_salary(details: SignDetails, bios: dict, season: str,
                        cap_levels: dict) -> Optional[CheckResult]:
     """§ 3.11: a signed player's current-season salary shouldn't exceed their
     experience-tier maximum (25/30/35% of that season's Salary Cap). Skipped
-    for two-way contracts (no cap salary) and undrafted players (no
-    draft_year experience proxy). Advisory only — § 3.11 is manual review,
-    not system-enforced, and years of NBA experience is inferred from
-    draft_year, not independently verified.
+    for two-way contracts (no cap salary) and players whose experience can't
+    be established. Advisory only — § 3.11 is manual review, not
+    system-enforced, and years of NBA experience (`_years_exp`) is usually
+    inferred, not independently verified.
     """
     if details.contract.type == "two-way":
         return None
     salaries = details.contract.salaries or {}
     if season not in salaries:
         return None
-    expected = _max_salary(bios.get(details.player, {}), season, cap_levels)
+    bio = bios.get(details.player, {})
+    expected = _max_salary(bio, season, cap_levels, details.contract)
     if expected is None:
         return None
+    exp, source = _years_exp_basis(bio, season, details.contract)
     submitted = _parse_dollar(salaries[season])
     if submitted <= expected:
         return CheckResult(
@@ -5326,7 +5345,7 @@ def _check_max_salary(details: SignDetails, bios: dict, season: str,
         passed=False,
         level="warning",
         message=(f"Submitted Year 1 salary (${submitted:,}) exceeds the § 3.11 max of ${expected:,} "
-                 f"inferred from this player's real NBA draft year — double check before submitting."),
+                 f"for {exp} years of experience ({source}) — double check before submitting."),
     )
 
 

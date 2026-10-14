@@ -85,7 +85,11 @@ def main():
     check("no draft year asks for a manual check", exp.passed and "isn't on file" in exp.message)
     exp = [r for r in terms(contract(CLEAN, CLEAN_HOLDS, years_experience=2), {"draft_year": 2015})
            if r.check == "two_way_experience"][0]
-    check("declared experience beats the proxy", "2 years" in exp.message and "declared" in exp.message)
+    check("declared experience beats the proxy", "2 years" in exp.message and "stated on the contract" in exp.message)
+    exp = [r for r in terms(contract(CLEAN, CLEAN_HOLDS),
+                            {"draft_year": 2018, "nba_experience": {"years": 3, "season": SEASON}})
+           if r.check == "two_way_experience"][0]
+    check("the bio's figure beats the proxy", "3 years" in exp.message and "set on his bio" in exp.message)
 
     print("\nconsecutive years with one team")
     one_prior = {"contracts": [{"team": "GSW", "salaries": {"25-26": "$0", "26-27": "$1"},
