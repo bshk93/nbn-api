@@ -105,22 +105,26 @@ print("roster counts exempt draft-rights and dead, not just two-way")
 # roster with one held pick read as 16/15 on the homepage).
 synth_dir = TMP / "synth-data"
 synth_dir.mkdir()
-(synth_dir / "zzz-roster.csv").write_text("SLUG\na\nb\nc\nd\ne\n")
+(synth_dir / "zzz-roster.csv").write_text("SLUG\na\nb\nc\nd\ne\nf\ng\n")
 synth_bios = {
     "a": {"type": "player"},
     "b": {"type": "two-way"},
     "c": {"type": "draft-rights"},
     "d": {"type": "dead"},
     "e": {"type": ""},
+    "f": {"type": "player", "cap_holds": {"26-27": "UFA"}},
+    "g": {"type": "player", "cap_holds": {"26-27": "TEAM_OPT", "27-28": "RFA"}},
 }
 real_data_dir = ch.DATA_DIR
 try:
     ch.DATA_DIR = synth_dir
-    synth_counts = ch._roster_counts("zzz", synth_bios)
+    synth_counts = ch._roster_counts("zzz", synth_bios, "26-27")
 finally:
     ch.DATA_DIR = real_data_dir
-check("draft-rights and dead are excluded from the standard count", synth_counts["roster"] == 2)
+check("draft-rights and dead are excluded from the standard count", synth_counts["roster"] == 4)
 check("two-way is still counted separately", synth_counts["two_way"] == 1)
+check("a hold is still in the standard count", synth_counts["roster"] == 4)
+check("only this season's UFA/RFA holds are counted as holds", synth_counts["fa_holds"] == 1)
 
 print("the figures are the validators' own, not a second implementation")
 bios = _load_json(DATA_DIR / "player-bios.json", {})

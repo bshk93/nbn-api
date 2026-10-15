@@ -73,14 +73,15 @@ def _apron_position(salary_ex_holds: int, levels: dict) -> Optional[str]:
     return None
 
 
-def _roster_counts(team: str, bios: dict) -> dict:
+def _roster_counts(team: str, bios: dict, season: Optional[str] = None) -> dict:
     path = DATA_DIR / f"{team.lower()}-roster.csv"
     if not path.exists():
-        return {"roster": 0, "two_way": 0}
+        return {"roster": 0, "two_way": 0, "fa_holds": 0}
     _, rows = read_csv(path)
-    standard = two_way = 0
+    standard = two_way = fa_holds = 0
     for row in rows:
-        bio_type = bios.get((row.get("SLUG") or "").strip(), {}).get("type", "")
+        bio = bios.get((row.get("SLUG") or "").strip(), {})
+        bio_type = bio.get("type", "")
         if bio_type == "two-way":
             two_way += 1
         # draft-rights (held, unsigned pick) and dead (cap hit, no player) are
@@ -90,7 +91,13 @@ def _roster_counts(team: str, bios: dict) -> dict:
         # is how a 15-man SAS roster with one held pick showed as 16/15.
         elif _is_standard_roster_slot(bio_type):
             standard += 1
-    return {"roster": standard, "two_way": two_way}
+            # A team's own UFA/RFA stays on the roster as a hold and is in
+            # `standard` above. Counted separately so the rosters committee
+            # board can show the roster without them. Display only: every
+            # rule still reads `roster`.
+            if season and (bio.get("cap_holds") or {}).get(season) in ("UFA", "RFA"):
+                fa_holds += 1
+    return {"roster": standard, "two_way": two_way, "fa_holds": fa_holds}
 
 
 def _draft_rights(team: str, bios: dict) -> list[dict]:
@@ -136,7 +143,7 @@ def build_rows(on_date: Optional[str] = None, season: Optional[str] = None) -> l
         raw = _compute_team_salary(team, bios, season)
         raw_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
         ts = get_season_state(state, team, season)
-        counts = _roster_counts(team, bios)
+        counts = _roster_counts(team, bios, season)
         # § 2.1a: a team below 12 standard players carries a real charge that
         # "counts toward the team's real guaranteed salary — including Hard Cap
         # and apron comparisons — exactly as a real player contract would". So
