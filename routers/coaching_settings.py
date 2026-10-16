@@ -74,6 +74,27 @@ def get_coaching_settings(authorization: Optional[str] = Header(None)):
     return {team: rec for team, rec in data.items() if has_role(info, team.lower())}
 
 
+@router.get("/api/rotations")
+def get_rotations():
+    """Every team's depth chart order, public — who holds each slot, nothing else.
+
+    The rest of the record stays private (above). Team pages use this for the
+    Rosters tab's starting five, so any visitor sees the lineup the team set.
+    Minutes, the RES flag and `values` are deliberately left out: the order
+    may be public (decided 2026-10-16), the minutes may not.
+    """
+    out = {}
+    for team, rec in load_coaching_settings().items():
+        minutes = rec.get("minutes") if isinstance(rec, dict) else None
+        if not isinstance(minutes, dict):
+            continue
+        slots = {slot: row["slug"] for slot, row in minutes.items()
+                 if isinstance(row, dict) and isinstance(row.get("slug"), str) and row["slug"]}
+        if slots:
+            out[team] = slots
+    return out
+
+
 @router.put("/api/coaching-settings/{team}")
 def put_coaching_settings(
     team: str,

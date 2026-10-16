@@ -157,6 +157,24 @@ check("the other team likewise", set(read(BOS)) == {"BOS"})
 check("a streamer sees every team", set(read(STREAM)) == {"ATL", "BOS"})
 check("admin sees every team", set(read(ADMIN)) == {"ATL", "BOS"})
 
+# ── the public rotation ──────────────────────────────────────────────────────
+
+print("the rotation order is public, the minutes are not")
+c.put("/api/coaching-settings/BOS", json={"values": {"x": 1}, "minutes": {
+    "PG": {"slug": "white-derrick", "minutes": 34, "res": False},
+    "SG": {"slug": "", "minutes": 0, "res": False},
+    "6":  {"slug": "brown-jaylen", "minutes": 20, "res": True},
+}}, headers=BOS)
+r = c.get("/api/rotations")
+check("no token is a 200", r.status_code == 200)
+rot = r.json()
+check("each team maps slot -> slug, empty slots dropped", rot.get("BOS") == {"PG": "white-derrick", "6": "brown-jaylen"})
+check("ATL's rotation is there too", rot.get("ATL") == {"PG": "mann-tre"})
+check("no minutes, res or values leak", all(k not in r.text for k in ('"minutes"', '"res"', '"values"', '34', '20')))
+c.put("/api/coaching-settings/BOS", json={"values": {}, "minutes": {}}, headers=BOS)
+check("a team with no slots set is left out", "BOS" not in c.get("/api/rotations").json())
+c.put("/api/coaching-settings/BOS", json=BODY, headers=BOS)
+
 # ── the file on disk ─────────────────────────────────────────────────────────
 
 print("the file on disk")
