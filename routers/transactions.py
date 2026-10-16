@@ -9940,6 +9940,37 @@ def self_release(body: SelfReleaseIn, info: dict = Depends(get_token_info)):
     return {"ok": True, "transaction": txn, "checks": [c.model_dump() for c in checks]}
 
 
+def _current_two_way_deal(bio: dict) -> Optional[dict]:
+    """The two-way deal a player is on now, as ``{salaries, cap_holds}``.
+
+    The last `contracts` entry when there is one. About half the league's
+    two-ways were signed before the write path recorded `contracts`, so for
+    those the deal is read off the bio's own lines instead: the trailing
+    UFA/RFA hold, plus the unbroken run of $0 seasons just before it (a
+    two-way pays $0, § 2.2, so the first season with real money is an older
+    deal). Two back-to-back two-ways read as one long deal this way; the
+    caller's 2-year cap refuses that rather than guessing. None when there
+    is nothing to read.
+    """
+    contracts = bio.get("contracts") or []
+    if contracts:
+        last = contracts[-1]
+        return {"salaries": last.get("salaries") or {}, "cap_holds": last.get("cap_holds") or {}}
+    salaries = bio.get("salaries") or {}
+    holds = bio.get("cap_holds") or {}
+    seasons = sorted(salaries)
+    while seasons and holds.get(seasons[-1]) in _FA_HOLD_TYPES:
+        seasons.pop()
+    trailing = sorted(set(salaries) - set(seasons))
+    deal = []
+    while seasons and _parse_dollar(salaries[seasons[-1]]) == 0:
+        deal.insert(0, seasons.pop())
+    if not deal:
+        return None
+    return {"salaries": {y: salaries[y] for y in deal + trailing},
+            "cap_holds": {y: holds[y] for y in deal + trailing if y in holds}}
+
+
 def _self_convert_twoway_contract(bio: dict, player: str, cap_levels: dict, cur_season: str) -> dict[str, str]:
     """Builds the minimum-scale standard contract a self-serve two-way
     conversion would submit — N years (N = the player's existing two-way
@@ -9958,24 +9989,23 @@ def _self_convert_twoway_contract(bio: dict, player: str, cap_levels: dict, cur_
     if bio.get("type") != "two-way":
         raise HTTPException(status_code=422, detail=f"{player!r} is not on a two-way contract.")
 
-    prior_contracts = bio.get("contracts") or []
-    if not prior_contracts:
+    prior = _current_two_way_deal(bio)
+    if not prior:
         raise HTTPException(
             status_code=422,
-            detail=(f"No contract history on file for {player!r} to match a like-for-like length "
-                    "against — enter this by hand on /transactions."),
+            detail=(f"Can't tell how long {player!r}'s two-way deal is, so there's no length to "
+                    "match. Ask the rosters committee to enter the conversion."),
         )
     # A trailing UFA/RFA line is the hold the deal rolls into, not a contract
     # year — a 2-year two-way with its RFA hold has three salary entries.
-    prior = prior_contracts[-1]
-    prior_holds = prior.get("cap_holds") or {}
-    prior_length = sum(1 for y in (prior.get("salaries") or {}) if prior_holds.get(y) not in _FA_HOLD_TYPES)
+    prior_holds = prior["cap_holds"]
+    prior_length = sum(1 for y in prior["salaries"] if prior_holds.get(y) not in _FA_HOLD_TYPES)
     if prior_length not in (1, 2):
         raise HTTPException(
             status_code=422,
-            detail=(f"{player!r}'s existing two-way deal is {prior_length} years — § 2.2 caps a "
-                    "two-way at 2, so this doesn't look like a real length to match. Enter this by "
-                    "hand on /transactions."),
+            detail=(f"{player!r}'s two-way deal reads as {prior_length} years — § 2.2 caps a "
+                    "two-way at 2, so there's no real length to match. Ask the rosters committee "
+                    "to enter the conversion."),
         )
 
     seasons = [cur_season] if prior_length == 1 else [cur_season, _season_after(cur_season)]
@@ -9986,8 +10016,8 @@ def _self_convert_twoway_contract(bio: dict, player: str, cap_levels: dict, cur_
             raise HTTPException(
                 status_code=422,
                 detail=(f"Can't confirm the minimum salary for {season} — {player}'s years of NBA "
-                        "experience can't be established (no draft year on file). Enter this by "
-                        "hand on /transactions, or use the PDC pitch-and-bid process (§ 2.2)."),
+                        "experience can't be established (no draft year on file). Ask the rosters "
+                        "committee to enter it, or use the PDC pitch-and-bid process (§ 2.2)."),
             )
         salaries[season] = f"${expected:,}"
     return salaries
@@ -10019,7 +10049,7 @@ def _self_convert_twoway_holds(bio: dict, salaries: dict[str, str],
                 detail="Only the second year of a 2-year conversion can be a team option or non-guaranteed (§ 2.2).",
             )
         holds[max(salaries)] = tag
-    prior_holds = ((bio.get("contracts") or [{}])[-1].get("cap_holds")) or {}
+    prior_holds = (_current_two_way_deal(bio) or {}).get("cap_holds") or {}
     trailing = [t for _, t in sorted(prior_holds.items()) if t in _FA_HOLD_TYPES]
     if trailing:
         holds[_season_after(max(salaries))] = trailing[-1]

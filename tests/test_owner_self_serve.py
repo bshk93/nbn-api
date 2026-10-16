@@ -35,6 +35,7 @@ from routers.transactions import (  # noqa: E402
     RenounceDetails, _validate_option, OptionDetails,
     _validate_release, ReleaseDetails,
     _self_convert_twoway_contract, _self_convert_twoway_holds, _self_convert_twoway_guarantee_dates, _self_sign_pick_contract,
+    _current_two_way_deal,
 )
 from fastapi import HTTPException  # noqa: E402
 
@@ -360,8 +361,29 @@ def raises_http(name, status, fn):
     check(f"{name} → {status}", False)
 
 
-raises_http("no contract history at all is refused", 422,
+raises_http("no contract history and no salary lines is refused", 422,
            lambda: build_contract([]))
+
+# Half the league's two-ways predate `contracts`; their deal is read off the
+# bio's own lines (ryan-cormac, 2026-10-16: the owner was sent to the
+# office-only /transactions form instead).
+legacy = {"name": "TEST, PLAYER", "type": "two-way", "draft_year": 2026,
+          "salaries": {"24-25": "$2,000,000", "25-26": "$0", SEASON: "$0", NEXT: "$1"},
+          "cap_holds": {NEXT: "RFA"}}
+check("no contracts: the $0 run before the trailing hold is the deal",
+      _current_two_way_deal(legacy) == {"salaries": {"25-26": "$0", SEASON: "$0", NEXT: "$1"},
+                                        "cap_holds": {NEXT: "RFA"}})
+check("...so a legacy 2-year two-way converts to 2 years",
+      list(_self_convert_twoway_contract(legacy, "p", CAP_LEVELS_2YR, SEASON)) == [SEASON, NEXT])
+check("...keeping its RFA hold",
+      _self_convert_twoway_holds(legacy, {SEASON: "$1", NEXT: "$1"}) == {"28-29": "RFA"})
+check("unprefixed legacy amounts ('0') parse too",
+      len(_current_two_way_deal({"salaries": {SEASON: "0", NEXT: "1"}, "cap_holds": {NEXT: "RFA"}})["salaries"]) == 2)
+raises_http("no contracts and three straight $0 years is refused, not guessed", 422,
+           lambda: _self_convert_twoway_contract(
+               {"type": "two-way", "draft_year": 2026,
+                "salaries": {"25-26": "$0", SEASON: "$0", NEXT: "$0", "28-29": "$1"},
+                "cap_holds": {"28-29": "RFA"}}, "p", CAP_LEVELS_2YR, SEASON))
 
 s = build_contract([{"salaries": {NEXT: "$500,000"}}])  # a 1-year prior two-way deal
 check("a 1-year prior deal builds a 1-year contract, this season only", list(s) == [SEASON])
