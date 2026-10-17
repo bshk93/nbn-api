@@ -466,7 +466,7 @@ def _resolve_one_waiver(release_txn: dict, txns: list[dict]) -> Optional[tuple]:
 
     if priority["status"] == "no_claims":
         _log_waiver_clear(release_txn, "unclaimed", _SYSTEM_INFO)
-        return ("closed", player, False, release_txn["id"], None)
+        return ("closed", player, False, release_txn["id"], None, None)
 
     if priority["status"] == "tied":
         already_flagged = any(
@@ -491,13 +491,13 @@ def _resolve_one_waiver(release_txn: dict, txns: list[dict]) -> Optional[tuple]:
             release_txn, "unclaimed", _SYSTEM_INFO,
             notes="Every claim on file failed re-validation at resolution time (spec § 5 step 6).",
         )
-        return ("closed", player, False, release_txn["id"], None)
+        return ("closed", player, False, release_txn["id"], None, None)
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     _apply_waiver_transfer(release_txn, winner, today, _SYSTEM_INFO)
-    _log_waiver_clear(release_txn, "claimed", _SYSTEM_INFO,
-                      claimed_by=winner["team"], signing_method=winner.get("signing_method"))
-    return ("closed", player, True, release_txn["id"], winner["team"])
+    clear = _log_waiver_clear(release_txn, "claimed", _SYSTEM_INFO,
+                              claimed_by=winner["team"], signing_method=winner.get("signing_method"))
+    return ("closed", player, True, release_txn["id"], winner["team"], clear)
 
 
 def _notify_waiver_claimants(released_txn_id: str, player: str, claimed_by: Optional[str]) -> None:
@@ -519,11 +519,23 @@ def _notify_waiver_claimants(released_txn_id: str, player: str, claimed_by: Opti
             inbox.notify_member(recipient, text, link="/transactions")
 
 
+def _announce_claim(clear_txn: Optional[dict]) -> None:
+    """An awarded claim is a roster move, so it goes in the transactions feed,
+    relayed into #roster-log like an owner's own moves. Nothing else posts it:
+    the claim is applied here, by the sweep or by PDC, never through the
+    dispatcher that announces everything else."""
+    if not clear_txn or (clear_txn.get("details") or {}).get("outcome") != "claimed":
+        return
+    from .discord_notify import notify_transaction
+    notify_transaction(clear_txn, relay_to_roster_log=True)
+
+
 def _fire_waiver_notification(note: tuple) -> None:
     from . import waiver_notify
     if note[0] == "closed":
-        _, player, claimed, txn_id, claimed_by = note
-        waiver_notify.notify_window_closed(player, claimed)
+        _, player, claimed, txn_id, claimed_by, clear_txn = note
+        waiver_notify.notify_window_closed(player, claimed, claimed_by)
+        _announce_claim(clear_txn)
         _notify_waiver_claimants(txn_id, player, claimed_by)
     elif note[0] == "tied":
         _, player, tied_teams, h2h, season = note
@@ -720,6 +732,8 @@ def resolve_waiver(txn_id: str, body: WaiverResolveDetails,
             txn = _log_waiver_clear(release_txn, "unclaimed", info, resolution="manual")
 
     from . import waiver_notify
-    waiver_notify.notify_window_closed(release_txn["details"]["player"], bool(body.team))
+    waiver_notify.notify_window_closed(release_txn["details"]["player"], bool(body.team),
+                                       team if body.team else None)
+    _announce_claim(txn)
     _notify_waiver_claimants(txn_id, release_txn["details"]["player"], team if body.team else None)
     return txn

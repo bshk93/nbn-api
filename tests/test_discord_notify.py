@@ -236,6 +236,28 @@ reset()
 dn.notify_transaction(txn(description="Sign-and-trade fallout"))
 check("the submitter's note is included", "Sign-and-trade fallout" in SENT[0]["description"])
 
+# A waiver claim is applied by the sweep, not the dispatcher, so it is
+# announced from waivers.py; this is how it reads.
+reset()
+dn.notify_transaction(txn(
+    type="waiver_clear", created_by="system",
+    details={"player": "curry-stephen", "released_by": "UTA", "outcome": "claimed",
+             "claimed_by": "MIA", "signing_method": "ntmle"}), relay_to_roster_log=True)
+e = SENT[0]
+check("a waiver claim's title names the claiming team", e["title"] == "MIA — Waiver Claim", e["title"])
+check("...says where he came from and how it was funded",
+      "Claimed off waivers from UTA" in e["description"] and "NTMLE" in e["description"], e["description"])
+check("...links the player", any("/players/?p=curry-stephen" in f["value"] for f in e["fields"]))
+check("...and is relayed to #roster-log", dn.NO_RELAY_MARKER not in e["footer"]["text"])
+
+import routers.waivers as wv  # noqa: E402
+reset()
+wv._announce_claim({"type": "waiver_clear", "created_at": txn()["created_at"],
+                    "details": {"player": "curry-stephen", "outcome": "unclaimed", "released_by": "UTA"}})
+check("a player clearing waivers unclaimed isn't announced as a move", SENT == [])
+wv._announce_claim(None)
+check("...nor is a missing entry", SENT == [])
+
 
 # ── Contract detail ───────────────────────────────────────────────────────────
 # The headline gives a deal's shape; the year-by-year field is where the actual

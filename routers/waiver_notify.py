@@ -61,12 +61,15 @@ def notify_waived(player_slug: str, team: str) -> None:
     _waivers_post(f"**{name}** has been waived by **{team}**. Waiver claims are open for 48 hours.")
 
 
-def notify_window_closed(player_slug: str, claimed: bool) -> None:
-    """fa-news, posted either way (spec § 6) — `_news`'s signature can't carry
-    who claimed the player even if the caller wanted it to."""
+def notify_window_closed(player_slug: str, claimed: bool, claimed_by: Optional[str] = None) -> None:
+    """fa-news, posted either way (spec § 6). Names the winning team: claims
+    are sealed only while the window is open, and by now he is on that team's
+    roster. Losing claimants are never named. The roster move itself goes to
+    #roster-log through `discord_notify` (see `waivers._fire_waiver_notification`)."""
     name = fa_notify._name(player_slug)
     if claimed:
-        fa_notify._news(player_slug, f"Waiver claims on **{name}** have closed — the player was claimed.")
+        who = f"**{claimed_by}**" if claimed_by else "a team"
+        fa_notify._news(player_slug, f"Waiver claims on **{name}** have closed — claimed by {who}.")
     else:
         fa_notify._news(player_slug, f"Waiver claims on **{name}** have closed.")
 

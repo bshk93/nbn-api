@@ -57,6 +57,7 @@ TYPE_LABELS = {
     "stash": "Stash",
     "set_hard_cap_level": "Hard Cap", "extension": "Extension",
     "qualifying_offer": "Qualifying Offer", "accept_qo": "Qualifying Offer Accepted",
+    "waiver_clear": "Waiver Claim",
 }
 
 # Mirrors the badge colours on /transactions so the channel reads the same way
@@ -69,6 +70,7 @@ TYPE_COLORS = {
     "convert_twoway": 0xA8A29E, "void_player": 0x9CA3AF, "stash": 0x60A5FA,
     "set_hard_cap_level": 0xD4AF37, "offer_sheet": 0xA5B4FC,
     "offer_sheet_decision": 0xA5B4FC,
+    "waiver_clear": 0x38BDF8,   # feed-types.js's waiver_clear badge
     # Same blue as .badge-extension in transactions/index.html and
     # poext_notify's COLOR_SUBMIT — one color for "extension" everywhere it
     # shows up, not three independently-chosen ones.
@@ -211,6 +213,8 @@ def _teams(txn: dict) -> list[str]:
     d = txn.get("details") or {}
     if txn.get("type") in ("trade", "offer_sheet", "offer_sheet_decision"):
         return list(d.get("teams") or [])
+    if txn.get("type") == "waiver_clear":
+        return [d["claimed_by"]] if d.get("claimed_by") else []
     return [d["team"]] if d.get("team") else []
 
 
@@ -279,6 +283,12 @@ def _describe(txn: dict, bios: dict) -> str:
 
     if t == "renounce":
         return "Renounced — free agent, no dead cap"
+
+    if t == "waiver_clear":
+        if d.get("outcome") != "claimed":
+            return "Cleared waivers — unclaimed"
+        frm = f" from {d['released_by']}" if d.get("released_by") else ""
+        return f"Claimed off waivers{frm} — takes on his existing contract" + _method_str(d)
 
     if t == "qualifying_offer":
         season = d.get("season") or ""
