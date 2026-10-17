@@ -29,6 +29,9 @@ worth pinning:
   a game they can no longer reach.
 - **One streamer per game.** A second claimant is a 409 naming who holds it,
   not a silent join, and re-claiming a game you already hold is not an error.
+- **Only an admin writes someone else's name.** Assigning a game or a whole
+  day replaces any claim, but only to a member who could have claimed it
+  themselves, and not even `bod` can do it.
 - **The stream flag is independent of the streamer claim.** `stream` carries
   no name and no holder — anyone with the `streamer` role can mark or unmark
   it on any game, whether or not that game has a claimed streamer.
@@ -66,11 +69,13 @@ BOD_TOKEN  = "b" * 64
 PLAIN_TOKEN = "n" * 64
 STREAM_TOKEN  = "s" * 64
 STREAM2_TOKEN = "t" * 64
+ADMIN_TOKEN   = "a" * 64
 MEMBERS = {
     "Boss":    {"token": BOD_TOKEN,     "roles": ["bod"],      "tenures": []},
     "Nobody":  {"token": PLAIN_TOKEN,   "roles": [],           "tenures": []},
     "Streamy": {"token": STREAM_TOKEN,  "roles": ["streamer"], "tenures": []},
     "Costream": {"token": STREAM2_TOKEN, "roles": ["streamer"], "tenures": []},
+    "Root":    {"token": ADMIN_TOKEN,   "roles": ["admin"],    "tenures": []},
 }
 auth.load_members = lambda: MEMBERS
 
@@ -87,6 +92,7 @@ BOD    = {"Authorization": "Bearer " + BOD_TOKEN}
 PLAIN  = {"Authorization": "Bearer " + PLAIN_TOKEN}
 STREAM  = {"Authorization": "Bearer " + STREAM_TOKEN}
 STREAM2 = {"Authorization": "Bearer " + STREAM2_TOKEN}
+ADMIN   = {"Authorization": "Bearer " + ADMIN_TOKEN}
 
 
 def seed(season, games, source="test"):
@@ -316,6 +322,64 @@ check("a revoked streamer cannot claim anything new",
 check("but is not stranded on the game they already claimed",
       c.delete("/api/schedule/ccc/streamer", headers=STREAM).status_code == 200)
 MEMBERS["Streamy"]["roles"] = ["streamer"]
+
+# ── admin assigning streamers ─────────────────────────────────────────────────
+
+print("assigning streamers")
+SENT = []
+# Stubbed, so nothing reaches the real inbox file (routers/constants.py
+# hardcodes the live data dir).
+sched.game_day_notify.streamer_assigned = lambda *a: SENT.append(a)
+
+
+def streamer_of(gid):
+    return [x for x in games() if x["id"] == gid][0]["streamer"]
+
+
+check("a streamer cannot assign a game",
+      c.put("/api/schedule/aaa/streamer", json={"name": "Costream"}, headers=STREAM).status_code == 403)
+check("nor can bod",
+      c.put("/api/schedule/aaa/streamer", json={"name": "Costream"}, headers=BOD).status_code == 403)
+check("nor can bod assign a day",
+      c.put("/api/schedule/days/2026-10-20/streamer", json={"name": "Costream"},
+            headers=BOD).status_code == 403)
+check("assigning to a non-member is a 422",
+      c.put("/api/schedule/aaa/streamer", json={"name": "Ghost"}, headers=ADMIN).status_code == 422)
+check("assigning to a member without the role is a 422",
+      c.put("/api/schedule/aaa/streamer", json={"name": "Nobody"}, headers=ADMIN).status_code == 422)
+check("and neither wrote anything", streamer_of("aaa") is None and not SENT)
+
+c.post("/api/schedule/aaa/streamer", headers=STREAM)
+r = c.put("/api/schedule/aaa/streamer", json={"name": "Costream"}, headers=ADMIN)
+check("an admin can assign a game", r.status_code == 200 and r.json()["streamer"] == "Costream")
+check("replacing an existing claim rather than 409ing", streamer_of("aaa") == "Costream")
+check("the new streamer and the replaced one are both named to notify",
+      len(SENT) == 1 and SENT[0][0] == "Costream" and SENT[0][4] == ["Streamy"])
+SENT.clear()
+c.put("/api/schedule/aaa/streamer", json={"name": "Costream"}, headers=ADMIN)
+check("assigning the same streamer again sends nothing", not SENT)
+check("an admin can assign themselves",
+      c.put("/api/schedule/ccc/streamer", json={"name": "Root"}, headers=ADMIN).json()["streamer"] == "Root")
+SENT.clear()
+
+# Whatever the edits above left on that date; there are at least two.
+day_ids = sorted(x["id"] for x in games() if x["date"] == "2026-10-20")
+r = c.put("/api/schedule/days/2026-10-20/streamer", json={"name": "Streamy"}, headers=ADMIN)
+check("an admin can assign a whole day", r.status_code == 200 and len(day_ids) >= 2)
+check("it returns that day's games", sorted(x["id"] for x in r.json()) == day_ids)
+check("every game that day is theirs", all(streamer_of(x) == "Streamy" for x in day_ids))
+check("a game on another day is untouched", streamer_of("ccc") == "Root")
+check("one message for the day, naming who was replaced",
+      len(SENT) == 1 and len(SENT[0][2]) == len(day_ids) and SENT[0][4] == ["Costream"])
+check("a day with no games is a 404",
+      c.put("/api/schedule/days/2026-10-21/streamer", json={"name": "Streamy"},
+            headers=ADMIN).status_code == 404)
+check("a bad date is a 422",
+      c.put("/api/schedule/days/10-20/streamer", json={"name": "Streamy"},
+            headers=ADMIN).status_code == 422)
+for gid in day_ids + ["ccc"]:
+    c.delete(f"/api/schedule/{gid}/streamer", headers=ADMIN)
+check("an admin can still drop assigned claims", all(streamer_of(x) is None for x in day_ids + ["ccc"]))
 
 # ── stream flag ────────────────────────────────────────────────────────────────
 

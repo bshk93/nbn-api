@@ -85,6 +85,26 @@ def coaching_entered(team: str, entered_by: Optional[str]) -> None:
         logger.warning("coaching_entered notify failed for %s: %s", team, exc)
 
 
+def streamer_assigned(name: str, date: str, games: list, by: Optional[str],
+                      displaced: Iterable[str]) -> None:
+    """An admin put `name` on `games` (all on `date`). Tells the new streamer,
+    and anyone whose claim was replaced. Nobody is told about their own action."""
+    try:
+        n = len(games)
+        what = (f"{games[0]['away_team']} @ {games[0]['home_team']}" if n == 1
+                else f"{n} games")
+        link = "/committees/stream/"
+        if name != by:
+            inbox.notify_member(name, f"{by or 'An admin'} assigned you to stream {what} on "
+                                      f"{_fmt_date(date)}", link)
+        for old in displaced:
+            if old not in (name, by):
+                inbox.notify_member(old, f"{by or 'An admin'} moved your {_fmt_date(date)} "
+                                         f"stream to {name}", link)
+    except Exception as exc:
+        logger.warning("streamer_assigned notify failed for %s: %s", date, exc)
+
+
 def day_done(date: str, done_by: Optional[str]) -> None:
     """Handoff 3. Call only when the date goes from not-done to done."""
     try:

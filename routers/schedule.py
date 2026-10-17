@@ -30,8 +30,10 @@ from pydantic import BaseModel
 
 from .constants import DATA_DIR, SCHEDULE_FILE_FMT, VALID_TEAMS
 from .storage import _load_json, _save_json, log_write, _current_league_year
-from .auth import require_role, get_token_info, has_role
+from .auth import require_role, require_admin, get_token_info, has_role
 from .league_time import league_today_str
+from . import auth as auth_module
+from . import game_day_notify
 from . import wallet
 
 router = APIRouter()
@@ -354,6 +356,78 @@ def unclaim_schedule_game(game_id: str, season: str | None = None,
         _save(found_season, data)
     log_write(info, f"DELETE schedule/{game_id}/streamer — {found_season} {held}")
     return _public(game)
+
+
+# ── Assigning streamers (admin) ──────────────────────────────────────────────
+#
+# The one path that writes a name other than the caller's, so it is `admin`
+# alone. It overwrites an existing claim instead of 409ing, since moving a game
+# from one streamer to another is the reason to have it. The name must be a
+# member who could have claimed the game themselves (`streamer`, or `admin`,
+# which satisfies it). Unassigning needs nothing new: DELETE above already
+# lets an admin drop anyone's claim.
+
+class StreamerAssign(BaseModel):
+    name: str
+
+
+def _check_assignee(name: str) -> str:
+    name = (name or "").strip()
+    member = auth_module.load_members().get(name)
+    if member is None:
+        raise HTTPException(status_code=422, detail=f"Unknown member: {name!r}")
+    if not has_role({"roles": member.get("roles", [])}, "streamer") \
+            and not has_role({"roles": member.get("roles", [])}, "admin"):
+        raise HTTPException(status_code=422, detail=f"{name} doesn't hold the streamer role")
+    return name
+
+
+@router.put("/api/schedule/{game_id}/streamer")
+def assign_schedule_game(game_id: str, body: StreamerAssign, season: str | None = None,
+                         info: dict = Depends(require_admin)):
+    """Put a named streamer on one game, replacing whoever held it."""
+    name = _check_assignee(body.name)
+    preferred = _resolve_season(season)
+    with _schedule_lock:
+        found_season, data, game = _find(game_id, preferred)
+        displaced = game.get("streamer")
+        if displaced != name:
+            game["streamer"] = name
+            _save(found_season, data)
+    log_write(info, f"PUT schedule/{game_id}/streamer — {found_season} {game['date']} "
+                    f"{game['away_team']}@{game['home_team']} → {name}"
+                    + (f" (was {displaced})" if displaced and displaced != name else ""))
+    if displaced != name:
+        game_day_notify.streamer_assigned(name, game["date"], [game], info["name"],
+                                          [displaced] if displaced else [])
+    return _public(game)
+
+
+@router.put("/api/schedule/days/{date}/streamer")
+def assign_schedule_day(date: str, body: StreamerAssign, season: str | None = None,
+                        info: dict = Depends(require_admin)):
+    """Put a named streamer on every game that date, replacing any claims.
+    Returns the date's games."""
+    if not DATE_RE.match(date):
+        raise HTTPException(status_code=422, detail=f"date must look like 2026-10-18, got {date!r}")
+    name = _check_assignee(body.name)
+    season = _resolve_season(season)
+    with _schedule_lock:
+        data = _load(season)
+        day = [g for g in data["games"] if g["date"] == date]
+        if not day:
+            raise HTTPException(status_code=404, detail=f"No games on {date} in {season}")
+        changed = [g for g in day if g.get("streamer") != name]
+        displaced = sorted({g["streamer"] for g in changed if g.get("streamer")})
+        for g in changed:
+            g["streamer"] = name
+        if changed:
+            _save(season, data)
+    log_write(info, f"PUT schedule/days/{date}/streamer — {season} {len(changed)} game(s) → {name}"
+                    + (f" (was {', '.join(displaced)})" if displaced else ""))
+    if changed:
+        game_day_notify.streamer_assigned(name, date, changed, info["name"], displaced)
+    return [_public(g) for g in day]
 
 
 # ── Stream flag ────────────────────────────────────────────────────────────
