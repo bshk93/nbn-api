@@ -66,6 +66,14 @@ cs.log_write = lambda info, msg: None
 import routers.game_day_notify as gdn  # noqa: E402
 for _fn in ('coaching_saved', 'coaching_entered', 'day_done', 'maybe_day_ready'):
     setattr(gdn, _fn, lambda *a, **k: None)
+# The starter check reads 2K positions and bios; give it a fixed world
+# instead of the live files.
+import routers.players as players  # noqa: E402
+PRIMARY = {"mann-tre": "PG", "big-man": "C", "wing-guy": "SF", "combo-sf": "SF"}
+BIOS = {"big-man": {"name": "MAN, BIG"}, "wing-guy": {"name": "GUY, WING"},
+        "combo-sf": {"name": "SF, COMBO", "secondary_pos": "PF"}}
+players._primary_pos = lambda slug: PRIMARY.get(slug)
+players.load_player_bios = lambda: BIOS
 
 app = FastAPI()
 app.include_router(cs.router)
@@ -174,6 +182,44 @@ check("no minutes, res or values leak", all(k not in r.text for k in ('"minutes"
 c.put("/api/coaching-settings/BOS", json={"values": {}, "minutes": {}}, headers=BOS)
 check("a team with no slots set is left out", "BOS" not in c.get("/api/rotations").json())
 c.put("/api/coaching-settings/BOS", json=BODY, headers=BOS)
+
+# ── starters must play near their slot ───────────────────────────────────────
+
+print("starters")
+check("where a C may start", cs.starter_positions("C", None) == ["PF", "C"])
+check("where an SF may start", cs.starter_positions("SF", None) == ["SG", "SF", "PF"])
+check("a secondary is added (already within one step today)",
+      cs.starter_positions("SF", "PF") == ["SG", "SF", "PF"])
+check("an unknown primary has no list", cs.starter_positions(None, "PF") == [])
+
+
+def five(**slots):
+    return {"values": {}, "minutes": {s: {"slug": slug, "minutes": 30} for s, slug in slots.items()}}
+
+
+r = c.put("/api/coaching-settings/BOS", json=five(PG="big-man"), headers=BOS)
+check("a C can't start at PG", r.status_code == 422 and "can't start at PG" in r.json()["detail"])
+check("...and nothing was saved", (rec("BOS") or {}).get("minutes", {}).get("PG", {}).get("slug") != "big-man")
+check("nor can admin put him there",
+      c.put("/api/coaching-settings/BOS", json=five(PG="big-man"), headers=ADMIN).status_code == 422)
+check("one step off is fine: a C at PF",
+      c.put("/api/coaching-settings/BOS", json=five(PF="big-man"), headers=BOS).status_code == 200)
+check("an SF at SG and PF",
+      c.put("/api/coaching-settings/BOS", json=five(SG="wing-guy", PF="combo-sf"), headers=BOS).status_code == 200)
+check("a player with no 2K position yet isn't blocked",
+      c.put("/api/coaching-settings/BOS", json=five(C="rookie-unknown"), headers=BOS).status_code == 200)
+check("the bench is never checked",
+      c.put("/api/coaching-settings/BOS", json=five(**{"6": "big-man", "7": "mann-tre"}), headers=BOS).status_code == 200)
+
+# A rotation saved before the rule: a slot left as it was keeps saving.
+data = json.loads(cs.COACHING_SETTINGS_FILE.read_text())
+data["BOS"]["minutes"] = five(PG="big-man")["minutes"]
+cs.COACHING_SETTINGS_FILE.write_text(json.dumps(data))
+check("an already-saved illegal starter doesn't block an unrelated save",
+      c.put("/api/coaching-settings/BOS", json={"values": {"tempo": 5}, "minutes": five(PG="big-man")["minutes"]},
+            headers=BOS).status_code == 200)
+check("but moving a different illegal player in is refused",
+      c.put("/api/coaching-settings/BOS", json=five(PG="big-man", SG="big-man"), headers=BOS).status_code == 422)
 
 # ── the file on disk ─────────────────────────────────────────────────────────
 

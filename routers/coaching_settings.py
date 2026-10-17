@@ -47,6 +47,57 @@ class CoachingSettingsBody(BaseModel):
     minutes: dict = {}
 
 
+# A starter has to play near his slot: his 2K primary position, one step
+# either side of it (PG-SG-SF-PF-C), or the secondary his team gave him
+# (§ 2.3 already keeps that within one step, so today it adds nothing, but it
+# is part of the rule as the league states it). The one rule this
+# schema-blind store enforces, because it is a league rule rather than a
+# coaching preference.
+STARTER_SLOTS = ("PG", "SG", "SF", "PF", "C")
+
+
+def starter_positions(primary: Optional[str], secondary: Optional[str]) -> list[str]:
+    """Where a player may start, in PG→C order. Empty when his primary is unknown."""
+    from .players import POSITION_ORDER
+    if primary not in POSITION_ORDER:
+        return []
+    i = POSITION_ORDER.index(primary)
+    ok = {POSITION_ORDER[j] for j in (i - 1, i, i + 1) if 0 <= j < len(POSITION_ORDER)}
+    if secondary in POSITION_ORDER:
+        ok.add(secondary)
+    return [p for p in POSITION_ORDER if p in ok]
+
+
+def _illegal_starters(minutes: dict, prev_minutes: dict) -> list[str]:
+    """What's wrong with the starting five, one line per bad slot. A slot left
+    exactly as it was already saved passes, so a rotation saved before this
+    rule existed doesn't block the team's next save of something else (the
+    Coaching Profile resends the minutes untouched). A player with no 2K
+    primary yet can't be checked, and isn't blocked."""
+    from .players import _primary_pos, load_player_bios
+    bios = None
+    problems = []
+    for slot in STARTER_SLOTS:
+        row = minutes.get(slot)
+        slug = row.get("slug") if isinstance(row, dict) else None
+        if not slug:
+            continue
+        prev = prev_minutes.get(slot)
+        if isinstance(prev, dict) and prev.get("slug") == slug:
+            continue
+        primary = _primary_pos(slug)
+        if primary is None:
+            continue
+        if bios is None:
+            bios = load_player_bios()
+        bio = bios.get(slug) or {}
+        legal = starter_positions(primary, bio.get("secondary_pos"))
+        if slot not in legal:
+            problems.append(f"{bio.get('name') or slug} can't start at {slot}: "
+                            f"his 2K position is {primary}, so he can start at {', '.join(legal)}")
+    return problems
+
+
 class EnterBody(BaseModel):
     # The `updated_at` the streamer's dashboard last saw for this team. If the
     # team saved again in the meantime, this won't match and the enter is
@@ -109,6 +160,9 @@ def put_coaching_settings(
     with _coaching_lock:
         data = load_coaching_settings()
         prev = data.get(team, {})
+        problems = _illegal_starters(body.minutes or {}, prev.get("minutes") or {})
+        if problems:
+            raise HTTPException(status_code=422, detail="; ".join(problems))
         was_pending = bool(prev.get("pending"))
         data[team] = {
             "values": body.values,
