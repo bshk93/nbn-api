@@ -6943,6 +6943,19 @@ def _validate_option(details: OptionDetails, ctx: dict) -> list[CheckResult]:
     team = _build_team_map().get(details.player)
     if not team:
         return checks
+    # Declining a future year's option leaves the player under contract
+    # through this season, so the roster doesn't change now. Counting him as
+    # gone warned CHA about a shortfall that would never happen (Holmes and
+    # Dillingham's 27-28 options, 2026-10-17). Only an option for the current
+    # season makes him a free agent today.
+    cur = ctx.get("cur_season")
+    if cur and _season_start(details.year) > _season_start(cur):
+        checks.append(CheckResult(
+            check="roster_minimum", passed=True,
+            message=(f"{name} stays under contract through {cur}, so declining his {details.year} "
+                     f"option doesn't change {team}'s roster now."),
+        ))
+        return checks
     after = _standard_count_after_departure(team, bios.get(details.player) or {})
     if after < ROSTER_CHARGE_MIN:
         short = ROSTER_CHARGE_MIN - after

@@ -280,15 +280,26 @@ check("accepting never scores a roster consequence — § 1.3 already counted th
       "salary before exercise, so nothing changes financially or on the roster",
       find(r, "roster_minimum") is None)
 
-r = validate_option({NEXT: "TEAM_OPT"}, 15, decision="decline")
-check("declining with a healthy roster passes the minimum", find(r, "roster_minimum").passed)
-
+# A future year's option: the player is under contract through this season,
+# so a decline changes nothing on the roster today (CHA, 2026-10-17).
 r = validate_option({NEXT: "TEAM_OPT"}, 14, decision="decline")
-check("declining down to 13 warns about the § 2.1 minimum",
+check("declining next season's option on a 14-man roster passes — he stays this season",
+      find(r, "roster_minimum").passed)
+r = validate_option({NEXT: "TEAM_OPT"}, 12, decision="decline")
+check("...and even at 12 nothing is charged, since nobody leaves now",
+      find(r, "roster_minimum").passed and "Empty Roster Charge" not in find(r, "roster_minimum").message)
+
+# The current season's option: a decline makes him a free agent today.
+r = validate_option({SEASON: "TEAM_OPT"}, 15, decision="decline", year=SEASON)
+check("declining this season's option with a healthy roster passes the minimum",
+      find(r, "roster_minimum").passed)
+
+r = validate_option({SEASON: "TEAM_OPT"}, 14, decision="decline", year=SEASON)
+check("declining this season's option down to 13 warns about the § 2.1 minimum",
       not find(r, "roster_minimum").passed and find(r, "roster_minimum").level == "warning")
 
-r = validate_option({NEXT: "TEAM_OPT"}, 12, decision="decline")
-check("declining down to 11 warns about the § 2.1a charge",
+r = validate_option({SEASON: "TEAM_OPT"}, 12, decision="decline", year=SEASON)
+check("declining this season's option down to 11 warns about the § 2.1a charge",
       "Empty Roster Charge" in find(r, "roster_minimum").message)
 
 
