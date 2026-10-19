@@ -246,6 +246,29 @@ def test_claims_and_resolution_enumeration():
         w._load_transactions = orig_load
 
 
+# ── _validate_waiver_claim: § 2.2 two-way slots ───────────────────────────────
+
+def test_two_way_claim_checks_slots():
+    """A two-way claim was checked against nothing roster-wise, so CHA claimed
+    a fourth two-way (2026-10-19). Read-only: the real bios and cap levels,
+    with the roster counts patched."""
+    release = {"date": "2026-10-17", "details": {
+        "player": "martin-alijah", "team": "NYK",
+        "_snapshot": {"type": "two-way", "salaries": {"26-27": "$0", "27-28": "$1"},
+                      "cap_holds": {"27-28": "RFA"}}}}
+    ctx = w._val_ctx("2026-10-19")
+    real = w._count_two_way_roster
+    try:
+        for held, legal in ((2, True), (3, False)):
+            w._count_two_way_roster = lambda team, excluding=None, n=held: n
+            ids = [c.check for c in w._validate_waiver_claim(claim("CHA", None), release, ctx)
+                   if not c.passed and c.level == "error"]
+            check(f"a two-way claim holding {held} two-ways is "
+                  f"{'legal' if legal else 'refused'}", ("two_way_slots" in ids) != legal, ids)
+    finally:
+        w._count_two_way_roster = real
+
+
 def main():
     test_h2h_record()
     test_relevant_record_season()
@@ -253,6 +276,7 @@ def main():
     test_team_record_pct_reads_real_csv()
     test_waiver_deadline()
     test_claims_and_resolution_enumeration()
+    test_two_way_claim_checks_slots()
 
     print()
     if FAILS:

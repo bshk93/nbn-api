@@ -61,6 +61,7 @@ from .transactions import (
     _hard_cap_check, _universal_hard_cap_check, _check_bae_eligibility,
     _check_signing_method_funding, _check_signing_method_declared,
     _roster_size_check, _count_standard_roster, _buyout_salary_above_ntmle,
+    _two_way_slot_check, _count_two_way_roster,
 )
 
 router = APIRouter()
@@ -262,10 +263,14 @@ def _validate_waiver_claim(claim: dict, release_txn: dict, ctx: dict) -> list[Ch
                 ),
             ))
 
-    if contract_type != "two-way":
+    # A two-way sits outside the 15 but has its own three slots (§ 2.2).
+    # Nothing checked them here, so CHA claimed a fourth two-way (2026-10-19).
+    if contract_type == "two-way":
+        r = _two_way_slot_check(team, _count_two_way_roster(team) + 1, "claiming")
+    else:
         r = _roster_size_check(team, _count_standard_roster(team) + 1, "claiming", ctx["txn_date"])
-        if r:
-            checks.append(r)
+    if r:
+        checks.append(r)
 
     r = _check_signing_method_declared(team, claim.get("signing_method"), contract_type)
     if r:
