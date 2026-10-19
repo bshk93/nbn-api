@@ -113,6 +113,8 @@ check("...none to roster-log — the transaction's own post gets mirrored there 
 pdc_payload = by_channel("pdc-chan")[0]
 check("pdc-alerts footer names the real ledger entry, not a manual hand-off",
       "deadbeef" in pdc_payload["embeds"][0].get("footer", {}).get("text", ""))
+check("pdc-alerts states the agreed contract, year by year",
+      "$3,000,000" in payload_text(pdc_payload) and "$3,200,000" in payload_text(pdc_payload))
 fa_news_text = by_channel("fa-news-chan")[0]["content"]
 check("fa-news names the player", "Dominick" in fa_news_text)
 

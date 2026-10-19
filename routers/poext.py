@@ -1025,7 +1025,11 @@ def finalize_player(slug: str, body: FinalizeBody = FinalizeBody(),
                 apply_extension, details,
                 datetime.now(timezone.utc).strftime("%Y-%m-%d"), info,
                 description=f"POEXT — {_player_display_name(slug)} extension agreed",
-                confirm_warnings=body.confirm_warnings)
+                confirm_warnings=body.confirm_warnings,
+                # The #roster-log mirror skips a #transactions post unless
+                # asked — free_agency's finalize asks too. Without it the
+                # agreed extension never reached #roster-log (2026-10-19).
+                relay_to_roster_log=True)
 
         idx = next(i for i, p in enumerate(proposals) if p["id"] == live["id"])
         if outcome == "agreed" and body.eaps_assumption:

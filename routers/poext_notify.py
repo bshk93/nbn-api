@@ -217,7 +217,9 @@ def notify_player_finalized(slug: str, proposal: dict, final: dict) -> None:
     `#roster-log` gets the agreed extension too, but not from here: finalize
     now writes a real transaction (`apply_extension`), whose own
     `notify_transaction` post to `#transactions` the roster-log-relay poller
-    mirrors on its own — this function no longer posts there directly.
+    mirrors on its own (finalize passes `relay_to_roster_log=True` for that —
+    without it the mirror skips the post) — this function no longer posts
+    there directly.
     """
     team = proposal["team"]
     outcome = final["outcome"]
@@ -227,6 +229,21 @@ def notify_player_finalized(slug: str, proposal: dict, final: dict) -> None:
         exhausted_note = "\n\n§ 6.3: three proposals now rejected — no further extension opportunities arise for this player unless PO-EXT unlocks it."
 
     def build():
+        # The terms the committee just decided on — without them the post
+        # said only who voted how, and the channel couldn't tell what passed.
+        contract = proposal.get("contract") or {}
+        terms = [{"name": "Contract",
+                  "value": (_contract_str(contract) or "—")
+                           + (f" · {KIND_LABELS.get(proposal.get('kind'), proposal.get('kind'))}"
+                              if proposal.get("kind") else ""),
+                  "inline": False}]
+        breakdown = _contract_breakdown(contract)
+        if breakdown:
+            terms.append({"name": "Year by year", "value": breakdown, "inline": False})
+        if proposal.get("eaps_assumption"):
+            terms.append({"name": "EAPS assumption",
+                          "value": f"Final salary {proposal['eaps_assumption']} EAPS (prices the trailing hold, § 3.10)",
+                          "inline": False})
         embed = {
             "title": f"{_name(slug)} — extension {outcome}",
             "description": (f"{(final.get('totals') or {}).get('accept', 0)} accept – "
@@ -235,11 +252,13 @@ def notify_player_finalized(slug: str, proposal: dict, final: dict) -> None:
                                else "decided by lottery draw")
                             + f" · locked by {final['locked_by']}" + exhausted_note),
             "color": color,
-            "fields": [{"name": "Team", "value": team, "inline": True}]
+            "fields": [{"name": "Team", "value": team, "inline": True},
+                       {"name": "Proposal", "value": f"#{proposal.get('number', '?')} · v{proposal.get('version', 1)}", "inline": True}]
                       # § 6.3's three-proposal limit is an expiring veteran's only.
                       + ([{"name": "Rejections this negotiation",
                            "value": str(final.get("rejections_total", 0)) + "/3", "inline": True}]
-                         if final.get("rejection_limit") else []),
+                         if final.get("rejection_limit") else [])
+                      + terms,
             "url": _link(slug),
         }
         if outcome == "agreed":

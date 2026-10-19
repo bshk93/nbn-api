@@ -178,7 +178,8 @@ def fake_apply_extension(details, txn_date, info, description="", force=False,
     if blocking:
         raise HTTPException(422, {"validation": True, "checks": PENDING_CHECKS, "can_force": True})
     txn = {"id": f"txn{len(APPLIED_EXTENSIONS) + 1}", "type": "extension",
-           "details": details.model_dump(), "force_warnings_only": force_warnings_only}
+           "details": details.model_dump(), "force_warnings_only": force_warnings_only,
+           "relay_to_roster_log": relay_to_roster_log}
     APPLIED_EXTENSIONS.append(txn)
     LEDGER.append(txn)
     return txn
@@ -327,6 +328,8 @@ check("applied for the right player/team", APPLIED_EXTENSIONS[0]["details"]["pla
       and APPLIED_EXTENSIONS[0]["details"]["team"] == "SAS")
 check("no warnings here, so nothing needed confirming",
       APPLIED_EXTENSIONS[0]["force_warnings_only"] is False)
+check("the agreed extension is relayed to #roster-log, as FA's finalize is",
+      APPLIED_EXTENSIONS[0]["relay_to_roster_log"] is True)
 check("finalize's txn_id matches the applied extension", final["txn_id"] == APPLIED_EXTENSIONS[0]["id"])
 check("proposal archived", PROPOSALS[[i for i, x in enumerate(PROPOSALS) if x["id"] == p["id"]][0]]["status"] == "agreed")
 raises("can't finalize twice", 409, lambda: poext.finalize_player("barlow-dominick", poext.FinalizeBody(), HEAD))
