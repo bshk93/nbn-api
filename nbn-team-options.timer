@@ -1,0 +1,15 @@
+[Unit]
+Description=Hourly check of the rookie-scale team option deadline
+
+[Timer]
+# Hourly, so the 48- and 24-hour reminders land within an hour of the mark and
+# the automatic declines run within an hour of the deadline. Every other hour
+# of the year the run finds nothing to do and exits.
+OnCalendar=hourly
+# A missed run catches up after downtime. The sweep is idempotent: a reminder
+# goes once a season, and a declined option is no longer a team option.
+Persistent=true
+RandomizedDelaySec=2min
+
+[Install]
+WantedBy=timers.target

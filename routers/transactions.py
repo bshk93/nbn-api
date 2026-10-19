@@ -21,7 +21,7 @@ from .constants import (
     SALARY_MATCH_TIER1_CAP, SALARY_MATCH_TIER2_CAP,
 )
 from .storage import (
-    read_csv, write_csv, _load_json, log_write, _parse_dollar, _season_start, _season_shift,
+    read_csv, write_csv, _load_json, _save_json, log_write, _parse_dollar, _season_start, _season_shift,
     _season_for_date, _current_league_year, _league_rollovers, _season_start_date,
 )
 from .auth import require_role, get_token_info, is_team_owner
@@ -29,7 +29,7 @@ from .discord_notify import notify_transaction, _player_name
 from .roster_move_notify import announce as announce_roster_move
 from . import inbox
 from . import season_calendar
-from .league_time import league_today_str
+from .league_time import league_today_str, LEAGUE_TZ
 from .players import load_player_bios, save_player_bios, _build_team_map, _scrub_trading_block, _display_name
 from .roster_picks import (
     load_picks, save_picks, _all_picks_flat, _pick_year_horizon,
@@ -2960,6 +2960,104 @@ def sweep_lapsed_qualifying_offers(as_of: Optional[str] = None) -> list[str]:
         if lapsed:
             save_player_bios(bios)
     return lapsed
+
+
+TEAM_OPTION_NOTICES_FILE = DATA_DIR / "team-option-notices.json"
+
+
+def _due_rookie_options(season: str, bios: dict) -> list[tuple[str, str, str]]:
+    """(slug, team, option year) for every rookie-scale team option the
+    `season` deadline decides — next season's, for first-rounders in years 2
+    and 3 — still undecided and on a roster."""
+    nxt = _season_shift(season, 1)
+    team_map = _build_team_map()
+    out = []
+    for slug, bio in bios.items():
+        if (bio.get("cap_holds") or {}).get(nxt) != "TEAM_OPT" or bio.get("retired"):
+            continue
+        if not season_calendar.is_rookie_scale_option(bio, nxt):
+            continue
+        team = team_map.get(slug)
+        if team:
+            out.append((slug, team, nxt))
+    return out
+
+
+def sweep_rookie_team_options(now: Optional[datetime] = None) -> dict:
+    """§ 6.1's rookie-scale deadline, run hourly by `sweep_team_options.py`.
+
+    Before the deadline: one inbox message per team, at 48 hours and again at
+    24 hours before the deadline day ends (league time), listing its undecided
+    rookie options. Each is sent once a season; `team-option-notices.json`
+    remembers which went. After the deadline: every option still undecided is
+    declined, as a UFA hold, and announced like an owner's own decline — ledger,
+    the transactions embed relayed to #roster-log, #fa-news, and the team's
+    inbox. Returns what it did, for the log."""
+    season = _current_league_year()
+    deadline = season_calendar.team_option_deadline(season)
+    done = {"season": season, "deadline": deadline, "notices": [], "declined": []}
+    if not deadline:
+        return done
+    now = now or datetime.now(LEAGUE_TZ)
+    end = datetime.strptime(deadline, "%Y-%m-%d").replace(tzinfo=LEAGUE_TZ) + timedelta(days=1)
+    hours_left = (end - now).total_seconds() / 3600
+    pretty = datetime.strptime(deadline, "%Y-%m-%d").strftime("%A, %b %-d")
+
+    if 0 < hours_left <= 48:
+        sent = _load_json(TEAM_OPTION_NOTICES_FILE, {})
+        mine = sent.setdefault(season, {})
+        # The most urgent notice due and not yet sent. After downtime, a run
+        # inside 24 hours sends only the 24-hour one, not both back to back.
+        mark = "24h" if hours_left <= 24 else "48h"
+        if mark not in mine:
+            by_team: dict[str, list[str]] = {}
+            for slug, team, nxt in _due_rookie_options(season, load_player_bios()):
+                by_team.setdefault(team, []).append(slug)
+            bios = load_player_bios()
+            for team, slugs in sorted(by_team.items()):
+                names = ", ".join(_player_name(s, bios) for s in sorted(slugs))
+                left = "24 hours" if mark == "24h" else "48 hours"
+                inbox.notify_team(team, f"{left} left: rookie-scale team options are due by the end of "
+                                        f"{pretty}. Still undecided: {names}. Anything not exercised by "
+                                        f"then is declined automatically (§ 6.1).", link=f"/teams/{team}/")
+                done["notices"].append((mark, team, len(slugs)))
+            mine[mark] = now.isoformat()
+            if mark == "24h":
+                mine.setdefault("48h", mine["24h"])
+            _save_json(TEAM_OPTION_NOTICES_FILE, sent)
+        return done
+
+    if hours_left > 0:
+        return done
+
+    info = {"name": "system"}
+    txns = []
+    with _txn_lock:
+        for slug, team, nxt in _due_rookie_options(season, load_player_bios()):
+            details = OptionDetails(player=slug, decision="decline", option_type="TEAM_OPT",
+                                    year=nxt, cap_hold_type="UFA")
+            applied = _apply_option(details, info)
+            txn = {
+                "id": secrets.token_hex(8),
+                "type": "option",
+                "date": league_today_str(),
+                "created_by": "system",
+                "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "description": f"Declined automatically: not exercised by the {deadline} rookie-scale deadline (§ 6.1)",
+                "details": {**details.model_dump(), "team": applied, "_source": "auto_deadline"},
+            }
+            _append_transaction(txn)
+            txns.append(txn)
+    bios = load_player_bios()
+    for txn in txns:
+        d = txn["details"]
+        notify_transaction(txn, relay_to_roster_log=True)
+        announce_roster_move(txn)
+        inbox.notify_team(d["team"], f"{_player_name(d['player'], bios)}'s {d['year']} team option wasn't "
+                                     f"exercised by the deadline, so it was declined. He becomes a UFA "
+                                     f"after this season (§ 6.1).", link=f"/teams/{d['team']}/")
+        done["declined"].append((d["team"], d["player"]))
+    return done
 
 
 def _offer_sheet_outcome_team(details: dict) -> Optional[str]:
@@ -6903,6 +7001,40 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
     return checks
 
 
+def _option_window_check(bio: dict, year: str, date: str, name: str) -> CheckResult:
+    """§ 6.1's decision windows (league office, 2026-10-19). A rookie-scale
+    option is due by the deadline and is declined automatically after it; any
+    other team option is decided between the end of the previous regular
+    season and June 30. An error, so an owner can't decide outside it; the
+    office can still force one through for a correction."""
+    w = season_calendar.team_option_window(bio, year)
+    when = lambda d: datetime.strptime(d, "%Y-%m-%d").strftime("%b %-d, %Y")
+    if w["kind"] == "rookie":
+        if w["closes"] and date > w["closes"]:
+            return CheckResult(check="option_window", passed=False, level="error",
+                               message=f"{name}'s {year} option is a rookie-scale option, due by "
+                                       f"{when(w['closes'])}. That deadline has passed, and an option "
+                                       f"not exercised by then is declined automatically (§ 6.1).")
+        return CheckResult(check="option_window", passed=True,
+                           message=f"Rookie-scale option, due by {when(w['closes'])} (§ 6.1)."
+                                   if w["closes"] else "Rookie-scale option (§ 6.1).")
+    if w["closes"] and date > w["closes"]:
+        return CheckResult(check="option_window", passed=False, level="error",
+                           message=f"The window for {name}'s {year} option closed on {when(w['closes'])}, "
+                                   f"before that league year began (§ 6.1).")
+    if not w["opens"]:
+        return CheckResult(check="option_window", passed=False, level="warning",
+                           message=f"{name}'s {year} option can only be decided after the regular season "
+                                   f"ends, and that season's schedule isn't on file to check (§ 6.1).")
+    if date < w["opens"]:
+        return CheckResult(check="option_window", passed=False, level="error",
+                           message=f"{name}'s {year} option isn't a rookie-scale option, so it can only be "
+                                   f"decided once the regular season ends: from {when(w['opens'])} "
+                                   f"through {when(w['closes'])} (§ 6.1).")
+    return CheckResult(check="option_window", passed=True,
+                       message=f"Inside the option window, open through {when(w['closes'])} (§ 6.1).")
+
+
 def _validate_option(details: OptionDetails, ctx: dict) -> list[CheckResult]:
     """§ 6.1 option decisions. Real content is TEAM_OPT-only — a PLAYER_OPT
     decision is PDC's own judgment call (the team never even initiates it;
@@ -6936,6 +7068,7 @@ def _validate_option(details: OptionDetails, ctx: dict) -> list[CheckResult]:
         check="option_eligible", passed=True,
         message=f"{name} carries a TEAM_OPT for {details.year} — eligible to exercise or decline.",
     ))
+    checks.append(_option_window_check(bio, details.year, ctx.get("txn_date") or league_today_str(), name))
 
     if details.decision != "decline":
         return checks

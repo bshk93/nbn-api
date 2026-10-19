@@ -274,14 +274,65 @@ def test_team_option_deadline():
     check("the calendar lists one per league year, 20-21 through next season",
           [e["date"][:4] for e in deadlines] == [str(y) for y in range(2020, 2028)])
     check("this year's is Monday Nov 2",
-          any(e["date"] == "2026-11-02" and e["label"] == "Team option deadline" for e in deadlines))
+          any(e["date"] == "2026-11-02" and e["label"] == "Rookie-scale team option deadline" for e in deadlines))
     check("the board's own events are still there", any(e["id"] == "abc" for e in events))
     check("and everything is in date order", [e["date"] for e in events] == sorted(e["date"] for e in events))
     r = client.delete("/api/calendar/events/recurring:team-option-deadline:26-27", headers=BOD)
     check("a computed event can't be deleted", r.status_code == 404)
 
 
+def test_team_option_windows():
+    print("\n-- § 6.1 team option windows: rookie-scale by the deadline, others after the season --")
+    r25 = {"name": "ROOKIE, TWENTYFIVE", "draft_year": 2025, "draft_round": 1}
+    r24 = {"name": "ROOKIE, TWENTYFOUR", "draft_year": 2024, "draft_round": 1}
+    r23 = {"name": "OLDER, FIRSTROUNDER", "draft_year": 2023, "draft_round": 1}
+    second = {"name": "SECOND, ROUNDER", "draft_year": 2025, "draft_round": 2}
+    check("a 2025 first-rounder's 27-28 and 28-29 options are rookie-scale",
+          cal.is_rookie_scale_option(r25, "27-28") and cal.is_rookie_scale_option(r25, "28-29"))
+    check("a 2024 first-rounder's 27-28 option is rookie-scale (year 4)", cal.is_rookie_scale_option(r24, "27-28"))
+    check("a 2023 first-rounder's 27-28 option is not (his rookie deal is over)",
+          not cal.is_rookie_scale_option(r23, "27-28"))
+    check("a second-rounder's is not", not cal.is_rookie_scale_option(second, "27-28"))
+
+    def window(bio, year, date):
+        return T._option_window_check(bio, year, date, bio["name"])
+
+    c = window(r25, "27-28", "2026-11-02")
+    check("a rookie option can be decided on deadline day", c.passed)
+    c = window(r25, "27-28", "2026-11-03")
+    check("...and is refused the day after, as an error",
+          not c.passed and c.level == "error" and "declined automatically" in c.message)
+    check("next fall's rookie option can be decided now", window(r25, "28-29", "2026-10-19").passed)
+
+    c = window(second, "27-28", "2026-10-19")
+    check("any other option is refused during the season",
+          not c.passed and c.level == "error" and "Apr 12, 2027" in c.message)
+    check("...and refused on the last regular-season day", not window(second, "27-28", "2027-04-11").passed)
+    check("...and allowed the day after it", window(second, "27-28", "2027-04-12").passed)
+    check("...through June 30", window(second, "27-28", "2027-06-30").passed)
+    c = window(second, "27-28", "2027-07-01")
+    check("...and refused from July 1", not c.passed and c.level == "error")
+    c = window(second, "28-29", "2027-10-01")
+    check("a season with no schedule on file warns rather than guesses",
+          not c.passed and c.level == "warning")
+
+    # Wired into the validator: an owner deciding out of window is refused.
+    orig_map = T._build_team_map
+    T._build_team_map = lambda: {"p": "PHX"}
+    try:
+        details = T.OptionDetails(player="p", decision="accept", option_type="TEAM_OPT",
+                                  year="27-28", cap_hold_type="UFA")
+        bios = {"p": {**second, "cap_holds": {"27-28": "TEAM_OPT"}}}
+        r = T._validate_option(details, {"bios": bios, "cap_levels": {}, "cur_season": "26-27",
+                                         "txn_date": "2026-10-19"})
+        check("the validator carries the window check",
+              any(x.check == "option_window" and not x.passed and x.level == "error" for x in r))
+    finally:
+        T._build_team_map = orig_map
+
+
 if __name__ == "__main__":
+    test_team_option_windows()
     test_calendar()
     test_roster_size()
     test_trade_limit()

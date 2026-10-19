@@ -100,6 +100,7 @@ CHECK_SECTIONS: dict[str, tuple[str, ...]] = {
     "offer_sheet_resolvable":     ("3.15",),
     "offer_sheet_rfa":            ("3.15",),
     "option_eligible":            ("6.1",),
+    "option_window":              ("6.1",),
     "pick_advance_limit":         ("7.2",),
     "pick_advance_limit_{}_{}":   ("7.2",),
     "trailing_hold":              ("3.10",),

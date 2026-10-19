@@ -106,10 +106,11 @@ def draft_days(season: str) -> list[str]:
 
 
 def team_option_deadline(season: str) -> Optional[str]:
-    """The team option deadline: October 31 of the season's first year, or
-    the Monday after when that's a weekend (league office, 2026-10-19). A
-    fixed rule rather than a stored date, so it needs no entering each year.
-    Shown on the calendar; nothing enforces it yet."""
+    """The rookie-scale team option deadline: October 31 of the season's
+    first year, or the Monday after when that's a weekend (league office,
+    2026-10-19). It decides next season's options for first-rounders in years
+    2 and 3 of their rookie deals. A fixed rule rather than a stored date, so
+    it needs no entering each year. See `team_option_window`."""
     try:
         year = 2000 + int(season.split("-")[0])
     except (ValueError, IndexError):
@@ -118,6 +119,56 @@ def team_option_deadline(season: str) -> Optional[str]:
     if d.weekday() >= 5:                       # Saturday 5, Sunday 6
         d += timedelta(days=7 - d.weekday())   # → the Monday after
     return d.strftime("%Y-%m-%d")
+
+
+def _prev_season(season: str) -> Optional[str]:
+    try:
+        y = int(season.split("-")[0])
+    except (ValueError, IndexError):
+        return None
+    return f"{(y - 1) % 100:02d}-{y % 100:02d}"
+
+
+def is_rookie_scale_option(bio: dict, year: str) -> bool:
+    """A first-round rookie-scale deal carries team options on its 3rd and 4th
+    seasons: a pick drafted in 2025 plays 25-26 and 26-27, then has options on
+    27-28 and 28-29. Read off the draft record, since only a few bios carry
+    their contract history. A first-rounder re-signed later onto a deal with an
+    option in one of those two seasons would be misread as rookie-scale; none
+    is on file today."""
+    if (bio or {}).get("draft_round") != 1 or not bio.get("draft_year"):
+        return False
+    try:
+        start = 2000 + int(year.split("-")[0])
+    except (ValueError, IndexError):
+        return False
+    return start - int(bio["draft_year"]) in (2, 3)
+
+
+def team_option_window(bio: dict, year: str) -> dict:
+    """When a team option on `year` may be decided (§ 6.1, league office
+    2026-10-19), inclusive dates, None meaning unbounded or unknown.
+
+    * rookie-scale (`kind: "rookie"`): any time up to the team option
+      deadline in the season before; unexercised by then, it's declined
+      automatically (sweep_team_options.py).
+    * every other team option (`kind: "other"`): from the day after the
+      previous season's last regular-season game through June 30, the day
+      before the option season's league year starts. `opens` is None when that
+      season has no schedule on file, which the validator reports rather than
+      guesses."""
+    prev = _prev_season(year)
+    if is_rookie_scale_option(bio, year):
+        return {"kind": "rookie", "opens": None,
+                "closes": team_option_deadline(prev) if prev else None}
+    bounds = regular_season_bounds(prev) if prev else None
+    opens = ((datetime.strptime(bounds[1], "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+             if bounds else None)
+    try:
+        closes = f"{2000 + int(year.split('-')[0])}-06-30"
+    except (ValueError, IndexError):
+        closes = None
+    return {"kind": "other", "opens": opens, "closes": closes}
 
 
 def season_calendar(season: str) -> dict:

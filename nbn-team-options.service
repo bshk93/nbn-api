@@ -1,0 +1,13 @@
+[Unit]
+Description=Rookie-scale team option reminders and deadline declines (§ 6.1)
+Documentation=file:///home/skim/projects/nbn-api/sweep_team_options.py
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=skim
+WorkingDirectory=/home/skim/projects/nbn-api
+ExecStart=/home/skim/projects/nbn-api/venv/bin/python /home/skim/projects/nbn-api/sweep_team_options.py
+StandardOutput=journal
+StandardError=journal

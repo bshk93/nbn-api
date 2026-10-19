@@ -545,7 +545,7 @@ def _recurring_events() -> list[dict]:
         date = season_calendar.team_option_deadline(season)
         if date:
             out.append({"id": f"recurring:team-option-deadline:{season}", "date": date,
-                        "label": "Team option deadline", "recurring": True})
+                        "label": "Rookie-scale team option deadline", "recurring": True})
     return out
 
 

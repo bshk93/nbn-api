@@ -660,6 +660,27 @@ never see it. `tests/test_audit_log.py` exercises that path end to end because
 it is the piece that fails silently. Writes with no request behind them
 (timers, the relay, CLI scripts) record as `system`.
 
+## Team option windows (§ 6.1)
+
+Set by the league office 2026-10-19. Two kinds of team option, told apart by
+`season_calendar.is_rookie_scale_option` (a first-rounder's 3rd and 4th
+seasons, off the bio's draft record):
+
+- **Rookie-scale:** decided any time up to the deadline, October 31 or the
+  Monday after a weekend (`team_option_deadline`), in the season before the
+  option year. Anything still undecided is declined automatically as a UFA hold.
+- **Every other team option:** decided from the day after the previous
+  regular season's last game through June 30 (`team_option_window`).
+
+`_option_window_check` (check id `option_window`) refuses an option decided
+outside its window. It's an error, so owners can't override it; the office can
+force a correction. `nbn-team-options.timer` runs `sweep_team_options.py`
+hourly: inbox reminders to each team at 48 and 24 hours before the rookie
+deadline (sent once a season, recorded in `team-option-notices.json`), and the
+automatic declines once it passes, announced like an owner's own decline.
+`--dry-run` lists what's due and writes nothing. Pinned by
+`tests/test_team_option_sweep.py` and `tests/test_season_start_rules.py`.
+
 ## Cap history (`routers/cap_history.py`)
 
 A daily row per team — Team Salary on both bases, apron position, hard-cap
