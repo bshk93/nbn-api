@@ -33,7 +33,6 @@ separate prefix cannot collide however the routers are ordered.
 """
 
 import json
-from datetime import date as _date
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -44,6 +43,7 @@ from .constants import CAP_LEVELS_FILE, DATA_DIR, VALID_TEAMS, logger
 from .roster_picks import get_season_state, load_team_state
 from .storage import _current_league_year, _load_json, read_csv
 from . import season_calendar
+from .league_time import league_today_str
 from .transactions import (_compute_team_salary, _compute_team_salary_ex_holds,
                             _is_standard_roster_slot, _real_empty_roster_charge)
 
@@ -128,7 +128,7 @@ def _draft_rights(team: str, bios: dict) -> list[dict]:
 
 def build_rows(on_date: Optional[str] = None, season: Optional[str] = None) -> list[dict]:
     """One row per team for `on_date`. Pure — computes, writes nothing."""
-    on_date = on_date or _date.today().isoformat()
+    on_date = on_date or league_today_str()
     season = season or _current_league_year()
     bios = _load_json(DATA_DIR / "player-bios.json", {})
     state = load_team_state()
@@ -222,7 +222,7 @@ def snapshot(on_date: Optional[str] = None, force: bool = False) -> dict:
     """Append today's rows. A second run on the same day is a no-op unless
     forced — the timer may fire twice after a reboot, and a duplicated day would
     quietly double-count in any chart built off this."""
-    on_date = on_date or _date.today().isoformat()
+    on_date = on_date or league_today_str()
     if not force and on_date in recorded_dates():
         return {"date": on_date, "written": 0, "skipped": "already recorded"}
     rows = build_rows(on_date)
