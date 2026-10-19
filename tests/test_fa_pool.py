@@ -83,6 +83,11 @@ def main():
         "unsigned-guy": {
             "type": "", "cap_holds": {}, "salaries": {},
         },
+        "no-type-key-guy": {
+            # A bio created without a `type` key at all is unset too, not
+            # excluded (Oscar Tshiebwe and 89 others went missing this way).
+            "name": "GUY, NO-TYPE",
+        },
         "still-rostered-no-hold": {
             # On a roster, no cap hold at all -> not a free agent, excluded entirely.
             "type": "player", "cap_holds": {}, "salaries": {"26-27": "$5,000,000"},
@@ -142,6 +147,8 @@ def main():
     check("unsigned-guy: bucketed UNSIGNED with zero prior salary",
           pool["unsigned-guy"]["hold_type"] == "UNSIGNED"
           and pool["unsigned-guy"]["prior_salary"] == 0)
+    check("no-type-key-guy: a bio with no `type` key is bucketed UNSIGNED too",
+          pool.get("no-type-key-guy", {}).get("hold_type") == "UNSIGNED")
 
     check("still-rostered-no-hold: excluded (on a roster, no actionable hold)",
           "still-rostered-no-hold" not in pool)

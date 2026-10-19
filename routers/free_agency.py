@@ -145,7 +145,7 @@ def _fa_pool(bios: dict, team_map: dict, season: str, cap_levels: Optional[dict]
             }
             continue
 
-        if bio.get("type") == "" and slug not in team_map and not cap_map and not bio.get("retired"):
+        if not bio.get("type") and slug not in team_map and not cap_map and not bio.get("retired"):
             (renounced if salaries else unsigned).append(slug)
 
     target_year = min(years_seen) if years_seen else season
