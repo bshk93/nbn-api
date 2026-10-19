@@ -369,6 +369,28 @@ raises("a real error blocks with no confirm_warnings escape hatch", 422,
 check("still nothing applied", len(APPLIED_EXTENSIONS) == before)
 PENDING_CHECKS[:] = []
 
+print("\nfinalize — the head answers an unpriced Full Bird hold's EAPS question")
+# A proposal submitted with no eaps_assumption, whose trailing hold lands in a
+# season with no EAPS yet: apply_extension can't price the hold. The head
+# supplies above/below at finalize, as FA's declare-winner already lets them.
+reset()
+TEAM_MAP["eapsy"] = "SAS"
+p_x = make_proposal(SAS, player="eapsy")
+poext.submit_proposal(p_x["id"], SAS)
+poext.claim_player("eapsy", AGENT)
+poext.advance_player("eapsy", {"note": ""}, AGENT)
+poext.assign_subcommittee("eapsy", {"subcommittee": ["memberA", "memberB"]}, HEAD)
+poext.cast_vote("eapsy", poext.VoteIn(balls={"accept": 1000}), MEM_A)
+poext.cast_vote("eapsy", poext.VoteIn(balls={"accept": 1000}), MEM_B)
+raises("an EAPS answer other than above/below is refused", 422,
+       lambda: poext.finalize_player("eapsy", poext.FinalizeBody(eaps_assumption="sideways"), HEAD))
+before = len(APPLIED_EXTENSIONS)
+poext.finalize_player("eapsy", poext.FinalizeBody(eaps_assumption="below"), HEAD)
+check("the head's EAPS answer reaches the applied extension",
+      len(APPLIED_EXTENSIONS) == before + 1 and APPLIED_EXTENSIONS[-1]["details"]["eaps_assumption"] == "below")
+check("and is recorded on the proposal",
+      next(x for x in PROPOSALS if x["id"] == p_x["id"])["eaps_assumption"] == "below")
+
 # ══ rejection + the 3-strike exhaustion ══════════════════════════════════════
 
 print("\nrejection burns a proposal; three rejections exhaust the player")

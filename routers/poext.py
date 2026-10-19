@@ -884,6 +884,11 @@ class FinalizeBody(BaseModel):
     # Required when no option took more than 85%; refused when one did,
     # since then the ballot has already decided.
     outcome: Optional[str] = None
+    # § 3.10: a Full Bird trailing hold in a season with no EAPS yet can't be
+    # priced without knowing which side of EAPS the final salary falls. A
+    # proposal submitted without it is answered here by the head, the same way
+    # free_agency's declare-winner asks (committees/pdc's EAPS prompt).
+    eaps_assumption: Optional[str] = None
 
 
 def _ballot_totals(node: dict) -> dict:
@@ -1008,15 +1013,23 @@ def finalize_player(slug: str, body: FinalizeBody = FinalizeBody(),
                                          f"with its outcome")
             outcome, path = body.outcome, "lottery"
 
+        if body.eaps_assumption is not None and body.eaps_assumption not in ("above", "below"):
+            raise HTTPException(422, "eaps_assumption must be 'above' or 'below'")
+
         txn = None
         if outcome == "agreed":
+            details = _extension_details(live)
+            if body.eaps_assumption:
+                details.eaps_assumption = body.eaps_assumption
             txn = apply_with_warning_confirm(
-                apply_extension, _extension_details(live),
+                apply_extension, details,
                 datetime.now(timezone.utc).strftime("%Y-%m-%d"), info,
                 description=f"POEXT — {_player_display_name(slug)} extension agreed",
                 confirm_warnings=body.confirm_warnings)
 
         idx = next(i for i, p in enumerate(proposals) if p["id"] == live["id"])
+        if outcome == "agreed" and body.eaps_assumption:
+            live["eaps_assumption"] = body.eaps_assumption
         live["status"] = outcome
         # One stamp for the lock and the archive: unlock finds the proposals
         # to bring back by matching it.
