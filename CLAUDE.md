@@ -668,17 +668,19 @@ seasons, off the bio's draft record):
 
 - **Rookie-scale:** decided any time up to the deadline, October 31 or the
   Monday after a weekend (`team_option_deadline`), in the season before the
-  option year. Anything still undecided is declined automatically as a UFA hold.
+  option year.
 - **Every other team option:** decided from the day after the previous
   regular season's last game through June 30 (`team_option_window`).
 
-`_option_window_check` (check id `option_window`) refuses an option decided
-outside its window. It's an error, so owners can't override it; the office can
-force a correction. `nbn-team-options.timer` runs `sweep_team_options.py`
-hourly: inbox reminders to each team at 48 and 24 hours before the rookie
-deadline (sent once a season, recorded in `team-option-notices.json`), and the
-automatic declines once it passes, announced like an owner's own decline.
-`--dry-run` lists what's due and writes nothing. Pinned by
+Across the board, an option not decided in its window is declined
+automatically as a UFA hold. `_option_window_check` (check id `option_window`)
+refuses an option decided outside its window. It's an error, so owners can't
+override it; the office can force a correction. `nbn-team-options.timer` runs
+`sweep_team_options.py` hourly (`sweep_team_options` in `transactions.py`):
+inbox reminders to each team at 48 and 24 hours before any window closes (once
+per close date, recorded in `team-option-notices.json`), and the automatic
+declines once one has, announced like an owner's own decline. `--dry-run`
+lists every undecided option by close date and writes nothing. Pinned by
 `tests/test_team_option_sweep.py` and `tests/test_season_start_rules.py`.
 
 ## Cap history (`routers/cap_history.py`)

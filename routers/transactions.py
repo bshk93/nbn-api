@@ -2965,98 +2965,121 @@ def sweep_lapsed_qualifying_offers(as_of: Optional[str] = None) -> list[str]:
 TEAM_OPTION_NOTICES_FILE = DATA_DIR / "team-option-notices.json"
 
 
-def _due_rookie_options(season: str, bios: dict) -> list[tuple[str, str, str]]:
-    """(slug, team, option year) for every rookie-scale team option the
-    `season` deadline decides — next season's, for first-rounders in years 2
-    and 3 — still undecided and on a roster."""
-    nxt = _season_shift(season, 1)
+def _undecided_team_options(bios: dict) -> list[dict]:
+    """Every team option on a roster still undecided, with its § 6.1 window:
+    `{slug, team, year, kind, closes}`. `kind` is "rookie" or "other";
+    `closes` is the last day it may be decided (None when unknown)."""
     team_map = _build_team_map()
     out = []
     for slug, bio in bios.items():
-        if (bio.get("cap_holds") or {}).get(nxt) != "TEAM_OPT" or bio.get("retired"):
-            continue
-        if not season_calendar.is_rookie_scale_option(bio, nxt):
+        if bio.get("retired"):
             continue
         team = team_map.get(slug)
-        if team:
-            out.append((slug, team, nxt))
+        if not team:
+            continue
+        for year, tag in (bio.get("cap_holds") or {}).items():
+            if tag != "TEAM_OPT":
+                continue
+            w = season_calendar.team_option_window(bio, year)
+            out.append({"slug": slug, "team": team, "year": year, "kind": w["kind"], "closes": w["closes"]})
     return out
 
 
-def sweep_rookie_team_options(now: Optional[datetime] = None) -> dict:
-    """§ 6.1's rookie-scale deadline, run hourly by `sweep_team_options.py`.
+def _close_end(closes: str) -> datetime:
+    """The moment a window closes: the end of its last day, league time."""
+    return datetime.strptime(closes, "%Y-%m-%d").replace(tzinfo=LEAGUE_TZ) + timedelta(days=1)
 
-    Before the deadline: one inbox message per team, at 48 hours and again at
-    24 hours before the deadline day ends (league time), listing its undecided
-    rookie options. Each is sent once a season; `team-option-notices.json`
-    remembers which went. After the deadline: every option still undecided is
-    declined, as a UFA hold, and announced like an owner's own decline — ledger,
+
+def sweep_team_options(now: Optional[datetime] = None) -> dict:
+    """§ 6.1: team options not decided in their window are declined, across
+    the board (league office, 2026-10-19). Run hourly by `sweep_team_options.py`.
+
+    A rookie-scale option's window closes at the deadline (October 31, or the
+    Monday after a weekend); every other team option's closes June 30.
+
+    Reminders: one inbox message per team, at 48 hours and again at 24 hours
+    before a window closes (league time), listing its undecided options. Each
+    goes once per close date; `team-option-notices.json` remembers which went.
+    After downtime, a run inside 24 hours sends only the 24-hour one.
+
+    Declines: once a window has closed, every option in it still undecided is
+    declined as a UFA hold and announced like an owner's own decline: ledger,
     the transactions embed relayed to #roster-log, #fa-news, and the team's
     inbox. Returns what it did, for the log."""
-    season = _current_league_year()
-    deadline = season_calendar.team_option_deadline(season)
-    done = {"season": season, "deadline": deadline, "notices": [], "declined": []}
-    if not deadline:
-        return done
     now = now or datetime.now(LEAGUE_TZ)
-    end = datetime.strptime(deadline, "%Y-%m-%d").replace(tzinfo=LEAGUE_TZ) + timedelta(days=1)
-    hours_left = (end - now).total_seconds() / 3600
-    pretty = datetime.strptime(deadline, "%Y-%m-%d").strftime("%A, %b %-d")
+    done = {"notices": [], "declined": []}
+    undecided = _undecided_team_options(load_player_bios())
 
-    if 0 < hours_left <= 48:
+    # Reminders, per close date inside the next 48 hours.
+    upcoming: dict[str, list[dict]] = {}
+    for o in undecided:
+        if o["closes"]:
+            hours_left = (_close_end(o["closes"]) - now).total_seconds() / 3600
+            if 0 < hours_left <= 48:
+                upcoming.setdefault(o["closes"], []).append(o)
+    if upcoming:
         sent = _load_json(TEAM_OPTION_NOTICES_FILE, {})
-        mine = sent.setdefault(season, {})
-        # The most urgent notice due and not yet sent. After downtime, a run
-        # inside 24 hours sends only the 24-hour one, not both back to back.
-        mark = "24h" if hours_left <= 24 else "48h"
-        if mark not in mine:
-            by_team: dict[str, list[str]] = {}
-            for slug, team, nxt in _due_rookie_options(season, load_player_bios()):
-                by_team.setdefault(team, []).append(slug)
-            bios = load_player_bios()
-            for team, slugs in sorted(by_team.items()):
-                names = ", ".join(_player_name(s, bios) for s in sorted(slugs))
-                left = "24 hours" if mark == "24h" else "48 hours"
-                inbox.notify_team(team, f"{left} left: rookie-scale team options are due by the end of "
-                                        f"{pretty}. Still undecided: {names}. Anything not exercised by "
-                                        f"then is declined automatically (§ 6.1).", link=f"/teams/{team}/")
-                done["notices"].append((mark, team, len(slugs)))
+        bios = load_player_bios()
+        for closes, opts in sorted(upcoming.items()):
+            hours_left = (_close_end(closes) - now).total_seconds() / 3600
+            mark = "24h" if hours_left <= 24 else "48h"
+            mine = sent.setdefault(closes, {})
+            if mark in mine:
+                continue
+            pretty = datetime.strptime(closes, "%Y-%m-%d").strftime("%A, %b %-d")
+            left = "24 hours" if mark == "24h" else "48 hours"
+            by_team: dict[str, list[dict]] = {}
+            for o in opts:
+                by_team.setdefault(o["team"], []).append(o)
+            for team, mine_opts in sorted(by_team.items()):
+                names = ", ".join(f"{_player_name(o['slug'], bios)} ({o['year']})"
+                                  for o in sorted(mine_opts, key=lambda o: o["slug"]))
+                inbox.notify_team(team, f"{left} left: team options are due by the end of {pretty}. "
+                                        f"Still undecided: {names}. Anything not exercised by then is "
+                                        f"declined automatically (§ 6.1).", link=f"/teams/{team}/")
+                done["notices"].append((mark, closes, team, len(mine_opts)))
             mine[mark] = now.isoformat()
             if mark == "24h":
                 mine.setdefault("48h", mine["24h"])
-            _save_json(TEAM_OPTION_NOTICES_FILE, sent)
-        return done
+        _save_json(TEAM_OPTION_NOTICES_FILE, sent)
 
-    if hours_left > 0:
+    # Declines, for every window already closed.
+    lapsed = [o for o in undecided if o["closes"] and now >= _close_end(o["closes"])]
+    if not lapsed:
         return done
-
     info = {"name": "system"}
     txns = []
     with _txn_lock:
-        for slug, team, nxt in _due_rookie_options(season, load_player_bios()):
-            details = OptionDetails(player=slug, decision="decline", option_type="TEAM_OPT",
-                                    year=nxt, cap_hold_type="UFA")
+        bios = load_player_bios()
+        for o in lapsed:
+            if ((bios.get(o["slug"]) or {}).get("cap_holds") or {}).get(o["year"]) != "TEAM_OPT":
+                continue  # decided since the list was read
+            details = OptionDetails(player=o["slug"], decision="decline", option_type="TEAM_OPT",
+                                    year=o["year"], cap_hold_type="UFA")
             applied = _apply_option(details, info)
+            what = "rookie-scale deadline" if o["kind"] == "rookie" else "June 30 close of its window"
             txn = {
                 "id": secrets.token_hex(8),
                 "type": "option",
                 "date": league_today_str(),
                 "created_by": "system",
                 "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "description": f"Declined automatically: not exercised by the {deadline} rookie-scale deadline (§ 6.1)",
+                "description": f"Declined automatically: not exercised by the {o['closes']} {what} (§ 6.1)",
                 "details": {**details.model_dump(), "team": applied, "_source": "auto_deadline"},
             }
             _append_transaction(txn)
             txns.append(txn)
-    bios = load_player_bios()
+            bios = load_player_bios()
+    cur = _current_league_year()
     for txn in txns:
         d = txn["details"]
         notify_transaction(txn, relay_to_roster_log=True)
         announce_roster_move(txn)
+        when = "now" if d["year"] == cur else "after this season"
         inbox.notify_team(d["team"], f"{_player_name(d['player'], bios)}'s {d['year']} team option wasn't "
-                                     f"exercised by the deadline, so it was declined. He becomes a UFA "
-                                     f"after this season (§ 6.1).", link=f"/teams/{d['team']}/")
-        done["declined"].append((d["team"], d["player"]))
+                                     f"exercised in its window, so it was declined. He becomes an "
+                                     f"unrestricted free agent {when} (§ 6.1).", link=f"/teams/{d['team']}/")
+        done["declined"].append((d["team"], d["player"], d["year"]))
     return done
 
 
