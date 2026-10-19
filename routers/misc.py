@@ -533,9 +533,25 @@ def _save_calendar_events(events: list[dict]):
     _save_json(CALENDAR_EVENTS_FILE, events)
 
 
+def _recurring_events() -> list[dict]:
+    """League dates that fall by rule every year, computed rather than typed
+    in. `recurring: true` tells the calendar there's nothing to delete; the
+    id is stable so a page can key on it. From the first league year (20-21)
+    through next season, so the coming one is visible before it starts."""
+    cur = int(_current_league_year().split("-")[0])
+    out = []
+    for y in range(20, cur + 2):
+        season = f"{y:02d}-{(y + 1) % 100:02d}"
+        date = season_calendar.team_option_deadline(season)
+        if date:
+            out.append({"id": f"recurring:team-option-deadline:{season}", "date": date,
+                        "label": "Team option deadline", "recurring": True})
+    return out
+
+
 @router.get("/api/calendar/events")
 def get_calendar_events():
-    events = _load_calendar_events()
+    events = _load_calendar_events() + _recurring_events()
     return sorted(events, key=lambda e: e["date"])
 
 

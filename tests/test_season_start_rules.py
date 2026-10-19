@@ -252,12 +252,42 @@ def test_dates_endpoint():
     check("GET /api/league-year shows the calendar", "calendar" in r.json())
 
 
+def test_team_option_deadline():
+    print("\n-- team option deadline: Oct 31, or the Monday after a weekend --")
+    check("a weekday Oct 31 stands (Fri 2025)", cal.team_option_deadline("25-26") == "2025-10-31")
+    check("a Saturday moves to Monday Nov 2 (2026)", cal.team_option_deadline("26-27") == "2026-11-02")
+    check("a Sunday moves to Monday Nov 1 (2027)", cal.team_option_deadline("27-28") == "2027-11-01")
+    check("a nonsense season is None, not a guess", cal.team_option_deadline("bad") is None)
+    check("it rides along in the league-year calendar",
+          cal.season_calendar("26-27")["team_option_deadline"] == "2026-11-02")
+
+    misc.CALENDAR_EVENTS_FILE = TMP / "calendar-events.json"
+    (TMP / "calendar-events.json").write_text(json.dumps(
+        [{"id": "abc", "date": "2026-12-25", "label": "Christmas games"}]))
+    orig = misc._current_league_year
+    misc._current_league_year = lambda: "26-27"
+    try:
+        events = client.get("/api/calendar/events").json()
+    finally:
+        misc._current_league_year = orig
+    deadlines = [e for e in events if e.get("recurring")]
+    check("the calendar lists one per league year, 20-21 through next season",
+          [e["date"][:4] for e in deadlines] == [str(y) for y in range(2020, 2028)])
+    check("this year's is Monday Nov 2",
+          any(e["date"] == "2026-11-02" and e["label"] == "Team option deadline" for e in deadlines))
+    check("the board's own events are still there", any(e["id"] == "abc" for e in events))
+    check("and everything is in date order", [e["date"] for e in events] == sorted(e["date"] for e in events))
+    r = client.delete("/api/calendar/events/recurring:team-option-deadline:26-27", headers=BOD)
+    check("a computed event can't be deleted", r.status_code == 404)
+
+
 if __name__ == "__main__":
     test_calendar()
     test_roster_size()
     test_trade_limit()
     test_fa_signing_freeze()
     test_dates_endpoint()
+    test_team_option_deadline()
     if FAILS:
         print(f"\n{len(FAILS)} FAILED: {FAILS}")
         sys.exit(1)

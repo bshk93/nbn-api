@@ -105,6 +105,21 @@ def draft_days(season: str) -> list[str]:
     return list(_season_dates(season).get("draft_days") or [])
 
 
+def team_option_deadline(season: str) -> Optional[str]:
+    """The team option deadline: October 31 of the season's first year, or
+    the Monday after when that's a weekend (league office, 2026-10-19). A
+    fixed rule rather than a stored date, so it needs no entering each year.
+    Shown on the calendar; nothing enforces it yet."""
+    try:
+        year = 2000 + int(season.split("-")[0])
+    except (ValueError, IndexError):
+        return None
+    d = datetime(year, 10, 31)
+    if d.weekday() >= 5:                       # Saturday 5, Sunday 6
+        d += timedelta(days=7 - d.weekday())   # → the Monday after
+    return d.strftime("%Y-%m-%d")
+
+
 def season_calendar(season: str) -> dict:
     """Everything above for one season, for `GET /api/league-year`."""
     b = regular_season_bounds(season)
@@ -113,4 +128,5 @@ def season_calendar(season: str) -> dict:
         "last_regular_season_game": b[1] if b else None,
         "trade_deadline": trade_deadline(season),
         "draft_days": draft_days(season),
+        "team_option_deadline": team_option_deadline(season),
     }
