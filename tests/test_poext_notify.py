@@ -8,9 +8,8 @@ one is modeled on:
   * **pdc-alerts** (private) gets every real event — submitted, remanded,
     voided, restored, and finalize either way.
   * **fa-news** (public) gets `agreed` only — never a submission, a remand,
-    or a rejection — and carries neither a team abbreviation nor a `$`,
-    ever, asserted against rendered output the same way test_fa_notify.py
-    asserts it for free agency's own public channel.
+    or a rejection. The agreed post names the team and the contract: it is a
+    decided deal, not a secret bid (2026-10-19), unlike free agency's.
   * **`#roster-log` gets nothing directly from this module.** finalize now
     writes a real transaction on "agreed" (`apply_extension`), and the
     roster-log-relay poller mirrors that transaction's own `#transactions`
@@ -131,8 +130,8 @@ TEAM_ABBRS = ["ATL", "BKN", "BOS", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GS
               "HOU", "IND", "LAC", "LAL", "MEM", "MIA", "MIL", "MIN", "NOP", "NYK",
               "OKC", "ORL", "PHI", "PHX", "POR", "SAC", "SAS", "TOR", "UTA", "WAS"]
 ABBR_RE = re.compile(r"\b(" + "|".join(TEAM_ABBRS) + r")\b")
-check("no team abbreviation in the fa-news post", not ABBR_RE.search(fa_news_text), fa_news_text)
-check("no dollar figure in the fa-news post", "$" not in fa_news_text, fa_news_text)
+check("the agreed fa-news post names the team", "SAS" in fa_news_text, fa_news_text)
+check("...and the contract", "$6.2M" in fa_news_text, fa_news_text)
 check("_news()'s own signature takes only (slug, text) — can't be handed a proposal or a team",
       pn._news.__code__.co_argcount == 2)
 

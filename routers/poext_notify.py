@@ -13,12 +13,13 @@ Three channels, two different appetites:
   gets accept only"). A submitted, remanded or rejected proposal never
   reaches either — only the committee's final yes. `#roster-log` gets the
   full picture (team, contract shorthand — that channel already carries this
-  much detail for every real transaction); `fa-news` gets the same
-  name-only, no-team, no-dollar treatment `fa_notify._news()` already
-  enforces for free agency, via its own choke point below (`_news()`) rather
-  than importing that module's — the "one function can reach the public
-  channel" discipline has to be a property of *this* module too, not
-  borrowed from a different one that happens to write to the same host.
+  much detail for every real transaction); `fa-news` gets the agreed deal
+  too, team and contract (2026-10-19 — free agency hides those because bids
+  are secret; an agreed extension is a decided contract). It goes through
+  this module's own choke point below (`_news()`) rather than importing
+  fa_notify's — the "one function can reach the public channel" discipline
+  has to be a property of *this* module too, not borrowed from a different
+  one that happens to write to the same host.
 
 Same no-op-without-config rule as fa_notify/discord_notify: each channel is
 independently inert without its own env var. Delivery is discord_transport's
@@ -279,6 +280,11 @@ def notify_player_finalized(slug: str, proposal: dict, final: dict) -> None:
     # to find; positing one anyway once a real one exists would double the
     # channel up, worded as "pending" beside one that already happened.
 
-    # fa-news: same no-team-no-dollar discipline fa_notify._news() enforces,
-    # via this module's own choke point.
-    _news(slug, f"{_name(slug)} has agreed to a contract extension.")
+    # fa-news: the agreed deal in full — team and contract. Free agency keeps
+    # its public posts name-only because bids are secret; an agreed extension
+    # is a decided contract, already public in #transactions, so there is
+    # nothing to hide (decided 2026-10-19). What stays from fa_notify is the
+    # boundary: only this accept path reaches the public channel.
+    contract_line = _contract_str(proposal.get("contract") or {})
+    _news(slug, f"✍️ **{_name(slug)}** has agreed to a contract extension with **{team}**"
+                + (f": {contract_line}." if contract_line else "."))
