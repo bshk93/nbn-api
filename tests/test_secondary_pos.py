@@ -40,3 +40,53 @@ def test_no_2k_primary_means_no_secondary(attrs):
     with pytest.raises(HTTPException):
         players._check_secondary_pos("unscraped", "SG")
     players._check_secondary_pos("unscraped", None)
+
+
+# The secondary a player actually has: his team's pick, or 2K's when the team
+# hasn't chosen. "none" removes 2K's.
+@pytest.fixture
+def twok(monkeypatch):
+    data = {
+        "wing": [{"2k_pos": ["SF", "PF"]}],
+        "odd": [{"2k_pos": ["PF", "PG"]}],   # 2K's own, not one step: stands as-is
+        "solo": [{"2k_pos": ["C"]}],
+    }
+    monkeypatch.setattr(players, "load_attributes", lambda: data)
+
+
+def test_unset_means_2ks_secondary(twok):
+    assert players.effective_secondary("wing", {}) == "PF"
+    assert players.effective_secondary("wing", {"secondary_pos": None}) == "PF"
+    assert players.effective_secondary("odd", {}) == "PG"
+    assert players.effective_secondary("solo", {}) is None
+
+
+def test_teams_pick_wins_and_none_removes(twok):
+    assert players.effective_secondary("wing", {"secondary_pos": "SG"}) == "SG"
+    assert players.effective_secondary("wing", {"secondary_pos": "none"}) is None
+
+
+def test_none_is_a_valid_choice(twok):
+    players._check_secondary_pos("wing", "none")
+
+
+def test_streamer_has_nothing_to_do_when_2k_already_has_it(twok):
+    from routers import coaching_settings as cs
+    bios = {"wing": {"secondary_pos": "PF"}, "odd": {}, "solo": {"secondary_pos": "none"}}
+    assert cs.position_items("MIL", {}, bios, ["wing", "odd", "solo"], "2026-10-20") == []
+
+
+def test_streamer_sees_a_change_from_2ks(twok):
+    from routers import coaching_settings as cs
+    bios = {"wing": {"secondary_pos": "SG"}, "odd": {"secondary_pos": "none"}}
+    items = {i["slug"]: i for i in cs.position_items("MIL", {}, bios, ["wing", "odd"], "2026-10-20")}
+    assert (items["wing"]["was"], items["wing"]["secondary"]) == ("PF", "SG")
+    assert (items["odd"]["was"], items["odd"]["secondary"]) == ("PG", None)
+    # Once entered, what the streamer set is the baseline, not 2K's.
+    rec = {"entered": {"wing": "SG", "odd": None}}
+    assert cs.position_items("MIL", rec, bios, ["wing", "odd"], "2026-10-20") == []
+
+
+def test_2ks_secondary_counts_for_starting(twok):
+    from routers import coaching_settings as cs
+    assert "PG" in cs.starter_positions("PF", players.effective_secondary("odd", {}))

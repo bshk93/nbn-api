@@ -75,7 +75,7 @@ def _illegal_starters(minutes: dict, prev_minutes: dict) -> list[str]:
     rule existed doesn't block the team's next save of something else (the
     Coaching Profile resends the minutes untouched). A player with no 2K
     primary yet can't be checked, and isn't blocked."""
-    from .players import _primary_pos, load_player_bios
+    from .players import _primary_pos, effective_secondary, load_player_bios
     bios = None
     problems = []
     for slot in STARTER_SLOTS:
@@ -92,7 +92,7 @@ def _illegal_starters(minutes: dict, prev_minutes: dict) -> list[str]:
         if bios is None:
             bios = load_player_bios()
         bio = bios.get(slug) or {}
-        legal = starter_positions(primary, bio.get("secondary_pos"))
+        legal = starter_positions(primary, effective_secondary(slug, bio))
         if slot not in legal:
             problems.append(f"{bio.get('name') or slug} can't start at {slot}: "
                             f"his 2K position is {primary}, so he can start at {', '.join(legal)}")
@@ -260,18 +260,23 @@ def _roster_slugs(team: str) -> list[str]:
 
 def position_items(team: str, rec: dict, bios: dict, roster: list[str], today: str) -> list[dict]:
     """The players a streamer has to look at for this team, in roster order:
-    a secondary that changed since it was last set, or a locked player not
-    yet checked today. Locked players already checked today are listed too,
-    with `due` false, so the streamer sees what the team asked for."""
-    from .players import _primary_pos
+    a secondary that differs from what 2K has, or a locked player not yet
+    checked today. Locked players already checked today are listed too, with
+    `due` false, so the streamer sees what the team asked for.
+
+    What 2K has is what the streamer last entered, or, before he has entered
+    anything for that player, 2K's own secondary. So a team that leaves 2K's
+    secondary alone, or picks the same one, gives the streamer nothing to do."""
+    from .players import _primary_pos, _twok_secondary, effective_secondary
     entered = rec.get("entered") or {}
     pins = set(rec.get("pins") or [])
     checked = rec.get("checked") or {}
     items = []
     for slug in roster:
         bio = bios.get(slug) or {}
-        sec = bio.get("secondary_pos") or None
-        changed = (entered.get(slug) or None) != sec
+        sec = effective_secondary(slug, bio)
+        in_2k = (entered.get(slug) or None) if slug in entered else _twok_secondary(slug)
+        changed = in_2k != sec
         locked = slug in pins
         if not (changed or locked):
             continue
@@ -280,7 +285,7 @@ def position_items(team: str, rec: dict, bios: dict, roster: list[str], today: s
             "name": bio.get("name") or slug,
             "primary": _primary_pos(slug),
             "secondary": sec,
-            "was": entered.get(slug),
+            "was": in_2k,
             "changed": changed,
             "locked": locked,
             "due": changed or checked.get(slug) != today,
