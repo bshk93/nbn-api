@@ -30,25 +30,29 @@ def _primary_pos(slug: str) -> Optional[str]:
 
 
 def _twok_secondary(slug: str) -> Optional[str]:
-    """The secondary position 2K gives the player, from the latest scrape. Not
-    held to § 2.3's one step: it is 2K's designation, not a team's choice."""
+    """The secondary position 2K gives the player, from the latest scrape, as
+    2K has it. It may break § 2.3's one step; effective_secondary drops it then."""
     entries = load_attributes().get(slug) or []
     pos = entries[-1].get("2k_pos") if entries else None
     return pos[1] if isinstance(pos, list) and len(pos) > 1 and pos[1] in POSITION_ORDER else None
 
 
 # `secondary_pos` on a bio: null means the team hasn't chosen, so 2K's own
-# secondary stands; "none" means the team removed it; a position is the
-# team's pick (§ 2.3).
+# secondary stands if it is one step from the primary (none if it isn't);
+# "none" means the team removed it; a position is the team's pick (§ 2.3).
 NO_SECONDARY = "none"
 
 
 def effective_secondary(slug: str, bio: dict) -> Optional[str]:
-    """The secondary position a player actually has: his team's pick, or 2K's."""
+    """The secondary position a player actually has: his team's pick, or 2K's
+    when that is one step from the primary (§ 2.3)."""
     sec = bio.get("secondary_pos") or None
     if sec == NO_SECONDARY:
         return None
-    return sec or _twok_secondary(slug)
+    if sec:
+        return sec
+    twok = _twok_secondary(slug)
+    return twok if twok in secondary_pos_options(_primary_pos(slug)) else None
 
 
 def secondary_pos_options(primary: Optional[str]) -> list[str]:

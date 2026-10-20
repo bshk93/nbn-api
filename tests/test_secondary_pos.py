@@ -48,7 +48,7 @@ def test_no_2k_primary_means_no_secondary(attrs):
 def twok(monkeypatch):
     data = {
         "wing": [{"2k_pos": ["SF", "PF"]}],
-        "odd": [{"2k_pos": ["PF", "PG"]}],   # 2K's own, not one step: stands as-is
+        "odd": [{"2k_pos": ["PF", "PG"]}],   # 2K's own, not one step: not allowed
         "solo": [{"2k_pos": ["C"]}],
     }
     monkeypatch.setattr(players, "load_attributes", lambda: data)
@@ -57,7 +57,7 @@ def twok(monkeypatch):
 def test_unset_means_2ks_secondary(twok):
     assert players.effective_secondary("wing", {}) == "PF"
     assert players.effective_secondary("wing", {"secondary_pos": None}) == "PF"
-    assert players.effective_secondary("odd", {}) == "PG"
+    assert players.effective_secondary("odd", {}) is None
     assert players.effective_secondary("solo", {}) is None
 
 
@@ -72,8 +72,14 @@ def test_none_is_a_valid_choice(twok):
 
 def test_streamer_has_nothing_to_do_when_2k_already_has_it(twok):
     from routers import coaching_settings as cs
-    bios = {"wing": {"secondary_pos": "PF"}, "odd": {}, "solo": {"secondary_pos": "none"}}
-    assert cs.position_items("MIL", {}, bios, ["wing", "odd", "solo"], "2026-10-20") == []
+    bios = {"wing": {"secondary_pos": "PF"}, "solo": {"secondary_pos": "none"}}
+    assert cs.position_items("MIL", {}, bios, ["wing", "solo"], "2026-10-20") == []
+
+
+def test_streamer_removes_a_2k_secondary_that_isnt_one_step(twok):
+    from routers import coaching_settings as cs
+    items = cs.position_items("MIL", {}, {"odd": {}}, ["odd"], "2026-10-20")
+    assert [(i["was"], i["secondary"]) for i in items] == [("PG", None)]
 
 
 def test_streamer_sees_a_change_from_2ks(twok):
@@ -87,6 +93,6 @@ def test_streamer_sees_a_change_from_2ks(twok):
     assert cs.position_items("MIL", rec, bios, ["wing", "odd"], "2026-10-20") == []
 
 
-def test_2ks_secondary_counts_for_starting(twok):
+def test_a_2k_secondary_that_isnt_one_step_doesnt_count_for_starting(twok):
     from routers import coaching_settings as cs
-    assert "PG" in cs.starter_positions("PF", players.effective_secondary("odd", {}))
+    assert "PG" not in cs.starter_positions("PF", players.effective_secondary("odd", {}))
