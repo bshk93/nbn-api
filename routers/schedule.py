@@ -35,6 +35,7 @@ from .league_time import league_today_str
 from . import auth as auth_module
 from . import game_day_notify
 from . import wallet
+from . import inbox
 
 router = APIRouter()
 
@@ -109,7 +110,8 @@ def _public(game: dict) -> dict:
     carry either, neither, or both."""
     return {**game, "streamer": game.get("streamer") or None,
             "stream": bool(game.get("stream")),
-            "stream_buyer": game.get("stream_buyer") or None}
+            "stream_buyer": game.get("stream_buyer") or None,
+            "stream_request": game.get("stream_request") or None}
 
 
 def _check_team(label: str, team: str) -> str:
@@ -475,45 +477,137 @@ def unmark_schedule_game_stream(game_id: str, season: str | None = None,
 # ── Buying a stream ────────────────────────────────────────────────────────
 #
 # Any member can spend NB¥ to have a game streamed — the one thing NB¥ buys at
-# the 2026-09 reset. It sets the same `stream` flag a streamer sets, plus
-# `stream_buyer`. A day can have one bought stream (`_stream_clash`), next to
-# any number of free streamer-flagged ones. The buyer can't cancel; a streamer refunds it, in full, if
-# the stream can't happen.
+# the 2026-09 reset. It goes in two steps:
+#
+# 1. The member requests it. That stores `stream_request` on the game and costs
+#    nothing yet; the balance is only checked, so a request nobody could pay
+#    for doesn't reach the streamers. The member can withdraw it.
+# 2. A streamer accepts or declines. Accepting debits the member then, sets the
+#    same `stream` flag a streamer sets, plus `stream_buyer`. Declining clears
+#    it and costs nothing.
+#
+# A day can have one bought stream (`_stream_clash`), next to any number of
+# free streamer-flagged ones. Several requests can wait on one day; accepting
+# one declines the rest. Once bought, the buyer can't cancel; a streamer
+# refunds it, in full, if the stream can't happen.
+
+STREAMS_LINK = "/committees/stream/"
 
 
-@router.post("/api/schedule/{game_id}/purchase")
-def buy_stream(game_id: str, season: str | None = None, info: dict = Depends(get_token_info)):
-    buyer = info.get("name")
-    if not buyer:
-        raise HTTPException(status_code=401, detail="Sign in to buy a stream")
+def _label(game: dict) -> str:
+    return f"{game['away_team']} @ {game['home_team']} on {game['date']}"
+
+
+def _requestable(data: dict, game: dict) -> None:
+    """Refuse a request, or its acceptance, that can't become a bought stream."""
+    if game["date"] < league_today_str():
+        raise HTTPException(status_code=409, detail="That game has already been played")
+    if game.get("stream_buyer"):
+        raise HTTPException(status_code=409, detail=f"{game['stream_buyer']} already bought this stream")
+    if game.get("stream"):
+        raise HTTPException(status_code=409, detail="This game is already being streamed")
+    other = _stream_clash(data["games"], game["date"], {**game, "stream_buyer": "?"})
+    if other:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{game['date']} already has a bought stream "
+                   f"({other['away_team']} @ {other['home_team']}) — one a day.")
+
+
+@router.post("/api/schedule/{game_id}/stream-request")
+def request_stream(game_id: str, season: str | None = None, info: dict = Depends(get_token_info)):
+    member = info.get("name")
+    if not member:
+        raise HTTPException(status_code=401, detail="Sign in to request a stream")
     preferred = _resolve_season(season)
     with _schedule_lock:
         found_season, data, game = _find(game_id, preferred)
-        label = f"{game['away_team']} @ {game['home_team']} on {game['date']}"
-        if game["date"] < league_today_str():
-            raise HTTPException(status_code=409, detail="That game has already been played")
-        if game.get("stream_buyer"):
-            raise HTTPException(status_code=409, detail=f"{game['stream_buyer']} already bought this stream")
-        if game.get("stream"):
-            raise HTTPException(status_code=409, detail="This game is already being streamed")
-        other = _stream_clash(data["games"], game["date"], {**game, "stream": True, "stream_buyer": buyer})
-        if other:
-            raise HTTPException(
-                status_code=409,
-                detail=f"{game['date']} already has a bought stream "
-                       f"({other['away_team']} @ {other['home_team']}) — one a day.")
+        _requestable(data, game)
+        if game.get("stream_request"):
+            raise HTTPException(status_code=409,
+                                detail=f"{game['stream_request']} already requested this stream")
+        if wallet.balance(member) < wallet.STREAM_PRICE:
+            raise HTTPException(status_code=402,
+                                detail=f"A stream costs NB¥{wallet.STREAM_PRICE:,}, and you have "
+                                       f"NB¥{wallet.balance(member):,.0f}")
+        game["stream_request"] = member
+        _save(found_season, data)
+    log_write(info, f"POST schedule/{game_id}/stream-request — {found_season} {_label(game)}")
+    inbox.notify_roles(["streamer"], f"{member} wants to buy a stream of {_label(game)}. "
+                                     f"Accept or decline it.", STREAMS_LINK)
+    return _public(game)
+
+
+@router.delete("/api/schedule/{game_id}/stream-request")
+def withdraw_stream_request(game_id: str, season: str | None = None,
+                            info: dict = Depends(get_token_info)):
+    """The requester takes their own request back. Nothing was spent."""
+    preferred = _resolve_season(season)
+    with _schedule_lock:
+        found_season, data, game = _find(game_id, preferred)
+        if not game.get("stream_request"):
+            raise HTTPException(status_code=404, detail="Nobody has requested a stream of this game")
+        if game["stream_request"] != info.get("name"):
+            raise HTTPException(status_code=403, detail="Only the member who asked can withdraw it")
+        game.pop("stream_request")
+        _save(found_season, data)
+    log_write(info, f"DELETE schedule/{game_id}/stream-request — {found_season} {_label(game)}")
+    return _public(game)
+
+
+@router.post("/api/schedule/{game_id}/stream-request/accept")
+def accept_stream_request(game_id: str, season: str | None = None,
+                          info: dict = Depends(require_role("streamer"))):
+    """Buy the stream for the member who asked: debit them now, flag the game,
+    and decline every other request waiting on that day."""
+    preferred = _resolve_season(season)
+    with _schedule_lock:
+        found_season, data, game = _find(game_id, preferred)
+        buyer = game.get("stream_request")
+        if not buyer:
+            raise HTTPException(status_code=404, detail="Nobody has requested a stream of this game")
+        _requestable(data, game)
         new_balance = wallet.debit(buyer, wallet.STREAM_PRICE, "stream_purchase",
-                                   f"Stream: {label}", ref=f"stream:{found_season}:{game_id}")
+                                   f"Stream: {_label(game)}", ref=f"stream:{found_season}:{game_id}")
+        game.pop("stream_request")
         game["stream"] = True
         game["stream_buyer"] = buyer
+        bumped = [g for g in data["games"]
+                  if g["date"] == game["date"] and g["id"] != game_id and g.get("stream_request")]
+        bumped_names = [(g.pop("stream_request"), _label(g)) for g in bumped]
         try:
             _save(found_season, data)
         except Exception:
             wallet.credit(buyer, wallet.STREAM_PRICE, "stream_refund",
-                          f"Refund — stream purchase failed: {label}", ref=f"stream:{found_season}:{game_id}")
+                          f"Refund — stream purchase failed: {_label(game)}",
+                          ref=f"stream:{found_season}:{game_id}")
             raise
-    log_write(info, f"POST schedule/{game_id}/purchase — {found_season} {label}")
+    log_write(info, f"POST schedule/{game_id}/stream-request/accept — {found_season} {_label(game)}, "
+                    f"{buyer} charged")
+    inbox.notify_member(buyer, f"{info['name']} accepted your stream of {_label(game)}. "
+                               f"NB¥{wallet.STREAM_PRICE:,} spent.", "/calendar/")
+    for name, label in bumped_names:
+        inbox.notify_member(name, f"Your stream request for {label} was declined: "
+                                  f"{buyer} has that day's stream. Nothing was spent.", "/calendar/")
     return {**_public(game), "new_balance": new_balance}
+
+
+@router.post("/api/schedule/{game_id}/stream-request/decline")
+def decline_stream_request(game_id: str, season: str | None = None,
+                           info: dict = Depends(require_role("streamer"))):
+    preferred = _resolve_season(season)
+    with _schedule_lock:
+        found_season, data, game = _find(game_id, preferred)
+        member = game.get("stream_request")
+        if not member:
+            raise HTTPException(status_code=404, detail="Nobody has requested a stream of this game")
+        game.pop("stream_request")
+        _save(found_season, data)
+    log_write(info, f"POST schedule/{game_id}/stream-request/decline — {found_season} {_label(game)}, "
+                    f"{member}")
+    inbox.notify_member(member, f"{info['name']} declined your stream request for {_label(game)}. "
+                                f"Nothing was spent.", "/calendar/")
+    return _public(game)
 
 
 @router.delete("/api/schedule/{game_id}/purchase")
@@ -526,7 +620,7 @@ def refund_stream(game_id: str, season: str | None = None,
         buyer = game.get("stream_buyer")
         if not buyer:
             raise HTTPException(status_code=404, detail="Nobody bought a stream of this game")
-        label = f"{game['away_team']} @ {game['home_team']} on {game['date']}"
+        label = _label(game)
         wallet.credit(buyer, wallet.STREAM_PRICE, "stream_refund",
                       f"Refund: {label} (by {info['name']})", ref=f"stream:{found_season}:{game_id}")
         game.pop("stream_buyer", None)

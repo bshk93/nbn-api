@@ -7,8 +7,9 @@ Pins:
   file always equals the ledger summed.
 - **Betting.** Fixed odds only; the per-bet cap; a payout can exceed the stakes
   and `GET /api/bets/house` shows by how much; deleting a bet refunds.
-- **Buying a stream.** 1,000 NB¥, upcoming games only; one bought stream a
-  day, next to any number of free ones; only a streamer refunds, in full; a
+- **Buying a stream.** A member requests it, free; a streamer accepts (and the
+  1,000 NB¥ is spent then) or declines. Upcoming games only; one bought stream
+  a day, next to any number of free ones; only a streamer refunds, in full; a
   bought game can't be unflagged, deleted or moved onto another bought day.
 - **Donations** credit 100 NB¥ a dollar, and an edit moves exactly the difference.
 - **A new member** gets a real `start` line.
@@ -176,6 +177,10 @@ check("a manual adjustment with a reason lands as kind 'admin'",
 
 print("\n-- buying a stream --")
 
+SENT = []   # (who, text): inbox notices, captured instead of written
+sched.inbox.notify_member = lambda name, text, link=None: SENT.append((name, text))
+sched.inbox.notify_roles = lambda roles, text, link=None: SENT.append(("+".join(roles), text))
+
 sched.league_today_str = lambda: "2026-10-20"
 (TMP / "schedule-26-27.json").write_text(json.dumps({"season": "26-27", "source": "", "games": [
     {"id": "g-past",  "date": "2026-10-19", "away_team": "BOS", "home_team": "NYK"},
@@ -186,7 +191,10 @@ sched.league_today_str = lambda: "2026-10-20"
     {"id": "g5",      "date": "2026-10-23", "away_team": "ATL", "home_team": "CHI"},
     {"id": "g6",      "date": "2026-10-22", "away_team": "SAC", "home_team": "POR"},
 ]}))
-URL = "/api/schedule/{}/purchase?season=26-27"
+REQ = "/api/schedule/{}/stream-request?season=26-27"
+ACCEPT = "/api/schedule/{}/stream-request/accept?season=26-27"
+DECLINE = "/api/schedule/{}/stream-request/decline?season=26-27"
+REFUND = "/api/schedule/{}/purchase?season=26-27"
 
 
 def game(gid):
@@ -194,26 +202,58 @@ def game(gid):
 
 
 check("the price is 1,000", wallet.STREAM_PRICE == 1000)
-check("a played game can't be bought", c.post(URL.format("g-past"), headers=H("Ann")).status_code == 409)
-give("Ben", 50)   # Ben: 1000
-r = c.post(URL.format("g1"), headers=H("Ann"))
-check("buying a stream → 200, 1,000 debited", r.status_code == 200 and B("Ann") == 300)
+check("a played game can't be requested", c.post(REQ.format("g-past"), headers=H("Ann")).status_code == 409)
+give("Ben", 50)   # Ann 1300, Ben 1000
+before = B("Ann")
+r = c.post(REQ.format("g1"), headers=H("Ann"))
+check("requesting a stream → 200, nothing spent", r.status_code == 200 and B("Ann") == before)
 g = game("g1")
-check("the game is flagged a stream and names its buyer", g["stream"] and g["stream_buyer"] == "Ann")
-check("the purchase is a stream_purchase line", wallet.read_ledger()[-1]["kind"] == "stream_purchase")
-r = c.post(URL.format("g2"), headers=H("Ben"))
-check("a second purchase the same day → 409", r.status_code == 409 and B("Ben") == 1000)
+check("the game names the request, and isn't a stream yet",
+      g["stream_request"] == "Ann" and not g["stream"] and g["stream_buyer"] is None)
+check("the streamers are told", SENT[-1][0] == "streamer" and "Ann" in SENT[-1][1])
+check("a second request on the same game → 409", c.post(REQ.format("g1"), headers=H("Ben")).status_code == 409)
+r = c.post(REQ.format("g2"), headers=H("Ben"))
+check("another game the same day can be requested too", r.status_code == 200)
+check("a member can't accept a request", c.post(ACCEPT.format("g1"), headers=H("Ann")).status_code == 403)
+check("only the requester withdraws", c.delete(REQ.format("g1"), headers=H("Ben")).status_code == 403)
+
+r = c.post(ACCEPT.format("g1"), headers=H("Streamer"))
+g = game("g1")
+check("accepting spends the 1,000 then", r.status_code == 200 and B("Ann") == before - 1000)
+check("...flags it, names the buyer, clears the request",
+      g["stream"] and g["stream_buyer"] == "Ann" and g["stream_request"] is None)
+check("...as a stream_purchase line", wallet.read_ledger()[-1]["kind"] == "stream_purchase")
+check("...and declines the day's other request", game("g2")["stream_request"] is None
+      and B("Ben") == 1000 and any(n == "Ben" and "declined" in t for n, t in SENT[-2:]))
+check("the buyer is told", any(n == "Ann" and "accepted" in t for n, t in SENT[-2:]))
+check("a day with a bought stream can't take a request",
+      c.post(REQ.format("g2"), headers=H("Ben")).status_code == 409)
 r = c.post("/api/schedule/g2/stream?season=26-27", headers=H("Streamer"))
 check("a streamer can still flag another game on a bought day", r.status_code == 200 and game("g2")["stream"])
 c.delete("/api/schedule/g2/stream?season=26-27", headers=H("Streamer"))
-r = c.post(URL.format("g3"), headers=H("Ann"))
-check("not enough NB¥ → 402", r.status_code == 402)
+
+check("not enough NB¥ to request → 402", c.post(REQ.format("g3"), headers=H("Ann")).status_code == 402)
+c.post(REQ.format("g5"), headers=H("Ben"))
+c.delete(REQ.format("g5"), headers=H("Ben"))
+check("the requester can withdraw, free", game("g5")["stream_request"] is None and B("Ben") == 1000)
+c.post(REQ.format("g5"), headers=H("Ben"))
+r = c.post(DECLINE.format("g5"), headers=H("Streamer"))
+check("a streamer declines, free, and the member is told", r.status_code == 200
+      and game("g5")["stream_request"] is None and B("Ben") == 1000
+      and SENT[-1][0] == "Ben" and "declined" in SENT[-1][1])
+
+c.post(REQ.format("g5"), headers=H("Ben"))
+wallet.debit("Ben", 500, "admin", "test")
+r = c.post(ACCEPT.format("g5"), headers=H("Streamer"))
+check("accepting when the member can no longer pay → 402, nothing changes",
+      r.status_code == 402 and game("g5")["stream_request"] == "Ben" and not game("g5")["stream"])
+give("Ben", 500)
+check("...and goes through once they can", c.post(ACCEPT.format("g5"), headers=H("Streamer")).status_code == 200
+      and B("Ben") == 0)
 
 c.post("/api/schedule/g3/stream?season=26-27", headers=H("Streamer"))
 c.post("/api/schedule/g4/stream?season=26-27", headers=H("Streamer"))
 check("two free streams on one day are still fine", game("g3")["stream"] and game("g4")["stream"])
-r = c.post(URL.format("g5"), headers=H("Ben"))
-check("buying on a day with no bought stream works", r.status_code == 200 and B("Ben") == 0)
 r = c.patch("/api/schedule/g5", json={"date": "2026-10-21", "season": "26-27"}, headers=H("Board"))
 check("a bought game can't be moved onto another bought day", r.status_code == 409)
 r = c.patch("/api/schedule/g3", json={"date": "2026-10-23", "season": "26-27"}, headers=H("Board"))
@@ -223,16 +263,16 @@ check("a bought stream can't just be unflagged", r.status_code == 409 and game("
 r = c.delete("/api/schedule/g1?season=26-27", headers=H("Board"))
 check("a bought game can't be deleted", r.status_code == 409)
 
-r = c.delete(URL.format("g1"), headers=H("Ann"))
+r = c.delete(REFUND.format("g1"), headers=H("Ann"))
 check("the buyer can't refund it themselves", r.status_code == 403)
-r = c.delete(URL.format("g1"), headers=H("Streamer"))
-check("a streamer refunds it in full", r.status_code == 200 and B("Ann") == 1300)
+r = c.delete(REFUND.format("g1"), headers=H("Streamer"))
+check("a streamer refunds it in full", r.status_code == 200 and B("Ann") == before)
 g = game("g1")
 check("...and the game is clear again", not g["stream"] and g["stream_buyer"] is None)
-r = c.post(URL.format("g2"), headers=H("Ann"))
-check("...and the day is free to buy", r.status_code == 200)
+check("...and the day is free to request", c.post(REQ.format("g2"), headers=H("Ann")).status_code == 200)
 give("Ben", 1000)
-r = c.post(URL.format("g6"), headers=H("Ben"))
+c.post(REQ.format("g6"), headers=H("Ben"))
+r = c.post(ACCEPT.format("g6"), headers=H("Streamer"))
 check("a game can be bought on a day a streamer already flagged", r.status_code == 200 and game("g4")["stream"])
 check("balances equal the ledger summed", consistent())
 
