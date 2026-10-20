@@ -115,6 +115,14 @@ def _build_team_map() -> dict[str, str]:
     return result
 
 
+def _block_key(name: str) -> str:
+    """How trading-block names compare. The block stores display names, and
+    older entries carry a hand-cased spelling ("Jared McCain") where
+    `_display_name` now gives "Jared Mccain" — so a match must ignore case, or
+    the same player reads as absent and gets listed twice."""
+    return (name or "").strip().casefold()
+
+
 def _scrub_trading_block(removals: dict[str, set[str]], bios: dict) -> None:
     """Remove players from their source teams' trading block entries after a trade or release.
 
@@ -124,13 +132,13 @@ def _scrub_trading_block(removals: dict[str, set[str]], bios: dict) -> None:
     data = load_trading_block()
     changed = False
     for team, slugs in removals.items():
-        display_names = {_display_name(bios[s].get('name', '')) for s in slugs if s in bios}
+        display_names = {_block_key(_display_name(bios[s].get('name', ''))) for s in slugs if s in bios}
         display_names.discard('')
         if not display_names:
             continue
         block    = _normalize_team_block(data.get(team, []))
         original = block["players"]
-        updated  = [e for e in original if e.get('player') not in display_names]
+        updated  = [e for e in original if _block_key(e.get('player')) not in display_names]
         if len(updated) != len(original):
             block["players"] = updated
             data[team] = block

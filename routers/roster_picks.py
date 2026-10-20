@@ -378,17 +378,26 @@ def put_trading_block(
         raise HTTPException(status_code=404, detail="Unknown team")
     if not has_role(info, team.lower()) and not has_role(info, "admin"):
         raise HTTPException(status_code=403, detail=f"'{team.lower()}' role required")
+    from .players import _block_key
     data = load_trading_block()
     old_block = _normalize_team_block(data.get(team, []))
-    data[team] = body.model_dump(exclude={"notify_discord"})
+    new_block = body.model_dump(exclude={"notify_discord"})
+    # One entry per player, however the name is cased (see _block_key).
+    seen, players = set(), []
+    for e in new_block["players"]:
+        if _block_key(e["player"]) not in seen:
+            seen.add(_block_key(e["player"]))
+            players.append(e)
+    new_block["players"] = players
+    data[team] = new_block
     save_trading_block(data)
-    n_players = len(body.players)
+    n_players = len(new_block["players"])
     n_picks   = len(body.picks)
     log_write(info, f"PUT trading-block/{team} — {n_players} players, {n_picks} picks")
 
     if body.notify_discord:
         old_players = {e.get("player") for e in old_block["players"]}
-        new_players = {e.player for e in body.players}
+        new_players = {e["player"] for e in new_block["players"]}
         old_pick_keys = {_pick_key(p) for p in old_block["picks"]}
         new_pick_keys = {_pick_key(p) for p in body.picks}
         tradeblock_notify.notify_tradeblock_change(
@@ -450,8 +459,10 @@ def put_trading_block_player(
     name = _block_player_name(slug, team)
     data = load_trading_block()
     block = _normalize_team_block(data.get(team, []))
-    entry = next((e for e in block["players"] if e.get("player") == name), None)
+    from .players import _block_key
+    entry = next((e for e in block["players"] if _block_key(e.get("player")) == _block_key(name)), None)
     if entry:
+        entry["player"] = name
         entry["notes"] = body.notes
     else:
         block["players"].append({"player": name, "notes": body.notes})
@@ -472,7 +483,8 @@ def delete_trading_block_player(team: str, slug: str, info: dict = Depends(get_t
     name = _display_name(bios[slug].get("name", ""))
     data = load_trading_block()
     block = _normalize_team_block(data.get(team, []))
-    block["players"] = [e for e in block["players"] if e.get("player") != name]
+    from .players import _block_key
+    block["players"] = [e for e in block["players"] if _block_key(e.get("player")) != _block_key(name)]
     data[team] = block
     save_trading_block(data)
     log_write(info, f"DELETE trading-block/{team}/player — {name}")
