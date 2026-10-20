@@ -7,9 +7,9 @@ Pins:
   file always equals the ledger summed.
 - **Betting.** Fixed odds only; the per-bet cap; a payout can exceed the stakes
   and `GET /api/bets/house` shows by how much; deleting a bet refunds.
-- **Buying a stream.** 1,000 NB¥, upcoming games only; once a day has a bought
-  stream it has one stream; only a streamer refunds, in full; a bought game
-  can't be unflagged, deleted or moved onto another stream's day.
+- **Buying a stream.** 1,000 NB¥, upcoming games only; one bought stream a
+  day, next to any number of free ones; only a streamer refunds, in full; a
+  bought game can't be unflagged, deleted or moved onto another bought day.
 - **Donations** credit 100 NB¥ a dollar, and an edit moves exactly the difference.
 - **A new member** gets a real `start` line.
 - **Twitch**: rates by tier, a gift pays the gifter, and an unmatched login pays nobody.
@@ -184,6 +184,7 @@ sched.league_today_str = lambda: "2026-10-20"
     {"id": "g3",      "date": "2026-10-22", "away_team": "DEN", "home_team": "PHX"},
     {"id": "g4",      "date": "2026-10-22", "away_team": "DAL", "home_team": "HOU"},
     {"id": "g5",      "date": "2026-10-23", "away_team": "ATL", "home_team": "CHI"},
+    {"id": "g6",      "date": "2026-10-22", "away_team": "SAC", "home_team": "POR"},
 ]}))
 URL = "/api/schedule/{}/purchase?season=26-27"
 
@@ -203,7 +204,8 @@ check("the purchase is a stream_purchase line", wallet.read_ledger()[-1]["kind"]
 r = c.post(URL.format("g2"), headers=H("Ben"))
 check("a second purchase the same day → 409", r.status_code == 409 and B("Ben") == 1000)
 r = c.post("/api/schedule/g2/stream?season=26-27", headers=H("Streamer"))
-check("a streamer can't flag another game on a bought day either", r.status_code == 409)
+check("a streamer can still flag another game on a bought day", r.status_code == 200 and game("g2")["stream"])
+c.delete("/api/schedule/g2/stream?season=26-27", headers=H("Streamer"))
 r = c.post(URL.format("g3"), headers=H("Ann"))
 check("not enough NB¥ → 402", r.status_code == 402)
 
@@ -211,11 +213,11 @@ c.post("/api/schedule/g3/stream?season=26-27", headers=H("Streamer"))
 c.post("/api/schedule/g4/stream?season=26-27", headers=H("Streamer"))
 check("two free streams on one day are still fine", game("g3")["stream"] and game("g4")["stream"])
 r = c.post(URL.format("g5"), headers=H("Ben"))
-check("buying on a clear day works", r.status_code == 200 and B("Ben") == 0)
+check("buying on a day with no bought stream works", r.status_code == 200 and B("Ben") == 0)
 r = c.patch("/api/schedule/g5", json={"date": "2026-10-21", "season": "26-27"}, headers=H("Board"))
-check("a bought game can't be moved onto a day that has a stream", r.status_code == 409)
+check("a bought game can't be moved onto another bought day", r.status_code == 409)
 r = c.patch("/api/schedule/g3", json={"date": "2026-10-23", "season": "26-27"}, headers=H("Board"))
-check("...nor a streamed game onto a bought day", r.status_code == 409)
+check("...but a free stream can move onto a bought day", r.status_code == 200)
 r = c.delete("/api/schedule/g1/stream?season=26-27", headers=H("Streamer"))
 check("a bought stream can't just be unflagged", r.status_code == 409 and game("g1")["stream"])
 r = c.delete("/api/schedule/g1?season=26-27", headers=H("Board"))
@@ -229,6 +231,9 @@ g = game("g1")
 check("...and the game is clear again", not g["stream"] and g["stream_buyer"] is None)
 r = c.post(URL.format("g2"), headers=H("Ann"))
 check("...and the day is free to buy", r.status_code == 200)
+give("Ben", 1000)
+r = c.post(URL.format("g6"), headers=H("Ben"))
+check("a game can be bought on a day a streamer already flagged", r.status_code == 200 and game("g4")["stream"])
 check("balances equal the ledger summed", consistent())
 
 # ── donations ────────────────────────────────────────────────────────────────

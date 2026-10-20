@@ -130,14 +130,13 @@ def _conflict(games: list[dict], date: str, home: str, away: str, exclude_id: st
 
 
 def _stream_clash(games: list[dict], date: str, game: dict) -> dict | None:
-    """The other stream on `date` that `game` being a stream would break the
-    one-a-day rule with. The rule only binds a *bought* stream: once a member
-    pays for a day, that day has one stream. Two free streamer-flagged games on
-    one night are still fine."""
+    """The other bought stream on `date` that `game`, if it is bought too, would
+    break the one-a-day rule with. Only bought streams count: a day can have
+    any number of free streamer-flagged games next to its one bought stream."""
+    if not game.get("stream_buyer"):
+        return None
     for g in games:
-        if g["date"] != date or g["id"] == game["id"] or not g.get("stream"):
-            continue
-        if g.get("stream_buyer") or game.get("stream_buyer"):
+        if g["date"] == date and g["id"] != game["id"] and g.get("stream_buyer"):
             return g
     return None
 
@@ -279,7 +278,7 @@ def update_schedule_game(game_id: str, body: ScheduleGamePatch, info: dict = Dep
                 detail=f"{clash['away_team']} @ {clash['home_team']} is already scheduled on "
                        f"{updated['date']}. Pass allow_conflict to move it there anyway.")
 
-        if game.get("stream") and updated["date"] != game["date"]:
+        if game.get("stream_buyer") and updated["date"] != game["date"]:
             other = _stream_clash(data["games"], updated["date"], game)
             if other:
                 raise HTTPException(
@@ -445,12 +444,6 @@ def mark_schedule_game_stream(game_id: str, season: str | None = None,
     preferred = _resolve_season(season)
     with _schedule_lock:
         found_season, data, game = _find(game_id, preferred)
-        other = _stream_clash(data["games"], game["date"], {**game, "stream": True})
-        if other:
-            raise HTTPException(
-                status_code=409,
-                detail=f"{game['date']} already has a bought stream "
-                       f"({other['away_team']} @ {other['home_team']}) — one a day.")
         game["stream"] = True
         _save(found_season, data)
     log_write(info, f"POST schedule/{game_id}/stream — {found_season} {game['date']} "
@@ -483,8 +476,8 @@ def unmark_schedule_game_stream(game_id: str, season: str | None = None,
 #
 # Any member can spend NB¥ to have a game streamed — the one thing NB¥ buys at
 # the 2026-09 reset. It sets the same `stream` flag a streamer sets, plus
-# `stream_buyer`. Once a day has a bought stream it has exactly one stream
-# (`_stream_clash`). The buyer can't cancel; a streamer refunds it, in full, if
+# `stream_buyer`. A day can have one bought stream (`_stream_clash`), next to
+# any number of free streamer-flagged ones. The buyer can't cancel; a streamer refunds it, in full, if
 # the stream can't happen.
 
 
@@ -507,8 +500,8 @@ def buy_stream(game_id: str, season: str | None = None, info: dict = Depends(get
         if other:
             raise HTTPException(
                 status_code=409,
-                detail=f"{game['date']} already has a stream "
-                       f"({other['away_team']} @ {other['home_team']}) — one a day once one is bought.")
+                detail=f"{game['date']} already has a bought stream "
+                       f"({other['away_team']} @ {other['home_team']}) — one a day.")
         new_balance = wallet.debit(buyer, wallet.STREAM_PRICE, "stream_purchase",
                                    f"Stream: {label}", ref=f"stream:{found_season}:{game_id}")
         game["stream"] = True
