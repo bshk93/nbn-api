@@ -3083,6 +3083,74 @@ def sweep_team_options(now: Optional[datetime] = None) -> dict:
     return done
 
 
+def _lapsed_fa_holds(bios: dict, season: str) -> list[dict]:
+    """Players still on a roster as a UFA/RFA hold for `season` itself — the
+    free agents a team kept through free agency without re-signing or
+    renouncing. Skips one with an open offer sheet: that RFA is still being
+    decided (§ 3.15). Same test as `cap_history._roster_counts`' `fa_holds`."""
+    open_offers = {o.get("player") for o in _open_offer_sheets()}
+    out = []
+    for slug, team in _build_team_map().items():
+        bio = bios.get(slug) or {}
+        if bio.get("type", "") in _ROSTER_EXEMPT_TYPES or slug in open_offers:
+            continue
+        hold = (bio.get("cap_holds") or {}).get(season)
+        if hold in ("UFA", "RFA"):
+            out.append({"slug": slug, "team": team, "hold": hold})
+    return sorted(out, key=lambda h: (h["team"], h["slug"]))
+
+
+def sweep_fa_holds(today: Optional[str] = None) -> dict:
+    """§ 3.10: a free-agent hold still on a roster at opening night is
+    renounced automatically (league office, 2026-10-20). A hold reserves a
+    spot during free agency; once the season starts it only blocks a roster
+    spot. Run hourly by `sweep_fa_holds.py`, so it fires within the hour after
+    midnight league time on opening night, and catches up after downtime.
+
+    Each one is an ordinary renounce, announced like an owner's own: ledger
+    (with the snapshot `rescind_renounce` restores from), the transactions
+    embed relayed to #roster-log, #fa-news, and the team's inbox."""
+    today = today or league_today_str()
+    season = _season_for_date(today)
+    opening = season_calendar.opening_night(season)
+    done = {"renounced": []}
+    if not opening or today < opening:
+        return done
+    info = {"name": "system"}
+    txns = []
+    with _txn_lock:
+        for h in _lapsed_fa_holds(load_player_bios(), season):
+            details = RenounceDetails(player=h["slug"])
+            try:
+                team, snapshot = _apply_renounce(details, today, info)
+            except HTTPException as e:
+                logger.warning("sweep_fa_holds: %s not renounced: %s", h["slug"], e.detail)
+                continue
+            txn = {
+                "id": secrets.token_hex(8),
+                "type": "renounce",
+                "date": today,
+                "created_by": "system",
+                "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "description": (f"Renounced automatically: {h['hold']} hold still unsigned at "
+                                f"opening night ({opening}) (§ 3.10)"),
+                "details": {"player": h["slug"], "team": team, "_snapshot": snapshot,
+                            "_source": "auto_opening_night"},
+            }
+            _append_transaction(txn)
+            txns.append(txn)
+    bios = load_player_bios()
+    for txn in txns:
+        d = txn["details"]
+        notify_transaction(txn, relay_to_roster_log=True)
+        announce_roster_move(txn)
+        inbox.notify_team(d["team"], f"{_player_name(d['player'], bios)} was still a free-agent hold "
+                                     f"on opening night, so he was renounced. He's now an unsigned "
+                                     f"free agent (§ 3.10).", link=f"/teams/{d['team']}/")
+        done["renounced"].append((d["team"], d["player"]))
+    return done
+
+
 def _offer_sheet_outcome_team(details: dict) -> Optional[str]:
     """Which team ends up with the player, from a resolved offer sheet's details.
 

@@ -683,6 +683,15 @@ declines once one has, announced like an owner's own decline. `--dry-run`
 lists every undecided option by close date and writes nothing. Pinned by
 `tests/test_team_option_sweep.py` and `tests/test_season_start_rules.py`.
 
+**Free-agent holds lapse at opening night** (§ 3.10, set 2026-10-20). A
+UFA/RFA hold for the current season still on a roster from opening night on
+(midnight league time) is renounced by `nbn-fa-holds.timer`, hourly, through
+`sweep_fa_holds.py` (`sweep_fa_holds` in `transactions.py`). Each is a normal
+`renounce` with its snapshot, created by `system`, `_source:
+"auto_opening_night"`, announced like an owner's own, so `rescind_renounce`
+can undo one. An RFA with an open offer sheet is skipped. `--dry-run` lists
+the holds. Pinned by `tests/test_fa_hold_sweep.py`.
+
 ## Cap history (`routers/cap_history.py`)
 
 A daily row per team — Team Salary on both bases, apron position, hard-cap
