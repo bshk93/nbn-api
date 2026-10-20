@@ -206,6 +206,15 @@ def _to_webp(src: Path, dst: Path) -> bool:
         return False
 
 
+def paid_on_upload(date: str, home_team: str, away_team: str) -> bool:
+    """Whether this game's screenshots already paid the submission reward. The
+    upload routes pay per side as each one arrives, so a commit of the same game
+    must not pay it again."""
+    with shots_lock:
+        found = find_pending(date, home_team, away_team)
+    return bool(found and found[1].get("rewarded"))
+
+
 def archive_for_game(date: str, home_team: str, away_team: str) -> None:
     """Move a committed game's screenshots to the kept folder, compressed, with
     a 14-day expiry. Called from the commit route after the rows are written.

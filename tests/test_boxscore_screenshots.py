@@ -9,7 +9,8 @@ What is pinned:
     sides swapped still files the image under the right team.
   * **`ready` means both sides are in.** That is what /parse-boxscores waits for.
   * **The reward is paid once per side**, half the per-game amount, and removing
-    and re-adding a screenshot does not pay it again.
+    and re-adding a screenshot does not pay it again. Committing a game that
+    came in as screenshots pays nothing more; committing a typed-in one pays.
   * **Commit moves the screenshots, it doesn't delete them.** They leave the
     parse queue, are re-encoded as WebP, and carry a 14-day expiry; the sweep
     removes them after that.
@@ -182,10 +183,13 @@ def row(slug, fgm):
 home = [row(f"phx-{i}", 5) for i in range(5)]
 away = [row(f"lal-{i}", 4) for i in range(5)]
 bx.PLAYER_BIOS_FILE.write_text(json.dumps({r["slug"]: {"name": r["slug"].upper()} for r in home + away}))
+paid_before = list(REWARDS)
 r = c.post("/api/boxscore/commit", headers=STATS, json={
     **GAME, "home_pts": 50, "away_pts": 40, "home_rows": home, "away_rows": away,
-    "skip_build": True, "skip_reward": True})
+    "skip_build": True})
 check("the game commits", r.status_code == 200, r.text)
+check("a game paid on upload is not paid again at commit",
+      REWARDS == paid_before and r.json()["nbyen_reward"] == 0.0)
 prov = [json.loads(l) for l in (TMP / "boxscore-provenance-26-27.jsonl").read_text().splitlines()]
 check("provenance still finds the uploader", prov[-1]["source"] == "screenshot" and prov[-1]["uploaded_by"] == "Statsy")
 check("the game leaves the parse queue", c.get("/api/boxscore/pending", headers=STATS).json() == [])
@@ -198,6 +202,12 @@ check("expiring in 14 days", timedelta(days=13) < exp - datetime.now(timezone.ut
 check("still public after commit", c.get(k["images"]["home"][0]["url"]).status_code == 200)
 check("a committed game's screenshots cannot be removed from the queue",
       c.delete(f"/api/boxscore/pending/{k['id']}/images/{k['images']['home'][0]['file']}", headers=STATS).status_code == 404)
+typed = {**GAME, "date": "2026-10-23"}
+r = c.post("/api/boxscore/commit", headers=STATS, json={
+    **typed, "home_pts": 50, "away_pts": 40, "home_rows": home, "away_rows": away,
+    "skip_build": True})
+check("a typed-in game with no screenshots is paid at commit",
+      r.status_code == 200 and REWARDS == paid_before + [("Statsy", 200.0)], r.text)
 check("archiving a game with nothing pending is a no-op", shots.archive_for_game("2026-01-01", "BOS", "NYK") is None)
 
 print("sweep")

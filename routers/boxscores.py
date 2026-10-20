@@ -571,11 +571,14 @@ def commit_boxscore(body: BoxscoreCommitRequest, info: dict = Depends(require_an
         rows_added=len(new_rows), file_rows_after=len(existing) + len(new_rows),
         filename=path.name, committed_by=info.get("name", "unknown"),
     )
+    # Read before the archive below, which removes the pending item. A game that
+    # came in as screenshots was paid on upload; a typed-in one is paid here.
+    paid_on_upload = shots.paid_on_upload(body.date, home_team, away_team)
     # After the provenance line, which reads the pending upload to find who
     # sent it. Moves the screenshots out of the parse queue. Never raises.
     shots.archive_for_game(body.date, home_team, away_team)
 
-    if body.skip_reward:
+    if body.skip_reward or paid_on_upload:
         reward, new_bal = 0.0, 0.0
     else:
         reward, new_bal = _award_submission_reward(info["name"])
