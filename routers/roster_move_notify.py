@@ -22,6 +22,10 @@ fuller text, contract year by year. `#waivers` *is* relayed, so a void's
 embed stays unrelayed and its line here is what #roster-log gets. Either way
 the move lands in #roster-log once.
 
+A signing the PDC decided, and a player accepting his QO, also ping the
+team's Discord role (`PINGED_TYPES`), since the team is waiting on that
+outcome. The other moves are the team's own doing and ping nobody.
+
 Team names are fine here, unlike `fa_notify._news` and `poext_notify._news`:
 those keep sealed free-agency bids out of a public channel, and a roster move
 is public the moment it is made.
@@ -36,7 +40,7 @@ from typing import Optional
 
 from . import discord_transport as transport
 from .constants import TEAM_NAMES
-from .discord_notify import _contract_str, _player_name
+from .discord_notify import _contract_str, _player_name, _teams, with_team_pings
 from .players import load_player_bios
 
 logger = logging.getLogger("nbn-api")
@@ -128,6 +132,12 @@ def fa_result_announcement(txn: dict) -> Optional[tuple[str, str]]:
     return None
 
 
+# The moves whose team needs to hear the outcome, so the post pings its
+# Discord role: a signing the PDC decided, and a player taking his QO.
+# An offer sheet pings both sides, since the incumbent has 48 hours to match.
+PINGED_TYPES = {"sign", "offer_sheet", "accept_qo"}
+
+
 def announce_fa_result(txn: dict) -> bool:
     """Post a declare-winner signing to #fa-news. False if it wasn't sent."""
     return _send(fa_result_announcement, txn)
@@ -138,6 +148,12 @@ def announce(txn: dict) -> bool:
     return _send(announcement, txn)
 
 
+def payload(txn: dict, text: str) -> dict:
+    if txn.get("type") in PINGED_TYPES:
+        return with_team_pings(text, _teams(txn))
+    return {"content": text}
+
+
 def _send(render, txn: dict) -> bool:
     try:
         found = render(txn)
@@ -146,7 +162,7 @@ def _send(render, txn: dict) -> bool:
         channel, text = found
         if not transport.configured(channel):
             return False
-        return transport.send(channel, {"content": text},
+        return transport.send(channel, payload(txn, text),
                               max_burst=MAX_BURST, burst_window=BURST_WINDOW)
     except Exception as exc:
         logger.warning("roster move announcement failed for %s: %s", txn.get("id"), exc)

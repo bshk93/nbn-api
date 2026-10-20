@@ -132,7 +132,10 @@ TEAM_ABBRS = ["ATL", "BKN", "BOS", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GS
 ABBR_RE = re.compile(r"\b(" + "|".join(TEAM_ABBRS) + r")\b")
 check("the agreed fa-news post names the team", "SAS" in fa_news_text, fa_news_text)
 check("...and the contract", "$6.2M" in fa_news_text, fa_news_text)
-check("_news()'s own signature takes only (slug, text) — can't be handed a proposal or a team",
+SAS_ROLE = "663948135214874624"
+check("the agreed fa-news post pings the team's role",
+      fa_news_text.endswith(f"\n<@&{SAS_ROLE}>"), fa_news_text)
+check("_news() takes a finished string, never a proposal (ping is keyword-only)",
       pn._news.__code__.co_argcount == 2)
 
 print("\nfa-news is independently inert without its own config")

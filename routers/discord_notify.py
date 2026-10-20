@@ -200,6 +200,37 @@ def _player_name(slug: str, bios: dict) -> str:
     return _display_name((bios.get(slug) or {}).get("name", "")) or slug
 
 
+# Each team's role in the league Discord, for pinging a team about the outcome
+# of its own deal in #fa-news. Pulled from the guild's roles once
+# (`discord-role-team-map.json` in the data dir, docs/discord-transaction-backfill.md);
+# role ids don't change when a role is renamed.
+TEAM_ROLE_IDS = {
+    "ATL": "663947022281474060", "BKN": "663947943400833076", "BOS": "663947196252684309",
+    "CHA": "663948706806104083", "CHI": "663947872710033420", "CLE": "663946435024257044",
+    "DAL": "663947494136217625", "DEN": "663946508063997962", "DET": "663946747630059580",
+    "GSW": "663947080779300884", "HOU": "663947544434573322", "IND": "663948081133256733",
+    "LAC": "663947145610657802", "LAL": "663947233875460111", "MEM": "663947798344892445",
+    "MIA": "663947406571864084", "MIL": "663946104056053760", "MIN": "663946527085166592",
+    "NOP": "663935363768647691", "NYK": "663947768695619615", "OKC": "663891272167325729",
+    "ORL": "663948429457752074", "PHI": "663946670899200000", "PHX": "663947322060963860",
+    "POR": "663953717019803649", "SAC": "663947419981185024", "SAS": "663948135214874624",
+    "TOR": "663947619109961732", "UTA": "663946790873071626", "WAS": "663948381768646676",
+}
+
+
+def with_team_pings(text: str, teams) -> dict:
+    """A plain-text payload that pings each named team's role on a new line.
+
+    `allowed_mentions` names exactly those roles, so nothing else in `text`
+    (a player name, a stray `@everyone`) can ever ping anyone."""
+    ids = [TEAM_ROLE_IDS[t] for t in dict.fromkeys((t or "").upper() for t in teams)
+           if t in TEAM_ROLE_IDS]
+    if not ids:
+        return {"content": text, "allowed_mentions": {"parse": []}}
+    return {"content": text + "\n" + " ".join(f"<@&{i}>" for i in ids),
+            "allowed_mentions": {"parse": [], "roles": ids}}
+
+
 def _offer_sheet_sides(d: dict) -> tuple[str, str]:
     """``(offering_team, retaining_team)``. The stored `teams` list is in that
     order; `offering_team` is the authoritative field when present."""

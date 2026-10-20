@@ -98,6 +98,25 @@ check("anything else is not a declare-winner result", rm.fa_result_announcement(
 SENT.clear()
 check("announce_fa_result queues it", rm.announce_fa_result(txn("sign", contract=contract)) is True
       and SENT and SENT[0][0] == "fa-news", SENT)
+MIL_ROLE, BOS_ROLE = "663946104056053760", "663947196252684309"
+sent = SENT[0][1]
+check("a declared signing pings the team's role on its own line",
+      sent["content"].endswith(f"\n<@&{MIL_ROLE}>"), sent)
+check("...and allows that role and nothing else to ping",
+      sent["allowed_mentions"] == {"parse": [], "roles": [MIL_ROLE]}, sent)
+SENT.clear()
+rm.announce_fa_result({"id": "t2", "type": "offer_sheet", "details": {
+    "player": "ishchenko-vsevolod", "teams": ["MIL", "BOS"], "contract": contract}})
+check("an offer sheet pings both teams — the incumbent has to decide",
+      SENT and SENT[0][1]["allowed_mentions"]["roles"] == [MIL_ROLE, BOS_ROLE], SENT)
+SENT.clear()
+rm.announce(txn("accept_qo"))
+check("a player taking his QO pings his team",
+      SENT and SENT[0][1]["allowed_mentions"]["roles"] == [MIL_ROLE], SENT)
+SENT.clear()
+rm.announce(txn("renounce"))
+check("a team's own move pings nobody", SENT and "<@&" not in SENT[0][1]["content"]
+      and "allowed_mentions" not in SENT[0][1], SENT)
 
 
 print("\nannounce — sends, and stays inert without a channel")

@@ -40,7 +40,8 @@ import re
 from typing import Optional
 
 from . import discord_transport as transport
-from .discord_notify import SITE, _contract_breakdown, _contract_str, _player_name
+from .discord_notify import (SITE, _contract_breakdown, _contract_str, _player_name,
+                             with_team_pings)
 from .fa_notify import _promises_str
 from .players import load_player_bios
 
@@ -112,22 +113,18 @@ _TEAM_ABBRS = ["ATL", "BKN", "BOS", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "G
 _ABBR_RE = re.compile(r"\b(" + "|".join(_TEAM_ABBRS) + r")\b")
 
 
-def _news(slug: str, text: str) -> bool:
-    """Post to the **public** `fa-news` channel.
+def _news(slug: str, text: str, *, ping: Optional[str] = None) -> bool:
+    """Post to the **public** `fa-news` channel, pinging `ping`'s team role.
 
-    This is the only function in this module that can reach it, and it takes
-    a player and a finished string — never a proposal, never a team, never a
-    figure — the same signature discipline `fa_notify._news` uses for the
-    same reason (§ 9.2 there; D9 here). Belt-and-braces: also asserted at
-    the call site by construction (nothing built into `text` ever includes
-    team/dollar data) and by tests/test_poext_notify.py scanning rendered
-    output, but the signature is what makes a future caller unable to hand
-    this a team or a contract even by accident.
+    The only function in this module that can reach it. It takes a finished
+    string, never a proposal, so only the agreed path decides what goes
+    public. Since 2026-10-19 that string names the team and contract; the
+    team is pinged because it is waiting on the decision.
     """
     if not transport.configured(DISCORD_FA_NEWS_CHANNEL):
         return False
     try:
-        return transport.send(DISCORD_FA_NEWS_CHANNEL, {"content": text},
+        return transport.send(DISCORD_FA_NEWS_CHANNEL, with_team_pings(text, [ping]),
                               max_burst=NEWS_MAX_BURST, burst_window=NEWS_BURST_WINDOW)
     except Exception as exc:
         logger.warning("PO-EXT news post failed for %s: %s", slug, exc)
@@ -287,4 +284,4 @@ def notify_player_finalized(slug: str, proposal: dict, final: dict) -> None:
     # boundary: only this accept path reaches the public channel.
     contract_line = _contract_str(proposal.get("contract") or {})
     _news(slug, f"✍️ **{_name(slug)}** has agreed to a contract extension with **{team}**"
-                + (f": {contract_line}." if contract_line else "."))
+                + (f": {contract_line}." if contract_line else "."), ping=team)
