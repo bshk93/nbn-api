@@ -8,9 +8,8 @@ Pins:
 - **Betting.** Fixed odds only; the per-bet cap; a payout can exceed the stakes
   and `GET /api/bets/house` shows by how much; deleting a bet refunds.
 - **Buying a stream.** A member requests it, free; a streamer accepts (and the
-  1,000 NB¥ is spent then) or declines. Upcoming games only; one bought stream
-  a day, next to any number of free ones; only a streamer refunds, in full; a
-  bought game can't be unflagged, deleted or moved onto another bought day.
+  1,000 NB¥ is spent then) or declines. Upcoming games only; no daily limit;
+  only a streamer refunds, in full; a bought game can't be unflagged or deleted.
 - **Donations** credit 100 NB¥ a dollar, and an edit moves exactly the difference.
 - **A new member** gets a real `start` line.
 - **Twitch**: rates by tier, a gift pays the gifter, and an unmatched login pays nobody.
@@ -223,14 +222,12 @@ check("accepting spends the 1,000 then", r.status_code == 200 and B("Ann") == be
 check("...flags it, names the buyer, clears the request",
       g["stream"] and g["stream_buyer"] == "Ann" and g["stream_request"] is None)
 check("...as a stream_purchase line", wallet.read_ledger()[-1]["kind"] == "stream_purchase")
-check("...and declines the day's other request", game("g2")["stream_request"] is None
-      and B("Ben") == 1000 and any(n == "Ben" and "declined" in t for n, t in SENT[-2:]))
-check("the buyer is told", any(n == "Ann" and "accepted" in t for n, t in SENT[-2:]))
-check("a day with a bought stream can't take a request",
-      c.post(REQ.format("g2"), headers=H("Ben")).status_code == 409)
-r = c.post("/api/schedule/g2/stream?season=26-27", headers=H("Streamer"))
-check("a streamer can still flag another game on a bought day", r.status_code == 200 and game("g2")["stream"])
-c.delete("/api/schedule/g2/stream?season=26-27", headers=H("Streamer"))
+check("the buyer is told", SENT[-1][0] == "Ann" and "accepted" in SENT[-1][1])
+check("...and the day's other request still waits", game("g2")["stream_request"] == "Ben")
+r = c.post(ACCEPT.format("g2"), headers=H("Streamer"))
+check("a second bought stream the same day is fine", r.status_code == 200
+      and game("g2")["stream_buyer"] == "Ben" and B("Ben") == 0)
+c.delete(REFUND.format("g2"), headers=H("Streamer"))
 
 check("not enough NB¥ to request → 402", c.post(REQ.format("g3"), headers=H("Ann")).status_code == 402)
 c.post(REQ.format("g5"), headers=H("Ben"))
@@ -255,9 +252,7 @@ c.post("/api/schedule/g3/stream?season=26-27", headers=H("Streamer"))
 c.post("/api/schedule/g4/stream?season=26-27", headers=H("Streamer"))
 check("two free streams on one day are still fine", game("g3")["stream"] and game("g4")["stream"])
 r = c.patch("/api/schedule/g5", json={"date": "2026-10-21", "season": "26-27"}, headers=H("Board"))
-check("a bought game can't be moved onto another bought day", r.status_code == 409)
-r = c.patch("/api/schedule/g3", json={"date": "2026-10-23", "season": "26-27"}, headers=H("Board"))
-check("...but a free stream can move onto a bought day", r.status_code == 200)
+check("a bought game can move onto another bought day", r.status_code == 200)
 r = c.delete("/api/schedule/g1/stream?season=26-27", headers=H("Streamer"))
 check("a bought stream can't just be unflagged", r.status_code == 409 and game("g1")["stream"])
 r = c.delete("/api/schedule/g1?season=26-27", headers=H("Board"))
@@ -269,7 +264,7 @@ r = c.delete(REFUND.format("g1"), headers=H("Streamer"))
 check("a streamer refunds it in full", r.status_code == 200 and B("Ann") == before)
 g = game("g1")
 check("...and the game is clear again", not g["stream"] and g["stream_buyer"] is None)
-check("...and the day is free to request", c.post(REQ.format("g2"), headers=H("Ann")).status_code == 200)
+check("...and can be requested again", c.post(REQ.format("g1"), headers=H("Ann")).status_code == 200)
 give("Ben", 1000)
 c.post(REQ.format("g6"), headers=H("Ben"))
 r = c.post(ACCEPT.format("g6"), headers=H("Streamer"))
