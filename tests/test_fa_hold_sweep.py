@@ -54,6 +54,7 @@ T._build_team_map = lambda: dict(TEAMS)
 T._season_for_date = lambda d: "26-27"
 T._open_offer_sheets = lambda: [{"player": "sheet"}]
 T._apply_renounce = apply_renounce
+T._load_transactions = lambda: LEDGER
 T._append_transaction = lambda txn: LEDGER.append(txn)
 T.notify_transaction = lambda txn, relay_to_roster_log=False: POSTS.append(("embed", relay_to_roster_log))
 T.announce_roster_move = lambda txn: POSTS.append(("fa-news", txn["details"]["player"]))
@@ -84,6 +85,14 @@ check("returns what it did", sorted(done["renounced"]) == [("MIL", "ufa"), ("TOR
 
 print("the next hour")
 check("idempotent: nothing left to renounce", T.sweep_fa_holds("2026-10-20") == {"renounced": []})
+
+print("after the office rescinds one")
+ufa_txn = next(t for t in LEDGER if t["details"]["player"] == "ufa")
+ufa_txn["details"]["_rescinded"] = True
+BIOS["ufa"].update(type="player", cap_holds={"26-27": "UFA"})
+TEAMS["ufa"] = "MIL"
+check("a rescinded opening-night renounce isn't swept again",
+      T.sweep_fa_holds("2026-10-20") == {"renounced": []} and "ufa" in TEAMS)
 
 if FAILS:
     print(f"\n{len(FAILS)} failed")

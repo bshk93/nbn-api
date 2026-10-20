@@ -3087,12 +3087,22 @@ def _lapsed_fa_holds(bios: dict, season: str) -> list[dict]:
     """Players still on a roster as a UFA/RFA hold for `season` itself — the
     free agents a team kept through free agency without re-signing or
     renouncing. Skips one with an open offer sheet: that RFA is still being
-    decided (§ 3.15). Same test as `cap_history._roster_counts`' `fa_holds`."""
+    decided (§ 3.15). Same test as `cap_history._roster_counts`' `fa_holds`.
+
+    Also skips a player whose opening-night renounce this season was rescinded:
+    the office restored the hold on purpose (2026-10-20, Jaden Hardy, so MIL
+    could re-sign him on Bird rights), and the next hourly run would otherwise
+    renounce him again."""
     open_offers = {o.get("player") for o in _open_offer_sheets()}
+    rescinded = {(t.get("details") or {}).get("player") for t in _load_transactions()
+                 if t.get("type") == "renounce"
+                 and (t.get("details") or {}).get("_source") == "auto_opening_night"
+                 and (t.get("details") or {}).get("_rescinded")
+                 and _season_for_date(t.get("date", "")) == season}
     out = []
     for slug, team in _build_team_map().items():
         bio = bios.get(slug) or {}
-        if bio.get("type", "") in _ROSTER_EXEMPT_TYPES or slug in open_offers:
+        if bio.get("type", "") in _ROSTER_EXEMPT_TYPES or slug in open_offers or slug in rescinded:
             continue
         hold = (bio.get("cap_holds") or {}).get(season)
         if hold in ("UFA", "RFA"):
