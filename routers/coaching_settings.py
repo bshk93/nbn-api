@@ -221,8 +221,8 @@ def enter_coaching_settings(
 # - `pins`: slugs the team ticked 📌 for: check this player before every
 #   game, not just once after a change. Opt-in, and kept per team, so a
 #   player traded away leaves his pin behind. A pin is due again on any
-#   league day it hasn't been checked, and only means something while the
-#   player has a secondary.
+#   league day it hasn't been checked. A pin on a player with no secondary
+#   means "make sure 2K has none", which is just as real a request.
 # - `checked`: slug → the league date a streamer last confirmed him.
 #
 # Kept out of coaching-settings.json because that record is a team's private,
@@ -272,7 +272,7 @@ def position_items(team: str, rec: dict, bios: dict, roster: list[str], today: s
         bio = bios.get(slug) or {}
         sec = bio.get("secondary_pos") or None
         changed = (entered.get(slug) or None) != sec
-        locked = slug in pins and sec is not None
+        locked = slug in pins
         if not (changed or locked):
             continue
         items.append({

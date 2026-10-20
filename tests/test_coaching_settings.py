@@ -276,14 +276,15 @@ check("the team pins", r.status_code == 200 and r.json()["pinned"] == ["big-man"
 TODAY[0] = "2026-11-02"
 check("a pinned player is listed, and due on a day he hasn't been checked",
       items()["wing-guy"]["due"] and items()["wing-guy"]["locked"] and not items()["wing-guy"]["changed"])
-check("a pin on a player with no secondary means nothing", "big-man" not in items())
+check("a pin with no secondary is listed too: make sure 2K has none",
+      items()["big-man"]["locked"] and items()["big-man"]["secondary"] is None)
 c.post("/api/position-checks/BOS/confirm", json={"seen": {"wing-guy": "PF"}}, headers=STREAM)
 check("checked today: listed, not due", "wing-guy" in items() and not items()["wing-guy"]["due"])
 TODAY[0] = "2026-11-03"
 check("due again the next day", items()["wing-guy"]["due"])
 r = c.put("/api/position-checks/BOS/pins", json={"pins": {"wing-guy": False}}, headers=BOS)
 check("unpinning one keeps the other", r.json()["pinned"] == ["big-man"])
-check("unpinned and unchanged, he drops off", items() == {})
+check("unpinned and unchanged, he drops off", "wing-guy" not in items())
 
 # ── the file on disk ─────────────────────────────────────────────────────────
 
