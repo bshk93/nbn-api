@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
 from .constants import COACHING_SETTINGS_FILE, POSITION_CHECKS_FILE, DATA_DIR, VALID_TEAMS, _coaching_lock
-from .storage import _load_json, _save_json, log_write, read_csv, _current_league_year
+from .storage import _load_json, _save_json, log_write, read_csv
 from .league_time import league_today_str
 from .auth import _resolve_token, get_token_info, has_role, require_role
 from . import game_day_notify
@@ -218,14 +218,11 @@ def enter_coaching_settings(
 #   said it was set (null for "none"). A roster player whose bio differs is a
 #   change waiting to be entered. A player missing from it has never been
 #   confirmed, so his secondary, if he has one, is waiting too.
-# - `pins`: slug → {on, season}, the team's 📌 choice: check this player
-#   before every game, not just once after a change. **Pinned is the
-#   default**: a player with no choice from this team for the current league
-#   year is pinned. So a signing or a player traded in starts pinned (no
-#   choice on this team yet), and every pin switches back on when the league
-#   year rolls over (last year's choices no longer count). A pin is due again
-#   on any league day it hasn't been checked, and only means something while
-#   the player has a secondary.
+# - `pins`: slugs the team ticked 📌 for: check this player before every
+#   game, not just once after a change. Opt-in, and kept per team, so a
+#   player traded away leaves his pin behind. A pin is due again on any
+#   league day it hasn't been checked, and only means something while the
+#   player has a secondary.
 # - `checked`: slug → the league date a streamer last confirmed him.
 #
 # Kept out of coaching-settings.json because that record is a team's private,
@@ -268,14 +265,14 @@ def position_items(team: str, rec: dict, bios: dict, roster: list[str], today: s
     with `due` false, so the streamer sees what the team asked for."""
     from .players import _primary_pos
     entered = rec.get("entered") or {}
-    season = _current_league_year()
+    pins = set(rec.get("pins") or [])
     checked = rec.get("checked") or {}
     items = []
     for slug in roster:
         bio = bios.get(slug) or {}
         sec = bio.get("secondary_pos") or None
         changed = (entered.get(slug) or None) != sec
-        locked = is_pinned(rec, slug, season) and sec is not None
+        locked = slug in pins and sec is not None
         if not (changed or locked):
             continue
         items.append({
@@ -291,24 +288,16 @@ def position_items(team: str, rec: dict, bios: dict, roster: list[str], today: s
     return items
 
 
-def is_pinned(rec: dict, slug: str, season: str) -> bool:
-    choice = (rec.get("pins") or {}).get(slug)
-    if isinstance(choice, dict) and choice.get("season") == season:
-        return bool(choice.get("on"))
-    return True
-
-
 def team_positions_view(team: str, data: Optional[dict] = None, bios: Optional[dict] = None) -> dict:
     from .players import load_player_bios
     data = load_position_checks() if data is None else data
     bios = load_player_bios() if bios is None else bios
     rec = data.get(team) or {}
     roster = _roster_slugs(team)
-    season = _current_league_year()
+    pins = set(rec.get("pins") or [])
     return {
         "items": position_items(team, rec, bios, roster, league_today_str()),
-        # Every roster player pinned right now, default included.
-        "pinned": [s for s in roster if is_pinned(rec, s, season)],
+        "pinned": [s for s in roster if s in pins],
         "checked_at": rec.get("checked_at"),
         "checked_by": rec.get("checked_by"),
     }
@@ -337,8 +326,7 @@ def get_team_position_checks(team: str):
 
 @router.put("/api/position-checks/{team}/pins")
 def put_position_pins(team: str, body: PinsBody, info: dict = Depends(get_token_info)):
-    """Pin or unpin players for a position check before every game. The
-    choice holds for this league year on this team."""
+    """Pin or unpin players for a position check before every game."""
     team = team.upper()
     if team not in VALID_TEAMS:
         raise HTTPException(status_code=404, detail="Unknown team")
@@ -348,12 +336,13 @@ def put_position_pins(team: str, body: PinsBody, info: dict = Depends(get_token_
     off = [s for s in body.pins if s not in roster]
     if off:
         raise HTTPException(status_code=422, detail=f"Not on the {team} roster: {', '.join(off)}")
-    season = _current_league_year()
     with _coaching_lock:
         data = load_position_checks()
-        pins = data.setdefault(team, {}).setdefault("pins", {})
+        rec = data.setdefault(team, {})
+        pins = set(rec.get("pins") or [])
         for slug, on in body.pins.items():
-            pins[slug] = {"on": bool(on), "season": season}
+            (pins.add if on else pins.discard)(slug)
+        rec["pins"] = sorted(pins)
         save_position_checks(data)
     log_write(info, f"PUT position-checks/{team}/pins — "
                     + ", ".join(f"{s}={'on' if on else 'off'}" for s, on in sorted(body.pins.items())))

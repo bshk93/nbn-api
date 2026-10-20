@@ -250,8 +250,7 @@ check("only a streamer can confirm",
       c.post("/api/position-checks/BOS/confirm", json={"seen": {"combo-sf": "PF"}}, headers=BOS).status_code == 403)
 r = c.post("/api/position-checks/BOS/confirm", json={"seen": {"combo-sf": "PF"}}, headers=STREAM)
 check("a streamer confirms", r.status_code == 200 and r.json()["checked_by"] == "Streamy")
-check("nothing is waiting after", waiting() == set())
-check("...though, pinned by default and checked today, he's still listed", not items()["combo-sf"]["due"])
+check("nothing is waiting after", items() == {})
 check("the team gets a receipt", RECEIPTS == ["BOS"])
 
 BIOS["wing-guy"]["secondary_pos"] = "SG"
@@ -266,36 +265,25 @@ check("a change made after the streamer loaded stays waiting", waiting() == {"wi
 c.post("/api/position-checks/BOS/confirm", json={"seen": {"wing-guy": "PF"}}, headers=STREAM)
 
 print("pins")
-SEASON = ["26-27"]
-cs._current_league_year = lambda: SEASON[0]
-# Everything above ran with every player pinned by default. Unpin, to see
-# the default and the choice apart.
 check("another team can't pin",
-      c.put("/api/position-checks/BOS/pins", json={"pins": {"wing-guy": False}}, headers=ATL).status_code == 403)
+      c.put("/api/position-checks/BOS/pins", json={"pins": {"wing-guy": True}}, headers=ATL).status_code == 403)
 check("a player off the roster can't be pinned",
       c.put("/api/position-checks/BOS/pins", json={"pins": {"mann-tre": True}}, headers=BOS).status_code == 422)
-check("everyone starts pinned", c.get("/api/position-checks/BOS").json()["pinned"] == ROSTERS["BOS"])
+check("nobody starts pinned", c.get("/api/position-checks/BOS").json()["pinned"] == [])
+check("unpinned and unchanged, nobody is listed", items() == {})
+r = c.put("/api/position-checks/BOS/pins", json={"pins": {"wing-guy": True, "big-man": True}}, headers=BOS)
+check("the team pins", r.status_code == 200 and r.json()["pinned"] == ["big-man", "wing-guy"])
 TODAY[0] = "2026-11-02"
-check("a pinned player is due the next day, unchanged",
+check("a pinned player is listed, and due on a day he hasn't been checked",
       items()["wing-guy"]["due"] and items()["wing-guy"]["locked"] and not items()["wing-guy"]["changed"])
 check("a pin on a player with no secondary means nothing", "big-man" not in items())
 c.post("/api/position-checks/BOS/confirm", json={"seen": {"wing-guy": "PF"}}, headers=STREAM)
 check("checked today: listed, not due", "wing-guy" in items() and not items()["wing-guy"]["due"])
-TODAY[0] = "2026-11-04"
+TODAY[0] = "2026-11-03"
 check("due again the next day", items()["wing-guy"]["due"])
 r = c.put("/api/position-checks/BOS/pins", json={"pins": {"wing-guy": False}}, headers=BOS)
-check("the team unpins", r.status_code == 200 and "wing-guy" not in r.json()["pinned"])
+check("unpinning one keeps the other", r.json()["pinned"] == ["big-man"])
 check("unpinned and unchanged, he drops off", items() == {})
-check("the others keep their default", "big-man" in r.json()["pinned"])
-
-ROSTERS["BOS"].append("traded-in")
-BIOS["traded-in"] = {"name": "IN, TRADED", "secondary_pos": "SG"}
-PRIMARY["traded-in"] = "SF"
-check("a player new to the team starts pinned", items()["traded-in"]["locked"])
-c.post("/api/position-checks/BOS/confirm", json={"seen": {"traded-in": "SG"}}, headers=STREAM)
-SEASON[0] = "27-28"
-TODAY[0] = "2027-07-02"
-check("a new league year pins everyone again", items()["wing-guy"]["locked"] and items()["wing-guy"]["due"])
 
 # ── the file on disk ─────────────────────────────────────────────────────────
 
