@@ -55,14 +55,25 @@ def coaching_saved(team: str, was_pending: bool, saved_by: Optional[str]) -> Non
     """Handoff 1. Call after a save, with whether the team was already pending."""
     if was_pending:
         return
+    _tell_next_streamer(team, saved_by, "saved new coaching settings", "they need", "coaching_saved")
+
+
+def positions_changed(team: str, saved_by: Optional[str]) -> None:
+    """Handoff 1 again, for a player's secondary position. Call only when the
+    team had no position change waiting already, for the same reason a
+    coaching save notifies only on the way into pending."""
+    _tell_next_streamer(team, saved_by, "changed a player's position", "it needs", "positions_changed")
+
+
+def _tell_next_streamer(team: str, saved_by: Optional[str], what: str, needs: str, label: str) -> None:
     try:
         g = _next_game(team)
         if not g:
             return
         opp = g["away_team"] if g["home_team"] == team else g["home_team"]
         at = "vs" if g["home_team"] == team else "@"
-        text = (f"{team} saved new coaching settings for {_fmt_date(g['date'])} "
-                f"{at} {opp} — they need entering in 2K")
+        text = (f"{team} {what} for {_fmt_date(g['date'])} "
+                f"{at} {opp} — {needs} entering in 2K")
         link = "/committees/stream/"
         streamer = g.get("streamer")
         if streamer:
@@ -73,7 +84,7 @@ def coaching_saved(team: str, was_pending: bool, saved_by: Optional[str]) -> Non
         if g["date"] <= soon:
             inbox.notify_role("streamer", text + " (no streamer has claimed that game)", link)
     except Exception as exc:
-        logger.warning("coaching_saved notify failed for %s: %s", team, exc)
+        logger.warning("%s notify failed for %s: %s", label, team, exc)
 
 
 def coaching_entered(team: str, entered_by: Optional[str]) -> None:
@@ -83,6 +94,15 @@ def coaching_entered(team: str, entered_by: Optional[str]) -> None:
                           link=f"/teams/{team}/")
     except Exception as exc:
         logger.warning("coaching_entered notify failed for %s: %s", team, exc)
+
+
+def positions_set(team: str, set_by: Optional[str]) -> None:
+    """Handoff 2, for positions: the team's receipt."""
+    try:
+        inbox.notify_team(team, f"Your player positions were set in 2K by {set_by or 'a streamer'}",
+                          link=f"/teams/{team}/#coaching")
+    except Exception as exc:
+        logger.warning("positions_set notify failed for %s: %s", team, exc)
 
 
 def streamer_assigned(name: str, date: str, games: list, by: Optional[str],

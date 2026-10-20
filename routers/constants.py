@@ -108,6 +108,7 @@ DISCORD_FA_SUBMITTED_FILE = DATA_DIR / "discord-fa-signings-submitted.json"
 # Per-team 2K coach profile, submitted by the team's own role and entered into
 # the game by a streamer. Keyed by team abbr — see routers/coaching_settings.py.
 COACHING_SETTINGS_FILE = DATA_DIR / "coaching-settings.json"
+POSITION_CHECKS_FILE = DATA_DIR / "position-checks.json"
 # Per-date streaming status — a day of games marked done, and its YouTube VOD
 # link. Keyed by date — see routers/streaming_days.py.
 STREAMING_DAYS_FILE = DATA_DIR / "streaming-days.json"

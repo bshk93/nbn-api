@@ -121,6 +121,34 @@ SENT.clear()
 c.put("/api/coaching-settings/UTA", json={"values": {}}, headers={"Authorization": "Bearer " + "u" * 64})
 check("an unclaimed game a week out pings nobody", SENT == [])
 
+# ── 1b. a position changed ────────────────────────────────────────────────────
+
+print("a team changes a player's position")
+import routers.players as pl  # noqa: E402
+BIOS = {"booker-devin": {"name": "BOOKER, DEVIN"}, "beal-bradley": {"name": "BEAL, BRADLEY"}}
+pl.load_player_bios = lambda: BIOS
+pl.save_player_bios = lambda data: None
+pl._build_team_map = lambda: {"booker-devin": "PHX", "beal-bradley": "PHX"}
+pl._check_secondary_pos = lambda slug, sec: None
+pl._primary_pos = lambda slug: "SG"
+pl.log_write = lambda *a, **k: None
+cs.POSITION_CHECKS_FILE = TMP / "position-checks.json"
+cs._roster_slugs = lambda team: ["booker-devin", "beal-bradley"] if team == "PHX" else []
+app.include_router(pl.router)
+SENT.clear()
+c.put("/api/players/booker-devin/team-settings", json={"secondary_pos": "SF"}, headers=H["phxowner"])
+check("the next game's streamer hears about it", len(SENT) == 1 and SENT[0][1] == "streamy"
+      and "position" in SENT[0][2], SENT)
+c.put("/api/players/beal-bradley/team-settings", json={"secondary_pos": "PG"}, headers=H["phxowner"])
+check("a second change while one is waiting sends nothing", len(SENT) == 1)
+c.put("/api/players/beal-bradley/team-settings", json={"jersey_number": "3", "secondary_pos": "PG"}, headers=H["phxowner"])
+check("a jersey change alone sends nothing", len(SENT) == 1)
+c.post("/api/position-checks/PHX/confirm", json={"seen": {"booker-devin": "SF", "beal-bradley": "PG"}},
+       headers=H["streamy"])
+check("setting them sends the team a receipt", last() == [("team", "PHX", last()[0][2])] and "positions" in last()[0][2])
+c.post("/api/position-checks/PHX/confirm", json={"seen": {"booker-devin": "SF"}}, headers=H["streamy"])
+check("re-checking an unchanged player sends no receipt", len(SENT) == 2)
+
 # ── 3. day done ───────────────────────────────────────────────────────────────
 
 print("a streamer marks a day done")

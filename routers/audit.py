@@ -51,6 +51,7 @@ _AUDITED_NAMES = {
     "draft-picks.csv",
     "draft-conveyance-registry.json",   # what /api/picks serves for any structured pick
     "coaching-settings.json",
+    "position-checks.json",
     "streaming-days.json",
 }
 _AUDITED_SUFFIXES = ("-roster.csv", "-deadcap.csv", "-picks.csv")

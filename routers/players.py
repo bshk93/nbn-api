@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from .constants import (
     DATA_DIR, PLAYER_BIOS_FILE, OVR_FILE, ATTRIBUTES_FILE, VALID_TEAMS,
-    _ovr_lock, CURATOR_FIELDS, BIO_REWARD_FIELDS, BIO_REWARDS_FILE, _bio_rewards_lock,
+    _ovr_lock, CURATOR_FIELDS, BIO_REWARD_FIELDS, BIO_REWARDS_FILE, _bio_rewards_lock, logger,
 )
 from .storage import _load_json, _save_json, read_csv, log_write
 from .auth import get_token_info, has_role, require_any_role, require_admin
@@ -283,10 +283,24 @@ def update_team_settings(slug: str, body: TeamSettingsUpdate, info: dict = Depen
         raise HTTPException(status_code=422, detail="jersey_number must be 1–2 digits")
     _check_secondary_pos(slug, body.secondary_pos)
 
+    from . import coaching_settings, game_day_notify
+    pos_changed = (bios[slug].get("secondary_pos") or None) != (body.secondary_pos or None)
+    # Tell the streamer once, on the way from nothing waiting to something.
+    # A failed check only costs the message, never the save.
+    try:
+        already_waiting = pos_changed and coaching_settings.has_position_changes(player_team)
+    except Exception:
+        already_waiting = True
+
     bios[slug]["jersey_number"] = body.jersey_number
     bios[slug]["secondary_pos"] = body.secondary_pos
     save_player_bios(bios)
     log_write(info, f"PUT players/{slug}/team-settings — jersey={body.jersey_number} secondary_pos={body.secondary_pos}")
+    try:
+        if pos_changed and not already_waiting and coaching_settings.has_position_changes(player_team):
+            game_day_notify.positions_changed(player_team, info.get("name"))
+    except Exception as exc:
+        logger.warning("positions_changed check failed for %s: %s", player_team, exc)
     return {"ok": True}
 
 
