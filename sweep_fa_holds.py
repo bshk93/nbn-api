@@ -13,6 +13,7 @@ import json
 import sys
 
 from routers import season_calendar
+from routers import discord_transport
 from routers import transactions as T
 from routers.league_time import league_today_str
 
@@ -30,6 +31,9 @@ def main() -> int:
         return 0
 
     done = T.sweep_fa_holds()
+    # Posts go out on a daemon thread; without this the process exits
+    # before they're sent and Discord never hears about the run.
+    discord_transport.flush()
     if done["renounced"]:
         print(json.dumps(done))
     return 0

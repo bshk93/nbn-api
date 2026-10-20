@@ -14,6 +14,7 @@ import json
 import sys
 from collections import Counter
 
+from routers import discord_transport
 from routers import transactions as T
 
 
@@ -32,6 +33,9 @@ def main() -> int:
         return 0
 
     done = T.sweep_team_options()
+    # Posts go out on a daemon thread; without this the process exits
+    # before they're sent and Discord never hears about the run.
+    discord_transport.flush()
     if done["notices"] or done["declined"]:
         print(json.dumps(done))
     return 0
