@@ -146,6 +146,30 @@ check("the new save is pending again", r2.json()["pending"] is True)
 check("the entered trail survives the save",
       r2.json()["entered_by"] == "Streamy" and bool(r2.json()["entered_at"]))
 
+print("what was entered is kept, so the streamer sees what changed")
+check("entering snapshots the settings",
+      entered["entered_values"] == BODY["values"] and entered["entered_minutes"] == BODY["minutes"])
+CHANGED = {"values": {"offensive_focus": "Shoot Threes"}, "minutes": BODY["minutes"]}
+r4 = c.put("/api/coaching-settings/ATL", json=CHANGED, headers=ATL)
+check("a later save keeps the entered snapshot, not the new values",
+      r4.json()["values"] == CHANGED["values"] and r4.json()["entered_values"] == BODY["values"])
+c.put("/api/coaching-settings/ATL", json=BODY, headers=ATL)
+
+print("a record entered before snapshots existed")
+data = cs.load_coaching_settings()
+data["ATL"] = {"values": {"old": 1}, "minutes": {}, "pending": False,
+               "entered_at": "2026-10-01T00:00:00+00:00", "entered_by": "Streamy", "updated_at": "x"}
+cs.save_coaching_settings(data)
+r5 = c.put("/api/coaching-settings/ATL", json=BODY, headers=ATL)
+check("its settings at the time stand in as what was entered", r5.json()["entered_values"] == {"old": 1})
+data = cs.load_coaching_settings()
+data["ATL"] = {"values": {"old": 1}, "minutes": {}, "pending": True, "entered_at": None, "updated_at": "x"}
+cs.save_coaching_settings(data)
+check("a never-entered record gets no snapshot",
+      "entered_values" not in c.put("/api/coaching-settings/ATL", json=BODY, headers=ATL).json())
+c.post("/api/coaching-settings/ATL/enter", json={}, headers=STREAM)
+r2 = c.put("/api/coaching-settings/ATL", json=BODY, headers=ATL)
+
 print("stale enter")
 stale_updated_at = before["updated_at"]  # the *first* save, now superseded
 r3 = c.post("/api/coaching-settings/ATL/enter",

@@ -108,6 +108,20 @@ class EnterBody(BaseModel):
     expected_updated_at: Optional[str] = None
 
 
+def _entered_snapshot(rec: dict):
+    """(values, minutes) as a streamer last entered them into 2K, or None.
+
+    Kept so the streamer dashboard can show what changed since. A record
+    entered before the snapshot existed has none, but if it isn't pending its
+    current settings are exactly what was entered, so they stand in.
+    """
+    if "entered_values" in rec:
+        return rec.get("entered_values") or {}, rec.get("entered_minutes") or {}
+    if rec.get("entered_at") and not rec.get("pending"):
+        return rec.get("values") or {}, rec.get("minutes") or {}
+    return None
+
+
 @router.get("/api/coaching-settings")
 def get_coaching_settings(authorization: Optional[str] = Header(None)):
     """A team's coach profile is private to that team.
@@ -174,6 +188,9 @@ def put_coaching_settings(
             "entered_at": prev.get("entered_at"),
             "entered_by": prev.get("entered_by"),
         }
+        entered = _entered_snapshot(prev)
+        if entered:
+            data[team]["entered_values"], data[team]["entered_minutes"] = entered
         save_coaching_settings(data)
         rec = data[team]
     log_write(info, f"PUT coaching-settings/{team}")
@@ -201,6 +218,8 @@ def enter_coaching_settings(
         rec["pending"] = False
         rec["entered_at"] = _now()
         rec["entered_by"] = info.get("name")
+        rec["entered_values"] = rec.get("values") or {}
+        rec["entered_minutes"] = rec.get("minutes") or {}
         save_coaching_settings(data)
     log_write(info, f"POST coaching-settings/{team}/enter")
     if was_pending:
