@@ -96,3 +96,35 @@ def test_streamer_sees_a_change_from_2ks(twok):
 def test_a_2k_secondary_that_isnt_one_step_doesnt_count_for_starting(twok):
     from routers import coaching_settings as cs
     assert "PG" not in cs.starter_positions("PF", players.effective_secondary("odd", {}))
+
+
+def test_parallel_team_settings_saves_all_land(monkeypatch):
+    # The team page sends every changed player at once. Each save must keep
+    # the others: a load-modify-save without the lock let only the last one
+    # survive (2026-10-21, "none" picks that wouldn't stick).
+    import copy, threading, time
+    from routers import coaching_settings
+    slugs = [f"p{i}" for i in range(8)]
+    disk = {"bios": {s: {"secondary_pos": None} for s in slugs}}
+
+    def load():
+        data = copy.deepcopy(disk["bios"])
+        time.sleep(0.01)  # widen the window a racing save would hit
+        return data
+
+    monkeypatch.setattr(players, "load_player_bios", load)
+    monkeypatch.setattr(players, "save_player_bios", lambda d: disk.update(bios=copy.deepcopy(d)))
+    monkeypatch.setattr(players, "_build_team_map", lambda: {s: "MIL" for s in slugs})
+    monkeypatch.setattr(players, "_check_secondary_pos", lambda slug, sec: None)
+    monkeypatch.setattr(players, "log_write", lambda *a, **k: None)
+    monkeypatch.setattr(coaching_settings, "has_position_changes", lambda team: True)
+
+    info = {"roles": ["mil"], "name": "owner"}
+    threads = [threading.Thread(target=players.update_team_settings,
+                                args=(s, players.TeamSettingsUpdate(secondary_pos="none"), info))
+               for s in slugs]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert {s: b["secondary_pos"] for s, b in disk["bios"].items()} == {s: "none" for s in slugs}

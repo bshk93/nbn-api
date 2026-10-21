@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from .constants import (
     DATA_DIR, PLAYER_BIOS_FILE, OVR_FILE, ATTRIBUTES_FILE, VALID_TEAMS,
-    _ovr_lock, CURATOR_FIELDS, BIO_REWARD_FIELDS, BIO_REWARDS_FILE, _bio_rewards_lock, logger,
+    _ovr_lock, _txn_lock, CURATOR_FIELDS, BIO_REWARD_FIELDS, BIO_REWARDS_FILE, _bio_rewards_lock, logger,
 )
 from .storage import _load_json, _save_json, read_csv, log_write
 from .auth import get_token_info, has_role, require_any_role, require_admin
@@ -265,30 +265,31 @@ def update_player(slug: str, body: PlayerBio, info: dict = Depends(require_any_r
     invalid_pos = [p for p in body.pos if p not in VALID_POSITIONS]
     if invalid_pos:
         raise HTTPException(status_code=422, detail=f"Invalid positions: {invalid_pos}")
-    bios = load_player_bios()
-    existed = slug in bios
-    old_bio = dict(bios.get(slug, {}))
+    with _txn_lock:
+        bios = load_player_bios()
+        existed = slug in bios
+        old_bio = dict(bios.get(slug, {}))
 
-    # § 2.3 applies only when this write changes secondary_pos, so a bio edit
-    # that carries an older, now-invalid value along doesn't fail on it.
-    if 'secondary_pos' in body.model_fields_set and body.secondary_pos != old_bio.get('secondary_pos'):
-        _check_secondary_pos(slug, body.secondary_pos)
-    if has_role(info, "curator") and not has_role(info, "rosters") and not has_role(info, "admin"):
-        existing = bios.get(slug, {})
-        update_data = body.model_dump()
-        for field in CURATOR_FIELDS:
-            existing[field] = update_data[field]
-        bios[slug] = existing
-        new_bio = existing
-    else:
-        # Merge onto the existing record instead of replacing it wholesale.
-        # Any key the PlayerBio model doesn't declare (e.g. draft_team, stamped
-        # directly by the draft-pick transaction) or that this particular caller
-        # simply didn't include in its JSON body must survive untouched — a full
-        # replace has silently wiped fields like this before (jersey_number).
-        bios[slug] = {**old_bio, **body.model_dump(exclude_unset=True)}
-        new_bio = bios[slug]
-    save_player_bios(bios)
+        # § 2.3 applies only when this write changes secondary_pos, so a bio edit
+        # that carries an older, now-invalid value along doesn't fail on it.
+        if 'secondary_pos' in body.model_fields_set and body.secondary_pos != old_bio.get('secondary_pos'):
+            _check_secondary_pos(slug, body.secondary_pos)
+        if has_role(info, "curator") and not has_role(info, "rosters") and not has_role(info, "admin"):
+            existing = bios.get(slug, {})
+            update_data = body.model_dump()
+            for field in CURATOR_FIELDS:
+                existing[field] = update_data[field]
+            bios[slug] = existing
+            new_bio = existing
+        else:
+            # Merge onto the existing record instead of replacing it wholesale.
+            # Any key the PlayerBio model doesn't declare (e.g. draft_team, stamped
+            # directly by the draft-pick transaction) or that this particular caller
+            # simply didn't include in its JSON body must survive untouched — a full
+            # replace has silently wiped fields like this before (jersey_number).
+            bios[slug] = {**old_bio, **body.model_dump(exclude_unset=True)}
+            new_bio = bios[slug]
+        save_player_bios(bios)
     log_write(info, f"PUT players/{slug} ({body.name})")
     if existed:
         _maybe_award_bio_reward(info["name"], slug, old_bio, new_bio)
@@ -318,17 +319,23 @@ def update_team_settings(slug: str, body: TeamSettingsUpdate, info: dict = Depen
     _check_secondary_pos(slug, body.secondary_pos)
 
     from . import coaching_settings, game_day_notify
-    pos_changed = (bios[slug].get("secondary_pos") or None) != (body.secondary_pos or None)
-    # Tell the streamer once, on the way from nothing waiting to something.
-    # A failed check only costs the message, never the save.
-    try:
-        already_waiting = pos_changed and coaching_settings.has_position_changes(player_team)
-    except Exception:
-        already_waiting = True
+    # The team page saves every changed player at once, so these requests
+    # arrive in parallel. Without the lock each one reloads the file, sets its
+    # own player and writes it back over the others, and only the last save
+    # survives.
+    with _txn_lock:
+        bios = load_player_bios()
+        pos_changed = (bios[slug].get("secondary_pos") or None) != (body.secondary_pos or None)
+        # Tell the streamer once, on the way from nothing waiting to something.
+        # A failed check only costs the message, never the save.
+        try:
+            already_waiting = pos_changed and coaching_settings.has_position_changes(player_team)
+        except Exception:
+            already_waiting = True
 
-    bios[slug]["jersey_number"] = body.jersey_number
-    bios[slug]["secondary_pos"] = body.secondary_pos
-    save_player_bios(bios)
+        bios[slug]["jersey_number"] = body.jersey_number
+        bios[slug]["secondary_pos"] = body.secondary_pos
+        save_player_bios(bios)
     log_write(info, f"PUT players/{slug}/team-settings — jersey={body.jersey_number} secondary_pos={body.secondary_pos}")
     try:
         if pos_changed and not already_waiting and coaching_settings.has_position_changes(player_team):
