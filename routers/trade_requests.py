@@ -11,6 +11,7 @@ trade branch uses. A finalized TRC trade is indistinguishable from one entered
 directly by `rosters`: same ledger shape, same Discord post.
 """
 
+import logging
 import secrets
 import threading
 from datetime import datetime, timezone
@@ -33,6 +34,7 @@ from .transactions import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 _trc_lock = threading.Lock()
 
@@ -153,9 +155,29 @@ class FinalizeBody(BaseModel):
     override_reason: Optional[str] = None
 
 
+def _can_see(info: dict, item: dict) -> bool:
+    """A request is the committee's business and its parties' — nobody
+    else's. A party is anyone in the team's front office (the team role), not
+    just its owner, so a GM can follow a trade the owner has to consent to."""
+    if has_role(info, "admin") or has_role(info, "trc") or has_role(info, "trc_head"):
+        return True
+    return any(has_role(info, p.lower()) or is_team_owner(info, p) for p in item["parties"])
+
+
+def _tell_parties(item: dict, text: str) -> None:
+    """An inbox notice to every team in the trade. Never fails the write it
+    reports on, same as the Discord posts."""
+    for p in item["parties"]:
+        try:
+            inbox.notify_team(p, text, link="/committees/trc/")
+        except Exception:
+            logger.exception("trade request inbox notice failed")
+
+
 @router.get("/api/trade-requests")
-def list_trade_requests(team: Optional[str] = None, status: Optional[str] = None):
-    items = _load_store()["items"]
+def list_trade_requests(team: Optional[str] = None, status: Optional[str] = None,
+                        info: dict = Depends(get_token_info)):
+    items = [i for i in _load_store()["items"] if _can_see(info, i)]
     if team:
         t = team.upper()
         items = [i for i in items if t in i["parties"]]
@@ -166,9 +188,11 @@ def list_trade_requests(team: Optional[str] = None, status: Optional[str] = None
 
 
 @router.get("/api/trade-requests/{request_id}")
-def get_trade_request(request_id: str):
+def get_trade_request(request_id: str, info: dict = Depends(get_token_info)):
     store = _load_store()
     idx = _find(store, request_id)
+    if not _can_see(info, store["items"][idx]):
+        raise HTTPException(status_code=404, detail="Trade request not found")
     return _public_view(store["items"][idx])
 
 
@@ -261,6 +285,8 @@ def consent_trade_request(request_id: str, info: dict = Depends(get_token_info))
         # would otherwise never hear about it (see docs/trc-trade-pipeline.md).
         inbox.notify_role("trc", text, link="/committees/trc/")
         inbox.notify_role("trc_head", text, link="/committees/trc/")
+        _tell_parties(item, f"Every team has consented to the {trc_notify.trade_name(item)}. "
+                            "It's with the TRC for a vote.")
 
     view = _public_view(item)
     if ready_for_ballot:
@@ -286,6 +312,8 @@ def withdraw_trade_request(request_id: str, body: WithdrawBody, info: dict = Dep
         item["updated_at"] = now
         _save_store(store)
     log_write(info, f"POST trade-requests/{request_id}/withdraw")
+    why = f" Reason: {body.reason.strip()}" if body.reason.strip() else ""
+    _tell_parties(item, f"{info['name']} withdrew the {trc_notify.trade_name(item)}.{why}")
     return _public_view(item)
 
 
@@ -326,6 +354,8 @@ def ballot_trade_request(request_id: str, body: BallotBody, info: dict = Depends
     view = _public_view(item)
     if just_ready:
         trc_notify.notify_ready_to_finalize(view, APPROVALS_NEEDED)
+        _tell_parties(item, f"The TRC approved the {trc_notify.trade_name(item)}. "
+                            "It goes through once the committee head finalizes it.")
     return view
 
 
@@ -343,6 +373,7 @@ def reject_trade_request(request_id: str, body: RejectBody, info: dict = Depends
         item["updated_at"] = now
         _save_store(store)
     log_write(info, f"POST trade-requests/{request_id}/reject")
+    _tell_parties(item, f"The TRC rejected the {trc_notify.trade_name(item)}. Reason: {body.reason}")
     return _public_view(item)
 
 
@@ -421,4 +452,5 @@ def finalize_trade_request(request_id: str, body: FinalizeBody = FinalizeBody(),
         _save_store(store)
     log_write(info, f"POST trade-requests/{request_id}/finalize — txn {txn['id']}")
     trc_notify.post_trade(item, trade_number)
+    _tell_parties(item, f"The {trc_notify.trade_name(item)} is done. It's Trade {trade_number}.")
     return _public_view(item)

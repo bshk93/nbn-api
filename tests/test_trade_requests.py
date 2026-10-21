@@ -397,6 +397,44 @@ tr.consent_trade_request(quiet["id"], PHX_OWNER)
 tr.consent_trade_request(quiet["id"], BOS_OWNER)
 check("with the channel unset nothing is sent", len(ALERTS) == n)
 
+# ── who can read requests, and what the parties hear ─────────────────────────
+seen = tr.create_trade_request(body_2team(), PHX_GM)
+ids = lambda who: {i["id"] for i in tr.list_trade_requests(None, None, who)}
+check("a party's GM sees the request", seen["id"] in ids(PHX_GM))
+check("the TRC sees it", seen["id"] in ids(TRC_A) and seen["id"] in ids(TRC_HEAD))
+check("an outsider doesn't", seen["id"] not in ids(OUTSIDER))
+raises("an outsider can't fetch it by id", 404, lambda: tr.get_trade_request(seen["id"], OUTSIDER))
+check("a party can fetch it by id", tr.get_trade_request(seen["id"], BOS_OWNER)["id"] == seen["id"])
+
+
+def team_notes_during(fn):
+    before = len(NOTIFICATIONS)
+    fn()
+    return [(t, text) for kind, t, text in NOTIFICATIONS[before:] if kind == "team"]
+
+
+notes = team_notes_during(lambda: (tr.consent_trade_request(seen["id"], PHX_OWNER),
+                                   tr.consent_trade_request(seen["id"], BOS_OWNER)))
+check("both teams hear it went to a vote",
+      sorted(t for t, text in notes if "with the TRC for a vote" in text) == ["BOS", "PHX"], notes)
+notes = team_notes_during(lambda: [tr.ballot_trade_request(
+    seen["id"], tr.BallotBody(decision="approve", note="ok"), who) for who in (TRC_A, TRC_B, TRC_C)])
+check("both teams hear the TRC approved it",
+      sorted(t for t, text in notes if "TRC approved" in text) == ["BOS", "PHX"], notes)
+notes = team_notes_during(lambda: tr.finalize_trade_request(seen["id"], tr.FinalizeBody(), TRC_HEAD))
+check("both teams hear it's done, with its trade number",
+      len(notes) == 2 and all("is done. It's Trade " in text for _, text in notes), notes)
+
+nope = tr.create_trade_request(body_2team(), PHX_GM)
+notes = team_notes_during(lambda: tr.reject_trade_request(nope["id"], tr.RejectBody(reason="Lopsided"), TRC_HEAD))
+check("both teams hear a rejection and why",
+      len(notes) == 2 and all("rejected" in text and "Lopsided" in text for _, text in notes), notes)
+
+gone = tr.create_trade_request(body_2team(), PHX_GM)
+notes = team_notes_during(lambda: tr.withdraw_trade_request(gone["id"], tr.WithdrawBody(reason="nah"), PHX_OWNER))
+check("both teams hear a withdrawal, who and why",
+      len(notes) == 2 and all("phxOwner withdrew" in text and "nah" in text for _, text in notes), notes)
+
 if FAILS:
     print(f"{len(FAILS)} FAILED: {FAILS}")
     sys.exit(1)
