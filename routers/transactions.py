@@ -6122,142 +6122,273 @@ def _trade_flows(details, bios: dict, season: str) -> tuple[dict, dict, dict, di
     return outgoing, incoming, out_players, in_players
 
 
+_STEPIEN_MAX_SCENARIOS = 4096
+
+
 def _check_stepien_rule(details: TradeIn, all_picks: list[dict] | None = None) -> list[CheckResult]:
-    """§ 7.2 Stepien Rule: a team must retain the ability to make a
-    first-round selection at least once every two draft years — a proposed
-    trade is illegal if, after it, a team would have no first-round pick in
-    two or more consecutive draft years. "Ability to make a selection" counts
-    any first-round pick the team holds, own or acquired (not just its own).
+    """§ 7.2 Stepien Rule: a trade is illegal if, after it, a team could end
+    up with no first-round pick in two consecutive draft years. "Could" is
+    the point: the rule has to hold however every protection resolves, so a
+    claim only counts in the outcomes where the team actually gets the pick.
+    Any first-round pick counts, own or acquired.
 
-    Uses the same resolved, conveyance-aware ownership `GET /api/picks`
-    serves (`_all_picks_flat`) — not the raw flat-CSV OWNER column, which
-    under the conveyance cutover (PICKS_READ_SOURCE=conveyance) no longer
-    reflects final ownership for protected/swap picks. "Has a pick that
-    year" mirrors `get_team_picks`'s own matching rule: an exact owner, or
-    the orig team when a pick's owner is still fully undetermined ("?").
+    Ownership is what `GET /api/picks` serves (`_all_picks_flat`), modeled
+    per pick as one of:
 
-    Only plain, unconditional first-round retrades are simulated here — a
-    protected pick, a swap right, or a protection ladder doesn't hand over a
-    definite claim on draft day, so folding those into this year-by-year
-    ownership count would be guessing at a still-contingent outcome (see
-    picks_conveyance's `leaves` model). Those cases fall back to committee
-    manual review, same as the rest of § 7.2's badge in the rulebook.
+      - "bands": the pick goes to exactly one team, chosen by where it lands.
+        A settled pick is one band (1-60). A protected pick's bands come from
+        its `leaves`. A pipe-joined owner with no leaves to say how it splits
+        (the flat-CSV fallback) is a band per team at unknown positions.
+      - "group": a row with a `group_id` (a swap group or binary chain). Every
+        team holding a leaf gets exactly one of the group's picks that year,
+        whatever the order, so each counts as certain. Every row of a group is
+        the SAME claim (see `registry.handle_retrade`): trading one row conveys
+        the team's whole interest in all of them, never "one leg, keeping the
+        other".
 
-    A pick with a non-null `group_id` shares its conveyance state with every
-    other pick carrying the same `group_id` (a 2+-way swap group or binary
-    chain projects the SAME shared priority list / chain node onto each
-    member pick's own row — see `registry.handle_retrade` in
-    picks_conveyance, which mutates that one shared structure regardless of
-    which member pick named the trade). So retrading one member conveys the
-    team's single shared claim, not an independent share per row — every
-    row in the group must be updated together, or a team with two picks in
-    a shared swap group would wrongly look like it has two independent
-    claims it can trade away one at a time while "keeping the other."
+    A pick with `ladder_fallback_of` goes to `to` when its governing pick
+    lands inside `protect_top`, and to its own owner otherwise. Both picks
+    resolve from the governing pick's one landing spot, so they are scored as
+    one outcome, not independently: a team that either keeps the protected
+    pick or keeps the fallback is never charged with losing both.
 
-    A multi-band `protected` pick (no `group_id` — bands aren't a shared
-    structure the way swap groups are) can still list several real,
-    INDEPENDENT candidates in its pipe-joined `owner` (e.g. a 3-band pick
-    with bands going to 3 different teams). Each band is its own claim —
-    `registry.handle_retrade` mutates only the specific band the trading
-    team occupies, leaving the others untouched — so a plain retrade must
-    replace just that one team within the pipe string, never overwrite the
-    whole entry down to a single team (which would silently delete every
-    other band-holder's real claim).
-
-    A pick with `ladder_fallback_of` set carries a real but easy-to-miss
-    claim: its own `owner`/`leaves` look like a plain settled pick, but a
-    DIFFERENT pick's `ladder.fallback` names this one as compensation if
-    that ladder's protection never lifts — the claimant only appears in
-    `ladder_fallback_of.to` on THIS pick, nowhere else. Folded into the
-    owner pipe here so that team's real (if contingent) coverage counts;
-    left out of retrade simulation below (too indirect to safely mutate
-    the same way a normal retrade does — falls to manual review).
+    The trade is simulated on that model: a plain retrade moves the team's
+    claim (or just the `leaf_id` band); `protection` splits the team's band
+    at the threshold, the way `from_trade.register_protection` does;
+    `swap_with` turns the pick and its counterpart into a two-team group, as
+    `register_swap` does; `ladder_fallback` links the fallback picks to this
+    one. Then each team in the trade is checked against every combination of
+    outcomes that touches it. Past `_STEPIEN_MAX_SCENARIOS` combinations it
+    falls back to counting only certain claims, which can only be stricter.
 
     `all_picks` is injectable (defaults to the real `_all_picks_flat()`)
-    so tests can exercise this against synthetic pick data instead of
-    live production picks — see `tests/test_stepien_rule.py`.
+    so tests can run against synthetic picks — see `tests/test_stepien_rule.py`.
     """
+    import itertools
+    import re
+
+    if not any(a.type == "pick" and a.round == 1
+               for x in details.transfers for a in x.assets):
+        return []
     if all_picks is None:
         all_picks = _all_picks_flat()
-    owner_map: dict[tuple[int, str], str] = {}
+
+    # key -> {"kind": "bands", "bands": [[lo, hi, team], ...]}
+    #      | {"kind": "group", "gid": gid}
+    picks: dict[tuple[int, str], dict] = {}
+    groups: dict[str, set[str]] = {}          # gid -> teams certain of one pick
     group_members: dict[str, list[tuple[int, str]]] = {}
-    fallback_keys: set[tuple[int, str]] = set()
+    fallbacks: dict[tuple[int, str], dict] = {}  # key -> {gov, top, to}
+    band_re = re.compile(r"^protected band (\d+)-(\d+)$")
+
     for p in all_picks:
         if p.get("round") != 1 or p.get("player"):
             continue
         key = (p["year"], p["orig"].upper())
         owner = p.get("owner") or "?"
-        fallback = p.get("ladder_fallback_of")
-        if fallback and fallback.get("to"):
-            fallback_keys.add(key)
-            fb_team = fallback["to"]
-            owner = fb_team if owner == "?" else (
-                owner if fb_team in owner.split("|") else f"{owner}|{fb_team}")
-        owner_map[key] = owner
+        teams = [p["orig"].upper()] if owner == "?" else owner.split("|")
+        leaves = p.get("leaves") or []
         gid = p.get("group_id")
         if gid:
+            leaf_teams = {l["team"] for l in leaves}
+            groups.setdefault(gid, set()).update(leaf_teams or teams)
             group_members.setdefault(gid, []).append(key)
-    key_to_group = {key: gid for gid, keys in group_members.items() for key in keys}
+            picks[key] = {"kind": "group", "gid": gid}
+        else:
+            bands = []
+            for l in leaves:
+                m = band_re.match(l.get("description") or "")
+                if m:
+                    bands.append([int(m[1]), int(m[2]), l["team"]])
+            if not bands:
+                if len(teams) == 1:
+                    bands = [[1, 60, teams[0]]]
+                else:
+                    # Who gets which band is unknown: give each its own
+                    # made-up slice, so no two can both be counted at once.
+                    n = len(teams)
+                    bands = [[i * 60 // n + 1, (i + 1) * 60 // n, t] for i, t in enumerate(teams)]
+            picks[key] = {"kind": "bands", "bands": sorted(bands)}
+        fb = p.get("ladder_fallback_of")
+        if fb and fb.get("to"):
+            gov = fb.get("governing_pick") or {}
+            gov_key = (gov["year"], gov["orig"].upper()) if gov.get("year") else None
+            fallbacks[key] = {"gov": gov_key, "top": int(fb.get("protect_top") or 0),
+                              "to": fb["to"]}
 
-    def _replace_owner(owner: str, from_team: str, to_team: str) -> str:
-        if owner == "?" or from_team not in owner.split("|"):
-            return owner
-        teams = [to_team if t == from_team else t for t in owner.split("|")]
-        deduped = []
-        for t in teams:
-            if t not in deduped:
-                deduped.append(t)
-        return "|".join(deduped)
+    def holders(key):
+        node = picks[key]
+        if node["kind"] == "group":
+            return set(groups[node["gid"]])
+        return {t for _lo, _hi, t in node["bands"]}
 
-    affected_teams: set[str] = set()
+    def retrade(key, from_t, to_t, leaf_id):
+        node = picks[key]
+        if node["kind"] == "group":
+            g = groups[node["gid"]]
+            if from_t in g:
+                g.discard(from_t)
+                g.add(to_t)
+            return
+        band_idx = None
+        if leaf_id:
+            m = re.search(r":protected:(\d+)$", leaf_id)
+            band_idx = int(m[1]) if m else None
+        for i, band in enumerate(node["bands"]):
+            if band[2] == from_t and (band_idx is None or i == band_idx):
+                band[2] = to_t
+
+    def protect(key, from_t, to_t, top):
+        node = picks[key]
+        if node["kind"] == "group":
+            # A protection on a swap leg: neither side is certain of anything
+            # from it any more. Drop from_t's certainty; to_t gains nothing.
+            groups[node["gid"]].discard(from_t)
+            return
+        out = []
+        for lo, hi, t in node["bands"]:
+            if t != from_t or not (lo <= top < hi):
+                out.append([lo, hi, to_t if t == from_t and lo > top else t])
+                continue
+            out += [[lo, top, from_t], [top + 1, hi, to_t]]
+        node["bands"] = out
+
+    def swap(key, from_t, to_t, named):
+        counterpart = next((k for k, n in picks.items()
+                            if k[0] == key[0] and k[1] != key[1] and n["kind"] == "bands"
+                            and [t for _lo, _hi, t in n["bands"]] == [named]), None)
+        if counterpart is None or picks[key]["kind"] != "bands":
+            retrade(key, from_t, to_t, None)     # apply passes it through flat
+            return
+        gid = f"_sim_{key[0]}_{key[1]}_{counterpart[1]}"
+        groups[gid] = {named, to_t}
+        group_members[gid] = [key, counterpart]
+        picks[key] = picks[counterpart] = {"kind": "group", "gid": gid}
+
+    trade_keys = set()
+    affected: set[str] = set()
     for xfer in details.transfers:
-        from_t = xfer.from_team.upper()
-        to_t = xfer.to_team.upper()
+        from_t, to_t = xfer.from_team.upper(), xfer.to_team.upper()
         for asset in xfer.assets:
             if asset.type != "pick" or asset.round != 1:
                 continue
-            affected_teams.add(from_t)
-            affected_teams.add(to_t)
-            if asset.swap_with or asset.protection is not None or asset.ladder_protect_top is not None:
-                continue
+            affected |= {from_t, to_t}
             key = (asset.year, (asset.orig or "").upper())
-            if key not in owner_map or key in fallback_keys:
+            if key not in picks:
                 continue
-            gid = key_to_group.get(key)
-            for member_key in (group_members[gid] if gid else [key]):
-                owner_map[member_key] = _replace_owner(owner_map[member_key], from_t, to_t)
+            trade_keys.add(key)
+            if asset.swap_with:
+                affected.add(asset.swap_with.upper())
+                swap(key, from_t, to_t, asset.swap_with.upper())
+            elif asset.protection:
+                protect(key, from_t, to_t, asset.protection)
+            else:
+                retrade(key, from_t, to_t, asset.leaf_id)
+            for ref in asset.ladder_fallback or []:
+                if ref.get("round", 1) != 1:
+                    continue
+                fkey = (ref["year"], ref["orig"].upper())
+                fallbacks[fkey] = {"gov": key, "top": int(asset.ladder_protect_top or 0),
+                                   "to": to_t}
 
-    if not affected_teams or not owner_map:
+    if not affected or not picks:
         return []
 
-    years = sorted({y for (y, _orig) in owner_map})
-    lo, hi = years[0], years[-1]
-    checks: list[CheckResult] = []
-    for team in sorted(affected_teams):
-        have = {y for (y, orig), owner in owner_map.items()
-                if (owner == "?" and orig == team) or team in owner.split("|")}
-        gap = None
-        run_start = None
-        for y in range(lo, hi + 1):
-            if y in have:
-                run_start = None
+    years = sorted({y for (y, _o) in picks})
+    lo_y, hi_y = years[0], years[-1]
+
+    def outcomes_for(team):
+        """(certain years, [[set of years per outcome], ...]) for one team."""
+        certain: set[int] = set()
+        # One outcome space per governing pick: its own bands plus every
+        # fallback that hangs off it.
+        spaces: dict[tuple, list] = {}
+        for key, node in picks.items():
+            if key in fallbacks:
                 continue
-            if run_start is None:
-                run_start = y
-            elif y - run_start >= 1:
-                gap = (run_start, y)
-                break
+            if node["kind"] == "group":
+                if team in groups[node["gid"]]:
+                    certain.add(key[0])
+                continue
+            if team in holders(key):
+                spaces.setdefault(key, [])
+        for fkey, fb in fallbacks.items():
+            if fb["to"] == team or team in holders(fkey):
+                spaces.setdefault(fb["gov"] or ("fallback", fkey), []).append(fkey)
+
+        variable = []
+        for gov, fkeys in spaces.items():
+            gov_node = picks.get(gov) if isinstance(gov, tuple) and gov and gov[0] != "fallback" else None
+            cuts = {1, 61}
+            if gov_node and gov_node["kind"] == "bands":
+                for lo, hi, _t in gov_node["bands"]:
+                    cuts |= {lo, hi + 1}
+            for fk in fkeys:
+                cuts.add(fallbacks[fk]["top"] + 1)
+            cuts = sorted(c for c in cuts if 1 <= c <= 61)
+            spots = cuts[:-1] if gov_node else [None]
+            if not gov_node:
+                # Governing pick unknown: the fallback could go either way.
+                outs = []
+                for fk in fkeys:
+                    fb = fallbacks[fk]
+                    owner = holders(fk)
+                    outs.append([{fk[0]} if fb["to"] == team else set(),
+                                 {fk[0]} if team in owner else set()])
+                variable.extend(outs)
+                continue
+            outs = []
+            for spot in spots:
+                got = set()
+                if gov_node["kind"] == "bands" and any(
+                        lo <= spot <= hi and t == team for lo, hi, t in gov_node["bands"]):
+                    if gov not in fallbacks:
+                        got.add(gov[0])
+                for fk in fkeys:
+                    fb = fallbacks[fk]
+                    if spot <= fb["top"]:
+                        if fb["to"] == team:
+                            got.add(fk[0])
+                    elif team in holders(fk):
+                        got.add(fk[0])
+                outs.append(got)
+            variable.append(outs)
+        return certain, variable
+
+    def first_gap(have):
+        for y in range(lo_y, hi_y):
+            if y not in have and y + 1 not in have:
+                return (y, y + 1)
+        return None
+
+    checks: list[CheckResult] = []
+    for team in sorted(affected):
+        certain, variable = outcomes_for(team)
+        n = 1
+        for outs in variable:
+            n *= max(len(outs), 1)
+        gap = None
+        if n > _STEPIEN_MAX_SCENARIOS:
+            gap = first_gap(certain)
+        else:
+            for combo in itertools.product(*variable):
+                gap = first_gap(certain.union(*combo))
+                if gap:
+                    break
         if gap:
+            best_case = certain.union(*[set().union(*o) for o in variable])
+            why = " if its protections fall the wrong way" if first_gap(best_case) is None else ""
             checks.append(CheckResult(
                 check=f"stepien_rule_{team.lower()}", passed=False, level="error",
-                message=(f"{team} would have no first-round pick in {gap[0]} and {gap[1]} after this "
-                         "trade — violates the Stepien Rule (§ 7.2): a team must retain the ability to "
-                         "make a first-round selection at least once every two draft years."),
+                message=(f"{team} could have no first-round pick in {gap[0]} and {gap[1]} after this "
+                         f"trade{why} — violates the Stepien Rule (§ 7.2): a team must keep a "
+                         "first-round pick at least once every two draft years, however its "
+                         "protections resolve."),
             ))
         else:
             checks.append(CheckResult(
                 check=f"stepien_rule_{team.lower()}", passed=True,
-                message=f"{team}: retains a first-round pick at least once every two draft years (§ 7.2).",
+                message=f"{team}: keeps a first-round pick at least once every two draft years (§ 7.2).",
             ))
     return checks
 

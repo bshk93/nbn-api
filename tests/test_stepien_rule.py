@@ -123,57 +123,107 @@ def test_independent_double_claim_not_treated_as_shared():
           r is not None and r.passed is True)
 
 
+def band(team, lo, hi):
+    return {"team": team, "description": f"protected band {lo}-{hi}"}
+
+
 def test_multiband_protected_preserves_other_bands():
-    print("\n-- retrading one band of a multi-band protected pick leaves others intact --")
+    print("\n-- retrading one band of a protected pick leaves the others intact --")
     picks = [
         pick(2099, "ZZZ", "ZZZ"),
-        pick(2100, "DDD", "DDD|EEE|FFF"),   # 3 independent bands, NO group_id
-        pick(2100, "GGG", "EEE"),           # EEE's own separate, unrelated 2100 pick
+        dict(pick(2100, "DDD", "DDD|EEE"), leaves=[band("DDD", 1, 4), band("EEE", 5, 60)]),
+        pick(2100, "GGG", "EEE"),           # EEE's own separate 2100 pick
         pick(2101, "ZZZ", "ZZZ"),
     ]
     details = TradeIn(transfers=[
-        TradeTransfer(from_team="DDD", to_team="ZZZ",
+        TradeTransfer(from_team="DDD", to_team="EEE",
                        assets=[TradeAsset(type="pick", year=2100, round=1, orig="DDD")]),
         TradeTransfer(from_team="EEE", to_team="ZZZ",
                        assets=[TradeAsset(type="pick", year=2100, round=1, orig="GGG")]),
     ])
     checks = _check_stepien_rule(details, all_picks=picks)
-    rd = result_for(checks, "DDD")
-    re_ = result_for(checks, "EEE")
-    check("DDD blocked: gave up its only claim",
-          rd is not None and rd.passed is False)
-    check("EEE still passes: its band on the DDD-orig pick was never touched, "
-          "even though DDD retraded ITS OWN band of the same pick",
-          re_ is not None and re_.passed is True)
+    check("DDD blocked: gave up its only claim", result_for(checks, "DDD").passed is False)
+    check("EEE passes: it now holds both bands, so the pick is certainly its own",
+          result_for(checks, "EEE").passed is True)
 
 
-def test_ladder_fallback_credited():
-    print("\n-- ladder_fallback_of claims count toward the fallback team's coverage --")
+def test_protected_claim_is_not_a_pick():
+    print("\n-- a protected band only counts where the team actually gets the pick --")
     picks = [
-        pick(2099, "JJJ", "JJJ"),
-        pick(2099, "LLL", "JJJ"),           # JJJ's second, harmless 2099 claim
-        pick(2100, "ZZZ", "ZZZTEAM"),       # unrelated, just fills out the year range
-        pick(2101, "III", "III", ladder_fallback_of={"to": "JJJ"}),
+        pick(2099, "AAA", "AAA"),
+        dict(pick(2100, "AAA", "AAA|ZZZ"), leaves=[band("AAA", 1, 4), band("ZZZ", 5, 60)]),
+        pick(2101, "AAA", "AAA"),
+        pick(2102, "AAA", "AAA"),
     ]
     details = TradeIn(transfers=[
-        TradeTransfer(from_team="JJJ", to_team="ZZZTEAM",
-                       assets=[TradeAsset(type="pick", year=2099, round=1, orig="LLL")]),
+        TradeTransfer(from_team="AAA", to_team="ZZZ",
+                       assets=[TradeAsset(type="pick", year=2101, round=1, orig="AAA")]),
+    ])
+    r = result_for(_check_stepien_rule(details, all_picks=picks), "AAA")
+    check("AAA blocked: its top-4-only 2100 claim doesn't cover 2100-2101",
+          r.passed is False and "protections fall the wrong way" in r.message)
+
+
+def test_trading_a_protected_pick_counts():
+    print("\n-- trading away a pick with protection is checked, not skipped --")
+    picks = [pick(2099, "ZZZ", "ZZZ"), pick(2100, "AAA", "AAA"), pick(2101, "ZZZ", "ZZZ")]
+    details = TradeIn(transfers=[
+        TradeTransfer(from_team="AAA", to_team="ZZZ",
+                       assets=[TradeAsset(type="pick", year=2100, round=1, orig="AAA", protection=4)]),
+    ])
+    r = result_for(_check_stepien_rule(details, all_picks=picks), "AAA")
+    check("AAA blocked: a top-4-protected pick is usually gone", r.passed is False)
+
+
+def test_swap_with_hands_over_a_pick():
+    print("\n-- giving a pick away inside a new swap still loses it --")
+    picks = [pick(2099, "ZZZ", "ZZZ"), pick(2100, "AAA", "AAA"),
+             pick(2100, "ZZZ", "ZZZ"), pick(2101, "ZZZ", "ZZZ")]
+    details = TradeIn(transfers=[
+        TradeTransfer(from_team="AAA", to_team="ZZZ",
+                       assets=[TradeAsset(type="pick", year=2100, round=1, orig="AAA", swap_with="ZZZ")]),
     ])
     checks = _check_stepien_rule(details, all_picks=picks)
-    r = result_for(checks, "JJJ")
-    check("JJJ passes: the 2101 fallback claim covers what would otherwise be a "
-          "2100+2101 gap (JJJ never appears in ZZZ's 2100 pick's owner at all)",
-          r is not None and r.passed is True)
+    check("AAA blocked: both swap picks now go to ZZZ", result_for(checks, "AAA").passed is False)
 
-    # Same fixture, minus the fallback link — JJJ should now correctly fail,
-    # proving the pass above is really the fallback credit at work, not a
-    # test-fixture accident.
-    picks_no_fallback = [dict(p, ladder_fallback_of=None) if p["orig"] == "III" else p
-                          for p in picks]
-    checks2 = _check_stepien_rule(details, all_picks=picks_no_fallback)
-    r2 = result_for(checks2, "JJJ")
-    check("JJJ fails without the fallback link (control case)",
-          r2 is not None and r2.passed is False)
+
+def test_ladder_fallback_scored_with_its_pick():
+    print("\n-- a ladder pick and its fallback resolve together, not independently --")
+    picks = [
+        pick(2099, "AAA", "AAA"),
+        pick(2100, "AAA", "AAA"),
+        pick(2101, "AAA", "AAA"),
+        pick(2102, "AAA", "AAA"),
+    ]
+    # AAA sends 2100 top-5 protected; if it stays protected, ZZZ gets 2101
+    # instead. Either way AAA keeps one of the two, so no 2100-2101 gap.
+    details = TradeIn(transfers=[
+        TradeTransfer(from_team="AAA", to_team="ZZZ", assets=[TradeAsset(
+            type="pick", year=2100, round=1, orig="AAA", protection=5,
+            ladder_protect_top=5, ladder_fallback=[{"year": 2101, "round": 1, "orig": "AAA"}])]),
+    ])
+    r = result_for(_check_stepien_rule(details, all_picks=picks), "AAA")
+    check("AAA passes: it always keeps 2100 or 2101", r.passed is True)
+
+    # The same, already on the books, as GET /api/picks serves it.
+    booked = [
+        pick(2099, "AAA", "AAA"),
+        dict(pick(2100, "AAA", "AAA|ZZZ"), leaves=[band("AAA", 1, 5), band("ZZZ", 6, 60)]),
+        pick(2101, "AAA", "AAA", ladder_fallback_of={
+            "to": "ZZZ", "protect_top": 5,
+            "governing_pick": {"year": 2100, "round": 1, "orig": "AAA"}}),
+        pick(2102, "AAA", "AAA"),
+        pick(2103, "AAA", "AAA"),
+    ]
+    trade_2103 = TradeIn(transfers=[TradeTransfer(from_team="AAA", to_team="ZZZ", assets=[
+        TradeAsset(type="pick", year=2103, round=1, orig="AAA")])])
+    check("AAA passes on the booked version too",
+          result_for(_check_stepien_rule(trade_2103, all_picks=booked), "AAA").passed is True)
+
+    trade_2102 = TradeIn(transfers=[TradeTransfer(from_team="AAA", to_team="ZZZ", assets=[
+        TradeAsset(type="pick", year=2102, round=1, orig="AAA")])])
+    check("AAA blocked trading 2102: if 2100 stays protected it loses 2101 and 2102",
+          result_for(_check_stepien_rule(trade_2102, all_picks=booked), "AAA").passed is False)
 
 
 def main():
@@ -182,7 +232,10 @@ def main():
     test_shared_swap_group_is_one_claim()
     test_independent_double_claim_not_treated_as_shared()
     test_multiband_protected_preserves_other_bands()
-    test_ladder_fallback_credited()
+    test_protected_claim_is_not_a_pick()
+    test_trading_a_protected_pick_counts()
+    test_swap_with_hands_over_a_pick()
+    test_ladder_fallback_scored_with_its_pick()
 
     print("\n" + ("=" * 40))
     if FAILS:
