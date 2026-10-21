@@ -28,6 +28,9 @@ stored, so it can never drift out of sync with the structure it describes.
 from __future__ import annotations
 
 
+from . import model
+
+
 def _pick_prefix(pick: dict) -> str:
     return f"{pick['year']}-{pick['round']}-{pick['orig']}"
 
@@ -53,6 +56,48 @@ def _expand_leaf(value, leaf_id: str, description: str) -> list[dict]:
             return out
         # extinguished, or anything else: no claimant, no leaf
     return []
+
+
+def _binary_phrase(sid: str, side: str, bs: dict, pick: dict) -> str:
+    """Plain English for one side of a binary swap: "better of OKC and LAC",
+    "worse of DET and the better of OKC/LAC". An earlier swap's output
+    taken in the same direction folds into one list ("best of A, B and C"),
+    so the reader never needs the chain's internal step ids."""
+    def name(ref):
+        if model.is_pick_ref(ref):
+            if ref["year"] == pick["year"] and ref["round"] == pick["round"]:
+                return ref["orig"]
+            return f"{ref['year']} {ref['orig']} {'1st' if ref['round'] == 1 else '2nd'}"
+        return "?"
+
+    def items(node_id, direction, seen, depth):
+        node = bs.get(node_id) or {}
+        picks, groups = [], []
+        for op in (node.get("a"), node.get("b")):
+            if model.is_output_ref(op) and op["ref"] not in seen:
+                nxt = seen | {op["ref"]}
+                if op["output"] == direction:
+                    p, g = items(op["ref"], direction, nxt, depth)
+                    picks += p
+                    groups += g
+                else:
+                    groups.append(phrase(op["ref"], op["output"], nxt, depth + 1))
+            else:
+                picks.append(name(op))
+        return picks, groups
+
+    def phrase(node_id, direction, seen, depth):
+        picks, groups = items(node_id, direction, seen, depth)
+        names = picks + groups
+        word = direction if len(names) <= 2 else ("best" if direction == "better" else "worst")
+        if depth == 0:
+            names = picks + ["the " + g for g in groups]
+            body = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+            return f"{word} of {body}"
+        text = f"{word} of {'/'.join(picks + [f'({g})' for g in groups])}"
+        return text
+
+    return phrase(sid, side, {sid}, 0)
 
 
 def list_leaves(pick: dict, store: dict) -> list[dict]:
@@ -114,7 +159,7 @@ def list_leaves(pick: dict, store: dict) -> list[dict]:
             for slot in ("better_to", "worse_to"):
                 leaves = _expand_leaf(
                     s.get(slot), f"{prefix}:binary:{sid}:{slot}",
-                    f"binary chain node {sid!r} {slot}")
+                    _binary_phrase(sid, slot[:-3], bs, pick))
                 for leaf in leaves:
                     leaf["txn_ids"] = s.get("txn_ids", [])
                 out.extend(leaves)

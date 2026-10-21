@@ -49,6 +49,24 @@ def main():
         check(f"binary chain: {team} holds a claim", holds((2030, 1, "NOP"), team))
     check("binary chain: unrelated team does not", not holds((2030, 1, "NOP"), "BOS"))
 
+    # binary chain wording -- plain English, never the chain's step ids.
+    # Synthetic, so it doesn't drift with the live registry.
+    pk = lambda o: {"year": 2027, "round": 1, "orig": o}
+    bs = {
+        "s1": {"a": pk("OKC"), "b": pk("LAC")},
+        "s2": {"a": pk("DET"), "b": {"ref": "s1", "output": "worse"}},
+        "s3": {"a": {"ref": "s2", "output": "worse"}, "b": pk("GSW")},
+    }
+    phrase = lambda sid, side: ownership._binary_phrase(sid, side, bs, pk("OKC"))
+    check("binary wording: first step", phrase("s1", "better") == "better of OKC and LAC")
+    check("binary wording: a step fed by another",
+          phrase("s2", "better") == "better of DET and the worse of OKC/LAC")
+    check("binary wording: same direction folds into one list",
+          phrase("s3", "worse") == "worst of DET, OKC, LAC and GSW")
+    check("binary wording: other years are named in full",
+          ownership._binary_phrase("s1", "better", bs, {"year": 2028, "round": 1, "orig": "X"})
+          == "better of 2027 OKC 1st and 2027 LAC 1st")
+
     # legacy -- synthetic node, since as of 2026-07-19 all 6 real legacy
     # picks have been resolved to real structure (see curated.py); a real
     # example would only be transient, so this is deliberately not tied to
