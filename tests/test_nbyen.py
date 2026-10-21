@@ -308,7 +308,9 @@ check("a new member starts with 1,000 as a real start line",
 print("\n-- paused rewards --")
 
 before = B("Ann")
-check("a box score reward pays nothing while paused", bets._award_submission_reward("Ann") == (0.0, before))
+check("a bio reward pays nothing while paused", bets._award_bio_reward("Ann", 10) == (0.0, before))
+check("a box score reward pays 50", bets._award_submission_reward("Ann") == (50.0, before + 50))
+before = B("Ann")
 r = c.post("/api/trivia/answer", json={"streak": 10}, headers=H("Ann"))
 check("trivia pays nothing while paused", r.status_code == 200 and r.json()["reward"] == 0.0 and B("Ann") == before)
 

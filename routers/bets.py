@@ -17,7 +17,7 @@ router = APIRouter()
 
 # Rewards are paused at the reset (wallet.KINDS); these are the prices they
 # come back at, on the 100-NB¥-per-dollar scale.
-NBY_BOXSCORE_REWARD  = 30.0
+NBY_BOXSCORE_REWARD  = 50.0
 NBY_BIO_REWARD       = 1.0
 # Per member, per bet. Bookies price by hand and there's no house bank, so this
 # is what keeps one badly priced long shot from paying out thousands.

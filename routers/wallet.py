@@ -72,10 +72,11 @@ KINDS: dict[str, bool] = {
     "stream_refund":   True,
     # The commissioner's correction, always with a reason
     "admin":           True,
+    # Back on 2026-10-21, at 50 a game (25 per screenshot side)
+    "boxscore":        True,
     # Paused at the reset — see the module docstring
     "tip":             False,
     "achievement":     False,
-    "boxscore":        False,
     "bio":             False,
     "poeltl":          False,
     "perry":           False,
