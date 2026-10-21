@@ -576,7 +576,7 @@ values; `-0` keeps its sign; a whole double loses its `.0`).
 
 ## Link previews (`routers/og.py`)
 
-Four pages on the site are one shell serving many items, with the item fetched
+Five pages on the site are one shell serving many items, with the item fetched
 from the API after load:
 
 | Page | Endpoint | What the card says |
@@ -585,22 +585,23 @@ from the API after load:
 | `/players/?p=` | `GET /api/og/player` | positions, height, age, team, OVR, career per-game line, headshot |
 | `/proposals/view/?id=` | `GET /api/og/proposal` | number, title, state or outcome, author, excerpt |
 | `/members/{name}` | `GET /api/og/member` | current team, seasons, record, championships, avatar |
+| `/boxscores/?date=&game=AWAY-HOME` | `GET /api/og/boxscore` | final score, date, each side's top scorer, the winner's team card. Without `game` it is the page's own card |
 
-No link unfurler runs JavaScript, so all four fetched the shell and got the
+No link unfurler runs JavaScript, so all of them fetched the shell and got the
 placeholder Open Graph tags `nbn-today/build/og_tags.py` bakes into it — every
 article unfurled in Discord as the same "Article — NBN News" card, every player
 as the same "Players — NBN" one. `routers/og.py` renders the head each item
 should have had.
 
 **They only get used because nginx routes to them.** `/etc/nginx/sites-enabled/nbn.today`
-carries a `$nbn_unfurler` map over `$http_user_agent` and rewrites those four
+carries a `$nbn_unfurler` map over `$http_user_agent` and rewrites those five
 paths to internal locations that proxy here; every other visitor gets the real
 page. The map is **social unfurlers only, deliberately not search engines** —
 these endpoints answer with a head-only stub, and nothing that indexes pages
 should ever be handed one. A new preview client is one entry in that map; a
-fifth per-item page is a builder here plus a location block there.
+new per-item page is a builder here plus a location block there.
 
-Three rules hold across all four, and `tests/test_og.py` pins them:
+Three rules hold across all five, and `tests/test_og.py` pins them:
 
 - **Nothing unpublished, ever.** A draft article, a draft proposal, an unknown
   id — all fall back to that page's own static card. A crawler that gets a 404

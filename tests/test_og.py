@@ -52,6 +52,7 @@ SHELLS = {
     "players": ("Players — NBN", "Every player in NBN — career stats and contracts."),
     "proposals/view": ("Proposal — NBN", "A rule proposal before the NBN league."),
     "members/profile": ("Member — NBN", "An NBN member’s tenures and league history."),
+    "boxscores": ("Box Scores — NBN", "Every NBN box score."),
 }
 for path, (title, desc) in SHELLS.items():
     d = SITE_DIR / path
@@ -211,6 +212,48 @@ check("a member with no tenure still gets a sentence",
 check("name matching is case-insensitive", meta(og.member_head("BRYN"), "og:title") == "bryn — NBN")
 check("unknown member → the shell's card", meta(og.member_head("ghost"), "og:title") == "Member — NBN")
 check("no name → the shell's card", meta(og.member_head(""), "og:title") == "Member — NBN")
+
+# ── Box scores ────────────────────────────────────────────────────────────────
+
+def _pl(name, mins, pts, reb, ast):
+    return {"player": name, "min": mins, "pts": pts, "reb": reb, "ast": ast}
+
+GAMES = {
+    "2026-10-20": [{"home_team": "DET", "away_team": "BOS", "home_score": 94, "away_score": 112,
+                    "gametype": "REG",
+                    "away_players": [_pl("TATUM, JAYSON", 36, 34, 9, 5), _pl("BROWN, JAYLEN", 34, 22, 4, 3),
+                                     _pl("BENCH, DNP", 0, 0, 0, 0)],
+                    "home_players": [_pl("CUNNINGHAM, CADE", 37, 28, 6, 10)]}],
+    "2026-04-30": [{"home_team": "NYK", "away_team": "MIA", "home_score": 101, "away_score": 99,
+                    "gametype": "PLAYOFF", "away_players": [], "home_players": []}],
+}
+seen_seasons = []
+def _fake_games(d):
+    seen_seasons.append(og._season_for_date(d))
+    return GAMES.get(d, [])
+og._games_on = _fake_games
+
+print("\nbox score")
+doc = og.boxscore_head("2026-10-20", "BOS-DET")
+check("final score is the title", meta(doc, "og:title") == "BOS 112, DET 94 — NBN")
+desc = html.unescape(meta(doc, "og:description"))
+check("date and stage lead", desc.startswith("Final · Oct 20, 2026"))
+check("each side's top scorer", "BOS: Jayson Tatum 34 pts, 9 reb, 5 ast" in desc
+      and "DET: Cade Cunningham 28 pts, 6 reb, 10 ast" in desc)
+check("the winner's team card is the image", meta(doc, "og:image") == "https://nbn.today/og/team-bos.png")
+check("url is canonical away-home", meta(doc, "og:url") == "https://nbn.today/boxscores/?date=2026-10-20&amp;game=BOS-DET")
+check("teams match in either order", meta(og.boxscore_head("2026-10-20", "det-bos"), "og:title") == "BOS 112, DET 94 — NBN")
+doc = og.boxscore_head("2026-04-30", "MIA-NYK")
+check("a playoff game says so", html.unescape(meta(doc, "og:description")) == "Playoffs · Apr 30, 2026")
+check("a home win's image is the home team", meta(doc, "og:image") == "https://nbn.today/og/team-nyk.png")
+check("an October date is that autumn's season, April the one before", seen_seasons[:1] == ["26-27"] and "25-26" in seen_seasons)
+for name, args in [("unknown game", ("2026-10-20", "ATL-BKN")), ("no game", ("2026-10-20", "")),
+                   ("one team", ("2026-10-20", "BOS")), ("bad date", ("20-10-2026", "BOS-DET")),
+                   ("no date", ("", "BOS-DET"))]:
+    check(f"{name} → the shell's card", meta(og.boxscore_head(*args), "og:title") == "Box Scores — NBN")
+og._games_on = lambda d: (_ for _ in ()).throw(OSError("disk"))
+check("a read failure is a card, not an exception",
+      meta(og.boxscore_head("2026-10-20", "BOS-DET"), "og:title") == "Box Scores — NBN")
 
 # ── The URL helper ────────────────────────────────────────────────────────────
 

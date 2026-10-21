@@ -1,9 +1,10 @@
 """Open Graph heads for the pages that build themselves in the browser.
 
-Four pages on the site are one shell serving many items — an article, a player,
-a proposal, a member — with the item fetched from the API after load:
+Five pages on the site are one shell serving many items — an article, a player,
+a proposal, a member, a game — with the item fetched from the API after load:
 
     /news/view/?id=…      /players/?p=…      /proposals/view/?id=…   /members/{name}
+    /boxscores/?date=…&game=AWAY-HOME
 
 No link unfurler runs JavaScript, so all of them fetch the shell and see the
 placeholder tags nbn-today/build/og_tags.py bakes into it. Every article
@@ -12,13 +13,13 @@ same "Players — NBN" one. This module renders the head each of those items
 should have had.
 
 **It only gets used because nginx routes to it.** /etc/nginx/sites-enabled/nbn.today
-carries a `$nbn_unfurler` map over `$http_user_agent` and rewrites the four
+carries a `$nbn_unfurler` map over `$http_user_agent` and rewrites the five
 paths to internal locations that proxy here; every other visitor gets the real
 page, untouched. The map is **social unfurlers only, deliberately not search
 engines** — these endpoints answer with a head-only stub, and nothing that
 indexes pages should ever be handed one.
 
-Three rules hold across all four, and `tests/test_og.py` pins them:
+Three rules hold across all five, and `tests/test_og.py` pins them:
 
   * **Nothing unpublished, ever.** A draft article, a draft proposal, an unknown
     id — all fall back to the page's own static card. A crawler that gets a 404
@@ -353,6 +354,72 @@ def member_head(name: str) -> str:
     )
 
 
+# ── Box scores ────────────────────────────────────────────────────────────────
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _season_for_date(d: str) -> str:
+    """The league year a game date falls in — July 1 rollover (season_clock)."""
+    y, m = int(d[:4]), int(d[5:7])
+    start = y if m >= 7 else y - 1
+    return f"{start % 100:02d}-{(start + 1) % 100:02d}"
+
+
+def _games_on(d: str) -> list[dict]:
+    # Imported here, not at the top: boxscores pulls in the stats build, which
+    # nothing else in this module needs.
+    from .boxscores import get_boxscores
+    return get_boxscores(date=d, season=_season_for_date(d))
+
+
+def _top_line(players: list[dict]) -> Optional[str]:
+    """'Jayson Tatum 34 pts, 9 reb, 5 ast' — the side's top scorer."""
+    on = [p for p in players or [] if (p.get("min") or 0) > 0]
+    if not on:
+        return None
+    p = max(on, key=lambda x: (x.get("pts", 0), x.get("reb", 0) + x.get("ast", 0)))
+    return f"{_display_name(p.get('player', ''))} {p.get('pts', 0)} pts, {p.get('reb', 0)} reb, {p.get('ast', 0)} ast"
+
+
+def boxscore_head(d: str, game: str) -> str:
+    """One game's card: the final score, and each side's top scorer.
+
+    `game` is AWAY-HOME, matched on the two teams in either order (the page
+    does the same, since a schedule and a box score can disagree on which side
+    was home). Only committed box scores exist, so there is nothing
+    unpublished to guard; an unknown game falls back to the page's card."""
+    teams = sorted(t for t in (game or "").upper().split("-") if t)
+    if not _DATE_RE.match(d or "") or len(teams) != 2:
+        return _static_head("/boxscores/")
+    try:
+        games = _games_on(d)
+    except Exception as exc:  # a crawler should get a card, never a 500
+        logger.warning("og: box scores for %s — %s", d, exc)
+        games = []
+    g = next((x for x in games if sorted((x["home_team"], x["away_team"])) == teams), None)
+    if not g or g.get("home_score") is None:
+        return _static_head("/boxscores/")
+
+    away, home = g["away_team"], g["home_team"]
+    a, h = g["away_score"], g["home_score"]
+    winner = home if h > a else away
+    day = date.fromisoformat(d).strftime("%b %-d, %Y")
+    stage = "Playoffs" if g.get("gametype") == "PLAYOFF" else "Final"
+    lines = [f"{t}: {line}" for t, line in ((away, _top_line(g.get("away_players"))),
+                                             (home, _top_line(g.get("home_players")))) if line]
+    desc = f"{stage} · {day}"
+    if lines:
+        desc += " — " + " · ".join(lines)
+    return _document(
+        title=f"{away} {a}, {home} {h} — NBN",
+        desc=desc,
+        url=f"{SITE}/boxscores/?date={d}&game={away}-{home}",
+        image=f"{SITE}/og/team-{winner.lower()}.png",
+        image_alt=f"{TEAM_NAMES.get(winner, winner)} — Nothing But Net",
+    )
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 _HEADERS = {"Cache-Control": "public, max-age=300"}
@@ -376,3 +443,8 @@ def og_proposal(id: str = Query("")):
 @router.get("/api/og/member", response_class=HTMLResponse)
 def og_member(name: str = Query("")):
     return HTMLResponse(member_head(name), headers=_HEADERS)
+
+
+@router.get("/api/og/boxscore", response_class=HTMLResponse)
+def og_boxscore(date: str = Query(""), game: str = Query("")):
+    return HTMLResponse(boxscore_head(date, game), headers=_HEADERS)
