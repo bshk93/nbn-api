@@ -808,3 +808,22 @@ Keep `CLAUDE.md` and `docs/` in sync with every code change. If a change affects
 - `player-bios.json` is the source of truth for all player identity and contract data. Roster CSVs only store `SLUG`; everything else is joined from bios (and OVR from `ovr-history.json`) at render time. Transaction handlers that rewrite a roster row (`_apply_sign` etc.) write a bare `{"SLUG": ...}` — any other key is dropped on write (`extrasaction="ignore"`), so don't rely on a roster CSV carrying anything beyond `SLUG`.
 - Dead cap is stored in `bio["dead_cap"]` (dict keyed by season). Old players released before this field existed may have dead cap in `bio["salaries"]` instead — the frontend handles both.
 - OVR history is separate from bios: `ovr-history.json` keyed by slug, each value a list of `{date, ovr}` entries.
+
+## Who started each game (`routers/game_starters.py`)
+
+2K's box score screen lists players by points, not starters first, so the raw
+box scores can't say who started. `commit_boxscore` calls
+`game_starters.record_game`, which appends one line per game to
+`game-starters.jsonl` with each team's **entered** PG–C five: the
+`entered_minutes` snapshot a streamer's "entered" click saves, or the current
+order when the record predates that snapshot and has nothing pending. A team
+never entered is recorded as unknown, never guessed from its saved order 2K
+hasn't seen. A starter with no minutes, or missing from the box, is flagged and
+not counted as a start. The last line for a game wins.
+
+Served by `GET /api/game-starters` and `GET /api/game-starters/counts` (the
+player page's GS column and the award race's 6MOY). Recorded from 26-27;
+`backfill_game_starters.py` (dry run by default) wrote opening night,
+`reconstructed: true`. It is append-only and can't be rebuilt, and the data
+backup tracks it by default. Tests that run a real commit must point
+`STARTERS_FILE` at a temp dir, as `tests/test_boxscore_commit_gate.py` does.
