@@ -209,7 +209,12 @@ def main():
             "_current_league_year", "_game_in_manual_queue", "BUILD_STATUS_FILE",
             "_build_loop", "_run_build_once")}
         saved_archive = bs.shots.archive_for_game
+        # The starters hook writes game-starters.jsonl next to the live data;
+        # point it at the temp dir too, so a commit here never writes live.
+        saved_starters = (bs.game_starters.STARTERS_FILE, bs.game_starters.load_coaching_settings)
         try:
+            bs.game_starters.STARTERS_FILE = tmp / "game-starters.jsonl"
+            bs.game_starters.load_coaching_settings = lambda: {}
             bs.DATA_DIR = tmp
             bs.PLAYER_BIOS_FILE = tmp / "player-bios.json"
             bs.record_commit = lambda **kw: None
@@ -230,6 +235,7 @@ def main():
             for k, v in saved.items():
                 setattr(bs, k, v)
             bs.shots.archive_for_game = saved_archive
+            bs.game_starters.STARTERS_FILE, bs.game_starters.load_coaching_settings = saved_starters
             bs._resolve_players = real_resolve
 
     if FAILS:

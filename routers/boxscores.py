@@ -24,6 +24,7 @@ from .constants import (
 from .storage import read_csv, log_write, _current_league_year, _atomic_write
 from .allstats_guard import write_allstats, AllstatsGuardError
 from .boxscore_provenance import record_commit
+from . import game_starters
 from . import boxscore_shots as shots
 from . import game_day_notify
 from .auth import require_any_role, require_role
@@ -570,6 +571,13 @@ def commit_boxscore(body: BoxscoreCommitRequest, info: dict = Depends(require_an
         home_pts=body.home_pts, away_pts=body.away_pts,
         rows_added=len(new_rows), file_rows_after=len(existing) + len(new_rows),
         filename=path.name, committed_by=info.get("name", "unknown"),
+    )
+    # Who started, from each team's entered coaching settings. Never raises.
+    game_starters.record_game(
+        date=body.date, season=body.season, game_type=game_type,
+        home_team=home_team, away_team=away_team,
+        home_rows=[{"slug": r.slug, "min": r.min} for r in body.home_rows],
+        away_rows=[{"slug": r.slug, "min": r.min} for r in body.away_rows],
     )
     # Read before the archive below, which removes the pending item. A game that
     # came in as screenshots was paid on upload; a typed-in one is paid here.

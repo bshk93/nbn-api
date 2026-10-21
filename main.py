@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from routers import audit as audit_ctx
-from routers import auth, players, roster_picks, transactions, boxscores, game_highs, player_insights, playoff_odds, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, og, discord, trade_finder, picks_preview, suggestions, google_sheets, free_agency, roster_log_relay, waivers, inbox, poext, themes, cap_history, poopoo, schedule, coaching_settings, streaming_days, donations, nbnfl, irl, trade_requests, nbyen, markets, lore
+from routers import auth, players, roster_picks, transactions, boxscores, game_highs, player_insights, playoff_odds, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, og, discord, trade_finder, picks_preview, suggestions, google_sheets, free_agency, roster_log_relay, waivers, inbox, poext, themes, cap_history, poopoo, schedule, coaching_settings, streaming_days, donations, nbnfl, irl, trade_requests, nbyen, markets, lore, game_starters
 from routers.picks_scheduler import start_picks_horizon_scheduler
 from routers.roster_log_relay import start_roster_log_relay
 
@@ -91,3 +91,4 @@ app.include_router(trade_requests.router)  # Trade Request Committee — nbn-tod
 app.include_router(markets.router)          # futures markets on /bet
 app.include_router(nbyen.router)           # public read of NB¥ balances and the ledger, for /nbyen
 app.include_router(lore.router)            # league lore for NBN Today writers — $DATA_DIR/lore/*.md, member-read
+app.include_router(game_starters.router)   # who started each game, from the entered coaching settings
