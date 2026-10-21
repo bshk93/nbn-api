@@ -1,10 +1,10 @@
 """Open Graph heads for the pages that build themselves in the browser.
 
-Five pages on the site are one shell serving many items — an article, a player,
-a proposal, a member, a game — with the item fetched from the API after load:
+Six pages on the site are one shell serving many items — an article, a player,
+a proposal, a member, a game, a team's season — with the item fetched from the API after load:
 
     /news/view/?id=…      /players/?p=…      /proposals/view/?id=…   /members/{name}
-    /boxscores/?date=…&game=AWAY-HOME
+    /boxscores/?date=…&game=AWAY-HOME     /recap/?team=…&season=…
 
 No link unfurler runs JavaScript, so all of them fetch the shell and see the
 placeholder tags nbn-today/build/og_tags.py bakes into it. Every article
@@ -13,13 +13,13 @@ same "Players — NBN" one. This module renders the head each of those items
 should have had.
 
 **It only gets used because nginx routes to it.** /etc/nginx/sites-enabled/nbn.today
-carries a `$nbn_unfurler` map over `$http_user_agent` and rewrites the five
+carries a `$nbn_unfurler` map over `$http_user_agent` and rewrites the six
 paths to internal locations that proxy here; every other visitor gets the real
 page, untouched. The map is **social unfurlers only, deliberately not search
 engines** — these endpoints answer with a head-only stub, and nothing that
 indexes pages should ever be handed one.
 
-Three rules hold across all five, and `tests/test_og.py` pins them:
+Three rules hold across all six, and `tests/test_og.py` pins them:
 
   * **Nothing unpublished, ever.** A draft article, a draft proposal, an unknown
     id — all fall back to the page's own static card. A crawler that gets a 404
@@ -46,10 +46,11 @@ from fastapi.responses import HTMLResponse
 from .constants import DERIVED_DIR, logger
 from .storage import read_csv
 from .auth import load_members
-from .players import load_player_bios, load_ovr, _display_name, _build_team_map
+from .players import load_player_bios, load_ovr, _build_team_map
 from .news import _load_article, _md_excerpt, _article_teaser, _credited, _byline
 from .proposals import load_proposals
 from .discord import TEAM_NAMES
+from .names import player_name
 
 router = APIRouter()
 
@@ -224,7 +225,7 @@ def player_head(slug: str) -> str:
     if not bio:
         return _static_head("/players/")
 
-    name = _display_name(bio.get("name", "")) or slug
+    name = player_name(bio.get("name", "")) or slug
     bits = []
     if bio.get("pos"):
         bits.append("/".join(bio["pos"]))
@@ -379,7 +380,7 @@ def _top_line(players: list[dict]) -> Optional[str]:
     if not on:
         return None
     p = max(on, key=lambda x: (x.get("pts", 0), x.get("reb", 0) + x.get("ast", 0)))
-    return f"{_display_name(p.get('player', ''))} {p.get('pts', 0)} pts, {p.get('reb', 0)} reb, {p.get('ast', 0)} ast"
+    return f"{player_name(p.get('player', ''))} {p.get('pts', 0)} pts, {p.get('reb', 0)} reb, {p.get('ast', 0)} ast"
 
 
 def boxscore_head(d: str, game: str) -> str:
@@ -420,6 +421,66 @@ def boxscore_head(d: str, game: str) -> str:
     )
 
 
+# ── Season recaps ─────────────────────────────────────────────────────────────
+
+_RESULT = {"Champion": "Won the championship", "Runner-Up": "Lost in the Finals",
+           "Conf Finals": "Reached the conference finals", "Second Round": "Reached the second round",
+           "First Round": "Lost in the first round", "Missed": "Missed the playoffs"}
+_SEASON_RE = re.compile(r"^\d{2}-\d{2}$")
+
+
+def _team_season(team: str, season: str) -> Optional[dict]:
+    try:
+        _, rows = read_csv(DERIVED_DIR / "data" / f"{team.lower()}-seasons.csv")
+    except OSError:
+        return None
+    return next((r for r in rows if r.get("SEASON") == season), None)
+
+
+def _season_leader(team: str, season: str) -> Optional[str]:
+    """'CJ McCollum 19.6 PPG' — the team's top player that season by total Game Score."""
+    best = None
+    try:
+        with (DERIVED_DIR / "players" / "player_seasons.csv").open(newline="") as fh:
+            for r in csv.DictReader(fh):
+                if r.get("SEASON") != season or r.get("TEAM") != team:
+                    continue
+                try:
+                    g, gmsc, pts = int(r["G"] or 0), float(r["GMSC"] or 0), int(r["PTS"] or 0)
+                except (KeyError, ValueError):
+                    continue
+                if g and (best is None or gmsc > best[0]):
+                    best = (gmsc, r.get("PLAYER", ""), pts / g)
+    except OSError:
+        return None
+    return f"{player_name(best[1])} {best[2]:.1f} PPG" if best else None
+
+
+def recap_head(team: str, season: str) -> str:
+    team = (team or "").upper()
+    if team not in TEAM_NAMES or not _SEASON_RE.match(season or ""):
+        return _static_head("/recap/")
+    row = _team_season(team, season)
+    if not row:
+        return _static_head("/recap/")
+    label = f"20{season[:2]}–{season[3:]}"
+    name = TEAM_NAMES[team]
+    bits = [f"{row.get('W')}–{row.get('L')}"]
+    if row.get("SEED"):
+        bits.append(f"{row['SEED'].replace('-', ' ')} seed")
+    if row.get("PLAYOFF_RESULT"):
+        bits.append(_RESULT.get(row["PLAYOFF_RESULT"], row["PLAYOFF_RESULT"]))
+    leader = _season_leader(team, season)
+    desc = " · ".join(bits) + (f". Led by {leader}." if leader else ".")
+    return _document(
+        title=f"{label} {name} — Season Recap",
+        desc=desc,
+        url=f"{SITE}/recap/?team={team}&season={season}",
+        image=f"{SITE}/og/team-{team.lower()}.png",
+        image_alt=f"{name} — Nothing But Net",
+    )
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 _HEADERS = {"Cache-Control": "public, max-age=300"}
@@ -448,3 +509,8 @@ def og_member(name: str = Query("")):
 @router.get("/api/og/boxscore", response_class=HTMLResponse)
 def og_boxscore(date: str = Query(""), game: str = Query("")):
     return HTMLResponse(boxscore_head(date, game), headers=_HEADERS)
+
+
+@router.get("/api/og/recap", response_class=HTMLResponse)
+def og_recap(team: str = Query(""), season: str = Query("")):
+    return HTMLResponse(recap_head(team, season), headers=_HEADERS)

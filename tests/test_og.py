@@ -53,6 +53,7 @@ SHELLS = {
     "proposals/view": ("Proposal — NBN", "A rule proposal before the NBN league."),
     "members/profile": ("Member — NBN", "An NBN member’s tenures and league history."),
     "boxscores": ("Box Scores — NBN", "Every NBN box score."),
+    "recap": ("Season Recap — NBN", "One NBN team’s season on a page."),
 }
 for path, (title, desc) in SHELLS.items():
     d = SITE_DIR / path
@@ -254,6 +255,24 @@ for name, args in [("unknown game", ("2026-10-20", "ATL-BKN")), ("no game", ("20
 og._games_on = lambda d: (_ for _ in ()).throw(OSError("disk"))
 check("a read failure is a card, not an exception",
       meta(og.boxscore_head("2026-10-20", "BOS-DET"), "og:title") == "Box Scores — NBN")
+
+# ── Season recaps ─────────────────────────────────────────────────────────────
+
+og._team_season = lambda team, season: ({"SEASON": "25-26", "W": "58", "L": "24", "SEED": "East-2",
+                                         "PLAYOFF_RESULT": "Champion"}
+                                        if (team, season) == ("ORL", "25-26") else None)
+og._season_leader = lambda team, season: "Paolo Banchero 27.1 PPG" if team == "ORL" else None
+
+print("\nrecap")
+doc = og.recap_head("orl", "25-26")
+check("title names the season and team", meta(doc, "og:title") == "2025–26 Orlando Magic — Season Recap")
+check("record, seed, result and leader", html.unescape(meta(doc, "og:description"))
+      == "58–24 · East 2 seed · Won the championship. Led by Paolo Banchero 27.1 PPG.")
+check("team card image", meta(doc, "og:image") == "https://nbn.today/og/team-orl.png")
+check("canonical url, team upper-cased", meta(doc, "og:url") == "https://nbn.today/recap/?team=ORL&amp;season=25-26")
+for name, args in [("unknown season", ("ORL", "19-20")), ("unknown team", ("XXX", "25-26")),
+                   ("bad season", ("ORL", "2025")), ("nothing", ("", ""))]:
+    check(f"{name} → the shell's card", meta(og.recap_head(*args), "og:title") == "Season Recap — NBN")
 
 # ── The URL helper ────────────────────────────────────────────────────────────
 
