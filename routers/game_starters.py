@@ -146,19 +146,19 @@ def load(season: Optional[str] = None) -> list[dict]:
 
 
 def starts_by_player(entries: list[dict], game_type: str = "REG") -> dict:
-    """slug → {gs, team_games}: games started, out of the games this file
-    knows the starters for of each team the player started for. A flagged
-    starter (no minutes, or not in the box) is not counted as a start."""
-    out: dict[str, dict] = defaultdict(lambda: {"gs": 0})
+    """slug → {gs, by_team: {TEAM: gs}}: games started. A flagged starter
+    (no minutes, or not in the box) is not counted as a start."""
+    out: dict[str, dict] = defaultdict(lambda: {"gs": 0, "by_team": defaultdict(int)})
     for e in entries:
         if e.get("game_type") != game_type:
             continue
-        for t in (e.get("teams") or {}).values():
+        for team, t in (e.get("teams") or {}).items():
             flagged = {f["slug"] for f in t.get("flags") or []}
             for slug in t.get("starters") or []:
                 if slug not in flagged:
                     out[slug]["gs"] += 1
-    return dict(out)
+                    out[slug]["by_team"][team] += 1
+    return {k: {"gs": v["gs"], "by_team": dict(v["by_team"])} for k, v in out.items()}
 
 
 @router.get("/api/game-starters")

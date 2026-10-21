@@ -83,6 +83,7 @@ check("another season reads empty", gs.load("25-26") == [])
 counts = gs.starts_by_player(loaded)
 check("starts counted across games", counts["pg-guy"]["gs"] == 3)  # DET once, BOS twice
 check("an unknown team adds no starts", counts["c-guy"]["gs"] == 3)
+check("starts split by team", counts["pg-guy"]["by_team"] == {"DET": 1, "BOS": 2})
 api = gs.get_start_counts(season="26-27", game_type="REG")
 check("team games known skips the unknown team", api["team_games_known"] == {"DET": 1, "BOS": 2})
 
