@@ -162,9 +162,8 @@ def test_streamer_sees_a_jersey_change_only_once_recorded(twok):
     assert item["changed"] is False
     # Entered: 2K has what the team picked.
     assert cs.position_items("MIL", {"jerseys": {"solo": "7"}}, bios, ["solo"], "2026-10-20") == []
-    # A number taken away is a change too.
-    [item] = cs.position_items("MIL", rec, {"solo": {}}, ["solo"], "2026-10-20")
-    assert (item["jersey_was"], item["jersey"]) == ("3", None)
+    # A cleared number isn't: 2K always shows one, so there is nothing to enter.
+    assert cs.position_items("MIL", rec, {"solo": {}}, ["solo"], "2026-10-20") == []
 
 
 def test_a_jersey_save_records_what_2k_had(monkeypatch):

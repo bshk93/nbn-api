@@ -312,7 +312,8 @@ def position_items(team: str, rec: dict, bios: dict, roster: list[str], today: s
         changed = in_2k != sec
         locked = slug in pins
         jersey = bio.get("jersey_number") or None
-        jersey_changed = slug in jerseys and (jerseys[slug] or None) != jersey
+        # A cleared number is nothing to enter: 2K always shows one.
+        jersey_changed = jersey is not None and slug in jerseys and (jerseys[slug] or None) != jersey
         if not (changed or jersey_changed or locked):
             continue
         items.append({
