@@ -23,9 +23,13 @@ salary cap; the skill is guessing who has the big night.
     triple-double (a triple-double earns both). Scored straight from the raw
     box scores, so a day fills in as its games are uploaded; a player with no
     line that day scores 0.
-  * **Standings.** Daily, weekly (Monday to Sunday) and season totals. NB¥
-    prizes are `PRIZES` below, all 0 until the league sets them; nothing is
-    paid from here yet.
+  * **Standings.** Daily, weekly (Monday to Sunday) and season totals.
+  * **Prizes.** `PRIZES`, in NB¥, to first place: 100 for each day, 1,000 for
+    the season, none for the week. Every tied winner gets the full prize. A
+    day pays once all its box scores are in; the season pays once its last
+    scheduled day is over and final. `settle()` pays them, from the box score
+    commit and from every standings read, and is idempotent by ledger `ref`
+    (`pickem:day:<date>:<member>`, `pickem:season:<season>:<member>`).
 
 Storage: `pickem-{season}.json` in DATA_DIR, `{date: {member: {lineup, teams,
 saved_at}}}`.
@@ -45,11 +49,12 @@ from pydantic import BaseModel
 from .auth import _resolve_token, get_token_info, require_any_role
 from .boxscores import allstats_path
 from .coaching_settings import _roster_slugs
-from .constants import DATA_DIR
+from .constants import DATA_DIR, logger
 from .league_time import LEAGUE_TZ, league_now
 from .players import _primary_pos, effective_secondary, load_attributes, load_ovr, load_player_bios
 from .schedule import _load as load_schedule, _time_key
 from .storage import _load_json, _save_json, log_write
+from . import wallet
 import season_clock
 
 router = APIRouter()
@@ -63,8 +68,8 @@ DOUBLE_DOUBLE_BONUS = 1.5
 TRIPLE_DOUBLE_BONUS = 3.0
 DD_CATS = ("P", "R", "A", "S", "B")
 
-# NB¥ for first place. Set by the league; 0 means no prize.
-PRIZES = {"day": 0, "week": 0, "season": 0}
+# NB¥ for first place, set by the league 2026-10-22. 0 means no prize.
+PRIZES = {"day": 100, "week": 0, "season": 1000}
 
 LOCKS_FILE = DATA_DIR / "pickem-locks.json"
 LOCK_WHY = {
@@ -486,6 +491,56 @@ def reopen_day(date: str, info: dict = Depends(require_any_role("streamer", "bod
     return {"ok": True}
 
 
+def season_over(season: str, st: dict) -> bool:
+    """The last scheduled day has passed and every played day is final."""
+    dates = [g.get("date") for g in load_schedule(season).get("games", []) if g.get("date")]
+    if not dates or league_now().date().isoformat() <= max(dates):
+        return False
+    return all(d["final"] for d in st["days"])
+
+
+def settle(season: str) -> list[dict]:
+    """Pay every prize that is due and not yet paid. Returns the lines paid."""
+    if not wallet.enabled("pickem"):
+        return []
+    st = standings(season)
+    due = []
+    if PRIZES["day"]:
+        for d in st["days"]:
+            if d["final"]:
+                for m in d["winners"]:
+                    due.append({"member": m, "delta": PRIZES["day"], "kind": "pickem",
+                                "reason": f"Pick'em: won {d['date']}", "ref": f"pickem:day:{d['date']}:{m}"})
+    totals = st["season_totals"]
+    if PRIZES["season"] and totals and totals[0]["total"] > 0 and season_over(season, st):
+        top = totals[0]["total"]
+        for t in totals:
+            if t["total"] == top:
+                due.append({"member": t["member"], "delta": PRIZES["season"], "kind": "pickem",
+                            "reason": f"Pick'em: won the {season} season",
+                            "ref": f"pickem:season:{season}:{t['member']}"})
+    if not due:
+        return []
+    # Held across the check and the post, so two settles can't both pay.
+    with wallet.lock:
+        paid = {r.get("ref") for r in wallet.read_ledger() if r.get("kind") == "pickem"}
+        lines = [ln for ln in due if ln["ref"] not in paid]
+        if lines:
+            wallet.post(lines)
+    return lines
+
+
+def settle_quietly(season: str) -> None:
+    """For callers whose own work must not fail on a payout (the box score
+    commit, a standings read)."""
+    try:
+        settle(season)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("pickem settle failed for %s: %s", season, e)
+
+
 @router.get("/api/pickem")
 def get_standings(season: Optional[str] = None):
-    return standings(season or season_clock.current_season())
+    season = season or season_clock.current_season()
+    settle_quietly(season)
+    return standings(season)

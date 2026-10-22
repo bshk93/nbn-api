@@ -74,6 +74,7 @@ bx.MANUAL_QUEUE_FILE = TMP / "pending-manual-queue.json"
 
 REWARDS = []
 bx._award_amount = lambda name, amt, reason: (REWARDS.append((name, amt)), (amt, 0.0))[1]
+bx._settle_pickem = lambda season: None   # pays real NB¥
 bx._award_submission_reward = lambda name: (REWARDS.append((name, 200.0)), (200.0, 0.0))[1]
 
 app = FastAPI()

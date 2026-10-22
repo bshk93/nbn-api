@@ -45,6 +45,13 @@ PLAYOFF_ALLSTATS_HEADERS = [
 ]
 
 
+def _settle_pickem(season: str) -> None:
+    """Pay any Pick'em prize a commit made due. Its own function so tests that
+    commit a box score can stub it: it posts to the real NB¥ ledger."""
+    from .pickem import settle_quietly
+    settle_quietly(season)
+
+
 def allstats_path(season: str, game_type: str):
     if game_type.upper() == "PLAYOFF":
         year = season.split("-")[-1]
@@ -590,6 +597,9 @@ def commit_boxscore(body: BoxscoreCommitRequest, info: dict = Depends(require_an
         reward, new_bal = 0.0, 0.0
     else:
         reward, new_bal = _award_submission_reward(info["name"])
+
+    # A day's last box score makes its Pick'em winner payable. Never raises.
+    _settle_pickem(body.season)
 
     logger.info("[%s] POST boxscore/commit — %s vs %s on %s (%d rows, +NB¥%.2f)", info.get("name"), home_team, away_team, body.date, len(new_rows), reward)
     building = False if body.skip_build else _trigger_build()

@@ -11,7 +11,9 @@ What must keep being true:
   * a lineup can't be saved or deleted once the day is locked;
   * a streamer can reopen a day only a stream locked; that stream can't relock
     it, and a later stream (the real games) still can;
-  * nobody sees another member's lineup before the lock.
+  * nobody sees another member's lineup before the lock;
+  * each final day pays its winners 100 and the season pays 1,000, every tied
+    winner the full amount, never twice, and never for a day still in progress.
 
     venv/bin/python -m tests.test_pickem
 """
@@ -25,6 +27,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi import HTTPException  # noqa: E402
 import routers.pickem as pk  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+from contextlib import nullcontext  # noqa: E402
+
+# Never the real NB¥ ledger.
+LEDGER: list[dict] = []
+pk.wallet = SimpleNamespace(enabled=lambda kind: True, lock=nullcontext(),
+                            read_ledger=lambda: list(LEDGER),
+                            post=lambda lines: LEDGER.extend(lines))
 
 FAILS = []
 
@@ -198,6 +208,33 @@ try:
     check("an open day can't be reopened", False)
 except HTTPException as e:
     check("an open day can't be reopened", e.status_code == 409)
+
+print("prizes")
+pk.LOCKS_FILE.unlink(missing_ok=True)
+pk._save("26-27", {})
+NOW[0] = datetime(2026, 11, 2, 9, 0, tzinfo=pk.LEAGUE_TZ)   # the day after
+LIVE[0] = OFF
+pk._save("26-27", {"2026-11-01": {
+    "alice": {"lineup": GOOD}, "bob": {"lineup": GOOD},
+    "carol": {"lineup": {**GOOD, "PG": "wing-one", "6TH": "two-way-c"}}}})
+ROWS[:] = [{"DATE": "2026-11-01", "TEAM": "BOS", "PLAYER": "ONE, PG", "P": 30}]
+GAMES.append({"date": "2026-11-05", "away_team": "BOS", "home_team": "LAL", "time_et": ""})   # season not over
+check("a day still missing box scores pays nothing", pk.settle("26-27") == [])
+ROWS[:] = [{"DATE": "2026-11-01", "TEAM": t, "PLAYER": "ONE, PG" if t == "BOS" else "X", "P": 30}
+           for t in ("BOS", "NYK", "LAL", "GSW")]
+paid = pk.settle("26-27")
+check("a final day pays each tied winner the full 100",
+      sorted((p["member"], p["delta"]) for p in paid) == [("alice", 100), ("bob", 100)])
+check("never twice", pk.settle("26-27") == [])
+check("the season isn't over while games are left", not any("season" in p["ref"] for p in LEDGER))
+GAMES[:] = [g for g in GAMES if g["date"] <= "2026-11-01"]
+paid = pk.settle("26-27")
+check("the season pays its winners 1,000 once its last day is final",
+      sorted((p["member"], p["delta"]) for p in paid) == [("alice", 1000), ("bob", 1000)])
+check("the season pays once", pk.settle("26-27") == [])
+LEDGER.clear()
+pk.wallet.enabled = lambda kind: False
+check("nothing pays while Pick'em NB¥ is paused", pk.settle("26-27") == [] and LEDGER == [])
 
 print()
 if FAILS:

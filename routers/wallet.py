@@ -74,6 +74,8 @@ KINDS: dict[str, bool] = {
     "admin":           True,
     # Back on 2026-10-21, at 50 a game (25 per screenshot side)
     "boxscore":        True,
+    # Pick'em winners: 100 a day, 1,000 the season (2026-10-22)
+    "pickem":          True,
     # Paused at the reset — see the module docstring
     "tip":             False,
     "achievement":     False,
@@ -89,7 +91,7 @@ KINDS: dict[str, bool] = {
 
 # Human names for the 423 a paused feature returns.
 _KIND_LABEL = {
-    "tip": "Tipping", "achievement": "Achievement NB¥", "boxscore": "Box score NB¥",
+    "tip": "Tipping", "achievement": "Achievement NB¥", "pickem": "Pick'em NB¥", "boxscore": "Box score NB¥",
     "bio": "Bio NB¥", "poeltl": "Poeltl NB¥", "perry": "Perry NB¥", "trivia": "Trivia NB¥",
     "invest": "The market", "theme": "Buying themes", "cosmetic": "Buying cosmetics",
     "avatar": "Buying an avatar",
