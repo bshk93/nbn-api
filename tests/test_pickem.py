@@ -55,8 +55,9 @@ pk.load_schedule = lambda season: {"games": GAMES}
 pk._roster_slugs = lambda team: ROSTERS.get(team, [])
 pk.load_player_bios = lambda: BIOS
 pk.load_ovr = lambda: {}
-pk._primary_pos = lambda slug: PRIMARY.get(slug)
-pk.effective_secondary = lambda slug, bio: SECONDARY.get(slug)
+pk._primary_pos = lambda slug, attrs=None: PRIMARY.get(slug)
+pk.effective_secondary = lambda slug, bio, attrs=None: SECONDARY.get(slug)
+pk.load_attributes = lambda: {}
 pk.box_rows = lambda season: ROWS
 ROWS: list[dict] = []
 NOW = [datetime(2026, 11, 1, 12, 0, tzinfo=pk.LEAGUE_TZ)]

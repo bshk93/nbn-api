@@ -39,7 +39,7 @@ from .boxscores import allstats_path
 from .coaching_settings import _roster_slugs
 from .constants import DATA_DIR
 from .league_time import LEAGUE_TZ, league_now
-from .players import _primary_pos, effective_secondary, load_ovr, load_player_bios
+from .players import _primary_pos, effective_secondary, load_attributes, load_ovr, load_player_bios
 from .schedule import _load as load_schedule, _time_key
 from .storage import _load_json, _save_json, log_write
 import season_clock
@@ -102,11 +102,11 @@ def lock_at(date: str, games: list[dict]) -> datetime:
     return datetime(d.year, d.month, d.day, hh, mm, tzinfo=LEAGUE_TZ)
 
 
-def positions_of(slug: str, bio: dict) -> list[str]:
-    primary = _primary_pos(slug)
+def positions_of(slug: str, bio: dict, attrs: dict) -> list[str]:
+    primary = _primary_pos(slug, attrs)
     if not primary:
         return [p for p in POSITIONS if p in (bio.get("pos") or [])]
-    sec = effective_secondary(slug, bio)
+    sec = effective_secondary(slug, bio, attrs)
     return [primary] + ([sec] if sec and sec != primary else [])
 
 
@@ -128,6 +128,7 @@ def season_averages(rows: list[dict], bios: dict, before: str) -> dict[str, tupl
 def player_pool(games: list[dict], averages: Optional[dict] = None) -> dict[str, dict]:
     bios = load_player_bios()
     ovr = load_ovr()
+    attrs = load_attributes()
     averages = averages or {}
     pool = {}
     for g in games:
@@ -144,7 +145,7 @@ def player_pool(games: list[dict], averages: Optional[dict] = None) -> dict[str,
                     "team": team,
                     "opp": opp,
                     "home": home,
-                    "positions": positions_of(slug, bio),
+                    "positions": positions_of(slug, bio, attrs),
                     "ovr": hist[-1]["ovr"] if hist else None,
                     "photo_url": bio.get("photo_url") or "",
                     "type": bio.get("type"),
