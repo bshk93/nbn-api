@@ -134,6 +134,7 @@ pk.put_entry("2026-11-01", pk.EntryIn(lineup=GOOD), {"name": "bob"})
 check("saved", set(pk._load("26-27")["2026-11-01"]) == {"alice", "bob"})
 day = pk.get_day("2026-11-01", None)
 check("before the lock, a stranger sees no lineups", day["entries"] == [] and day["entry_count"] == 2)
+check("before the lock, anyone sees who is in", day["entrants"] == ["alice", "bob"])
 pk._resolve_token = lambda h: {"name": "alice"} if h else None
 day = pk.get_day("2026-11-01", "Bearer x")
 check("before the lock, you see only your own", [e["member"] for e in day["entries"]] == ["alice"])

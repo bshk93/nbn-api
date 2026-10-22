@@ -407,6 +407,8 @@ def get_day(date: str, authorization: Optional[str] = Header(None)):
         "names": names,
         "entries": out_entries,
         "entry_count": len(entries),
+        # Who has a lineup in is public before the lock; what it is is not.
+        "entrants": sorted(entries, key=str.lower),
         "scoring": {**SCORING, "DD": DOUBLE_DOUBLE_BONUS, "TD": TRIPLE_DOUBLE_BONUS},
     }
 
