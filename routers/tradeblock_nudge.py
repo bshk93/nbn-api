@@ -88,10 +88,12 @@ def sweep_tradeblock_nudges(today: date | None = None, dry_run: bool = False) ->
                 f"and we'll check again in {rp.SNOOZE_DAYS // 7} weeks.")
         actions = []
         for p, _ in stale:
-            actions.append({"kind": "tradeblock_remove", "label": f"Remove {p}", "group": p,
-                            "team": team, "player": p})
-            actions.append({"kind": "tradeblock_snooze", "label": f"{p} still available", "group": p,
-                            "team": team, "player": p})
+            # `short` is the button text when the page lays a group out as one
+            # row under the player's name; `label` stands alone.
+            actions.append({"kind": "tradeblock_remove", "label": f"Remove {p}", "short": "Remove",
+                            "group": p, "team": team, "player": p})
+            actions.append({"kind": "tradeblock_snooze", "label": f"{p} still available",
+                            "short": "Still available", "group": p, "team": team, "player": p})
         inbox.notify_team(team, text, link="/tradeblock/", actions=actions)
         sent[team] = today.isoformat()
 

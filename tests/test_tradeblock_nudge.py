@@ -139,6 +139,8 @@ check("remove + still available per player, grouped by player",
           ("tradeblock_snooze", "Stephen Curry still available", "Stephen Curry"),
           ("tradeblock_remove", "Remove Draymond Green", "Draymond Green"),
           ("tradeblock_snooze", "Draymond Green still available", "Draymond Green")], msg["actions"])
+check("each button has a short label for the grouped row",
+      [a["short"] for a in msg["actions"]] == ["Remove", "Still available"] * 2, msg["actions"])
 check("no permanent keep offered", not any("until traded" in a["label"] for a in msg["actions"]))
 check("copies share a batch", msg["batch"] and msg["batch"] == INBOX["bo"][0]["batch"])
 check("a second run inside the week sends nothing", sweep("2026-10-18")["nudged"] == [])

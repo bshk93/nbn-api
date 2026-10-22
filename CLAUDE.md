@@ -734,7 +734,7 @@ picks are never nudged.
   they're team-wide and end with the listing (`_scrub_trading_block` drops a
   traded or released player; off-and-back-on is a new listing).
 - **Inbox buttons are data, not URLs.** A message's `actions` are
-  `{kind, label, group?, ...}`; `POST /api/inbox/{id}/actions/{i}` runs the
+  `{kind, label, short?, group?, ...}`; `POST /api/inbox/{id}/actions/{i}` runs the
   handler the owning module registered for that kind (`inbox.register_action`),
   which checks the clicker's permission itself — receiving a message grants
   nothing. Actions sharing a `group` are alternatives (one done closes the
