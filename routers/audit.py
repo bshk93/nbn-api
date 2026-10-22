@@ -53,6 +53,7 @@ _AUDITED_NAMES = {
     "coaching-settings.json",
     "position-checks.json",
     "streaming-days.json",
+    "injuries.json",                    # the current 2K injury list (routers/injuries.py)
 }
 _AUDITED_SUFFIXES = ("-roster.csv", "-deadcap.csv", "-picks.csv")
 

@@ -848,6 +848,37 @@ document, named by its stem: `lore` (the storyline digest — start here),
 
 Pinned by `tests/test_lore.py`.
 
+## Injury report (`routers/injuries.py`)
+
+The 2K sim's in-game injuries, from the league-wide injury screen the streamer
+shows each stream day. Same shape as box scores: upload → pending → a Claude
+command parses → commit.
+
+| Route | Auth | What |
+|---|---|---|
+| `POST /api/injuries/upload` | `streamer`/`stats`/`rosters` | one screenshot (`image`, optional `date`, default league today) into that date's pending report — one per date, up to 6 images, since the list scrolls |
+| `GET /api/injuries/pending`, `DELETE /api/injuries/pending/{id}[/images/{file}]` | same | what `/parse-injuries` reads; remove a mistaken upload |
+| `POST /api/injuries/commit` | `stats`/`rosters` | `{date, complete, report_id?, rows:[{slug, status, injury, duration, ovr?, ovr_delta?, team_shown?, player?}]}` |
+| `GET /api/injuries`, `GET /api/injuries/history?team=&slug=&since=` | public | the current list; every change, newest first |
+| `GET /api/injuries/screenshots[/{id}/{file}]` | public | pending and kept images (14 days, WebP) |
+
+Files in NBS_DATA_DIR: `injuries.json` (current list + `last_report`, audited),
+`injury-history.jsonl` (append-only: `new` / `changed` / `healed`),
+`pending-injury-reports/`, `injury-report-screenshots/`.
+
+Three rules, pinned by `tests/test_injuries.py`:
+
+- **Only a `complete` report heals.** A player missing from a partial report
+  (one page of a scrolling list) stays injured. The parser sets `complete`
+  only when the top and bottom of the list are both on screen.
+- **Team is the roster CSV's**, not the 2K logo; a disagreement comes back as
+  a warning. A player on no roster falls back to `team_shown`.
+- **Discord gets changes only** — `changed` is status, injury or duration, not
+  OVR — to `DISCORD_INJURY_CHANNEL` (`#injury-report`), pinging each affected
+  team via `discord_notify.with_team_pings`, split by team past ~1,700 chars.
+  A re-commit of the same report posts nothing. Reports apply in date order; an
+  older one is a 409.
+
 ## Docs discipline
 
 Keep `CLAUDE.md` and `docs/` in sync with every code change. If a change affects an endpoint, a data field, a transaction type, or any behavior described in the docs, update the relevant doc in the same commit.
