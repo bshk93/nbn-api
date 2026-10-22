@@ -101,10 +101,12 @@ def set_day_youtube(date: str, body: YoutubeBody, info: dict = Depends(require_a
         rec = data.setdefault(date, {})
         if url:
             rec["youtube_url"] = url
+            rec.pop("youtube_source", None)   # hand-set; routers/youtube_vods.py marks its own "auto"
             rec["youtube_set_at"] = _now()
             rec["youtube_set_by"] = info.get("name")
         else:
             rec.pop("youtube_url", None)
+            rec.pop("youtube_source", None)
             rec.pop("youtube_set_at", None)
             rec.pop("youtube_set_by", None)
         if not rec:

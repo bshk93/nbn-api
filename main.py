@@ -6,9 +6,10 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from routers import audit as audit_ctx
-from routers import auth, players, roster_picks, transactions, boxscores, game_highs, player_insights, playoff_odds, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, og, discord, trade_finder, picks_preview, suggestions, google_sheets, free_agency, roster_log_relay, waivers, inbox, poext, themes, cap_history, poopoo, schedule, coaching_settings, streaming_days, donations, nbnfl, irl, trade_requests, nbyen, markets, lore, game_starters, on_this_day, stream_live, pickem
+from routers import auth, players, roster_picks, transactions, boxscores, game_highs, player_insights, playoff_odds, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, og, discord, trade_finder, picks_preview, suggestions, google_sheets, free_agency, roster_log_relay, waivers, inbox, poext, themes, cap_history, poopoo, schedule, coaching_settings, streaming_days, donations, nbnfl, irl, trade_requests, nbyen, markets, lore, game_starters, on_this_day, stream_live, pickem, youtube_vods
 from routers.picks_scheduler import start_picks_horizon_scheduler
 from routers.roster_log_relay import start_roster_log_relay
+from routers.youtube_vods import start_youtube_vods
 
 logging.basicConfig(
     stream=sys.stdout,
@@ -24,6 +25,7 @@ logger = logging.getLogger("nbn-api")
 async def lifespan(app: FastAPI):
     start_picks_horizon_scheduler()
     start_roster_log_relay()
+    start_youtube_vods()
     yield
 
 
@@ -83,6 +85,7 @@ app.include_router(cap_history.router)     # daily cap/apron snapshot per team �
 app.include_router(poopoo.router)          # read-only slice of build/poopoo.py's sheet-vs-site diff, for team pages
 app.include_router(schedule.router)        # the league game schedule, seeded from the NBA's and editable from there
 app.include_router(coaching_settings.router)  # per-team 2K coach profile, team-submitted, streamer-entered
+app.include_router(youtube_vods.router)  # finds each game's YouTube video from the channel feed
 app.include_router(streaming_days.router)  # per-date streaming status: day marked done, YouTube VOD link
 app.include_router(donations.router)       # league funding tracker — GET public, POST/PUT gated to bod
 app.include_router(nbnfl.router)           # NBNFL — one team's game log and stats, entered by the stats role
