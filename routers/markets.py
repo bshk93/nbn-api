@@ -256,6 +256,22 @@ def _payoffs(m: dict, pos: dict) -> list[float]:
             for w in ids]
 
 
+def open_holdings() -> dict[str, float]:
+    """NB¥ each member holds in unsettled markets, valued at current prices:
+    each position's payoff under every outcome, weighted by the market's odds.
+    A settled or voided market has already paid out, so it holds nothing."""
+    out: dict[str, float] = {}
+    for m in _load():
+        if m["status"] not in ("open", "locked"):
+            continue
+        p = _probs(m["q"], m["b"])
+        for member, pos in m["positions"].items():
+            v = sum(pi * x for pi, x in zip(p, _payoffs(m, pos)))
+            if v > 0:
+                out[member] = out.get(member, 0.0) + v
+    return {k: round(v, 2) for k, v in out.items()}
+
+
 def _member_teams(info: dict) -> set[str]:
     """Teams a member works for: a team role, or a current tenure in any
     position. Admin's implied roles don't count — admin isn't every team."""

@@ -340,8 +340,15 @@ check("refs are per month and per subscriber", {l["ref"] for l in lines} ==
 
 print("\n-- the public read --")
 
+import routers.markets as mk  # noqa: E402
+_held = {"Ann": 250.0}
+mk.open_holdings = lambda: _held
 summ = c.get("/api/nbyen/summary").json()
 check("the summary total equals the balances", summ["total"] == round(sum(wallet.balances().values()), 2))
+ann = next(r for r in summ["balances"] if r["name"] == "Ann")
+check("futures held are shown and added into net worth, not the wallet total",
+      ann["futures"] == 250.0 and ann["net_worth"] == round(ann["balance"] + 250.0, 2)
+      and summ["futures_total"] == 250.0)
 check("by_kind sums to the total", round(sum(summ["by_kind"].values()), 2) == summ["total"])
 check("paused kinds are listed", "tip" in summ["paused"] and "wager" not in summ["paused"])
 led = c.get("/api/nbyen/ledger?member=Ann").json()

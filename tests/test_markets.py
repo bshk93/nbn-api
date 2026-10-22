@@ -325,8 +325,13 @@ fees = g["house"]["fees_burned"]
 ann_shares = g["positions"]["Ann"][ids[0]]["yes"]
 ben_no = g["positions"]["Ben"][ids[2]]["no"]
 ann_before, ben_before = B("Ann"), B("Ben")
+px = {o["id"]: o["price"] for o in g["outcomes"]}
+ben_g = sum(h.get("yes", 0) * px[o] + h.get("no", 0) * (100 - px[o]) for o, h in g["positions"]["Ben"].items())
+held_before = mk.open_holdings().get("Ben", 0)
 r = c.post(f"/api/markets/{gid}/settle", json={"winner": ids[0]}, headers=H("Bookie"))
 check("settle succeeds", r.status_code == 200)
+check("open holdings value a position at shares × price, and drop it once settled",
+      near(held_before - mk.open_holdings().get("Ben", 0), ben_g, 0.1))
 check("a winning Yes pays 100, a No on the winner pays nothing",
       near(B("Ann") - ann_before, ann_shares * 100, 0.02))
 check("a No on a loser pays 100", near(B("Ben") - ben_before, ben_no * 100, 0.02))

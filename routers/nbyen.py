@@ -7,7 +7,7 @@ nearly everything in it already is: bets are public on /bet, donations on
 from fastapi import APIRouter, HTTPException, Query
 
 from .auth import load_members
-from . import wallet
+from . import markets, wallet
 
 router = APIRouter()
 
@@ -15,18 +15,27 @@ router = APIRouter()
 @router.get("/api/nbyen/summary")
 def nbyen_summary():
     """Every member's balance, the total in circulation, and the total moved by
-    each kind since the reset. `paused` lists the kinds switched off."""
+    each kind since the reset. `paused` lists the kinds switched off.
+
+    `futures` is what a member holds in unsettled markets at current prices.
+    That NB¥ has left the wallet but isn't spent, so `net_worth` adds it back.
+    Pricing is markets.py's; nothing here does its own."""
     members = load_members()
     bal = wallet.balances()
+    held = markets.open_holdings()
     by_kind: dict[str, float] = {}
     for r in wallet.read_ledger():
         by_kind[r["kind"]] = round(by_kind.get(r["kind"], 0.0) + r["delta"], 2)
-    rows = [{"name": n, "balance": round(bal.get(n, 0.0), 2), "member": n in members}
-            for n in sorted(set(members) | set(bal))]
-    rows.sort(key=lambda r: (-r["balance"], r["name"].lower()))
+    rows = []
+    for n in sorted(set(members) | set(bal) | set(held)):
+        b, f = round(bal.get(n, 0.0), 2), held.get(n, 0.0)
+        rows.append({"name": n, "balance": b, "futures": f,
+                     "net_worth": round(b + f, 2), "member": n in members})
+    rows.sort(key=lambda r: (-r["net_worth"], r["name"].lower()))
     return {
         "balances": rows,
         "total": round(sum(bal.values()), 2),
+        "futures_total": round(sum(held.values()), 2),
         "by_kind": by_kind,
         "paused": sorted(k for k, on in wallet.KINDS.items() if not on),
     }
