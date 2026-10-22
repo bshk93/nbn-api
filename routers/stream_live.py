@@ -100,4 +100,11 @@ def stream_live():
             body = {"live": False, "channel": CHANNEL}
         # Failures are cached too, so a Twitch outage costs one call a minute, not one per visitor.
         _cache["body"], _cache["at"] = body, time.time()
+        if body.get("live"):
+            # Live means today's games have started: lock Pick'em.
+            try:
+                from .pickem import note_stream_live
+                note_stream_live()
+            except Exception as e:  # noqa: BLE001 — never break the banner
+                log.warning("stream_live: pickem lock failed: %s", e)
         return body

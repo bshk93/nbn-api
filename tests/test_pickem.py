@@ -6,7 +6,9 @@ What must keep being true:
     that position; the sixth man takes anyone playing that day;
   * a player can't fill two slots, and every slot must be filled;
   * scoring is DraftKings classic, with a triple-double earning both bonuses;
-  * a lineup can't be saved or deleted once the day's first tip has passed;
+  * a day locks when the stream goes live, a box score or the VOD comes in,
+    or the day ends, never at the schedule's NBA tip time; the lock sticks;
+  * a lineup can't be saved or deleted once the day is locked;
   * nobody sees another member's lineup before the lock.
 
     venv/bin/python -m tests.test_pickem
@@ -33,6 +35,7 @@ def check(name, cond):
 
 # Never the live data dir.
 pk.DATA_DIR = Path(tempfile.mkdtemp())
+pk.LOCKS_FILE = pk.DATA_DIR / "pickem-locks.json"
 
 GAMES = [{"date": "2026-11-01", "away_team": "BOS", "home_team": "NYK", "time_et": "7:30p"},
          {"date": "2026-11-01", "away_team": "LAL", "home_team": "GSW", "time_et": "3:00p"}]
@@ -63,6 +66,10 @@ ROWS: list[dict] = []
 NOW = [datetime(2026, 11, 1, 12, 0, tzinfo=pk.LEAGUE_TZ)]
 pk.league_now = lambda: NOW[0]
 pk.log_write = lambda *a, **k: None
+LIVE = [False]
+pk.stream_is_live = lambda: LIVE[0]
+STREAM_DAY = {}
+pk._streaming_day = lambda date: STREAM_DAY
 
 GOOD = {"PG": "pg-one", "SG": "sg-one", "SF": "sf-one", "PF": "pf-one", "C": "c-one", "6TH": "wing-one"}
 
@@ -74,9 +81,18 @@ check("two-ways are in", "two-way-c" in pool)
 check("a player 2K doesn't carry falls back to his bio positions", pool["two-way-c"]["positions"] == ["C"])
 check("primary and secondary both count", pool["wing-one"]["positions"] == ["SF", "SG"])
 
-print("the lock is the first tip, in ET")
-lock = pk.lock_at("2026-11-01", games)
-check("3:00p, not 7:30p", (lock.hour, lock.minute) == (15, 0))
+print("when a day locks")
+check("open before the stream, even past the NBA tip time",
+      [NOW.__setitem__(0, datetime(2026, 11, 1, 20, 0, tzinfo=pk.LEAGUE_TZ)), pk.lock_state("2026-11-01", [])][1] is None)
+check("a future day is open", pk.lock_state("2026-11-02", []) is None)
+check("a past day is locked", pk.lock_state("2026-10-31", [])["why"] == "day over")
+check("a box score for the day locks it", pk.lock_state("2026-11-01", [{"DATE": "2026-11-01"}])["why"] == "boxscore")
+pk.LOCKS_FILE.unlink()
+STREAM_DAY.update(youtube_url="https://youtu.be/x")
+check("the day's VOD locks it", pk.lock_state("2026-11-01", [])["why"] == "vod")
+pk.LOCKS_FILE.unlink()
+STREAM_DAY.clear()
+NOW[0] = datetime(2026, 11, 1, 12, 0, tzinfo=pk.LEAGUE_TZ)
 
 print("lineup rules")
 check("a legal lineup passes", pk.check_lineup(GOOD, pool) == [])
@@ -103,7 +119,13 @@ pk._resolve_token = lambda h: {"name": "alice"} if h else None
 day = pk.get_day("2026-11-01", "Bearer x")
 check("before the lock, you see only your own", [e["member"] for e in day["entries"]] == ["alice"])
 
-NOW[0] = datetime(2026, 11, 1, 15, 0, tzinfo=pk.LEAGUE_TZ)
+print("the stream banner stamps the lock with nobody on Pick'em")
+pk.note_stream_live()
+check("stamped", pk.lock_state("2026-11-01", [])["why"] == "stream")
+pk.LOCKS_FILE.unlink()
+
+LIVE[0] = True
+NOW[0] = datetime(2026, 11, 1, 13, 5, tzinfo=pk.LEAGUE_TZ)
 try:
     pk.put_entry("2026-11-01", pk.EntryIn(lineup=GOOD), {"name": "alice"})
     check("saving after the lock is refused", False)
@@ -114,6 +136,9 @@ try:
     check("deleting after the lock is refused", False)
 except HTTPException as e:
     check("deleting after the lock is refused", e.status_code == 409)
+LIVE[0] = False
+check("the lock sticks after the stream ends", pk.lock_state("2026-11-01", [])["why"] == "stream")
+check("and keeps when it happened", pk.lock_state("2026-11-01", [])["at"].startswith("2026-11-01T13:05"))
 
 print("after the lock, scored from the box scores")
 ROWS[:] = [{"DATE": "2026-11-01", "TEAM": "BOS", "PLAYER": "ONE, PG", "P": 30, "R": 0, "A": 10},

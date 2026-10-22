@@ -8,8 +8,16 @@ salary cap; the skill is guessing who has the big night.
     his effective secondary (`players.effective_secondary`, the same § 2.3
     reading team pages use). A player 2K doesn't carry falls back to his bio's
     `pos` list. Only `player` and `two-way` types are in the pool.
-  * **Lock.** The whole lineup locks at the day's first tip-off (ET). Other
-    members' lineups stay hidden until then.
+  * **Lock.** The whole lineup locks when the day's games start, which is
+    when the league's Twitch stream goes live: every game is streamed. The
+    schedule's `time_et` is the real NBA tip-off and says nothing about when
+    our games are played, so it is never used. The API only sees the stream
+    when something asks Twitch (the homepage banner does, every minute while
+    anyone browses), so a day also locks on the first box score for that
+    date, its VOD link or "done" mark on the streaming day, and at the
+    latest at midnight ET. The first of these is recorded in
+    `pickem-locks.json` and is permanent. Other members' lineups stay hidden
+    until the lock.
   * **Scoring.** DraftKings classic: PTS 1, 3PM +0.5, REB 1.25, AST 1.5,
     STL 2, BLK 2, TO -0.5, plus +1.5 for a double-double and +3 for a
     triple-double (a triple-double earns both). Scored straight from the raw
@@ -58,8 +66,13 @@ DD_CATS = ("P", "R", "A", "S", "B")
 # NB¥ for first place. Set by the league; 0 means no prize.
 PRIZES = {"day": 0, "week": 0, "season": 0}
 
-# Used when no game that day has a tip-off time.
-DEFAULT_LOCK = (19, 0)
+LOCKS_FILE = DATA_DIR / "pickem-locks.json"
+LOCK_WHY = {
+    "stream": "the stream went live",
+    "boxscore": "a box score came in",
+    "vod": "the day's stream was posted",
+    "day over": "the day ended",
+}
 
 _lock = threading.Lock()
 
@@ -92,14 +105,53 @@ def slate_games(date: str) -> tuple[str, list[dict]]:
     return season, games
 
 
-def lock_at(date: str, games: list[dict]) -> datetime:
-    hh, mm = DEFAULT_LOCK
-    times = [_time_key(g.get("time_et", "")) for g in games]
-    known = [t for t in times if t != (99, 99)]
-    if known:
-        hh, mm = min(known)
-    d = Date.fromisoformat(date)
-    return datetime(d.year, d.month, d.day, hh, mm, tzinfo=LEAGUE_TZ)
+def stream_is_live() -> bool:
+    from .stream_live import stream_live
+    return bool(stream_live().get("live"))
+
+
+def _streaming_day(date: str) -> dict:
+    from .streaming_days import load_streaming_days
+    return load_streaming_days().get(date) or {}
+
+
+def _record_lock(date: str, why: str) -> dict:
+    with _lock:
+        locks = _load_json(LOCKS_FILE, {})
+        if date not in locks:
+            locks[date] = {"at": league_now().isoformat(timespec="seconds"), "why": why}
+            _save_json(LOCKS_FILE, locks)
+        return locks[date]
+
+
+def lock_state(date: str, rows: list[dict]) -> Optional[dict]:
+    """{at, why} once the day is locked; None while lineups are open."""
+    rec = _load_json(LOCKS_FILE, {}).get(date)
+    if rec:
+        return rec
+    today = league_now().date().isoformat()
+    if date < today:
+        end = Date.fromisoformat(date) + timedelta(days=1)
+        return {"at": datetime(end.year, end.month, end.day, tzinfo=LEAGUE_TZ).isoformat(), "why": "day over"}
+    if date > today:
+        return None
+    if any((r.get("DATE") or "").strip() == date for r in rows):
+        return _record_lock(date, "boxscore")
+    day = _streaming_day(date)
+    if day.get("done") or day.get("youtube_url"):
+        return _record_lock(date, "vod")
+    if stream_is_live():
+        return _record_lock(date, "stream")
+    return None
+
+
+def note_stream_live() -> None:
+    """Called by routers/stream_live.py whenever it sees the channel live, so
+    the lock is stamped even if nobody opens Pick'em during the stream."""
+    today = league_now().date().isoformat()
+    _, games = slate_games(today)
+    if games and today not in _load_json(LOCKS_FILE, {}):
+        _record_lock(today, "stream")
 
 
 def positions_of(slug: str, bio: dict, attrs: dict) -> list[str]:
@@ -265,12 +317,12 @@ class EntryIn(BaseModel):
 def get_day(date: str, authorization: Optional[str] = Header(None)):
     date = _check_date(date)
     season, games = slate_games(date)
-    lock = lock_at(date, games)
-    locked = league_now() >= lock
     me = (_resolve_token(authorization) or {}).get("name")
 
     bios = load_player_bios()
     rows = box_rows(season)
+    lock = lock_state(date, rows) if games else None
+    locked = lock is not None
     lines, box_teams = day_lines(rows, date, bios)
     slate_teams = {t for g in games for t in (g["away_team"], g["home_team"])}
     entries = _load(season).get(date, {})
@@ -293,8 +345,9 @@ def get_day(date: str, authorization: Optional[str] = Header(None)):
         "season": season,
         "games": [{"away": g["away_team"], "home": g["home_team"], "time_et": g.get("time_et", ""),
                    "final": g["away_team"] in box_teams and g["home_team"] in box_teams} for g in games],
-        "lock_at": lock.isoformat(),
         "locked": locked,
+        "locked_at": lock["at"] if lock else None,
+        "locked_because": LOCK_WHY.get(lock["why"], lock["why"]) if lock else None,
         "final": bool(games) and slate_teams <= box_teams,
         "players": sorted(pool.values(), key=lambda p: (-(p["ovr"] or 0), p["name"])),
         "names": names,
@@ -310,7 +363,7 @@ def put_entry(date: str, body: EntryIn, info: dict = Depends(get_token_info)):
     season, games = slate_games(date)
     if not games:
         raise HTTPException(status_code=404, detail="No games that day.")
-    if league_now() >= lock_at(date, games):
+    if lock_state(date, box_rows(season)):
         raise HTTPException(status_code=409, detail="Lineups for that day are locked.")
     lineup = {k.upper(): v for k, v in body.lineup.items() if v}
     pool = player_pool(games)
@@ -333,7 +386,7 @@ def put_entry(date: str, body: EntryIn, info: dict = Depends(get_token_info)):
 def delete_entry(date: str, info: dict = Depends(get_token_info)):
     date = _check_date(date)
     season, games = slate_games(date)
-    if games and league_now() >= lock_at(date, games):
+    if games and lock_state(date, box_rows(season)):
         raise HTTPException(status_code=409, detail="Lineups for that day are locked.")
     with _lock:
         data = _load(season)
@@ -347,11 +400,10 @@ def standings(season: str, today: Optional[str] = None) -> dict:
     data = _load(season)
     bios = load_player_bios()
     rows = box_rows(season)
-    now = league_now()
     days, weeks, totals = [], {}, {}
     for date in sorted(data):
         _, games = slate_games(date)
-        if not data[date] or now < lock_at(date, games):
+        if not data[date] or not lock_state(date, rows):
             continue
         lines, box_teams = day_lines(rows, date, bios)
         slate_teams = {t for g in games for t in (g["away_team"], g["home_team"])}
