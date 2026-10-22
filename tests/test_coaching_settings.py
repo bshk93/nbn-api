@@ -79,7 +79,7 @@ import routers.players as players  # noqa: E402
 PRIMARY = {"mann-tre": "PG", "big-man": "C", "wing-guy": "SF", "combo-sf": "SF"}
 BIOS = {"big-man": {"name": "MAN, BIG"}, "wing-guy": {"name": "GUY, WING"},
         "combo-sf": {"name": "SF, COMBO", "secondary_pos": "PF"}}
-players._primary_pos = lambda slug: PRIMARY.get(slug)
+players._primary_pos = lambda slug, attrs=None: PRIMARY.get(slug)
 players.load_player_bios = lambda: BIOS
 
 app = FastAPI()

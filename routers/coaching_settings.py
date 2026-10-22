@@ -265,6 +265,9 @@ class ConfirmBody(BaseModel):
     # none). Only these are confirmed, as these values: a change the team
     # made after the dashboard loaded stays waiting, since it won't match.
     seen: dict[str, Optional[str]]
+    # slug → the jersey number the streamer was shown and set (null for
+    # none). Same rule as `seen`: only these values are confirmed.
+    jerseys: dict[str, Optional[str]] = {}
 
 
 def load_position_checks() -> dict:
@@ -291,11 +294,16 @@ def position_items(team: str, rec: dict, bios: dict, roster: list[str], today: s
 
     What 2K has is what the streamer last entered, or, before he has entered
     anything for that player, 2K's own secondary. So a team that leaves 2K's
-    secondary alone, or picks the same one, gives the streamer nothing to do."""
+    secondary alone, or picks the same one, gives the streamer nothing to do.
+
+    Jersey numbers ride along: `jerseys` is the number 2K has, recorded when
+    a team first changes it (`note_jersey_change`). We have no scrape of 2K's
+    numbers, so a player with no record there has nothing to enter."""
     from .players import _primary_pos, _twok_secondary, effective_secondary
     entered = rec.get("entered") or {}
     pins = set(rec.get("pins") or [])
     checked = rec.get("checked") or {}
+    jerseys = rec.get("jerseys") or {}
     items = []
     for slug in roster:
         bio = bios.get(slug) or {}
@@ -303,7 +311,9 @@ def position_items(team: str, rec: dict, bios: dict, roster: list[str], today: s
         in_2k = (entered.get(slug) or None) if slug in entered else _twok_secondary(slug)
         changed = in_2k != sec
         locked = slug in pins
-        if not (changed or locked):
+        jersey = bio.get("jersey_number") or None
+        jersey_changed = slug in jerseys and (jerseys[slug] or None) != jersey
+        if not (changed or jersey_changed or locked):
             continue
         items.append({
             "slug": slug,
@@ -312,8 +322,11 @@ def position_items(team: str, rec: dict, bios: dict, roster: list[str], today: s
             "secondary": sec,
             "was": in_2k,
             "changed": changed,
+            "jersey": jersey,
+            "jersey_was": jerseys.get(slug) or None,
+            "jersey_changed": jersey_changed,
             "locked": locked,
-            "due": changed or checked.get(slug) != today,
+            "due": changed or jersey_changed or checked.get(slug) != today,
         })
     return items
 
@@ -333,8 +346,23 @@ def team_positions_view(team: str, data: Optional[dict] = None, bios: Optional[d
     }
 
 
+def _waiting(item: dict) -> bool:
+    return item["changed"] or item["jersey_changed"]
+
+
 def has_position_changes(team: str) -> bool:
-    return any(i["changed"] for i in team_positions_view(team)["items"])
+    return any(_waiting(i) for i in team_positions_view(team)["items"])
+
+
+def note_jersey_change(team: str, slug: str, old: Optional[str]) -> None:
+    """A team changed a player's jersey number. Record the number 2K still
+    has, unless one is already waiting: then 2K still has the first one."""
+    with _coaching_lock:
+        data = load_position_checks()
+        jerseys = data.setdefault(team, {}).setdefault("jerseys", {})
+        if slug not in jerseys:
+            jerseys[slug] = old or None
+            save_position_checks(data)
 
 
 def coaching_pending(team: str) -> bool:
@@ -393,18 +421,22 @@ def confirm_positions(team: str, body: ConfirmBody, info: dict = Depends(require
     with _coaching_lock:
         data = load_position_checks()
         rec = data.setdefault(team, {})
-        before = {i["slug"] for i in position_items(team, rec, _bios(), _roster_slugs(team), today) if i["changed"]}
+        before = {i["slug"] for i in position_items(team, rec, _bios(), _roster_slugs(team), today) if _waiting(i)}
         entered = rec.setdefault("entered", {})
         checked = rec.setdefault("checked", {})
         for slug, sec in body.seen.items():
             entered[slug] = sec or None
             checked[slug] = today
+        jerseys = rec.setdefault("jerseys", {})
+        for slug, num in body.jerseys.items():
+            jerseys[slug] = num or None
         rec["checked_at"] = _now()
         rec["checked_by"] = info.get("name")
         save_position_checks(data)
-    log_write(info, f"POST position-checks/{team}/confirm — {', '.join(sorted(body.seen))}")
+    log_write(info, f"POST position-checks/{team}/confirm — {', '.join(sorted(body.seen))}"
+                    + (f"; jerseys {', '.join(sorted(body.jerseys))}" if body.jerseys else ""))
     view = team_positions_view(team)
-    still = {i["slug"] for i in view["items"] if i["changed"]}
+    still = {i["slug"] for i in view["items"] if _waiting(i)}
     if before - still:
         game_day_notify.positions_set(team, info.get("name"))
     return view

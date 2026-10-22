@@ -327,7 +327,10 @@ def update_team_settings(slug: str, body: TeamSettingsUpdate, info: dict = Depen
     # survives.
     with _txn_lock:
         bios = load_player_bios()
-        pos_changed = (bios[slug].get("secondary_pos") or None) != (body.secondary_pos or None)
+        old_jersey = bios[slug].get("jersey_number") or None
+        jersey_changed = old_jersey != (body.jersey_number or None)
+        pos_changed = ((bios[slug].get("secondary_pos") or None) != (body.secondary_pos or None)
+                       or jersey_changed)
         # Tell the streamer once, on the way from nothing waiting to something.
         # Coaching settings waiting count too: the streamer enters both from
         # one card, so a team saving both gets one message, not two.
@@ -342,6 +345,8 @@ def update_team_settings(slug: str, body: TeamSettingsUpdate, info: dict = Depen
         bios[slug]["secondary_pos"] = body.secondary_pos
         save_player_bios(bios)
     log_write(info, f"PUT players/{slug}/team-settings — jersey={body.jersey_number} secondary_pos={body.secondary_pos}")
+    if jersey_changed:
+        coaching_settings.note_jersey_change(player_team, slug, old_jersey)
     try:
         if pos_changed and not already_waiting and coaching_settings.has_position_changes(player_team):
             game_day_notify.positions_changed(player_team, info.get("name"))

@@ -149,3 +149,45 @@ def test_one_message_when_coaching_is_already_waiting(monkeypatch, coaching_wait
     players.update_team_settings("p0", players.TeamSettingsUpdate(secondary_pos="SG"),
                                  {"roles": ["mil"], "name": "owner"})
     assert bool(sent) == notified
+
+
+def test_streamer_sees_a_jersey_change_only_once_recorded(twok):
+    # No scrape of 2K's numbers, so a number with no record is not a change.
+    from routers import coaching_settings as cs
+    bios = {"solo": {"jersey_number": "7"}}
+    assert cs.position_items("MIL", {}, bios, ["solo"], "2026-10-20") == []
+    rec = {"jerseys": {"solo": "3"}}
+    [item] = cs.position_items("MIL", rec, bios, ["solo"], "2026-10-20")
+    assert (item["jersey_was"], item["jersey"], item["jersey_changed"], item["due"]) == ("3", "7", True, True)
+    assert item["changed"] is False
+    # Entered: 2K has what the team picked.
+    assert cs.position_items("MIL", {"jerseys": {"solo": "7"}}, bios, ["solo"], "2026-10-20") == []
+    # A number taken away is a change too.
+    [item] = cs.position_items("MIL", rec, {"solo": {}}, ["solo"], "2026-10-20")
+    assert (item["jersey_was"], item["jersey"]) == ("3", None)
+
+
+def test_a_jersey_save_records_what_2k_had(monkeypatch):
+    from routers import coaching_settings, game_day_notify
+    disk = {"bios": {"p0": {"jersey_number": "3"}}, "checks": {}}
+    monkeypatch.setattr(players, "load_player_bios", lambda: disk["bios"])
+    monkeypatch.setattr(players, "save_player_bios", lambda d: disk.update(bios=d))
+    monkeypatch.setattr(players, "_build_team_map", lambda: {"p0": "MIL"})
+    monkeypatch.setattr(players, "_check_secondary_pos", lambda slug, sec: None)
+    monkeypatch.setattr(players, "log_write", lambda *a, **k: None)
+    monkeypatch.setattr(coaching_settings, "load_position_checks", lambda: disk["checks"])
+    monkeypatch.setattr(coaching_settings, "save_position_checks", lambda d: disk.update(checks=d))
+    monkeypatch.setattr(coaching_settings, "coaching_pending", lambda team: False)
+    monkeypatch.setattr(coaching_settings, "_roster_slugs", lambda team: ["p0"])
+    monkeypatch.setattr(coaching_settings, "position_items",
+                        lambda team, rec, bios, roster, today: [{"changed": False, "jersey_changed": bool(rec.get("jerseys"))}])
+    sent = []
+    monkeypatch.setattr(game_day_notify, "positions_changed", lambda team, by: sent.append(team))
+    info = {"roles": ["mil"], "name": "owner"}
+    players.update_team_settings("p0", players.TeamSettingsUpdate(jersey_number="7"), info)
+    assert disk["checks"]["MIL"]["jerseys"] == {"p0": "3"}
+    assert sent == ["MIL"]
+    # A second change before it's entered: 2K still has the first number.
+    players.update_team_settings("p0", players.TeamSettingsUpdate(jersey_number="9"), info)
+    assert disk["checks"]["MIL"]["jerseys"] == {"p0": "3"}
+    assert sent == ["MIL"]

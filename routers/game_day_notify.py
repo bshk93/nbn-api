@@ -59,10 +59,10 @@ def coaching_saved(team: str, was_pending: bool, saved_by: Optional[str]) -> Non
 
 
 def positions_changed(team: str, saved_by: Optional[str]) -> None:
-    """Handoff 1 again, for a player's secondary position. Call only when the
-    team had no position change waiting already, for the same reason a
+    """Handoff 1 again, for a player's secondary position or jersey number.
+    Call only when the team had no such change waiting already, for the same reason a
     coaching save notifies only on the way into pending."""
-    _tell_next_streamer(team, saved_by, "changed a player's position", "it needs", "positions_changed")
+    _tell_next_streamer(team, saved_by, "changed a player's position or jersey number", "it needs", "positions_changed")
 
 
 def _tell_next_streamer(team: str, saved_by: Optional[str], what: str, needs: str, label: str) -> None:
@@ -99,7 +99,7 @@ def coaching_entered(team: str, entered_by: Optional[str]) -> None:
 def positions_set(team: str, set_by: Optional[str]) -> None:
     """Handoff 2, for positions: the team's receipt."""
     try:
-        inbox.notify_team(team, f"Your player positions were set in 2K by {set_by or 'a streamer'}",
+        inbox.notify_team(team, f"Your player positions and numbers were set in 2K by {set_by or 'a streamer'}",
                           link=f"/teams/{team}/#coaching")
     except Exception as exc:
         logger.warning("positions_set notify failed for %s: %s", team, exc)
