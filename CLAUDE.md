@@ -714,6 +714,35 @@ UFA/RFA hold for the current season still on a roster from opening night on
 can undo one. An RFA with an open offer sheet is skipped. `--dry-run` lists
 the holds. Pinned by `tests/test_fa_hold_sweep.py`.
 
+## Trading block nudge (`routers/tradeblock_nudge.py`)
+
+A player on a team's trading block for 7+ days gets the team an inbox message
+naming him — one message per team, at most once every 7 days
+(`tradeblock-nudges.json`) — with two buttons per player: **Remove** (off the
+block) and **Still available** (`snoozed_until` two weeks out, then he's back
+in the nudge). `nbn-tradeblock-nudge.timer` runs `sweep_tradeblock_nudges.py`
+daily (`--dry-run` lists who'd be nudged and writes nothing). Players only;
+picks are never nudged.
+
+- **There is no permanent "keep until traded", on purpose.** The point is a
+  block that stays current; a mark that silenced a player for good would
+  become everyone's default answer. Removing is the one-click path, and still
+  available has to be re-said every two weeks. Don't add a permanent opt-out.
+- **`added_at` and `snoozed_until` are server-only.** `_carry_block_fields` in
+  `roster_picks.py` keeps both through the whole-block `PUT` and the
+  one-player add, and ignores them from the caller. Both live on the entry, so
+  they're team-wide and end with the listing (`_scrub_trading_block` drops a
+  traded or released player; off-and-back-on is a new listing).
+- **Inbox buttons are data, not URLs.** A message's `actions` are
+  `{kind, label, short?, group?, ...}`; `POST /api/inbox/{id}/actions/{i}` runs the
+  handler the owning module registered for that kind (`inbox.register_action`),
+  which checks the clicker's permission itself — receiving a message grants
+  nothing. Actions sharing a `group` are alternatives (one done closes the
+  rest), and a done action is marked on every copy of the message (`batch`, set
+  by `notify_team`). Kinds so far: `tradeblock_remove`, `tradeblock_snooze`.
+
+Pinned by `tests/test_tradeblock_nudge.py`.
+
 ## Cap history (`routers/cap_history.py`)
 
 A daily row per team — Team Salary on both bases, apron position, hard-cap

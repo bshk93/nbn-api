@@ -1,0 +1,13 @@
+[Unit]
+Description=Weekly inbox nudge for players sitting on a team's trading block
+Documentation=file:///home/skim/projects/nbn-api/sweep_tradeblock_nudges.py
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=skim
+WorkingDirectory=/home/skim/projects/nbn-api
+ExecStart=/home/skim/projects/nbn-api/venv/bin/python /home/skim/projects/nbn-api/sweep_tradeblock_nudges.py
+StandardOutput=journal
+StandardError=journal

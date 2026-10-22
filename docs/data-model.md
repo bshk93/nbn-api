@@ -159,15 +159,25 @@ See **[transactions.md](transactions.md)** for the `details` shape of each type.
 
 ## trading-block.json
 
-Keyed by team abbreviation (uppercase). Each value is a list of `{player, notes}` objects.
+Keyed by team abbreviation (uppercase). Each value is `{players, picks}`; an older file may hold a bare list of players, which `_normalize_team_block` reads the same way.
 
 ```json
 {
-  "OKC": [
-    { "player": "Desmond Bane", "notes": "Looking for younger talent / draft capital" }
-  ]
+  "OKC": {
+    "players": [
+      { "player": "Desmond Bane", "notes": "Looking for younger talent / draft capital",
+        "added_at": "2026-10-01", "snoozed_until": "2026-10-15" }
+    ],
+    "picks": [{ "year": 2027, "round": "1st", "team": "Own", "notes": "" }]
+  }
 }
 ```
+
+`added_at` (league date) and `snoozed_until` (optional) are server-set, never taken from a caller: the date is stamped when a player goes on the block and kept through every later save, and the snooze is set by the nudge's "Still available" button. A player taken off and put back is a new listing. Both drive the weekly nudge (`routers/tradeblock_nudge.py`, see CLAUDE.md § "Trading block nudge"). Entries from before the fields existed get a date on the sweep's first run.
+
+## tradeblock-nudges.json
+
+`{team: "YYYY-MM-DD"}` — the date each team was last sent the trading-block nudge, so it goes at most once every 7 days.
 
 ---
 

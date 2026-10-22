@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily check for players sitting on a trading block
+
+[Timer]
+# Daily; the sweep keeps each team's week itself (tradeblock-nudges.json), so
+# a team hears at most once every 7 days whatever this fires. 14:00 UTC is
+# morning in league time, when a message is likely to be read the same day.
+OnCalendar=*-*-* 14:00:00
+# A missed run catches up after downtime. The sweep is idempotent per week.
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

@@ -1,7 +1,7 @@
 import secrets
 import threading
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -38,17 +38,28 @@ def _prune(items: list[dict]) -> list[dict]:
     return items[-MAX_PER_MEMBER:]
 
 
-def notify_member(username: str, text: str, link: Optional[str] = None) -> None:
+def notify_member(username: str, text: str, link: Optional[str] = None,
+                  actions: Optional[list[dict]] = None, batch: Optional[str] = None) -> None:
     """Append one notification to a member's inbox. Called in-process from
     wherever an event already exists (remand, void, a suggestion's status
     change, ...) — there is no HTTP path that fires this on its own, the same
     way discord_notify/fa_notify are called inline rather than polled.
+
+    `actions` puts buttons on the message — see `register_action`; actions
+    sharing a `group` are alternatives, and one done closes the rest. `batch`
+    ties together the copies of one message that notify_team/notify_roles
+    hand to several members, so an action taken from one copy reads as done
+    on all of them.
 
     Pruning happens here, on write, rather than on a timer: an inbox only
     grows when something is appended to it, so checking the bound at that
     moment keeps the file bounded without a scheduled job."""
     now = datetime.now(timezone.utc).isoformat()
     entry = {"id": secrets.token_hex(8), "ts": now, "text": text, "link": link, "read": False}
+    if actions:
+        entry["actions"] = [dict(a) for a in actions]
+    if batch:
+        entry["batch"] = batch
     with _inbox_lock:
         store = _load_store()
         items = store.get(username, [])
@@ -57,7 +68,8 @@ def notify_member(username: str, text: str, link: Optional[str] = None) -> None:
         _save_store(store)
 
 
-def notify_team(team: str, text: str, link: Optional[str] = None) -> None:
+def notify_team(team: str, text: str, link: Optional[str] = None,
+                actions: Optional[list[dict]] = None) -> None:
     """Same as notify_member, but for events that are a team's business
     generally rather than one member's — an office-entered transaction (an
     offer sheet, say) has no `submitted_by` the way a self-serve PDC offer
@@ -65,9 +77,10 @@ def notify_team(team: str, text: str, link: Optional[str] = None) -> None:
     holder of the team's role (member roles use the lowercase team abbr, same
     as every other team-role check in this codebase)."""
     role = team.lower()
+    batch = secrets.token_hex(8) if actions else None
     for name, m in load_members().items():
         if role in (m.get("roles") or []):
-            notify_member(name, text, link)
+            notify_member(name, text, link, actions=actions, batch=batch)
 
 
 def notify_role(role: str, text: str, link: Optional[str] = None) -> None:
@@ -87,6 +100,24 @@ def notify_roles(roles: list[str], text: str, link: Optional[str] = None) -> Non
     for name, m in load_members().items():
         if wanted & set(m.get("roles") or []):
             notify_member(name, text, link)
+
+
+# ── Message actions ───────────────────────────────────────────────────────────
+#
+# A message's `actions` are data, not URLs: each is `{"kind", "label", ...}`
+# and the kind names a handler registered here by the module that owns the
+# thing being acted on. The page never chooses what gets called, so a button
+# can only ever do what its kind's handler does, and the handler checks the
+# clicking member's permission itself — being sent a message grants nothing.
+
+_ACTION_HANDLERS: dict[str, Callable[[dict, dict], str]] = {}
+
+
+def register_action(kind: str, handler: Callable[[dict, dict], str]) -> None:
+    """`handler(info, action)` performs the action for the member in `info`
+    and returns the label the done button should show. It raises
+    HTTPException to refuse — the action then stays undone."""
+    _ACTION_HANDLERS[kind] = handler
 
 
 @router.get("/api/inbox")
@@ -123,3 +154,47 @@ def mark_all_read(info: dict = Depends(get_token_info)):
         _save_store(store)
     log_write(info, "POST inbox/read-all")
     return {"ok": True}
+
+
+@router.post("/api/inbox/{item_id}/actions/{index}")
+def run_action(item_id: str, index: int, info: dict = Depends(get_token_info)):
+    """Run one of a message's action buttons. Once done it stays done, on every
+    copy of the message (see `batch` in notify_member), and a second click is a
+    no-op that returns the same result."""
+    with _inbox_lock:
+        items = _load_store().get(info["name"], [])
+        item = next((it for it in items if it["id"] == item_id), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    actions = item.get("actions") or []
+    if not 0 <= index < len(actions):
+        raise HTTPException(status_code=404, detail="No such action")
+    action = actions[index]
+    if action.get("done_at"):
+        return {"ok": True, "action": action}
+    # Actions sharing a `group` are alternatives — "remove him" or "he's still
+    # available" — so once one is done the others are closed.
+    if action.get("group") and any(a.get("done_at") and a.get("group") == action["group"] for a in actions):
+        raise HTTPException(status_code=409, detail="Already answered")
+    handler = _ACTION_HANDLERS.get(action.get("kind"))
+    if handler is None:
+        raise HTTPException(status_code=400, detail=f"Unknown action '{action.get('kind')}'")
+
+    # Outside the inbox lock: the handler writes its own files under its own
+    # rules, and nothing here depends on the inbox staying still meanwhile.
+    done_label = handler(info, action)
+
+    done = {"done_at": datetime.now(timezone.utc).isoformat(),
+            "done_by": info["name"], "done_label": done_label}
+    with _inbox_lock:
+        store = _load_store()
+        for member, its in store.items():
+            for it in its:
+                same = it["id"] == item_id or (item.get("batch") and it.get("batch") == item["batch"])
+                if same and index < len(it.get("actions") or []):
+                    it["actions"][index].update(done)
+                    if member == info["name"]:
+                        it["read"] = True
+        _save_store(store)
+    log_write(info, f"POST inbox action {action.get('kind')} — {done_label}")
+    return {"ok": True, "action": {**action, **done}}
