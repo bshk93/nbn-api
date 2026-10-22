@@ -8,8 +8,8 @@ Read is public (the site's /donations/ page has no auth gate), writes are
   * a plain member (no `bod`) can read but not write
   * editing a nonexistent id is a 404, not a silent no-op
 
-Writes go to a temp directory; nothing here touches donations.json in
-NBS_DATA_DIR.
+Writes go to a temp directory; nothing here touches donations.json, the NB¥
+ledger or the balances in NBS_DATA_DIR.
 
     venv/bin/python -m tests.test_donations
 """
@@ -43,9 +43,16 @@ MEMBERS = {
     "Nobody": {"token": PLAIN_TOKEN, "roles": [],      "tenures": []},
 }
 auth.load_members = lambda: MEMBERS
+# donations.py imports load_members by name, so it needs its own patch. It
+# returns no members, so a donation in this test credits nobody.
+donations.load_members = lambda: {}
 
 TMP = Path(tempfile.mkdtemp(prefix="nbn-donations-test-"))
 donations.DONATIONS_FILE = TMP / "donations.json"
+# Belt and braces: if a donation ever does credit someone, it lands here and
+# not in the live ledger. This test once gave KVL 15,000 real NB¥ that way.
+donations.wallet.LEDGER_FILE = TMP / "nbyen-ledger.jsonl"
+donations.wallet.BALANCES_FILE = TMP / "member-balances.json"
 donations.log_write = lambda info, msg: None
 
 app = FastAPI()
