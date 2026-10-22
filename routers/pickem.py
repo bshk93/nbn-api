@@ -30,6 +30,10 @@ salary cap; the skill is guessing who has the big night.
     scheduled day is over and final. `settle()` pays them, from the box score
     commit and from every standings read, and is idempotent by ledger `ref`
     (`pickem:day:<date>:<member>`, `pickem:season:<season>:<member>`).
+  * **Discord.** Each payout is announced in the bets channel (the same
+    webhook as bets and futures): a day's result with the winning lineup, and
+    the season winner. Only what `settle()` just paid is posted, so a day is
+    announced once.
 
 Storage: `pickem-{season}.json` in DATA_DIR, `{date: {member: {lineup, teams,
 saved_at}}}`.
@@ -51,6 +55,7 @@ from .boxscores import allstats_path
 from .coaching_settings import _roster_slugs
 from .constants import DATA_DIR, logger
 from .league_time import LEAGUE_TZ, league_now
+from .names import player_name
 from .players import _primary_pos, effective_secondary, load_attributes, load_ovr, load_player_bios
 from .schedule import _load as load_schedule, _time_key
 from .storage import _load_json, _save_json, log_write
@@ -527,7 +532,80 @@ def settle(season: str) -> list[dict]:
         lines = [ln for ln in due if ln["ref"] not in paid]
         if lines:
             wallet.post(lines)
+    if lines:
+        announce(season, st, lines)
     return lines
+
+
+# ── Discord ──────────────────────────────────────────────────────────────────
+
+def _post_discord(embed: dict) -> None:
+    """The bets channel. Its own function so tests can catch what is sent."""
+    from .bets import _discord_post_bet
+    _discord_post_bet(embed)
+
+
+def _nby(n: float) -> str:
+    return f"NB¥{n:,.0f}"
+
+
+def _who(members: list[str]) -> str:
+    names = [f"**{m}**" for m in members]
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def announce(season: str, st: dict, lines: list[dict]) -> None:
+    """Post what `settle()` just paid. Never raises: the payout already landed."""
+    try:
+        days = {d["date"]: d for d in st["days"]}
+        bios = load_player_bios()
+        rows = box_rows(season)
+        data = _load(season)
+        for date in sorted({ln["ref"].split(":")[2] for ln in lines if ln["ref"].startswith("pickem:day:")}):
+            _post_discord(day_embed(date, days[date], data.get(date, {}), day_lines(rows, date, bios)[0], bios))
+        if any(ln["ref"].startswith("pickem:season:") for ln in lines):
+            _post_discord(season_embed(season, st))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("pickem announce failed: %s", e)
+
+
+def day_embed(date: str, day: dict, entries: dict, lines: dict, bios: dict) -> dict:
+    winners, scores = day["winners"], day["scores"]
+    top = scores[0]["total"]
+    label = Date.fromisoformat(date).strftime("%a, %b %-d")
+    head = (f"{_who(winners)} wins with **{top:.1f}** (+{_nby(PRIZES['day'])})" if len(winners) == 1
+            else f"{_who(winners)} tie at **{top:.1f}** (+{_nby(PRIZES['day'])} each)")
+    rest = [s for s in scores if s["member"] not in winners][:3]
+    board = " · ".join(f"{s['member']} {s['total']:.1f}" for s in rest)
+    parts = [head]
+    if board:
+        parts.append(f"Next: {board}")
+    for m in winners:
+        sc = score_entry(entries[m], lines)["slots"]
+        picks = " · ".join(
+            f"{'6th' if s == '6TH' else s} {player_name((bios.get(v['slug']) or {}).get('name', v['slug']))} {v['fp']:.1f}"
+            for s, v in sc.items())
+        parts.append(f"{'Winning lineup' if len(winners) == 1 else m}: {picks}")
+    parts.append(f"{len(scores)} lineup{'s' if len(scores) != 1 else ''} · "
+                 f"[Full scores](https://nbn.today/bet/?date={date}#pickem)")
+    return {"title": f"🎯  Pick'em — {label}", "description": "\n\n".join(parts), "color": 0x3498db}
+
+
+def season_embed(season: str, st: dict) -> dict:
+    totals = st["season_totals"]
+    top = totals[0]["total"]
+    winners = [t for t in totals if t["total"] == top]
+    head = (f"{_who([t['member'] for t in winners])} {'wins' if len(winners) == 1 else 'share'} the {season} season "
+            f"with **{top:,.1f}** points (+{_nby(PRIZES['season'])}{'' if len(winners) == 1 else ' each'})")
+    plural = lambda n, word: f"{n} {word}{'' if n == 1 else 's'}"
+    detail = "\n".join(
+        (f"{w['member']}: " if len(winners) > 1 else "")
+        + f"{plural(w['days'], 'day')} played, {plural(w['day_wins'], 'day win')}, best day {w['best']:.1f}"
+        for w in winners)
+    rest = [t for t in totals if t["total"] != top][:4]
+    board = "\n".join(f"{i}. {t['member']} {t['total']:,.1f}" for i, t in enumerate(rest, len(winners) + 1))
+    parts = [head, detail] + ([board] if board else []) + ["[Standings](https://nbn.today/bet/#pickem)"]
+    return {"title": f"🏆  Pick'em season champion — {season}", "description": "\n\n".join(parts), "color": 0xf1c40f}
 
 
 def settle_quietly(season: str) -> None:
