@@ -13,7 +13,9 @@ What must keep being true:
     it, and a later stream (the real games) still can;
   * nobody sees another member's lineup before the lock;
   * each final day pays its winners 100 and the season pays 1,000, every tied
-    winner the full amount, never twice, and never for a day still in progress.
+    winner the full amount, never twice, and never for a day still in progress;
+  * each payout is announced on Discord once: the day with its winning
+    lineup, and the season winner.
 
     venv/bin/python -m tests.test_pickem
 """
@@ -32,6 +34,8 @@ from contextlib import nullcontext  # noqa: E402
 
 # Never the real NB¥ ledger.
 LEDGER: list[dict] = []
+POSTS: list[dict] = []
+pk._post_discord = POSTS.append   # never the real channel
 pk.wallet = SimpleNamespace(enabled=lambda kind: True, lock=nullcontext(),
                             read_ledger=lambda: list(LEDGER),
                             post=lambda lines: LEDGER.extend(lines))
@@ -226,12 +230,20 @@ paid = pk.settle("26-27")
 check("a final day pays each tied winner the full 100",
       sorted((p["member"], p["delta"]) for p in paid) == [("alice", 100), ("bob", 100)])
 check("never twice", pk.settle("26-27") == [])
+check("the day is announced once", len(POSTS) == 1 and "Pick'em" in POSTS[0]["title"])
+check("naming both tied winners and the prize", "**alice** and **bob** tie" in POSTS[0]["description"]
+      and "NB¥100 each" in POSTS[0]["description"])
+check("with the winning lineup, names cased", "PG Pg One 30.0" in POSTS[0]["description"])
+check("and the runner-up", "Next: carol" in POSTS[0]["description"])
 check("the season isn't over while games are left", not any("season" in p["ref"] for p in LEDGER))
 GAMES[:] = [g for g in GAMES if g["date"] <= "2026-11-01"]
 paid = pk.settle("26-27")
 check("the season pays its winners 1,000 once its last day is final",
       sorted((p["member"], p["delta"]) for p in paid) == [("alice", 1000), ("bob", 1000)])
 check("the season pays once", pk.settle("26-27") == [])
+check("the season winner is announced once", len(POSTS) == 2 and "season champion" in POSTS[1]["title"]
+      and "NB¥1,000 each" in POSTS[1]["description"])
+check("nothing more is posted", pk.settle("26-27") == [] and len(POSTS) == 2)
 LEDGER.clear()
 pk.wallet.enabled = lambda kind: False
 check("nothing pays while Pick'em NB¥ is paused", pk.settle("26-27") == [] and LEDGER == [])
