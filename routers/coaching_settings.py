@@ -286,7 +286,8 @@ def _roster_slugs(team: str) -> list[str]:
     return [r.get("SLUG", "").strip() for r in rows if r.get("SLUG", "").strip()]
 
 
-def position_items(team: str, rec: dict, bios: dict, roster: list[str], today: str) -> list[dict]:
+def position_items(team: str, rec: dict, bios: dict, roster: list[str], today: str,
+                   attrs: Optional[dict] = None) -> list[dict]:
     """The players a streamer has to look at for this team, in roster order:
     a secondary that differs from what 2K has, or a locked player not yet
     checked today. Locked players already checked today are listed too, with
@@ -299,7 +300,10 @@ def position_items(team: str, rec: dict, bios: dict, roster: list[str], today: s
     Jersey numbers ride along: `jerseys` is the number 2K has, recorded when
     a team first changes it (`note_jersey_change`). We have no scrape of 2K's
     numbers, so a player with no record there has nothing to enter."""
-    from .players import _primary_pos, _twok_secondary, effective_secondary
+    from .players import _primary_pos, _twok_secondary, effective_secondary, load_attributes
+    # Loaded once: the file is 2.7MB, and reading it per player made the
+    # all-teams list take over a minute, so nginx timed it out (2026-10-22).
+    attrs = load_attributes() if attrs is None else attrs
     entered = rec.get("entered") or {}
     pins = set(rec.get("pins") or [])
     checked = rec.get("checked") or {}
@@ -307,8 +311,8 @@ def position_items(team: str, rec: dict, bios: dict, roster: list[str], today: s
     items = []
     for slug in roster:
         bio = bios.get(slug) or {}
-        sec = effective_secondary(slug, bio)
-        in_2k = (entered.get(slug) or None) if slug in entered else _twok_secondary(slug)
+        sec = effective_secondary(slug, bio, attrs)
+        in_2k = (entered.get(slug) or None) if slug in entered else _twok_secondary(slug, attrs)
         changed = in_2k != sec
         locked = slug in pins
         jersey = bio.get("jersey_number") or None
@@ -319,7 +323,7 @@ def position_items(team: str, rec: dict, bios: dict, roster: list[str], today: s
         items.append({
             "slug": slug,
             "name": bio.get("name") or slug,
-            "primary": _primary_pos(slug),
+            "primary": _primary_pos(slug, attrs),
             "secondary": sec,
             "was": in_2k,
             "changed": changed,
@@ -332,7 +336,8 @@ def position_items(team: str, rec: dict, bios: dict, roster: list[str], today: s
     return items
 
 
-def team_positions_view(team: str, data: Optional[dict] = None, bios: Optional[dict] = None) -> dict:
+def team_positions_view(team: str, data: Optional[dict] = None, bios: Optional[dict] = None,
+                        attrs: Optional[dict] = None) -> dict:
     from .players import load_player_bios
     data = load_position_checks() if data is None else data
     bios = load_player_bios() if bios is None else bios
@@ -340,7 +345,7 @@ def team_positions_view(team: str, data: Optional[dict] = None, bios: Optional[d
     roster = _roster_slugs(team)
     pins = set(rec.get("pins") or [])
     return {
-        "items": position_items(team, rec, bios, roster, league_today_str()),
+        "items": position_items(team, rec, bios, roster, league_today_str(), attrs),
         "pinned": [s for s in roster if s in pins],
         "checked_at": rec.get("checked_at"),
         "checked_by": rec.get("checked_by"),
@@ -374,9 +379,9 @@ def coaching_pending(team: str) -> bool:
 def get_position_checks():
     """Every team's position checklist. Public: secondary positions already
     are, and a lock says nothing a team needs to keep to itself."""
-    from .players import load_player_bios
-    data, bios = load_position_checks(), load_player_bios()
-    return {team: team_positions_view(team, data, bios) for team in sorted(VALID_TEAMS)}
+    from .players import load_player_bios, load_attributes
+    data, bios, attrs = load_position_checks(), load_player_bios(), load_attributes()
+    return {team: team_positions_view(team, data, bios, attrs) for team in sorted(VALID_TEAMS)}
 
 
 @router.get("/api/position-checks/{team}")
