@@ -14,7 +14,8 @@ from .constants import (
 )
 from .storage import read_csv, write_csv, _load_json, _save_json, log_write, _current_league_year, _season_start
 from .auth import get_token_info, has_role, require_role
-from . import tradeblock_notify
+from .league_time import league_today, league_today_str
+from . import inbox, tradeblock_notify
 
 router = APIRouter()
 
@@ -348,6 +349,21 @@ class TradingBlockEntry(BaseModel):
     notes: str = ""
 
 
+def _carry_block_fields(entry: dict, old: Optional[dict]) -> dict:
+    """Give a saved player entry the fields only the server sets, never the
+    caller: when the player went on the block (kept from the old entry, else
+    today) and any "still available" snooze from the stale-block nudge
+    (`tradeblock_nudge.py`). A player taken off and put back starts over —
+    that is a new listing."""
+    old = old or {}
+    entry["added_at"] = old.get("added_at") or league_today_str()
+    if old.get("snoozed_until"):
+        entry["snoozed_until"] = old["snoozed_until"]
+    else:
+        entry.pop("snoozed_until", None)
+    return entry
+
+
 class TeamTradeBlock(BaseModel):
     players: list[TradingBlockEntry] = []
     picks: list[PickEntry] = []
@@ -383,11 +399,12 @@ def put_trading_block(
     old_block = _normalize_team_block(data.get(team, []))
     new_block = body.model_dump(exclude={"notify_discord"})
     # One entry per player, however the name is cased (see _block_key).
+    old_by_key = {_block_key(e.get("player")): e for e in old_block["players"]}
     seen, players = set(), []
     for e in new_block["players"]:
         if _block_key(e["player"]) not in seen:
             seen.add(_block_key(e["player"]))
-            players.append(e)
+            players.append(_carry_block_fields(e, old_by_key.get(_block_key(e["player"]))))
     new_block["players"] = players
     data[team] = new_block
     save_trading_block(data)
@@ -464,8 +481,9 @@ def put_trading_block_player(
     if entry:
         entry["player"] = name
         entry["notes"] = body.notes
+        _carry_block_fields(entry, dict(entry))
     else:
-        block["players"].append({"player": name, "notes": body.notes})
+        block["players"].append(_carry_block_fields({"player": name, "notes": body.notes}, None))
     data[team] = block
     save_trading_block(data)
     log_write(info, f"PUT trading-block/{team}/player — {name}")
@@ -489,6 +507,60 @@ def delete_trading_block_player(team: str, slug: str, info: dict = Depends(get_t
     save_trading_block(data)
     log_write(info, f"DELETE trading-block/{team}/player — {name}")
     return {"ok": True, "player": name, "on_block": False}
+
+
+# ── Stale-block nudge buttons ─────────────────────────────────────────────────
+#
+# The two buttons the weekly nudge puts on each stale player (see
+# tradeblock_nudge.py). Taking him off is the one-click answer; "still
+# available" only snoozes him, so a team can't park a player for good — the
+# point of the nudge is a block that stays current.
+
+SNOOZE_DAYS = 14
+
+
+def _find_block_entry(data: dict, team: str, player: str):
+    from .players import _block_key
+    block = _normalize_team_block(data.get(team, []))
+    entry = next((e for e in block["players"] if _block_key(e.get("player")) == _block_key(player)), None)
+    return block, entry
+
+
+def _inbox_remove_from_block(info: dict, action: dict) -> str:
+    """Inbox action `tradeblock_remove`. Same permission as editing the block.
+    A player already gone (traded, released, taken off since) is done, not an
+    error — the button's job is already finished."""
+    team = _require_block_write(info, action.get("team", ""))
+    data = load_trading_block()
+    block, entry = _find_block_entry(data, team, action.get("player", ""))
+    if entry is None:
+        return f"{action.get('player')} is already off the block"
+    block["players"] = [e for e in block["players"] if e is not entry]
+    data[team] = block
+    save_trading_block(data)
+    log_write(info, f"trading-block/{team} — removed {entry['player']} (stale-block nudge)")
+    return f"Removed {entry['player']} from the block"
+
+
+def _inbox_snooze_block_player(info: dict, action: dict) -> str:
+    """Inbox action `tradeblock_snooze`: "still available" — leaves him listed
+    and out of the nudge for SNOOZE_DAYS, then he's back in it."""
+    team = _require_block_write(info, action.get("team", ""))
+    data = load_trading_block()
+    block, entry = _find_block_entry(data, team, action.get("player", ""))
+    if entry is None:
+        raise HTTPException(status_code=409, detail=f"{action.get('player')} is no longer on {team}'s trading block")
+    until = league_today() + timedelta(days=SNOOZE_DAYS)
+    entry["snoozed_until"] = until.isoformat()
+    entry.setdefault("added_at", league_today_str())
+    data[team] = block
+    save_trading_block(data)
+    log_write(info, f"trading-block/{team} — {entry['player']} still available, snoozed to {until}")
+    return f"{entry['player']} still available — next check {until.strftime('%b')} {until.day}"
+
+
+inbox.register_action("tradeblock_remove", _inbox_remove_from_block)
+inbox.register_action("tradeblock_snooze", _inbox_snooze_block_player)
 
 
 # ── Team State ────────────────────────────────────────────────────────────────
