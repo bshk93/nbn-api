@@ -126,6 +126,14 @@ check("season totals", [t["total"] for t in st["season_totals"]] == [56.5, 56.5]
 check("a tie shares the day", st["days"][0]["winners"] == ["alice", "bob"])
 check("weeks start on Monday", st["weeks"][0]["week_of"] == "2026-10-26")
 
+print("season averages, to pick by")
+avg = pk.season_averages([{"DATE": "2026-10-30", "PLAYER": "ONE, PG", "M": 30, "P": 20},
+                          {"DATE": "2026-10-31", "PLAYER": "ONE, PG", "M": 30, "P": 10},
+                          {"DATE": "2026-10-31", "PLAYER": "ONE, C", "M": 0, "P": 0},
+                          {"DATE": "2026-11-01", "PLAYER": "ONE, PG", "M": 30, "P": 90}], BIOS, "2026-11-01")
+check("per game, from games before the day only", avg["pg-one"] == (15.0, 2))
+check("a DNP isn't a game", "c-one" not in avg)
+
 print()
 if FAILS:
     print(f"{len(FAILS)} failure(s)")

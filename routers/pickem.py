@@ -110,9 +110,25 @@ def positions_of(slug: str, bio: dict) -> list[str]:
     return [primary] + ([sec] if sec and sec != primary else [])
 
 
-def player_pool(games: list[dict]) -> dict[str, dict]:
+def season_averages(rows: list[dict], bios: dict, before: str) -> dict[str, tuple[float, int]]:
+    """slug -> (fantasy points per game, games) over box scores before `before`."""
+    by_name = _slug_by_name(bios)
+    tot: dict[str, list] = {}
+    for r in rows:
+        if (r.get("DATE") or "") >= before or not _int(r.get("M")):
+            continue
+        slug = by_name.get((r.get("PLAYER") or "").strip().upper())
+        if slug:
+            t = tot.setdefault(slug, [0.0, 0])
+            t[0] += fantasy_points(r)
+            t[1] += 1
+    return {k: (round(v[0] / v[1], 1), v[1]) for k, v in tot.items()}
+
+
+def player_pool(games: list[dict], averages: Optional[dict] = None) -> dict[str, dict]:
     bios = load_player_bios()
     ovr = load_ovr()
+    averages = averages or {}
     pool = {}
     for g in games:
         for team, opp, home in ((g["away_team"], g["home_team"], False),
@@ -132,6 +148,8 @@ def player_pool(games: list[dict]) -> dict[str, dict]:
                     "ovr": hist[-1]["ovr"] if hist else None,
                     "photo_url": bio.get("photo_url") or "",
                     "type": bio.get("type"),
+                    "fp_avg": averages.get(slug, (None, 0))[0],
+                    "gp": averages.get(slug, (None, 0))[1],
                 }
     return pool
 
@@ -190,14 +208,21 @@ def box_rows(season: str) -> list[dict]:
     return rows
 
 
-def day_lines(rows: list[dict], date: str, bios: dict) -> tuple[dict[str, dict], set[str]]:
-    """slug -> {fp, line} for every box score line that date, and the teams
-    that have a box score in."""
-    by_name = {}
+def _slug_by_name(bios: dict) -> dict[str, str]:
+    """Box score rows carry a name, not a slug: the same match as
+    `boxscores._bios_by_name`."""
+    out = {}
     for slug, bio in bios.items():
         n = (bio.get("name") or "").strip().upper()
         if n:
-            by_name.setdefault(n, slug)
+            out.setdefault(n, slug)
+    return out
+
+
+def day_lines(rows: list[dict], date: str, bios: dict) -> tuple[dict[str, dict], set[str]]:
+    """slug -> {fp, line} for every box score line that date, and the teams
+    that have a box score in."""
+    by_name = _slug_by_name(bios)
     out, teams = {}, set()
     for r in rows:
         if (r.get("DATE") or "").strip() != date:
@@ -244,7 +269,8 @@ def get_day(date: str, authorization: Optional[str] = Header(None)):
     me = (_resolve_token(authorization) or {}).get("name")
 
     bios = load_player_bios()
-    lines, box_teams = day_lines(box_rows(season), date, bios)
+    rows = box_rows(season)
+    lines, box_teams = day_lines(rows, date, bios)
     slate_teams = {t for g in games for t in (g["away_team"], g["home_team"])}
     entries = _load(season).get(date, {})
 
@@ -258,7 +284,7 @@ def get_day(date: str, authorization: Optional[str] = Header(None)):
     out_entries.sort(key=lambda x: -(x["score"]["total"] if x["score"] else 0))
 
     # Locked days keep their names even after a player is traded away.
-    pool = player_pool(games) if games else {}
+    pool = player_pool(games, season_averages(rows, bios, date)) if games else {}
     names = {s: (bios.get(s) or {}).get("name", s) for e in entries.values() for s in e["lineup"].values()}
 
     return {
