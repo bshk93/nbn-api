@@ -130,11 +130,15 @@ pl.load_player_bios = lambda: BIOS
 pl.save_player_bios = lambda data: None
 pl._build_team_map = lambda: {"booker-devin": "PHX", "beal-bradley": "PHX"}
 pl._check_secondary_pos = lambda slug, sec: None
-pl._primary_pos = lambda slug: "SG"
+pl._primary_pos = lambda slug, attrs=None: "SG"
 pl.log_write = lambda *a, **k: None
 cs.POSITION_CHECKS_FILE = TMP / "position-checks.json"
 cs._roster_slugs = lambda team: ["booker-devin", "beal-bradley"] if team == "PHX" else []
 app.include_router(pl.router)
+# Section 1 left PHX's coaching saved and not entered, which already pinged the
+# streamer (coaching and positions are entered from one card, so one message
+# covers both). Enter it so this starts from nothing waiting.
+c.post("/api/coaching-settings/PHX/enter", json={}, headers=H["streamy"])
 SENT.clear()
 c.put("/api/players/booker-devin/team-settings", json={"secondary_pos": "SF"}, headers=H["phxowner"])
 check("the next game's streamer hears about it", len(SENT) == 1 and SENT[0][1] == "streamy"
