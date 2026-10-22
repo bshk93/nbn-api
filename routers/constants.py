@@ -112,6 +112,9 @@ POSITION_CHECKS_FILE = DATA_DIR / "position-checks.json"
 # Per-date streaming status — a day of games marked done, and its YouTube VOD
 # link. Keyed by date — see routers/streaming_days.py.
 STREAMING_DAYS_FILE = DATA_DIR / "streaming-days.json"
+# The YouTube poller's memory: the channel id once resolved, and every video
+# it has seen with what became of it. See routers/youtube_vods.py.
+YOUTUBE_VODS_FILE = DATA_DIR / "youtube-vods.json"
 # NBNFL (the sister American-football league) — one team's regular-season
 # games only. { "games": [{id, season, week, date, home, away, home_score,
 # away_score, stats: [{player, team, category, stats: {...}}]}] }. Every stat

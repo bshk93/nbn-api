@@ -24,13 +24,15 @@ box score against later. It is a 409 rather than a wall — pass
 import re
 import secrets
 import threading
+from datetime import datetime, timezone
+from urllib.parse import parse_qs, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from .constants import DATA_DIR, SCHEDULE_FILE_FMT, VALID_TEAMS
 from .storage import _load_json, _save_json, log_write, _current_league_year
-from .auth import require_role, require_admin, get_token_info, has_role
+from .auth import require_role, require_any_role, require_admin, get_token_info, has_role
 from .league_time import league_today_str
 from . import auth as auth_module
 from . import game_day_notify
@@ -111,7 +113,8 @@ def _public(game: dict) -> dict:
     return {**game, "streamer": game.get("streamer") or None,
             "stream": bool(game.get("stream")),
             "stream_buyer": game.get("stream_buyer") or None,
-            "stream_request": game.get("stream_request") or None}
+            "stream_request": game.get("stream_request") or None,
+            "youtube_url": game.get("youtube_url") or None}
 
 
 def _check_team(label: str, team: str) -> str:
@@ -152,6 +155,53 @@ def _known_seasons() -> list[str]:
         if SEASON_RE.match(season):
             out.append(season)
     return sorted(out)
+
+
+# A YouTube video id: 11 characters from the URL-safe base64 alphabet.
+YT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+
+
+def youtube_watch_url(url: str) -> str | None:
+    """`url` as `https://www.youtube.com/watch?v=ID`, or None when it isn't a
+    YouTube video link. One spelling on disk whatever was pasted — youtu.be,
+    /live/, /shorts/, m.youtube.com — keeping a `t=` start time if it had one."""
+    try:
+        u = urlparse(url.strip())
+    except ValueError:
+        return None
+    host = (u.hostname or "").lower().removeprefix("www.").removeprefix("m.")
+    qs = parse_qs(u.query)
+    if host == "youtu.be":
+        vid = u.path.strip("/")
+    elif host == "youtube.com":
+        parts = [p for p in u.path.split("/") if p]
+        if parts[:1] == ["watch"]:
+            vid = (qs.get("v") or [""])[0]
+        elif len(parts) == 2 and parts[0] in ("live", "shorts", "embed"):
+            vid = parts[1]
+        else:
+            return None
+    else:
+        return None
+    if not YT_ID_RE.match(vid):
+        return None
+    out = f"https://www.youtube.com/watch?v={vid}"
+    t = (qs.get("t") or [""])[0]
+    if re.fullmatch(r"\d+s?|(\d+h)?(\d+m)?(\d+s)?", t) and t:
+        out += f"&t={t}"
+    return out
+
+
+def set_game_youtube(game: dict, url: str | None, source: str, by: str | None) -> None:
+    """Set or clear a game's video. Falsy fields are dropped, like `streamer`."""
+    if url:
+        game["youtube_url"] = url
+        game["youtube_source"] = source
+        game["youtube_set_at"] = datetime.now(timezone.utc).isoformat()
+        game["youtube_set_by"] = by
+    else:
+        for k in ("youtube_url", "youtube_source", "youtube_set_at", "youtube_set_by"):
+            game.pop(k, None)
 
 
 class ScheduleGameIn(BaseModel):
@@ -451,6 +501,36 @@ def unmark_schedule_game_stream(game_id: str, season: str | None = None,
         _save(found_season, data)
     log_write(info, f"DELETE schedule/{game_id}/stream — {found_season} {game['date']} "
                     f"{game['away_team']}@{game['home_team']}")
+    return _public(game)
+
+
+# ── Video link ─────────────────────────────────────────────────────────────
+#
+# The game's own YouTube video, once it's up. routers/youtube_vods.py finds most
+# of these on its own from the channel's feed; this is the hand-set fallback,
+# and the way to fix one it got wrong. A link set here is `manual`, and the
+# poller never overwrites a manual link.
+
+
+class YoutubeBody(BaseModel):
+    url: str | None = None
+
+
+@router.put("/api/schedule/{game_id}/youtube")
+def set_schedule_game_youtube(game_id: str, body: YoutubeBody, season: str | None = None,
+                              info: dict = Depends(require_any_role("streamer", "stats"))):
+    """Link a game's video, or clear it with an empty url."""
+    raw = (body.url or "").strip()
+    url = youtube_watch_url(raw) if raw else None
+    if raw and not url:
+        raise HTTPException(status_code=422, detail="That isn't a YouTube video link")
+    preferred = _resolve_season(season)
+    with _schedule_lock:
+        found_season, data, game = _find(game_id, preferred)
+        set_game_youtube(game, url, "manual", info.get("name"))
+        _save(found_season, data)
+    log_write(info, f"PUT schedule/{game_id}/youtube — {found_season} {game['date']} "
+                    f"{game['away_team']}@{game['home_team']} {url or '(cleared)'}")
     return _public(game)
 
 
