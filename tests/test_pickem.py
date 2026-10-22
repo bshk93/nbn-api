@@ -9,6 +9,8 @@ What must keep being true:
   * a day locks when the stream goes live, a box score or the VOD comes in,
     or the day ends, never at the schedule's NBA tip time; the lock sticks;
   * a lineup can't be saved or deleted once the day is locked;
+  * a streamer can reopen a day only a stream locked; that stream can't relock
+    it, and a later stream (the real games) still can;
   * nobody sees another member's lineup before the lock.
 
     venv/bin/python -m tests.test_pickem
@@ -66,8 +68,11 @@ ROWS: list[dict] = []
 NOW = [datetime(2026, 11, 1, 12, 0, tzinfo=pk.LEAGUE_TZ)]
 pk.league_now = lambda: NOW[0]
 pk.log_write = lambda *a, **k: None
-LIVE = [False]
-pk.stream_is_live = lambda: LIVE[0]
+OFF = {"live": False}
+STRAY = {"live": True, "started_at": "2026-11-01T10:00:00Z", "title": "Testing OBS"}
+GAMES_ON = {"live": True, "started_at": "2026-11-01T23:00:00Z", "title": "NBN Night 3"}
+LIVE = [OFF]
+pk.stream_status = lambda: LIVE[0]
 STREAM_DAY = {}
 pk._streaming_day = lambda date: STREAM_DAY
 
@@ -120,11 +125,11 @@ day = pk.get_day("2026-11-01", "Bearer x")
 check("before the lock, you see only your own", [e["member"] for e in day["entries"]] == ["alice"])
 
 print("the stream banner stamps the lock with nobody on Pick'em")
-pk.note_stream_live()
+pk.note_stream_live(GAMES_ON)
 check("stamped", pk.lock_state("2026-11-01", [])["why"] == "stream")
 pk.LOCKS_FILE.unlink()
 
-LIVE[0] = True
+LIVE[0] = GAMES_ON
 NOW[0] = datetime(2026, 11, 1, 13, 5, tzinfo=pk.LEAGUE_TZ)
 try:
     pk.put_entry("2026-11-01", pk.EntryIn(lineup=GOOD), {"name": "alice"})
@@ -136,7 +141,7 @@ try:
     check("deleting after the lock is refused", False)
 except HTTPException as e:
     check("deleting after the lock is refused", e.status_code == 409)
-LIVE[0] = False
+LIVE[0] = OFF
 check("the lock sticks after the stream ends", pk.lock_state("2026-11-01", [])["why"] == "stream")
 check("and keeps when it happened", pk.lock_state("2026-11-01", [])["at"].startswith("2026-11-01T13:05"))
 
@@ -159,6 +164,40 @@ avg = pk.season_averages([{"DATE": "2026-10-30", "PLAYER": "ONE, PG", "M": 30, "
                           {"DATE": "2026-11-01", "PLAYER": "ONE, PG", "M": 30, "P": 90}], BIOS, "2026-11-01")
 check("per game, from games before the day only", avg["pg-one"] == (15.0, 2))
 check("a DNP isn't a game", "c-one" not in avg)
+
+print("reopening a day a stray stream locked")
+ROWS.clear()   # no box scores yet: those would lock the day for real
+pk.LOCKS_FILE.unlink()
+NOW[0] = datetime(2026, 11, 1, 6, 17, tzinfo=pk.LEAGUE_TZ)
+LIVE[0] = STRAY
+pk.note_stream_live(STRAY)
+check("a stray stream locks the day", pk.lock_state("2026-11-01", [])["why"] == "stream")
+check("and the lock names the stream", pk.lock_state("2026-11-01", [])["stream"]["title"] == "Testing OBS")
+pk.reopen("2026-11-01", "streamy")
+check("reopened", pk.lock_state("2026-11-01", []) is None)
+pk.note_stream_live(STRAY)
+check("the same stream, still live, can't relock it", pk.lock_state("2026-11-01", []) is None)
+pk.put_entry("2026-11-01", pk.EntryIn(lineup=GOOD), {"name": "carol"})
+check("lineups can be saved again", "carol" in pk._load("26-27")["2026-11-01"])
+day = pk.get_day("2026-11-01", None)
+check("the page says who reopened it", day["reopened"][0]["by"] == "streamy")
+LIVE[0] = GAMES_ON
+pk.note_stream_live(GAMES_ON)
+check("the real games' stream still locks it", pk.lock_state("2026-11-01", [])["why"] == "stream")
+pk.LOCKS_FILE.unlink()
+LIVE[0] = OFF
+pk.lock_state("2026-11-01", [{"DATE": "2026-11-01"}])
+try:
+    pk.reopen("2026-11-01", "streamy")
+    check("a box score lock can't be reopened", False)
+except HTTPException as e:
+    check("a box score lock can't be reopened", e.status_code == 409)
+pk.LOCKS_FILE.unlink()
+try:
+    pk.reopen("2026-11-01", "streamy")
+    check("an open day can't be reopened", False)
+except HTTPException as e:
+    check("an open day can't be reopened", e.status_code == 409)
 
 print()
 if FAILS:

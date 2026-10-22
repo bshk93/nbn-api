@@ -104,7 +104,7 @@ def stream_live():
             # Live means today's games have started: lock Pick'em.
             try:
                 from .pickem import note_stream_live
-                note_stream_live()
+                note_stream_live(body)
             except Exception as e:  # noqa: BLE001 — never break the banner
                 log.warning("stream_live: pickem lock failed: %s", e)
         return body

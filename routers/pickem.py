@@ -42,7 +42,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
-from .auth import _resolve_token, get_token_info
+from .auth import _resolve_token, get_token_info, require_any_role
 from .boxscores import allstats_path
 from .coaching_settings import _roster_slugs
 from .constants import DATA_DIR
@@ -105,9 +105,10 @@ def slate_games(date: str) -> tuple[str, list[dict]]:
     return season, games
 
 
-def stream_is_live() -> bool:
+def stream_status() -> dict:
+    """The homepage banner's cached answer: {live, started_at, title, ...}."""
     from .stream_live import stream_live
-    return bool(stream_live().get("live"))
+    return stream_live()
 
 
 def _streaming_day(date: str) -> dict:
@@ -115,19 +116,33 @@ def _streaming_day(date: str) -> dict:
     return load_streaming_days().get(date) or {}
 
 
-def _record_lock(date: str, why: str) -> dict:
+def _record_lock(date: str, why: str, stream: Optional[dict] = None) -> dict:
+    """Lock `date`, once. A day's record also keeps its reopen history, so
+    "locked" is the presence of `why`, not of the record."""
     with _lock:
         locks = _load_json(LOCKS_FILE, {})
-        if date not in locks:
-            locks[date] = {"at": league_now().isoformat(timespec="seconds"), "why": why}
+        rec = locks.setdefault(date, {})
+        if not rec.get("why"):
+            rec.update(at=league_now().isoformat(timespec="seconds"), why=why)
+            if stream:
+                rec["stream"] = {k: stream.get(k) for k in ("started_at", "title")}
             _save_json(LOCKS_FILE, locks)
-        return locks[date]
+        return rec
+
+
+def _game_stream(date: str, status: dict) -> bool:
+    """A live stream counts as the day's games starting unless someone
+    reopened the day because of that very stream."""
+    if not status.get("live"):
+        return False
+    ignored = (_load_json(LOCKS_FILE, {}).get(date) or {}).get("ignore_streams") or []
+    return status.get("started_at") not in ignored
 
 
 def lock_state(date: str, rows: list[dict]) -> Optional[dict]:
     """{at, why} once the day is locked; None while lineups are open."""
-    rec = _load_json(LOCKS_FILE, {}).get(date)
-    if rec:
+    rec = _load_json(LOCKS_FILE, {}).get(date) or {}
+    if rec.get("why"):
         return rec
     today = league_now().date().isoformat()
     if date < today:
@@ -140,18 +155,44 @@ def lock_state(date: str, rows: list[dict]) -> Optional[dict]:
     day = _streaming_day(date)
     if day.get("done") or day.get("youtube_url"):
         return _record_lock(date, "vod")
-    if stream_is_live():
-        return _record_lock(date, "stream")
+    status = stream_status()
+    if _game_stream(date, status):
+        return _record_lock(date, "stream", status)
     return None
 
 
-def note_stream_live() -> None:
+def note_stream_live(status: dict) -> None:
     """Called by routers/stream_live.py whenever it sees the channel live, so
     the lock is stamped even if nobody opens Pick'em during the stream."""
     today = league_now().date().isoformat()
     _, games = slate_games(today)
-    if games and today not in _load_json(LOCKS_FILE, {}):
-        _record_lock(today, "stream")
+    if games and _game_stream(today, status):
+        _record_lock(today, "stream", status)
+
+
+def reopen(date: str, by: str) -> dict:
+    """Undo a lock that a stream caused when the stream wasn't the day's
+    games. Only a stream lock: a box score, a VOD or the day ending means
+    games were played. The stream that caused it is ignored from then on, so
+    it can't relock the day; a later stream (the real games) still can."""
+    with _lock:
+        locks = _load_json(LOCKS_FILE, {})
+        rec = locks.get(date) or {}
+        if rec.get("why") != "stream":
+            raise HTTPException(status_code=409, detail=(
+                "That day isn't locked." if not rec.get("why") else
+                f"That day locked because {LOCK_WHY.get(rec['why'], rec['why'])}, so its games have been played."))
+        started = (rec.get("stream") or {}).get("started_at")
+        if started:
+            rec.setdefault("ignore_streams", []).append(started)
+        rec.setdefault("reopened", []).append({
+            "at": league_now().isoformat(timespec="seconds"), "by": by,
+            "lock_at": rec["at"], "stream": rec.get("stream"),
+        })
+        for k in ("at", "why", "stream"):
+            rec.pop(k, None)
+        _save_json(LOCKS_FILE, locks)
+        return rec
 
 
 def positions_of(slug: str, bio: dict, attrs: dict) -> list[str]:
@@ -348,6 +389,9 @@ def get_day(date: str, authorization: Optional[str] = Header(None)):
         "locked": locked,
         "locked_at": lock["at"] if lock else None,
         "locked_because": LOCK_WHY.get(lock["why"], lock["why"]) if lock else None,
+        "lock_why": lock["why"] if lock else None,
+        "lock_stream": lock.get("stream") if lock else None,
+        "reopened": (_load_json(LOCKS_FILE, {}).get(date) or {}).get("reopened", []),
         "final": bool(games) and slate_teams <= box_teams,
         "players": sorted(pool.values(), key=lambda p: (-(p["ovr"] or 0), p["name"])),
         "names": names,
@@ -431,6 +475,15 @@ def standings(season: str, today: Optional[str] = None) -> dict:
                   for w, v in sorted(weeks.items(), reverse=True)],
         "days": list(reversed(days)),
     }
+
+
+@router.post("/api/pickem/{date}/reopen")
+def reopen_day(date: str, info: dict = Depends(require_any_role("streamer", "bod"))):
+    """Reopen a day a non-game stream locked. Streamers and the board."""
+    date = _check_date(date)
+    reopen(date, info["name"])
+    log_write(info, f"pickem reopen {date}")
+    return {"ok": True}
 
 
 @router.get("/api/pickem")

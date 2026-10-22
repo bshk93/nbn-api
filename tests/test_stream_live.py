@@ -24,7 +24,7 @@ import routers.pickem as pickem  # noqa: E402
 # A live answer locks today's Pick'em. Never let a faked one reach the live
 # data dir: this test once wrote a real lock that closed a game day at 6 AM.
 LIVE_NOTES = []
-pickem.note_stream_live = lambda: LIVE_NOTES.append(1)
+pickem.note_stream_live = lambda body: LIVE_NOTES.append(body)
 
 FAILS = []
 
