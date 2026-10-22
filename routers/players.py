@@ -22,17 +22,19 @@ VALID_POSITIONS = {"PG", "SG", "SF", "PF", "C"}
 POSITION_ORDER = ["PG", "SG", "SF", "PF", "C"]
 
 
-def _primary_pos(slug: str) -> Optional[str]:
-    """The player's 2K-designated primary position, from the latest scrape."""
-    entries = load_attributes().get(slug) or []
+def _primary_pos(slug: str, attrs: Optional[dict] = None) -> Optional[str]:
+    """The player's 2K-designated primary position, from the latest scrape.
+    Pass `attrs` (load_attributes()) when asking about many players: the file
+    is 2.7MB, and loading it per player made a 400-player slate take a minute."""
+    entries = (attrs if attrs is not None else load_attributes()).get(slug) or []
     pos = entries[-1].get("2k_pos") if entries else None
     return pos[0] if isinstance(pos, list) and pos and pos[0] in POSITION_ORDER else None
 
 
-def _twok_secondary(slug: str) -> Optional[str]:
+def _twok_secondary(slug: str, attrs: Optional[dict] = None) -> Optional[str]:
     """The secondary position 2K gives the player, from the latest scrape, as
     2K has it. It may break § 2.3's one step; effective_secondary drops it then."""
-    entries = load_attributes().get(slug) or []
+    entries = (attrs if attrs is not None else load_attributes()).get(slug) or []
     pos = entries[-1].get("2k_pos") if entries else None
     return pos[1] if isinstance(pos, list) and len(pos) > 1 and pos[1] in POSITION_ORDER else None
 
@@ -43,7 +45,7 @@ def _twok_secondary(slug: str) -> Optional[str]:
 NO_SECONDARY = "none"
 
 
-def effective_secondary(slug: str, bio: dict) -> Optional[str]:
+def effective_secondary(slug: str, bio: dict, attrs: Optional[dict] = None) -> Optional[str]:
     """The secondary position a player actually has: his team's pick, or 2K's
     when that is one step from the primary (§ 2.3)."""
     sec = bio.get("secondary_pos") or None
@@ -51,8 +53,8 @@ def effective_secondary(slug: str, bio: dict) -> Optional[str]:
         return None
     if sec:
         return sec
-    twok = _twok_secondary(slug)
-    return twok if twok in secondary_pos_options(_primary_pos(slug)) else None
+    twok = _twok_secondary(slug, attrs)
+    return twok if twok in secondary_pos_options(_primary_pos(slug, attrs)) else None
 
 
 def secondary_pos_options(primary: Optional[str]) -> list[str]:

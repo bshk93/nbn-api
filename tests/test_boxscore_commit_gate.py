@@ -31,6 +31,8 @@ from fastapi import HTTPException  # noqa: E402
 
 from routers import boxscores as bs  # noqa: E402
 
+bs._settle_pickem = lambda season: None   # pays real NB¥
+
 FAILS = []
 
 HEADER = ("TEAM,DATE,OPP,OPP_RAW,PLAYER,M,P,R,OR,DR,A,S,B,TO,FGM,FGA,FGPCT,"

@@ -574,6 +574,22 @@ imports at runtime, and numpy's float and NaN rendering would fight `csvio`,
 which reproduces `readr::write_csv` byte for byte (NA vs empty are different
 values; `-0` keeps its sign; a whole double loses its `.0`).
 
+## Twitch live status (`routers/stream_live.py`)
+
+`GET /api/stream/live`, public, behind the homepage's live banner: whether
+twitch.tv/nothingbutnet is live right now, with title, game and viewers. It
+answers from an in-memory cache at most 60s old, so every visitor shares one
+Helix call a minute.
+
+- **It uses a client-credentials app token, not `TWITCH_REFRESH_TOKEN`.**
+  `/helix/streams` needs no user consent, and refreshing the broadcaster's token
+  from here would race `fetch_twitch_subs.py`, which rewrites it in `.env`
+  after each run. `TWITCH_CLIENT_ID`/`TWITCH_CLIENT_SECRET` are all it reads.
+- **Any failure reads as offline, with a 200**, and is cached like a success.
+  No banner is harmless; a broken homepage or a false "LIVE" isn't.
+
+Pinned by `tests/test_stream_live.py` (no network).
+
 ## Link previews (`routers/og.py`)
 
 Six pages on the site are one shell serving many items, with the item fetched
