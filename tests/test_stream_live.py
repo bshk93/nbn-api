@@ -19,6 +19,12 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 import routers.stream_live as sl  # noqa: E402
+import routers.pickem as pickem  # noqa: E402
+
+# A live answer locks today's Pick'em. Never let a faked one reach the live
+# data dir: this test once wrote a real lock that closed a game day at 6 AM.
+LIVE_NOTES = []
+pickem.note_stream_live = lambda: LIVE_NOTES.append(1)
 
 FAILS = []
 
@@ -60,6 +66,7 @@ r = client.get("/api/stream/live")
 check("answers 200 with no token", r.status_code == 200)
 check("live is true", r.json().get("live") is True)
 check("carries the title", r.json().get("title") == "Night 42")
+check("tells Pick'em the day has started", len(LIVE_NOTES) == 1)
 
 print("cached for a minute")
 client.get("/api/stream/live"); client.get("/api/stream/live")
@@ -71,7 +78,9 @@ check("asks again once the minute is up", len(calls) == 2)
 print("offline")
 reset()
 sl.fetch_status = fake({"live": False, "channel": "nothingbutnet"})
+LIVE_NOTES.clear()
 check("live is false", client.get("/api/stream/live").json().get("live") is False)
+check("offline tells Pick'em nothing", LIVE_NOTES == [])
 
 print("Twitch fails")
 reset(); calls.clear()
