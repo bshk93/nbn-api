@@ -128,3 +128,24 @@ def test_parallel_team_settings_saves_all_land(monkeypatch):
     for t in threads:
         t.join()
     assert {s: b["secondary_pos"] for s, b in disk["bios"].items()} == {s: "none" for s in slugs}
+
+
+@pytest.mark.parametrize("coaching_waiting,notified", [(False, True), (True, False)])
+def test_one_message_when_coaching_is_already_waiting(monkeypatch, coaching_waiting, notified):
+    # The streamer enters positions and coaching from one card, so a team
+    # that already has coaching settings waiting has already pinged them.
+    from routers import coaching_settings, game_day_notify
+    disk = {"bios": {"p0": {"secondary_pos": None}}}
+    monkeypatch.setattr(players, "load_player_bios", lambda: disk["bios"])
+    monkeypatch.setattr(players, "save_player_bios", lambda d: disk.update(bios=d))
+    monkeypatch.setattr(players, "_build_team_map", lambda: {"p0": "MIL"})
+    monkeypatch.setattr(players, "_check_secondary_pos", lambda slug, sec: None)
+    monkeypatch.setattr(players, "log_write", lambda *a, **k: None)
+    calls = iter([False, True])  # nothing waiting before the save, a change after
+    monkeypatch.setattr(coaching_settings, "has_position_changes", lambda team: next(calls))
+    monkeypatch.setattr(coaching_settings, "coaching_pending", lambda team: coaching_waiting)
+    sent = []
+    monkeypatch.setattr(game_day_notify, "positions_changed", lambda team, by: sent.append(team))
+    players.update_team_settings("p0", players.TeamSettingsUpdate(secondary_pos="SG"),
+                                 {"roles": ["mil"], "name": "owner"})
+    assert bool(sent) == notified

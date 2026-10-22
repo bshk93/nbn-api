@@ -194,6 +194,12 @@ def put_coaching_settings(
         save_coaching_settings(data)
         rec = data[team]
     log_write(info, f"PUT coaching-settings/{team}")
+    # One message per batch of changes: a team that already has positions
+    # waiting has already pinged the streamer, who will see these with them.
+    try:
+        was_pending = was_pending or has_position_changes(team)
+    except Exception:
+        was_pending = True
     game_day_notify.coaching_saved(team, was_pending, info.get("name"))
     return rec
 
@@ -329,6 +335,10 @@ def team_positions_view(team: str, data: Optional[dict] = None, bios: Optional[d
 
 def has_position_changes(team: str) -> bool:
     return any(i["changed"] for i in team_positions_view(team)["items"])
+
+
+def coaching_pending(team: str) -> bool:
+    return bool((load_coaching_settings().get(team) or {}).get("pending"))
 
 
 @router.get("/api/position-checks")

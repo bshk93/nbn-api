@@ -68,6 +68,11 @@ for _fn in ('coaching_saved', 'coaching_entered', 'day_done', 'maybe_day_ready',
     setattr(gdn, _fn, lambda *a, **k: None)
 RECEIPTS = []
 gdn.positions_set = lambda team, by: RECEIPTS.append(team)
+SAVED = []  # (team, was_pending) per coaching save
+gdn.coaching_saved = lambda team, was_pending, by: SAVED.append((team, was_pending))
+# A save asks whether positions are waiting too; keep that off the live files.
+cs.POSITION_CHECKS_FILE = TMP / "position-checks.json"
+cs._roster_slugs = lambda team: []
 # The starter check reads 2K positions and bios; give it a fixed world
 # instead of the live files.
 import routers.players as players  # noqa: E402
@@ -309,6 +314,26 @@ check("due again the next day", items()["wing-guy"]["due"])
 r = c.put("/api/position-checks/BOS/pins", json={"pins": {"wing-guy": False}}, headers=BOS)
 check("unpinning one keeps the other", r.json()["pinned"] == ["big-man"])
 check("unpinned and unchanged, he drops off", "wing-guy" not in items())
+
+# ── one message per batch of changes ─────────────────────────────────────────
+
+print("one message per batch of changes")
+
+
+def enter(team):
+    c.post(f"/api/coaching-settings/{team}/enter",
+           json={"expected_updated_at": rec(team)["updated_at"]}, headers=STREAM)
+
+
+enter("ATL")
+c.put("/api/coaching-settings/ATL", json=BODY, headers=ATL)
+check("a save with nothing waiting notifies", SAVED[-1] == ("ATL", False))
+enter("ATL")
+_real = cs.has_position_changes
+cs.has_position_changes = lambda team: True
+c.put("/api/coaching-settings/ATL", json=BODY, headers=ATL)
+cs.has_position_changes = _real
+check("a save with positions already waiting doesn't notify again", SAVED[-1] == ("ATL", True))
 
 # ── the file on disk ─────────────────────────────────────────────────────────
 

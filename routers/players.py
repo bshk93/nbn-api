@@ -327,9 +327,12 @@ def update_team_settings(slug: str, body: TeamSettingsUpdate, info: dict = Depen
         bios = load_player_bios()
         pos_changed = (bios[slug].get("secondary_pos") or None) != (body.secondary_pos or None)
         # Tell the streamer once, on the way from nothing waiting to something.
+        # Coaching settings waiting count too: the streamer enters both from
+        # one card, so a team saving both gets one message, not two.
         # A failed check only costs the message, never the save.
         try:
-            already_waiting = pos_changed and coaching_settings.has_position_changes(player_team)
+            already_waiting = pos_changed and (coaching_settings.has_position_changes(player_team)
+                                               or coaching_settings.coaching_pending(player_team))
         except Exception:
             already_waiting = True
 
