@@ -6,8 +6,11 @@ What is pinned:
     the first; the upload is gated to streamer/stats/rosters and refuses an
     unreadable format.
   * **The diff.** New, changed (status, injury or duration — not OVR) and
-    healed. A report heals only when it is `complete`: a partial one must never
-    clear a player it simply didn't show.
+    healed. A player on the current list who isn't on the new report is
+    healed — the report is the whole league's list. **A long injury that
+    vanishes is confirmed, not assumed:** healing a player last reported at
+    2+ weeks (or an unreadable duration) is a 409 that writes nothing, until
+    the request names that player in `confirm_heals`.
   * **The team is the roster's.** A logo that disagrees is a warning, not the
     answer; a player on no roster falls back to the logo, with a warning.
   * **Refusals name every problem and write nothing**: an unknown slug, a
@@ -111,9 +114,9 @@ def row(slug, status="Hurt", injury="Strained Left Hip", duration="4-6 weeks", o
             "ovr": ovr, "ovr_delta": delta, "team_shown": shown}
 
 
-def commit(rows, date="2026-10-22", complete=True, report_id=None, headers=STATS):
+def commit(rows, date="2026-10-22", report_id=None, headers=STATS, confirm=()):
     return c.post("/api/injuries/commit", headers=headers,
-                  json={"date": date, "complete": complete, "rows": rows, "report_id": report_id})
+                  json={"date": date, "rows": rows, "report_id": report_id, "confirm_heals": list(confirm)})
 
 
 def pinged(payload):
@@ -161,7 +164,7 @@ check("nothing was written", not inj.INJURIES_FILE.exists() and SENT == [])
 print("first report")
 r = commit([row("reed-paul", status="hurt", shown="LAL"),
             row("ingram-brandon", injury="Strained Right Hip", shown="ATL"),
-            row("free-agent", shown="BOS")], report_id=item["id"], complete=False)
+            row("free-agent", shown="BOS")], report_id=item["id"])
 check("commits", r.status_code == 200, r.text)
 body = r.json()
 check("three new", body["new"] == 3 and body["changed"] == 0 and body["healed"] == 0, body)
@@ -175,7 +178,7 @@ check("status is title-cased", by["reed-paul"]["status"] == "Hurt")
 check("team comes from the roster", by["ingram-brandon"]["team"] == "CLE")
 check("names are joined", by["reed-paul"]["name"] == "Paul Reed")
 check("since is the first report", by["reed-paul"]["since"] == "2026-10-22")
-check("last report recorded", cur["last_report"]["id"] == item["id"] and cur["last_report"]["complete"] is False)
+check("last report recorded", cur["last_report"]["id"] == item["id"] and cur["last_report"]["date"] == "2026-10-22")
 check("one Discord message", len(SENT) == 1, SENT)
 msg = SENT[0]
 check("it pings exactly the affected teams",
@@ -198,43 +201,62 @@ check("committing a report that's gone is a 404",
 print("re-commit")
 SENT.clear()
 r = commit([row("reed-paul", shown="LAL"), row("ingram-brandon", injury="Strained Right Hip"),
-            row("free-agent", shown="BOS")], complete=False)
+            row("free-agent", shown="BOS")])
 check("nothing changed", r.json()["new"] == r.json()["changed"] == r.json()["healed"] == 0, r.json())
 check("and nothing is posted", SENT == [])
 
-# ── next day: a change, a new one, and a partial report ───────────────────────
+# ── next day: a change, a new one, and one off the report ─────────────────────
 
-print("partial report")
-r = commit([row("reed-paul", status="Out", ovr=79, delta=-3), row("jokic-nikola", injury="Bruised Left Hip", duration="1-2 weeks")],
-           date="2026-10-23", complete=False)
+print("next report")
+DAY2 = [row("reed-paul", status="Out", ovr=79, delta=-3), row("ingram-brandon", injury="Strained Right Hip"),
+        row("jokic-nikola", injury="Bruised Left Hip", duration="1-2 weeks")]
+SENT.clear()
+r = commit(DAY2, date="2026-10-23")
+check("healing a 4-6 week injury needs confirming", r.status_code == 409
+      and r.json()["detail"]["error"] == "confirm_heals", r.text)
+check("the refusal names who and what", [(p["slug"], p["duration"], p["since"]) for p in r.json()["detail"]["players"]]
+      == [("free-agent", "4-6 weeks", "2026-10-22")], r.json())
+check("and nothing was written or posted", SENT == [] and len(c.get("/api/injuries").json()["players"]) == 3
+      and c.get("/api/injuries").json()["last_report"]["date"] == "2026-10-22")
+r = commit(DAY2, date="2026-10-23", confirm=["somebody-else"])
+check("confirming someone else doesn't count", r.status_code == 409)
+r = commit(DAY2, date="2026-10-23", confirm=["free-agent"])
 body = r.json()
-check("one changed, one new, none healed", (body["new"], body["changed"], body["healed"]) == (1, 1, 0), body)
-check("a partial report keeps players it didn't show", body["injured"] == 4)
+check("one changed, one new, one healed", (body["new"], body["changed"], body["healed"]) == (1, 1, 1), body)
+check("the player off the report is no longer injured", body["injured"] == 3
+      and "free-agent" not in {p["slug"] for p in c.get("/api/injuries").json()["players"]})
 check("the change shows the status move", "Hurt → Out" in SENT[-1]["content"], SENT[-1]["content"])
-check("only the changed teams are pinged",
-      pinged(SENT[-1]) == {TEAM_ROLE_IDS["LAL"], TEAM_ROLE_IDS["DEN"]}, pinged(SENT[-1]))
+check("the healed player is announced", "Free Agent - back from Strained Left Hip" in SENT[-1]["content"], SENT[-1]["content"])
+check("only the teams with a change are pinged",
+      pinged(SENT[-1]) == {TEAM_ROLE_IDS["LAL"], TEAM_ROLE_IDS["DEN"], TEAM_ROLE_IDS["BOS"]}, pinged(SENT[-1]))
 cur = {p["slug"]: p for p in c.get("/api/injuries").json()["players"]}
 check("since survives a change", cur["reed-paul"]["since"] == "2026-10-22" and cur["reed-paul"]["updated"] == "2026-10-23")
 
 SENT.clear()
-r = commit([row("reed-paul", status="Out", ovr=81, delta=-1), row("jokic-nikola", injury="Bruised Left Hip", duration="1-2 weeks")],
-           date="2026-10-23", complete=False)
+r = commit([row("reed-paul", status="Out", ovr=81, delta=-1)] + DAY2[1:], date="2026-10-23")
 check("an OVR move alone is not news", r.json()["changed"] == 0 and SENT == [], r.json())
 
-# ── complete report heals ─────────────────────────────────────────────────────
+# ── everyone off the report is healed ─────────────────────────────────────────
 
-print("complete report")
+print("healing")
 SENT.clear()
-r = commit([row("reed-paul", status="Out", ovr=81, delta=-1)], date="2026-10-24", complete=True)
+r = commit([row("reed-paul", status="Out", ovr=81, delta=-1)], date="2026-10-24")
+check("a short injury heals without asking; only the long one is flagged",
+      r.status_code == 409 and [p["slug"] for p in r.json()["detail"]["players"]] == ["ingram-brandon"], r.text)
+r = commit([row("reed-paul", status="Out", ovr=81, delta=-1)], date="2026-10-24", confirm=["ingram-brandon"])
 body = r.json()
-check("a complete report heals everyone it didn't show", body["healed"] == 3 and body["injured"] == 1, body)
+check("everyone not on the report is healed", body["healed"] == 2 and body["injured"] == 1, body)
 check("cleared players are announced", "✅ **Cleared**" in SENT[-1]["content"]
       and "Nikola Jokic - back from Bruised Left Hip" in SENT[-1]["content"], SENT[-1]["content"])
 check("an older report is refused", commit([row("reed-paul")], date="2026-10-23").status_code == 409)
+SENT.clear()
+r = commit([], date="2026-10-25", confirm=["reed-paul"])
+check("an empty report clears everyone", r.json()["healed"] == 1 and r.json()["injured"] == 0, r.json())
+check("and says so", "Paul Reed - back from Strained Left Hip" in SENT[-1]["content"], SENT[-1]["content"])
 
 hist = c.get("/api/injuries/history").json()
-check("history is newest first", hist[0]["date"] == "2026-10-24" and hist[-1]["date"] == "2026-10-22")
-check("history has every change", len(hist) == 3 + 2 + 3, len(hist))
+check("history is newest first", hist[0]["date"] == "2026-10-25" and hist[-1]["date"] == "2026-10-22")
+check("history has every change", len(hist) == 3 + 3 + 2 + 1, len(hist))
 check("history filters by team", {e["team"] for e in c.get("/api/injuries/history?team=den").json()} == {"DEN"})
 check("history filters by player", all(e["slug"] == "reed-paul"
                                        for e in c.get("/api/injuries/history?slug=reed-paul").json()))
@@ -242,6 +264,15 @@ check("history carries names", hist[0]["name"])
 check("the write is in the edit log", "injuries.json" in audit.EDITS_FILE.read_text())
 
 # ── a long report splits ──────────────────────────────────────────────────────
+
+print("durations")
+for d, days, ask in [("4-6 weeks", 28, True), ("2-4 Weeks", 14, True), ("1-2 weeks", 7, False),
+                     ("3 days", 3, False), ("Day-To-Day", 0, False), ("1 month", 30, True),
+                     ("Career", float("inf"), True), ("Out For Season", float("inf"), True)]:
+    check(f"{d!r} is {days} days at the low end, confirm={ask}",
+          inj.min_duration_days(d) == days and inj.needs_confirming({"duration": d}) == ask)
+check("an unreadable duration is confirmed, not assumed",
+      inj.min_duration_days("soon") is None and inj.needs_confirming({"duration": "soon"}))
 
 print("splitting")
 names = {f"p{i}": f"Player Number {i} With A Long Name" for i in range(120)}

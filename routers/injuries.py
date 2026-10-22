@@ -19,14 +19,24 @@ is that screen's whole pipeline, shaped like the box score one:
   `DISCORD_INJURY_CHANNEL` (`#injury-report`), pinging each affected team's
   role on that player's own line. Unset, nothing is posted.
 
-## A report heals only when it is the whole list
+## Off the report means healed
 
-A player on `injuries.json` who is missing from today's report is healthy
-again — but only if today's report is complete. A streamer who screenshotted
-the first page of a scrolling list has not told us the rest of the league got
-better, so `complete: false` applies new and changed injuries and heals no one.
-The parser decides `complete` from the screenshots (top and bottom of the list
-both visible) and asks when it can't tell.
+The report is the whole league's list, so a player on `injuries.json` who is
+missing from today's report is healthy again (league rule, 2026-10-22). That
+makes every report the full list: a long one is uploaded as several
+screenshots of the same day, and `/parse-injuries` reads them all before it
+commits.
+
+## A long injury that vanishes is confirmed, not assumed
+
+The likeliest way a player drops off a report is a parse that missed a row, so
+a heal is checked before anything is written. A player whose last reported
+duration was at least `CONFIRM_HEAL_DAYS` at its low end ("2-4 weeks",
+"Career"), or one that can't be read, is not healed silently: the commit is a
+409 listing them and writes nothing, and goes through only when the same
+request names each of them in `confirm_heals`. Per player, not a blanket flag,
+so a newly flagged one can't ride along on an earlier yes. A short injury
+("1-2 weeks", days, day-to-day) heals with no question.
 
 ## The team is the roster's, not the logo's
 
@@ -38,7 +48,7 @@ back to `team_shown`, with a warning.
 
 injuries.json:
 
-    {"last_report": {"id", "date", "complete", "committed_by", "committed_at"},
+    {"last_report": {"id", "date", "committed_by", "committed_at"},
      "players": {slug: {"slug", "team", "status", "injury", "duration",
                         "ovr", "ovr_delta", "since", "updated"}}}
 """
@@ -237,12 +247,39 @@ def _roster_teams() -> dict:
 # would bury the real news.
 _TRACKED = ("status", "injury", "duration")
 
+# A heal from an injury this long, or longer, at its low end needs confirming.
+CONFIRM_HEAL_DAYS = 14
+_UNIT_DAYS = {"day": 1, "week": 7, "month": 30}
+_OPEN_ENDED = re.compile(r"career|season|indefinite", re.I)
+_SHORT = re.compile(r"day[\s-]*to[\s-]*day|game[\s-]*time", re.I)
 
-def diff_report(current: dict, rows: list[dict], date: str, complete: bool) -> tuple[dict, list[dict]]:
+
+def min_duration_days(duration: str) -> Optional[float]:
+    """The low end of a 2K duration in days: "4-6 weeks" → 28, "3 days" → 3,
+    "Day-To-Day" → 0, "Career" → inf. None when it can't be read."""
+    d = (duration or "").strip()
+    if _OPEN_ENDED.search(d):
+        return float("inf")
+    if _SHORT.search(d):
+        return 0
+    m = re.match(r"^(\d+(?:\.\d+)?)(?:\s*[-–]\s*\d+(?:\.\d+)?)?\s*(day|week|month)s?\b", d, re.I)
+    if not m:
+        return None
+    return float(m.group(1)) * _UNIT_DAYS[m.group(2).lower()]
+
+
+def needs_confirming(prev: dict) -> bool:
+    """Whether healing this entry should be confirmed rather than assumed."""
+    days = min_duration_days(prev.get("duration") or "")
+    return days is None or days >= CONFIRM_HEAL_DAYS
+
+
+def diff_report(current: dict, rows: list[dict], date: str) -> tuple[dict, list[dict]]:
     """`(players_after, events)` for one report against the current list.
 
     `rows` are already resolved: each has slug, team, status, injury, duration,
-    ovr, ovr_delta. Pure, so the rules are testable without any files."""
+    ovr, ovr_delta. Anyone on the current list and not in `rows` is healed.
+    Pure, so the rules are testable without any files."""
     after = {}
     events = []
     seen = set()
@@ -262,12 +299,8 @@ def diff_report(current: dict, rows: list[dict], date: str, complete: bool) -> t
         entry["updated"] = date
         after[slug] = entry
     for slug, prev in current.items():
-        if slug in seen:
-            continue
-        if complete:
+        if slug not in seen:
             events.append({"kind": "healed", "slug": slug, "team": prev.get("team"), "before": _view(prev)})
-        else:
-            after[slug] = prev
     return after, events
 
 
@@ -475,9 +508,10 @@ class InjuryRow(BaseModel):
 
 class InjuryCommit(BaseModel):
     date: str
-    complete: bool
     rows: list[InjuryRow]
     report_id: Optional[str] = None
+    # Players a long injury would be healed from, confirmed by a person.
+    confirm_heals: list[str] = []
 
 
 def _clean(s: str) -> str:
@@ -535,11 +569,32 @@ def commit_injury_report(body: InjuryCommit, info: dict = Depends(require_any_ro
         if (last.get("date") or "") > date:
             raise HTTPException(status_code=409, detail=f"A report for {last['date']} is already "
                                 f"committed; a report for {date} is older than the current list.")
-        after, events = diff_report(state["players"], rows, date, body.complete)
+        after, events = diff_report(state["players"], rows, date)
+        confirmed = set(body.confirm_heals)
+        unconfirmed = []
+        for e in events:
+            prev = state["players"].get(e["slug"]) or {}
+            if e["kind"] == "healed" and e["slug"] not in confirmed and needs_confirming(prev):
+                unconfirmed.append({
+                    "slug": e["slug"],
+                    "name": player_name((bios.get(e["slug"]) or {}).get("name", "")) or e["slug"],
+                    "team": prev.get("team"), "status": prev.get("status"),
+                    "injury": prev.get("injury"), "duration": prev.get("duration"),
+                    "since": prev.get("since"), "last_seen": prev.get("updated"),
+                })
+        if unconfirmed:
+            raise HTTPException(status_code=409, detail={
+                "error": "confirm_heals",
+                "message": f"{len(unconfirmed)} player{'s' if len(unconfirmed) != 1 else ''} on a long "
+                           f"injury {'are' if len(unconfirmed) != 1 else 'is'} missing from this report. "
+                           f"Check the screenshots, then resend with each slug in confirm_heals if they "
+                           f"really are healthy. Nothing was written.",
+                "players": unconfirmed,
+            })
         stamp = {"date": date, "report_id": body.report_id}
         events = [{**stamp, **e} for e in events]
         _save_json(INJURIES_FILE, {
-            "last_report": {"id": body.report_id, "date": date, "complete": body.complete,
+            "last_report": {"id": body.report_id, "date": date,
                             "committed_by": info.get("name"), "committed_at": _now().isoformat()},
             "players": after,
         })
@@ -553,7 +608,7 @@ def commit_injury_report(body: InjuryCommit, info: dict = Depends(require_any_ro
     notify(date, events, names)
     counts = {k: sum(1 for e in events if e["kind"] == k) for k in ("new", "changed", "healed")}
     log_write(info, f"injuries/commit {date}: {counts['new']} new, {counts['changed']} changed, "
-                    f"{counts['healed']} healed ({'complete' if body.complete else 'partial'})")
+                    f"{counts['healed']} healed")
     return {"ok": True, **counts, "injured": len(after), "warnings": warnings}
 
 
