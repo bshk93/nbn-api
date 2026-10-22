@@ -181,13 +181,13 @@ msg = SENT[0]
 check("it pings exactly the affected teams",
       pinged(msg) == {TEAM_ROLE_IDS["LAL"], TEAM_ROLE_IDS["CLE"], TEAM_ROLE_IDS["BOS"]}, pinged(msg))
 check("it reads as a new injury",
-      "🚑 **New**" in msg["content"] and f"<@&{TEAM_ROLE_IDS['LAL']}> · Paul Reed — Hurt · Strained Left Hip · 4-6 weeks · OVR 80 (−2)" in msg["content"],
+      "🚑 **New**" in msg["content"] and f"<@&{TEAM_ROLE_IDS['LAL']}> Paul Reed - Hurt - Strained Left Hip - 4-6 weeks - OVR 80 (-2)" in msg["content"],
       msg["content"])
 check("no @everyone can slip through", msg["allowed_mentions"]["parse"] == [])
 lines = msg["content"].splitlines()
 check("each player line starts with its team's tag",
-      all(ln.startswith("<@&") for ln in lines if "·" in ln), msg["content"])
-check("there is no trailing line of tags", all("·" in ln for ln in lines if "<@&" in ln), msg["content"])
+      all(ln.startswith("<@&") for ln in lines if " - " in ln), msg["content"])
+check("there is no trailing line of tags", all(" - " in ln for ln in lines if "<@&" in ln), msg["content"])
 check("the screenshots moved to the kept folder as WebP",
       not (inj.PENDING_DIR / item["id"]).exists() and (inj.KEPT_DIR / item["id"] / "shot-1.webp").exists())
 check("committing a report that's gone is a 404",
@@ -229,7 +229,7 @@ r = commit([row("reed-paul", status="Out", ovr=81, delta=-1)], date="2026-10-24"
 body = r.json()
 check("a complete report heals everyone it didn't show", body["healed"] == 3 and body["injured"] == 1, body)
 check("cleared players are announced", "✅ **Cleared**" in SENT[-1]["content"]
-      and "Nikola Jokic — back from Bruised Left Hip" in SENT[-1]["content"], SENT[-1]["content"])
+      and "Nikola Jokic - back from Bruised Left Hip" in SENT[-1]["content"], SENT[-1]["content"])
 check("an older report is refused", commit([row("reed-paul")], date="2026-10-23").status_code == 409)
 
 hist = c.get("/api/injuries/history").json()
@@ -258,6 +258,14 @@ check("each message pings only the teams it names",
       all(all(f"<@&{rid}>" in m["content"] for rid in pinged(m)) for m in msgs))
 check("a team with no role is written out in bold", inj._team_tag("XYZ") == "**XYZ**" and inj._team_tag(None) == "**—**")
 check("no changes, no messages", inj.build_messages("2026-10-25", [], {}) == [])
+
+print("format")
+avatar = inj.build_messages("2026-10-22", [{"kind": "new", "slug": "avatar", "team": "WAS",
+    "after": {"status": "Hurt", "injury": "Weak Knees", "duration": "Career", "ovr": 69, "ovr_delta": -33}}],
+    {"avatar": "Avatar"})[0]
+check("a line reads: @Team Player - Status - Injury - Duration - OVR n (-d)",
+      avatar["content"].splitlines()[-1] == f"<@&{TEAM_ROLE_IDS['WAS']}> Avatar - Hurt - Weak Knees - Career - OVR 69 (-33)",
+      avatar["content"])
 
 print()
 if FAILS:

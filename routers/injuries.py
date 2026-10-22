@@ -284,7 +284,7 @@ def _ovr_bit(v: dict) -> str:
     if v.get("ovr") is None:
         return ""
     d = v.get("ovr_delta")
-    return f" · OVR {v['ovr']}" + (f" ({d:+d})".replace("-", "−") if d else "")
+    return f" - OVR {v['ovr']}" + (f" ({d:+d})" if d else "")
 
 
 def _team_tag(team: Optional[str]) -> str:
@@ -295,14 +295,14 @@ def _team_tag(team: Optional[str]) -> str:
 
 
 def _event_line(e: dict, names: dict) -> str:
-    who = f"{_team_tag(e.get('team'))} · {names.get(e['slug']) or e['slug']}"
+    who = f"{_team_tag(e.get('team'))} {names.get(e['slug']) or e['slug']}"
     if e["kind"] == "healed":
-        return f"{who} — back from {e['before'].get('injury') or 'injury'}"
+        return f"{who} - back from {e['before'].get('injury') or 'injury'}"
     a = e["after"]
     status = a.get("status") or ""
     if e["kind"] == "changed" and (e["before"].get("status") or "") != status:
         status = f"{e['before'].get('status')} → {status}"
-    return f"{who} — {status} · {a.get('injury')} · {a.get('duration')}{_ovr_bit(a)}"
+    return f"{who} - {status} - {a.get('injury')} - {a.get('duration')}{_ovr_bit(a)}"
 
 
 def _render(date: str, events: list[dict], names: dict, part: str = "") -> str:
