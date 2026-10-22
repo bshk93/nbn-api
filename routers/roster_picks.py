@@ -43,11 +43,19 @@ def get_roster(team: str):
 @router.put("/api/roster/{team}")
 def put_roster(team: str, body: dict, info: dict = Depends(require_role("rosters"))):
     path = team_path(team, "roster")
-    existing_headers, _ = read_csv(path)
+    existing_headers, existing_rows = read_csv(path)
     headers = body.get("headers") or existing_headers
     rows = body.get("rows", [])
     write_csv(path, headers, rows)
     log_write(info, f"PUT roster/{team.upper()} — {len(rows)} rows")
+    # A player edited off this roster comes off this team's trading block too,
+    # as he already does after a trade or release. Without it he stays listed
+    # by a team that no longer has him.
+    from .players import load_player_bios, _scrub_trading_block
+    slugs = lambda rs: {(r.get("SLUG") or "").strip() for r in rs} - {""}
+    removed = slugs(existing_rows) - slugs(rows)
+    if removed:
+        _scrub_trading_block({team.upper(): removed}, load_player_bios())
     return {"ok": True}
 
 

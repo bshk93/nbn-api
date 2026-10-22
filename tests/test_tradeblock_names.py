@@ -71,6 +71,18 @@ reset("Jared McCain", "Isaac Okoro")
 pl._scrub_trading_block({"GSW": {"mccain-jared"}}, BIOS)
 check("scrubs the differently-cased entry", gsw_names() == ["Isaac Okoro"], gsw_names())
 
+print("\nscrub after a roster edit")
+# PUT /api/roster is the one roster write that isn't a transaction, and it
+# never scrubbed the block.
+rp.team_path = lambda team, kind: f"/nonexistent/{team}-{kind}.csv"
+rp.write_csv = lambda *a, **k: None
+reset("Jared McCain", "Isaac Okoro")
+rp.put_roster("GSW", {"rows": [{"SLUG": "okoro-isaac"}]}, INFO)
+check("a player edited off the roster leaves the block", gsw_names() == ["Isaac Okoro"], gsw_names())
+reset("Jared McCain", "Isaac Okoro")
+rp.put_roster("GSW", {"rows": [{"SLUG": "okoro-isaac"}, {"SLUG": "mccain-jared"}]}, INFO)
+check("a player still on the roster stays", len(gsw_names()) == 2, gsw_names())
+
 print()
 if FAILS:
     print(f"{len(FAILS)} failed: {FAILS}")
