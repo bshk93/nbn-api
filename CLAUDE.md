@@ -874,8 +874,9 @@ Three rules, pinned by `tests/test_injuries.py`:
 - **Team is the roster CSV's**, not the 2K logo; a disagreement comes back as
   a warning. A player on no roster falls back to `team_shown`.
 - **Discord gets changes only** — `changed` is status, injury or duration, not
-  OVR — to `DISCORD_INJURY_CHANNEL` (`#injury-report`), pinging each affected
-  team via `discord_notify.with_team_pings`, split by team past ~1,700 chars.
+  OVR — to `DISCORD_INJURY_CHANNEL` (`#injury-report`). Each line starts with
+  the team's role mention (`TEAM_ROLE_IDS`), and `allowed_mentions` names
+  exactly those roles; split by team past ~1,700 chars.
   A re-commit of the same report posts nothing. Reports apply in date order; an
   older one is a 409.
 

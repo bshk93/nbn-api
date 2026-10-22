@@ -17,7 +17,7 @@ is that screen's whole pipeline, shaped like the box score one:
   retention as box score screenshots.
 - **Announce** — the changes, and only the changes, go to
   `DISCORD_INJURY_CHANNEL` (`#injury-report`), pinging each affected team's
-  role. Unset, nothing is posted.
+  role on that player's own line. Unset, nothing is posted.
 
 ## A report heals only when it is the whole list
 
@@ -64,7 +64,7 @@ from .auth import require_any_role
 from .boxscore_shots import _to_webp, MAX_IMAGE_BYTES
 from .boxscores import _checked_image_ext
 from .constants import DATA_DIR, VALID_TEAMS, logger
-from .discord_notify import with_team_pings
+from .discord_notify import TEAM_ROLE_IDS
 from .league_time import league_today_str
 from .names import player_name
 from .players import load_player_bios
@@ -287,8 +287,15 @@ def _ovr_bit(v: dict) -> str:
     return f" · OVR {v['ovr']}" + (f" ({d:+d})".replace("-", "−") if d else "")
 
 
+def _team_tag(team: Optional[str]) -> str:
+    """The team's role mention, so the tag sits on the player's own line. A team
+    with no role (or no team at all) is written out in bold instead."""
+    rid = TEAM_ROLE_IDS.get((team or "").upper())
+    return f"<@&{rid}>" if rid else f"**{team or '—'}**"
+
+
 def _event_line(e: dict, names: dict) -> str:
-    who = f"**{e.get('team') or '—'}** · {names.get(e['slug']) or e['slug']}"
+    who = f"{_team_tag(e.get('team'))} · {names.get(e['slug']) or e['slug']}"
     if e["kind"] == "healed":
         return f"{who} — back from {e['before'].get('injury') or 'injury'}"
     a = e["after"]
@@ -310,8 +317,9 @@ def _render(date: str, events: list[dict], names: dict, part: str = "") -> str:
 
 def build_messages(date: str, events: list[dict], names: dict) -> list[dict]:
     """The Discord payloads for one report's changes: one message, or one per
-    group of teams when a single message would be too long. Each pings exactly
-    the teams it names."""
+    group of teams when a single message would be too long. Each line starts
+    with its team's role mention, and each message pings exactly the teams it
+    names — once per team, however many of its players are listed."""
     if not events:
         return []
     order = sorted({e.get("team") or "" for e in events})
@@ -331,7 +339,11 @@ def build_messages(date: str, events: list[dict], names: dict) -> list[dict]:
     for i, chunk in enumerate(chunks):
         part = f" ({i + 1}/{len(chunks)})" if len(chunks) > 1 else ""
         text = _render(date, chunk, names, part)
-        out.append(with_team_pings(text, [e.get("team") for e in chunk]))
+        # The tags are inline, one per line; `allowed_mentions` names exactly
+        # those roles, so nothing else in the text (a stray @everyone) can ping.
+        roles = sorted({TEAM_ROLE_IDS[t] for t in ((e.get("team") or "").upper() for e in chunk)
+                        if t in TEAM_ROLE_IDS})
+        out.append({"content": text, "allowed_mentions": {"parse": [], "roles": roles}})
     return out
 
 

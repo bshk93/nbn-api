@@ -181,9 +181,13 @@ msg = SENT[0]
 check("it pings exactly the affected teams",
       pinged(msg) == {TEAM_ROLE_IDS["LAL"], TEAM_ROLE_IDS["CLE"], TEAM_ROLE_IDS["BOS"]}, pinged(msg))
 check("it reads as a new injury",
-      "🚑 **New**" in msg["content"] and "**LAL** · Paul Reed — Hurt · Strained Left Hip · 4-6 weeks · OVR 80 (−2)" in msg["content"],
+      "🚑 **New**" in msg["content"] and f"<@&{TEAM_ROLE_IDS['LAL']}> · Paul Reed — Hurt · Strained Left Hip · 4-6 weeks · OVR 80 (−2)" in msg["content"],
       msg["content"])
 check("no @everyone can slip through", msg["allowed_mentions"]["parse"] == [])
+lines = msg["content"].splitlines()
+check("each player line starts with its team's tag",
+      all(ln.startswith("<@&") for ln in lines if "·" in ln), msg["content"])
+check("there is no trailing line of tags", all("·" in ln for ln in lines if "<@&" in ln), msg["content"])
 check("the screenshots moved to the kept folder as WebP",
       not (inj.PENDING_DIR / item["id"]).exists() and (inj.KEPT_DIR / item["id"] / "shot-1.webp").exists())
 check("committing a report that's gone is a 404",
@@ -251,7 +255,8 @@ check("each fits Discord's limit", all(len(m["content"]) <= 2000 for m in msgs),
 check("every team is pinged exactly once overall",
       sorted(r for m in msgs for r in pinged(m)) == sorted(TEAM_ROLE_IDS.values()))
 check("each message pings only the teams it names",
-      all(all(f"**{t}**" in m["content"] for t, rid in TEAM_ROLE_IDS.items() if rid in pinged(m)) for m in msgs))
+      all(all(f"<@&{rid}>" in m["content"] for rid in pinged(m)) for m in msgs))
+check("a team with no role is written out in bold", inj._team_tag("XYZ") == "**XYZ**" and inj._team_tag(None) == "**—**")
 check("no changes, no messages", inj.build_messages("2026-10-25", [], {}) == [])
 
 print()
