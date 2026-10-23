@@ -895,6 +895,38 @@ score is the client's word: `_plausible` refuses only what no game with that
 many lines could reach. **Don't attach NB¥ or anything else to it** while that
 stays true. Pinned by `tests/test_tetris.py`.
 
+## Quadrant charts and headshots (`routers/quadrants.py`, `routers/headshots.py`)
+
+Behind the Quadrants tab on `nbn-today/frivolities/index.html`: pick a stat per
+axis, caption the four quadrants, and each player is drawn as his face at his
+real values.
+
+| Route | Auth | What |
+|---|---|---|
+| `GET /api/quadrants`, `GET /api/quadrants/{n}` | Public | the gallery (newest first, no configs); one chart |
+| `POST /api/quadrants` | any member | `{title, config}` — the page's own config object, validated against `STAT_KEYS` |
+| `DELETE /api/quadrants/{n}` | its author, or `admin` | |
+| `GET /api/players/{slug}/headshot` | Public | the bio's `photo_url`, cropped square to 160px JPEG and cached in `$DATA_DIR/headshots/` |
+
+- **A saved chart is a recipe, not a picture.** `quadrants.json` stores the
+  config and the page redraws from live stats, so a chart moves with the
+  numbers. Numbers come from a monotonic `seq`, like suggestions.
+- **`STAT_KEYS` mirrors `AXIS_VARS` on the page** (plus `ovr`). A stat added
+  there needs adding here, or charts using it can't be saved.
+- **The headshot proxy exists for the PNG export.** basketball-reference sends
+  no CORS headers, and a canvas that draws a cross-origin image can't be
+  exported. It only ever fetches the URL on the bio — the route takes a slug,
+  never a URL — so it is not an open proxy. The cache name hashes the URL, so
+  a new photo replaces the old one; a failed fetch is a 404 (the page draws
+  initials) remembered for an hour.
+- **Fetches are paced per host** (`HOST_INTERVAL`, 3.5s): Sports-Reference
+  jails a client past ~20 requests a minute. Warm the whole cache once with
+  `venv/bin/python fetch_headshots.py` (about an hour; re-runs fetch only what's
+  missing). `headshots/` is rebuildable, so keep it in the data dir's
+  `.gitignore` alongside `irl/`.
+
+Pinned by `tests/test_quadrants.py` and `tests/test_headshots.py`.
+
 ## Docs discipline
 
 Keep `CLAUDE.md` and `docs/` in sync with every code change. If a change affects an endpoint, a data field, a transaction type, or any behavior described in the docs, update the relevant doc in the same commit.

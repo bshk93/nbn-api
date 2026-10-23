@@ -46,7 +46,8 @@ MODULES = ["test_route_bindings",
            "test_declared_experience", "test_two_way_release", "test_trade_releases",
            "test_apply_extension", "test_extension_trade_freeze", "test_extensions",
            "test_nbnfl", "test_qualifying_offers", "test_signing_books",
-           "test_split_players", "test_trc_discord", "test_injuries", "test_tetris"]
+           "test_split_players", "test_trc_discord", "test_injuries", "test_tetris",
+           "test_quadrants", "test_headshots"]
 
 # The picks_conveyance package keeps its tests beside it. They were never in
 # this list, which is how test_curated sat broken for two months (2026-09-30).
