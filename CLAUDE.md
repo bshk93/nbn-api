@@ -886,6 +886,15 @@ Four rules, pinned by `tests/test_injuries.py`:
   A re-commit of the same report posts nothing. Reports apply in date order; an
   older one is a 409.
 
+## Tetris leaderboard (`routers/tetris.py`)
+
+`GET /api/tetris/leaderboard` (public, top 20) and `POST /api/tetris/scores`
+(member token, `{score, lines}`) behind the homepage's Tetris card. Each
+member's best game in `tetris-scores.json`. The game runs in the browser, so a
+score is the client's word: `_plausible` refuses only what no game with that
+many lines could reach. **Don't attach NB¥ or anything else to it** while that
+stays true. Pinned by `tests/test_tetris.py`.
+
 ## Docs discipline
 
 Keep `CLAUDE.md` and `docs/` in sync with every code change. If a change affects an endpoint, a data field, a transaction type, or any behavior described in the docs, update the relevant doc in the same commit.
