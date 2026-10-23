@@ -19,6 +19,9 @@ DATA_DIR  = Path("/var/lib/nothing-but-stats")
 # (rosters, picks, bios) stays at DATA_DIR itself.
 DERIVED_DIR = DATA_DIR / "derived"
 AVATARS_DIR = DATA_DIR / "avatars"
+# Square headshots cached from each bio's photo_url — routers/headshots.py.
+# Rebuildable, so not backed up.
+HEADSHOTS_DIR = DATA_DIR / "headshots"
 PENDING_BOXSCORES_DIR  = DATA_DIR / "pending-boxscores"
 # Committed games' screenshots, kept 14 days — routers/boxscore_shots.py.
 KEPT_BOXSCORES_DIR     = DATA_DIR / "boxscore-screenshots"
@@ -71,6 +74,7 @@ DRAFT_LIVE_PICKS_FILE = DATA_DIR / "draft-live-picks.csv"
 # Member draft-pick grades: { "<year>": { "<slug>": { "<member>": "A" } } }
 DRAFT_GRADES_FILE = DATA_DIR / "draft-grades.json"
 SUGGESTIONS_FILE = DATA_DIR / "suggestions.json"
+QUADRANTS_FILE = DATA_DIR / "quadrants.json"
 # Trade Request Committee — see nbn-today/docs/trc-trade-pipeline.md.
 TRADE_REQUESTS_FILE = DATA_DIR / "trade-requests.json"
 # PDC free agency — see nbn-today/docs/pdc-free-agency-spec.md § 4.
