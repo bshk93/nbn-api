@@ -126,7 +126,7 @@ want = 100 * (1 - 15 / inv.MOVE_DIVISOR) * (1 - 10 / inv.MOVE_DIVISOR)
 check("price is the unrounded product of the game factors", abs(current["BOS"] - want) < 1e-9)
 # BOS and NYK are both Atlantic and every move is one beating the other, so the
 # index's daily average of their factors is exactly 1.
-check("an index is the daily average of its teams' moves", abs(current["NATL"] - 100) < 1e-9)
+check("an index is the daily average of its teams' moves", abs(current["ATLC"] - 100) < 1e-9)
 
 print("\nPlayoffs")
 # Two good teams (both +20 a game) meet in the playoffs. The old formula
@@ -143,8 +143,8 @@ bos = next(h for h in prices["BOS"] if h["date"] == "2027-04-20")
 nyk = next(h for h in prices["NYK"] if h["date"] == "2027-04-20")
 check("a playoff game moves by the margin, doubled", bos["diff_diff"] == 10 and nyk["diff_diff"] == -10)
 check("a playoff game between two teams in one index leaves it flat",
-      abs(next(h for h in prices["NATL"] if h["date"] == "2027-04-20")["price"]
-          - next(h for h in prices["NATL"] if h["date"] == "2026-11-03")["price"]) < 1e-3)
+      abs(next(h for h in prices["ATLC"] if h["date"] == "2027-04-20")["price"]
+          - next(h for h in prices["ATLC"] if h["date"] == "2026-11-03")["price"]) < 1e-3)
 (D / "allstats-playoffs-27.csv").unlink()
 write_games("allstats-26-27.csv", [
     ("2026-11-01", "BOS", "NYK", 120, 100),

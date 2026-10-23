@@ -71,7 +71,7 @@ RESET_AT = "2026-09-25T17:59:20+00:00"
 INDEXES: dict[str, list[str]] = {
     "EAST": ["ATL", "BKN", "BOS", "CHA", "CHI", "CLE", "DET", "IND", "MIA", "MIL", "NYK", "ORL", "PHI", "TOR", "WAS"],
     "WEST": ["DAL", "DEN", "GSW", "HOU", "LAC", "LAL", "MEM", "MIN", "NOP", "OKC", "PHX", "POR", "SAC", "SAS", "UTA"],
-    "NATL": ["BOS", "BKN", "NYK", "PHI", "TOR"],
+    "ATLC": ["BOS", "BKN", "NYK", "PHI", "TOR"],
     "CTRL": ["CHI", "CLE", "DET", "IND", "MIL"],
     "SE":   ["ATL", "CHA", "MIA", "ORL", "WAS"],
     "NW":   ["DEN", "MIN", "OKC", "POR", "UTA"],
@@ -81,7 +81,7 @@ INDEXES: dict[str, list[str]] = {
 INDEX_META: dict[str, dict] = {
     "EAST": {"name": "Eastern Conference", "conf": "East"},
     "WEST": {"name": "Western Conference", "conf": "West"},
-    "NATL": {"name": "Atlantic Division",  "conf": "East", "div": "Atlantic"},
+    "ATLC": {"name": "Atlantic Division",  "conf": "East", "div": "Atlantic"},
     "CTRL": {"name": "Central Division",   "conf": "East", "div": "Central"},
     "SE":   {"name": "Southeast Division", "conf": "East", "div": "Southeast"},
     "NW":   {"name": "Northwest Division", "conf": "West", "div": "Northwest"},
