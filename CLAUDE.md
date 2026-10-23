@@ -258,6 +258,12 @@ process.
     stats (sorted by scoring) with a record/seed/margin header from
     `data/{abbr}-seasons.csv`. Season defaults to the most recent on record.
     `TEAM_NAMES` maps abbr → full name; title links to the team page.
+  - `/roster team:<abbr>` — current depth chart. Starters are the team's saved
+    rotation (`GET /api/rotations`, via `_starting_five`) when it has one, else
+    the computed five — the same pick as the team page and `/preview`.
+  - `/lineups team1 team2` — both teams' starting fives side by side (same
+    `_starting_five`), oriented away/home off their next game this season with
+    a link to its `/preview` page; teams stay in the order given if none.
   - `/leaders [stat] [season] [team]` — top-10 regular-season totals for a stat
     (`LEADER_STATS`), aggregated from `player_seasons.csv` with optional
     season/team filters. `stat` is a Discord choice list (default Points).

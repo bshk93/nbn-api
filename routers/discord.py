@@ -614,9 +614,10 @@ def team_ratings_response(team_arg: str) -> dict:
 # ── /roster ───────────────────────────────────────────────────────────────────
 # Vertical depth chart: one block per position (PG→C), starter bolded on top,
 # reserves below by OVR. The starting five is picked the same way as the team
-# page's Rosters tab (buildRosterTable's 'depth' mode in teams/team.js) -- the
-# search below is a direct port of computeStartingFive in teams/lineup.js,
-# keep the two in sync. Reserves are bucketed by primary position (pos[0]),
+# page's Rosters tab and /preview: the team's saved rotation (GET /api/rotations)
+# when it has one -- _rotation_five, a port of rotationFive in teams/lineup.js --
+# else the search below, a direct port of computeStartingFive there. Keep both
+# in sync with the JS. Reserves are bucketed by primary position (pos[0]),
 # not full eligibility.
 #
 # A player's CURRENT-season cap_holds entry (this season is itself a pending
@@ -682,6 +683,46 @@ def _compute_starting_five(players: list[dict]) -> list[dict | None]:
     return best or [None] * len(DEPTH_SLOTS)
 
 
+def _rotation_five(players: list[dict], rotation: dict | None) -> list[dict | None] | None:
+    """The team's own starting five from its saved rotation (`{slot: slug}`),
+    or None when that names no starter among `players`. Port of rotationFive in
+    teams/lineup.js: positions are not checked -- where a player starts is the
+    team's call."""
+    if not rotation:
+        return None
+    by_slug = {p["slug"]: p for p in players}
+    used: set[str] = set()
+    five: list[dict | None] = []
+    for slot in DEPTH_SLOTS:
+        p = by_slug.get(rotation.get(slot))
+        if p is None or p["slug"] in used:
+            five.append(None)
+            continue
+        used.add(p["slug"])
+        five.append(p)
+    return five if any(five) else None
+
+
+def _team_rotation(team: str) -> dict | None:
+    from .coaching_settings import get_rotations  # public order only, never minutes
+    try:
+        return get_rotations().get(team)
+    except Exception:
+        logger.exception("could not read rotations")
+        return None
+
+
+def _starting_five(team: str, players: list[dict]) -> tuple[list[dict | None], bool]:
+    """(five, from_rotation) -- the saved rotation first, as /preview and the
+    team page do (standard and two-way contracts are both eligible there), else
+    the computed five over standard contracts only."""
+    pool = [p for p in players if p["type"] in ("player", "two-way")]
+    five = _rotation_five(pool, _team_rotation(team))
+    if five is not None:
+        return five, True
+    return _compute_starting_five([p for p in players if p["type"] == "player"]), False
+
+
 def _roster_augmented(team: str) -> list[dict]:
     roster_path = DATA_DIR / f"{team.lower()}-roster.csv"
     bios = _load_json(PLAYER_BIOS_FILE, {})
@@ -724,12 +765,11 @@ _ROSTER_TYPE_LABELS = {"two-way": "Two-Way Contracts", "draft-rights": "Draft Ri
 _ROSTER_TYPE_ORDER = {"two-way": 0, "draft-rights": 1, "dead": 2}
 
 
-def _depth_rows(players: list[dict]) -> list[list[dict | None]]:
+def _depth_rows(players: list[dict], five: list[dict | None]) -> list[list[dict | None]]:
     """One list per DEPTH_SLOTS position: [starter, *bench], unpadded.
-    Starter comes from computeStartingFive (full eligibility); everyone else
+    Starters are `five` (see _starting_five); every other standard contract
     is bucketed by primary position (pos_list[0]) and sorted by OVR desc."""
     starter_pool = [p for p in players if p["type"] == "player"]
-    five = _compute_starting_five(starter_pool)
     started_ids = {id(p) for p in five if p is not None}
 
     by_pos: dict[str, list[dict]] = {slot: [] for slot in DEPTH_SLOTS}
@@ -756,7 +796,9 @@ def roster_response(team_arg: str) -> dict:
     if not players:
         return _error(f"No roster on file for **{TEAM_NAMES[team]}**.")
 
-    rows = _depth_rows(players)
+    five, from_rotation = _starting_five(team, players)
+    started_ids = {id(p) for p in five if p is not None}
+    rows = _depth_rows(players, five)
     blocks = []
     for slot, row in zip(DEPTH_SLOTS, rows):
         starter, *reserves = row
@@ -764,7 +806,7 @@ def roster_response(team_arg: str) -> dict:
         block += [_player_line(p, bold=False) for p in reserves]
         blocks.append("\n".join(block))
 
-    rest = sorted((p for p in players if p["type"] != "player"),
+    rest = sorted((p for p in players if p["type"] != "player" and id(p) not in started_ids),
                   key=lambda p: (_ROSTER_TYPE_ORDER.get(p["type"], 3), -(p["ovr"] or 0)))
     rest_by_type: dict[str, list[dict]] = {}
     for p in rest:
@@ -783,7 +825,79 @@ def roster_response(team_arg: str) -> dict:
         "url": f"https://nbn.today/teams/{team}/",
         "color": TEAM_COLORS.get(team, NBN_BLUE),
         "description": desc,
-        "footer": {"text": "NBN roster · depth chart · (UFA/RFA/PO/TO/NG) flags this season's pending option/hold status"},
+        "footer": {"text": ("NBN roster · starters from the team's saved rotation" if from_rotation
+                            else "NBN roster · projected starters (no saved rotation)")
+                           + " · (UFA/RFA/PO/TO/NG) flags this season's pending option/hold status"},
+    }
+    return {"type": CHANNEL_MESSAGE, "data": {"embeds": [embed]}}
+
+
+# ── /lineups ─────────────────────────────────────────────────────────────────
+# Both teams' starting fives side by side, from today's rosters -- the same
+# pick as /roster and the "Starting fives" cards on /preview. When the two
+# teams have an upcoming game this season, it orients away/home off that game
+# and links its preview page; otherwise the teams stay in the order given.
+
+def _next_meeting(a: str, b: str) -> dict | None:
+    from .schedule import _load
+    from .league_time import league_today_str
+    today = league_today_str()
+    try:
+        games = _load(_current_league_year())["games"]
+    except Exception:
+        logger.exception("could not read schedule")
+        return None
+    for g in games:  # stored sorted by date, then tip-off
+        if g.get("date", "") >= today and {g.get("away_team"), g.get("home_team")} == {a, b}:
+            return g
+    return None
+
+
+def _lineup_field(team: str, title: str) -> dict:
+    players = _roster_augmented(team)
+    if not players:
+        return {"name": title, "value": "*Roster unavailable.*", "inline": True}
+    five, from_rotation = _starting_five(team, players)
+    lines = [f"`{slot:<2}` {_display_name(p['name_raw'])} — {_fmt_ovr(p['ovr'])}" if p
+             else f"`{slot:<2}` —" for slot, p in zip(DEPTH_SLOTS, five)]
+    ovrs = [float(p["ovr"]) for p in five if p and p.get("ovr") is not None]
+    if ovrs:
+        lines.append(f"*Avg OVR {sum(ovrs) / len(ovrs):.1f}*")
+    label = "starters" if from_rotation else "projected starters"
+    return {"name": f"{title} {label}", "value": "\n".join(lines), "inline": True}
+
+
+def lineups_response(t1_arg: str, t2_arg: str) -> dict:
+    t1, t2 = t1_arg.strip().upper(), t2_arg.strip().upper()
+    for raw, t in ((t1_arg, t1), (t2_arg, t2)):
+        if t not in TEAM_NAMES:
+            return _error(f"Unknown team **{raw}**. Use a 3-letter abbreviation, e.g. `HOU`.")
+    if t1 == t2:
+        return _error("Pick two different teams.")
+
+    game = _next_meeting(t1, t2)
+    if game:
+        from datetime import date as _date
+        away, home = game["away_team"], game["home_team"]
+        day = _date.fromisoformat(game["date"]).strftime("%a %b %-d")
+        tip = f" · {game['time_et']} ET" if game.get("time_et") else ""
+        desc = f"Next meeting: **{day}{tip}**"
+        url = f"https://nbn.today/preview/?away={away}&home={home}&date={game['date']}"
+        title = f"{away} @ {home} — Starting Lineups"
+    else:
+        away, home = t1, t2
+        desc = "No upcoming game between these two on this season's schedule."
+        url = f"https://nbn.today/teams/{home}/"
+        title = f"{away} vs {home} — Starting Lineups"
+
+    embed = {
+        "title": title,
+        "url": url,
+        "color": TEAM_COLORS.get(home, NBN_BLUE),
+        "description": desc,
+        "fields": [_lineup_field(away, away), _lineup_field(home, home)],
+        "footer": {"text": "From today's rosters and ratings · a team's saved rotation when it has one, "
+                           "otherwise projected from positions + OVR"},
     }
     return {"type": CHANNEL_MESSAGE, "data": {"embeds": [embed]}}
 
@@ -1554,6 +1668,7 @@ _HELP_GROUPS = [
     ("Teams & League", [
         "`/team team [season]` — roster + per-game stats",
         "`/roster team` — current roster: starting five, bench, two-way, dead cap",
+        "`/lineups team1 team2` — both teams' starting fives (+ next meeting)",
         "`/team-ratings team` — average 2K attributes + league rank across a team's top 8 players",
         "`/standings [season]` — conference standings",
         "`/leaders [stat] [season] [team]` — top-10 totals",
@@ -1627,6 +1742,8 @@ def dispatch(data: dict, invoker: dict) -> dict:
         return team_response(_option(data, "team"), _option(data, "season"))
     if cmd == "roster":
         return roster_response(_option(data, "team"))
+    if cmd == "lineups":
+        return lineups_response(_option(data, "team1"), _option(data, "team2"))
     if cmd == "team-ratings":
         return team_ratings_response(_option(data, "team"))
     if cmd == "leaders":

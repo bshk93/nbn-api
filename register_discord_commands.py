@@ -87,6 +87,14 @@ COMMANDS = [
         ],
     },
     {
+        "name": "lineups",
+        "description": "Both teams' starting fives for a matchup, plus their next meeting",
+        "options": [
+            {"name": "team1", "description": "Team abbreviation, e.g. PHX", "type": 3, "required": True},
+            {"name": "team2", "description": "Team abbreviation, e.g. LAL", "type": 3, "required": True},
+        ],
+    },
+    {
         "name": "team-ratings",
         "description": "A team's average NBA 2K attributes (+ league rank) across its top 8 rostered players",
         "options": [
