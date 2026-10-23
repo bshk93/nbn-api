@@ -6,6 +6,7 @@ What must keep being true:
     from its first game;
   * a price is the full-precision product of `1 + diff_diff / MOVE_DIVISOR`,
     and nothing a member does moves it;
+  * a playoff game moves by its margin alone, doubled, so it is zero-sum;
   * a team can't be traded while a played game of its has no box score, and
     an index can't while any of its teams can't; today's games only count as
     played once Pick'em says the day has started;
@@ -126,6 +127,29 @@ check("price is the unrounded product of the game factors", abs(current["BOS"] -
 # BOS and NYK are both Atlantic and every move is one beating the other, so the
 # index's daily average of their factors is exactly 1.
 check("an index is the daily average of its teams' moves", abs(current["NATL"] - 100) < 1e-9)
+
+print("\nPlayoffs")
+# Two good teams (both +20 a game) meet in the playoffs. The old formula
+# credited both sides for the strong opponent; now a game is zero-sum.
+write_games("allstats-playoffs-27.csv", [("2027-04-20", "BOS", "NYK", 105, 100)])
+(D / "allstats-playoffs-27.csv").write_text(
+    (D / "allstats-playoffs-27.csv").read_text().replace(",REG", ",PLAYOFF"))
+write_games("allstats-26-27.csv", [
+    ("2026-11-01", "BOS", "ATL", 120, 100), ("2026-11-01", "NYK", "CHI", 120, 100),
+    ("2026-11-03", "BOS", "CHI", 120, 100), ("2026-11-03", "NYK", "ATL", 120, 100),
+])
+prices, _ = inv._get_prices()
+bos = next(h for h in prices["BOS"] if h["date"] == "2027-04-20")
+nyk = next(h for h in prices["NYK"] if h["date"] == "2027-04-20")
+check("a playoff game moves by the margin, doubled", bos["diff_diff"] == 10 and nyk["diff_diff"] == -10)
+check("a playoff game between two teams in one index leaves it flat",
+      abs(next(h for h in prices["NATL"] if h["date"] == "2027-04-20")["price"]
+          - next(h for h in prices["NATL"] if h["date"] == "2026-11-03")["price"]) < 1e-3)
+(D / "allstats-playoffs-27.csv").unlink()
+write_games("allstats-26-27.csv", [
+    ("2026-11-01", "BOS", "NYK", 120, 100),
+    ("2026-11-03", "NYK", "BOS", 90, 100),
+])
 
 print("\nNo member moves a price")
 reset_market()

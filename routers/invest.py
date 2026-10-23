@@ -5,7 +5,9 @@ no counterparty: profit is minted and losses are burned. The rules:
 
   * **Price.** Every ticker starts at 100 in 20-21 and moves after each game by
     `1 + diff_diff / MOVE_DIVISOR`, where `diff_diff` is the margin plus the
-    opponent's average margin so far that season (doubled in the playoffs).
+    opponent's average margin so far that season. A playoff game counts the
+    margin alone, doubled: the opponent credit doesn't cancel out when every
+    team is a good one, so it inflated every postseason.
     Returns are a percentage, so the price level never matters. Nothing a
     member does moves a price: the old sentiment overlay let one member pump
     the stock he was trading, and was deleted. The price is compounded at full
@@ -254,15 +256,19 @@ def _compute_prices(own_avg: bool = False) -> tuple[dict, dict]:
     for g in games:
         opp_avg = _avg(game_meta.get((g["opp_raw"], g["date"])))
         own     = _avg(game_meta.get((g["team"],    g["date"]))) if own_avg else 0.0
-        if opp_avg is None or own is None:
+        if g["is_playoff"]:
+            # Margin only, doubled. Every playoff team is a good team, so the
+            # opponent credit never cancels out there: both sides of every
+            # game gained, and the indexes rose 5-29% every postseason.
+            dd = 2.0 * g["diff"]
+        elif opp_avg is None or own is None:
             g["diff_diff"] = None
             g["pct_chg"]   = 1.0
+            continue
         else:
             dd = g["diff"] + opp_avg - own
-            if g["is_playoff"]:
-                dd *= 2.0
-            g["diff_diff"] = dd
-            g["pct_chg"]   = 1.0 + dd / MOVE_DIVISOR
+        g["diff_diff"] = dd
+        g["pct_chg"]   = 1.0 + dd / MOVE_DIVISOR
 
     team_games: dict = defaultdict(list)
     for g in games:
