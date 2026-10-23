@@ -35,7 +35,7 @@ from .constants import TEAM_NAMES, DERIVED_DIR, DATA_DIR, ATTRIBUTES_FILE, PLAYE
 from .storage import _load_json, _current_league_year
 from .auth import load_members, save_members
 from .tips import perform_tip, TipError
-from .invest import get_all_holdings, compute_member_pnl  # net worth + per-stock P&L
+from .invest import compute_member_pnl  # per-stock P&L
 from .players import _display_name  # 'LAST, FIRST' bio name -> title-case 'First Last'
 
 logger = logging.getLogger("nbn-api.discord")
@@ -1137,16 +1137,17 @@ def _money(v) -> str:
 
 
 def balances_response() -> dict:
-    # net worth = liquid NB¥ + current market value of NBN Wall Street holdings
-    # (long shares + short equity), valued exactly as the site does.
-    rows = [r for r in get_all_holdings() if r["net_worth"] > 0][:10]
+    # The site's one net worth (routers/nbyen.py): wallet + everything held.
+    from .nbyen import net_worth_rows
+    rows = [r for r in net_worth_rows() if r["net_worth"] > 0][:10]
     if not rows:
         return _error("No NB¥ balances on record yet.")
-    data = [[f"{i+1}.", r["member"], _money(r["net_worth"]), _money(r["liquid"]), _money(r["equity"])]
+    data = [[f"{i+1}.", r["name"], _money(r["net_worth"]), _money(r["balance"]),
+             _money(r["net_worth"] - r["balance"])]
             for i, r in enumerate(rows)]
-    table = _grid([("#", True), ("MEMBER", True), ("NET", False), ("CASH", False), ("STK", False)], data)
+    table = _grid([("#", True), ("MEMBER", True), ("NET", False), ("CASH", False), ("HELD", False)], data)
     return _embed("💰 NB¥ Net Worth", "```\n" + table + "\n```",
-                  footer="NBN economy · cash + Wall Street holdings")
+                  footer="NBN economy · cash + stocks, futures and open bets")
 
 
 # ── /h2h ──────────────────────────────────────────────────────────────────────
@@ -1564,7 +1565,7 @@ _HELP_GROUPS = [
     ]),
     ("NB¥ Economy", [
         "`/nbyen` — your balance (private)",
-        "`/nbyen-leaders` — net worth leaders (cash + stocks)",
+        "`/nbyen-leaders` — net worth leaders (cash + everything held)",
         "`/trades [member]` — Wall Street P&L per stock (realized + unrealized)",
         "`/tip user amount [message]` — tip NB¥ to a member",
         "`/whoami` — your Discord link status",

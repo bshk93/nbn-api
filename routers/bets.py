@@ -174,6 +174,17 @@ def _load_bets() -> list[dict]:
     return _load_json(BETS_FILE, [])
 
 
+def open_stakes() -> dict[str, float]:
+    """NB¥ each member has staked on bets that haven't settled. It has left the
+    wallet but isn't lost yet, so net worth counts it at face value."""
+    out: dict[str, float] = {}
+    for bet in _load_bets():
+        if bet.get("status") in ("open", "locked"):
+            for member, w in (bet.get("wagers") or {}).items():
+                out[member] = out.get(member, 0.0) + w.get("amount", 0.0)
+    return {k: round(v, 2) for k, v in out.items() if v > 0}
+
+
 def _save_bets(bets: list[dict]):
     _save_json(BETS_FILE, bets)
 

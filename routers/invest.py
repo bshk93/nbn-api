@@ -52,7 +52,6 @@ from .auth import get_token_info, has_role, load_members
 
 router = APIRouter()
 
-NBY_START = 0.0   # no default balance since the 2026-09 reset; P&L is against zero
 
 # Set 2026-10-23. /3000 puts the best team of a season at about +55% and a
 # "buy the five hottest teams after 20 games" strategy at about +24%, which
@@ -341,12 +340,6 @@ def _get_prices(algo: str = "current") -> tuple[dict, dict]:
         return cache["prices"], cache["current"]
 
 
-# ── Balance helpers ───────────────────────────────────────────────────────────
-
-def _load_balances() -> dict:
-    return wallet.balances()
-
-
 # ── Holdings helpers ──────────────────────────────────────────────────────────
 #
 # Holdings structure:
@@ -619,86 +612,47 @@ def get_my_holdings(info: dict = Depends(get_token_info)):
     return result
 
 
-def _compute_realized_pnl_all(all_trades: list) -> dict[str, float]:
-    realized: dict[str, float] = {}
-    long_state:  dict[str, dict[str, dict]] = {}
-    short_state: dict[str, dict[str, dict]] = {}
-
-    for t in sorted(all_trades, key=lambda x: x["ts"]):
-        member = t["member"]
-        team   = t["team"]
-        action = t["action"]
-        shares = t["shares"]
-        price  = t["price"]
-        nbyen  = t["nbyen"]
-
-        if member not in realized:
-            realized[member] = 0.0
-
-        ls = long_state.setdefault(member, {}).setdefault(team, {"shares": 0.0, "avg_price": 0.0})
-        ss = short_state.setdefault(member, {}).setdefault(team, {"shares": 0.0, "avg_open": 0.0})
-
-        if action == "buy":
-            total = ls["shares"] + shares
-            ls["avg_price"] = (ls["shares"] * ls["avg_price"] + shares * price) / total if total else price
-            ls["shares"] = round(total, 6)
-        elif action == "sell":
-            profit = round(nbyen - shares * ls["avg_price"], 2)
-            realized[member] = round(realized[member] + profit, 2)
-            new_shares = round(ls["shares"] - shares, 6)
-            ls["shares"] = new_shares if new_shares >= 1e-9 else 0.0
-        elif action == "short":
-            total = ss["shares"] + shares
-            ss["avg_open"] = (ss["shares"] * ss["avg_open"] + shares * price) / total if total else price
-            ss["shares"] = round(total, 6)
-        elif action == "cover":
-            collateral = round(shares * ss["avg_open"], 2)
-            profit = round(nbyen - collateral, 2)
-            realized[member] = round(realized[member] + profit, 2)
-            new_shares = round(ss["shares"] - shares, 6)
-            ss["shares"] = new_shares if new_shares >= 1e-9 else 0.0
-
-    return {m: round(v, 2) for m, v in realized.items()}
+def open_holdings() -> dict[str, float]:
+    """What each member's open positions are worth at current prices: longs at
+    market value, shorts at what covering would pay back."""
+    _, current = _get_prices()
+    out: dict[str, float] = {}
+    for member, mh in _load_holdings().items():
+        v = 0.0
+        for team, entry in mh.items():
+            price = current.get(team, 0.0)
+            lp, sp = entry.get("long", {}), entry.get("short", {})
+            if lp.get("shares", 0) > 0:
+                v += lp["shares"] * price
+            if sp.get("shares", 0) > 0:
+                v += _short_equity(sp["shares"], sp["avg_open_price"], price)
+        if v > 0:
+            out[member] = round(v, 2)
+    return out
 
 
 @router.get("/api/invest/holdings/all")
 def get_all_holdings():
-    _, current = _get_prices()
-    holdings   = _load_holdings()
-    balances   = _load_balances()
-    members    = set(list(holdings.keys()) + list(balances.keys()))
-    realized_map = _compute_realized_pnl_all(_live_trades(_load_trades()))
-
-    rows = []
-    for member in members:
-        liquid = balances.get(member, NBY_START)
-        equity = 0.0
-        for team, entry in holdings.get(member, {}).items():
-            price = current.get(team, 0.0)
-            lp = entry.get("long",  {})
-            sp = entry.get("short", {})
-            if lp.get("shares", 0) > 0:
-                equity += lp["shares"] * price
-            if sp.get("shares", 0) > 0:
-                equity += _short_equity(sp["shares"], sp["avg_open_price"], price)
-        equity = round(equity, 2)
-        rows.append({
-            "member":       member,
-            "equity":       equity,
-            "liquid":       round(liquid, 2),
-            "net_worth":    round(equity + liquid, 2),
-            "pl":           round(equity + liquid - NBY_START, 2),
-            "realized_pnl": realized_map.get(member, 0.0),
-        })
-    rows.sort(key=lambda x: x["net_worth"], reverse=True)
+    """Wall Street's leaderboard: each trader's holdings and stock P&L — every
+    NB¥ the market has taken or paid them (fees included), plus what they still
+    hold. Net worth across all of NB¥ is /api/nbyen/summary's."""
+    held = open_holdings()
+    flow: dict[str, float] = {}
+    for r in wallet.read_ledger():
+        if r["kind"] == "invest":
+            flow[r["member"]] = flow.get(r["member"], 0.0) + r["delta"]
+    rows = [{"member": m, "equity": held.get(m, 0.0),
+             "pnl": round(flow.get(m, 0.0) + held.get(m, 0.0), 2)}
+            for m in set(flow) | set(held)]
+    rows.sort(key=lambda r: (-r["pnl"], r["member"].lower()))
     return rows
 
 
 def compute_member_pnl(member: str) -> dict:
     """Per-team realized + unrealized P&L for one member. Realized is replayed
-    from the member's trade history (same math as _compute_realized_pnl_all);
+    from the member's trade history since the reset;
     unrealized marks open positions to the current market price (same valuation
-    as get_all_holdings). Returns {positions: [...], total_realized,
+    as open_holdings). Returns {positions: [...], total_realized,
     total_unrealized}, positions sorted by total P&L descending."""
     _, cur = _get_prices()
     all_trades = _live_trades(_load_trades())
@@ -898,17 +852,16 @@ def get_portfolio(info: dict = Depends(get_token_info)):
         )
         chart.append({"date": date, "equity": round(long_eq + short_eq, 2)})
 
-    balances     = _load_balances()
-    liquid       = balances.get(member, NBY_START)
-    total_equity = chart[-1]["equity"] if chart else 0.0
+    from .nbyen import net_worth_rows
+    row = next((r for r in net_worth_rows() if r["name"] == member), None) or {}
 
     return {
         "equity_chart": chart,
         "summary": {
-            "equity":    round(total_equity, 2),
-            "liquid":    round(liquid, 2),
-            "net_worth": round(total_equity + liquid, 2),
-            "pl":        round(total_equity + liquid - NBY_START, 2),
+            "equity":    row.get("stocks", 0.0),
+            "liquid":    row.get("balance", 0.0),
+            "net_worth": row.get("net_worth", 0.0),
+            "pl":        (row.get("pnl") or {}).get("stocks") or 0.0,
         },
     }
 

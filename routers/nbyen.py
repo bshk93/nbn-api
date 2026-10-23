@@ -7,35 +7,66 @@ nearly everything in it already is: bets are public on /bet, donations on
 from fastapi import APIRouter, HTTPException, Query
 
 from .auth import load_members
-from . import markets, wallet
+from . import bets, invest, markets, wallet
 
 router = APIRouter()
+
+# The ledger kinds that are each game's money in and out. A game's P&L is what
+# its kinds moved plus what is still held in it at today's prices — so fees,
+# refunds and payouts are all in, and nothing has to replay a trade log.
+GAMES: dict[str, set[str]] = {
+    "stocks":  {"invest"},
+    "futures": {"market_buy", "market_sell", "market_payout", "market_refund"},
+    "bets":    {"wager", "payout", "bet_refund"},
+}
+
+
+def net_worth_rows() -> list[dict]:
+    """Every member's money, the one definition every page and command uses:
+    wallet + stocks + futures + open bets, where each holding is what its own
+    module says it is worth now (stocks and futures at current prices, open
+    bets at their stake). `pnl[game]` is None for a game they never played."""
+    members = load_members()
+    bal = wallet.balances()
+    held = {"stocks": invest.open_holdings(), "futures": markets.open_holdings(),
+            "bets": bets.open_stakes()}
+    flow: dict[str, dict[str, float]] = {g: {} for g in GAMES}
+    for r in wallet.read_ledger():
+        for g, kinds in GAMES.items():
+            if r["kind"] in kinds:
+                flow[g][r["member"]] = flow[g].get(r["member"], 0.0) + r["delta"]
+    names = set(members) | set(bal)
+    for d in (*held.values(), *flow.values()):
+        names |= set(d)
+    rows = []
+    for n in names:
+        h = {g: round(held[g].get(n, 0.0), 2) for g in GAMES}
+        b = round(bal.get(n, 0.0), 2)
+        rows.append({
+            "name": n, "balance": b, **h,
+            "net_worth": round(b + sum(h.values()), 2),
+            "pnl": {g: (round(flow[g].get(n, 0.0) + h[g], 2)
+                        if n in flow[g] or h[g] else None) for g in GAMES},
+            "member": n in members,
+        })
+    rows.sort(key=lambda r: (-r["net_worth"], r["name"].lower()))
+    return rows
 
 
 @router.get("/api/nbyen/summary")
 def nbyen_summary():
-    """Every member's balance, the total in circulation, and the total moved by
-    each kind since the reset. `paused` lists the kinds switched off.
-
-    `futures` is what a member holds in unsettled markets at current prices.
-    That NB¥ has left the wallet but isn't spent, so `net_worth` adds it back.
-    Pricing is markets.py's; nothing here does its own."""
-    members = load_members()
+    """Every member's money (`net_worth_rows`), the total in circulation, and
+    the total moved by each kind since the reset. `paused` lists the kinds
+    switched off."""
+    rows = net_worth_rows()
     bal = wallet.balances()
-    held = markets.open_holdings()
     by_kind: dict[str, float] = {}
     for r in wallet.read_ledger():
         by_kind[r["kind"]] = round(by_kind.get(r["kind"], 0.0) + r["delta"], 2)
-    rows = []
-    for n in sorted(set(members) | set(bal) | set(held)):
-        b, f = round(bal.get(n, 0.0), 2), held.get(n, 0.0)
-        rows.append({"name": n, "balance": b, "futures": f,
-                     "net_worth": round(b + f, 2), "member": n in members})
-    rows.sort(key=lambda r: (-r["net_worth"], r["name"].lower()))
     return {
         "balances": rows,
         "total": round(sum(bal.values()), 2),
-        "futures_total": round(sum(held.values()), 2),
+        **{f"{g}_total": round(sum(r[g] for r in rows), 2) for g in GAMES},
         "by_kind": by_kind,
         "paused": sorted(k for k, on in wallet.KINDS.items() if not on),
     }

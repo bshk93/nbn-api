@@ -341,14 +341,27 @@ check("refs are per month and per subscriber", {l["ref"] for l in lines} ==
 print("\n-- the public read --")
 
 import routers.markets as mk  # noqa: E402
+import routers.invest as inv  # noqa: E402
+import routers.bets as bt  # noqa: E402
 _held = {"Ann": 250.0}
 mk.open_holdings = lambda: _held
+inv.open_holdings = lambda: {"Ann": 120.0}
+bt.open_stakes = lambda: {"Ann": 30.0, "Ben": 10.0}
 summ = c.get("/api/nbyen/summary").json()
 check("the summary total equals the balances", summ["total"] == round(sum(wallet.balances().values()), 2))
 ann = next(r for r in summ["balances"] if r["name"] == "Ann")
 check("futures held are shown and added into net worth, not the wallet total",
-      ann["futures"] == 250.0 and ann["net_worth"] == round(ann["balance"] + 250.0, 2)
-      and summ["futures_total"] == 250.0)
+      ann["futures"] == 250.0 and summ["futures_total"] == 250.0)
+check("net worth is wallet + stocks + futures + open bets at stake",
+      ann["stocks"] == 120.0 and ann["bets"] == 30.0
+      and ann["net_worth"] == round(ann["balance"] + 250.0 + 120.0 + 30.0, 2))
+check("each holding has a total", summ["stocks_total"] == 120.0 and summ["bets_total"] == 40.0)
+check("a game nobody touched has no P&L, not zero",
+      next(r for r in summ["balances"] if r["name"] == "Ben")["pnl"]["stocks"] is None)
+# Ann paid 125 into the market and her shares are worth 120 now.
+wallet.post([{"member": "Ann", "delta": -125.0, "kind": "invest", "reason": "test buy"}])
+ann = next(r for r in c.get("/api/nbyen/summary").json()["balances"] if r["name"] == "Ann")
+check("a game's P&L is what its kinds moved plus what is still held", ann["pnl"]["stocks"] == -5.0)
 check("by_kind sums to the total", round(sum(summ["by_kind"].values()), 2) == summ["total"])
 check("paused kinds are listed", "tip" in summ["paused"] and "wager" not in summ["paused"])
 led = c.get("/api/nbyen/ledger?member=Ann").json()
