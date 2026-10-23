@@ -1,3 +1,34 @@
+"""NBN Wall Street (`/invest`) — shares in teams, priced by game results.
+
+A league-subsidised game, not a market (`docs/nbyen-economy.md` § 3). There is
+no counterparty: profit is minted and losses are burned. The rules:
+
+  * **Price.** Every ticker starts at 100 in 20-21 and moves after each game by
+    `1 + diff_diff / MOVE_DIVISOR`, where `diff_diff` is the margin plus the
+    opponent's average margin so far that season (doubled in the playoffs).
+    Returns are a percentage, so the price level never matters. Nothing a
+    member does moves a price: the old sentiment overlay let one member pump
+    the stock he was trading, and was deleted. The price is compounded at full
+    precision; rounding it every game froze low-priced teams.
+  * **Seasons** are every raw box score file on disk (`game_highs.iter_raw_files`,
+    the build's own list), so a new season counts from its first game.
+  * **Pending games.** A team can't be traded while one of its games has been
+    played but its box score isn't in yet, or anyone who watched the stream
+    could trade on a result the price hasn't seen. A game counts as played
+    once its date is past, or on the day itself once Pick'em's lock says the
+    day's games have started. An index is closed while any of its teams is.
+  * **Limits.** `TICKER_CAP` NB¥ per ticker and `TOTAL_CAP` across all of them,
+    counted at cost (what was put in, not what it is worth now). Shorts count
+    against the same caps. A short can lose no more than its collateral.
+  * **Fee.** `FEE_RATE` on every trade, charged on top of a buy or short and
+    taken out of a sale or cover. It is burned. Positions and P&L are kept
+    without it.
+  * **Old trades.** Holdings were emptied at the NB¥ reset (`RESET_AT`). Trades
+    before it stay in the log as history, but P&L and portfolio only replay
+    trades since.
+
+    venv/bin/python -m tests.test_invest
+"""
 import csv
 import io
 import json
@@ -20,6 +51,18 @@ from .auth import get_token_info, has_role, load_members
 router = APIRouter()
 
 NBY_START = 0.0   # no default balance since the 2026-09 reset; P&L is against zero
+
+# Set 2026-10-23. /3000 puts the best team of a season at about +55% and a
+# "buy the five hottest teams after 20 games" strategy at about +24%, which
+# keeps the league's payout near the § 3 budget. /1000 was about four times that.
+MOVE_DIVISOR = 3000.0
+TICKER_CAP   = 2500.0
+TOTAL_CAP    = 10000.0
+FEE_RATE     = 0.01
+
+# When nbyen_reset.py emptied the holdings. Trades before it were made with
+# pre-reset NB¥ and close no position that exists now.
+RESET_AT = "2026-09-25T17:59:20+00:00"
 
 # ── Index definitions ─────────────────────────────────────────────────────────
 
@@ -49,12 +92,12 @@ from . import wallet
 
 import httpx
 
-# ── Allstats file manifest ────────────────────────────────────────────────────
+from .game_highs import iter_raw_files
 
-_REG_SEASONS   = ["20-21", "21-22", "22-23", "23-24", "24-25", "25-26"]
-_PLAYOFF_YEARS = ["21",    "22",    "23",    "24",    "25",    "26"]
 
-_PLAYOFF_SEASON = {y: f"{int(y)-1:02d}-{y}" for y in _PLAYOFF_YEARS}
+def _raw_files() -> list[tuple[str, bool, "Path"]]:
+    """(season, is_playoff, path) for every raw box score file on disk."""
+    return list(iter_raw_files(DATA_DIR))
 
 
 # ── Discord ──────────────────────────────────────────────────────────────────
@@ -133,16 +176,7 @@ _price_cache_lock = threading.Lock()
 
 
 def _allstats_max_mtime() -> float:
-    mt = 0.0
-    for sy in _REG_SEASONS:
-        p = DATA_DIR / f"allstats-{sy}.csv"
-        if p.exists():
-            mt = max(mt, p.stat().st_mtime)
-    for py in _PLAYOFF_YEARS:
-        p = DATA_DIR / f"allstats-playoffs-{py}.csv"
-        if p.exists():
-            mt = max(mt, p.stat().st_mtime)
-    return mt
+    return max((p.stat().st_mtime for _, _, p in _raw_files()), default=0.0)
 
 
 def _load_game_data() -> list[dict]:
@@ -182,82 +216,19 @@ def _load_game_data() -> list[dict]:
                 "is_playoff":  is_playoff or gametype == "PLAYOFF",
             })
 
-    for sy in _REG_SEASONS:
-        _process(DATA_DIR / f"allstats-{sy}.csv", sy, False)
-    for py in _PLAYOFF_YEARS:
-        _process(DATA_DIR / f"allstats-playoffs-{py}.csv", _PLAYOFF_SEASON[py], True)
+    for season, is_playoff, path in _raw_files():
+        _process(path, season, is_playoff)
 
     return games
 
 
-def _compute_prices() -> tuple[dict, dict]:
-    games = _load_game_data()
-    if not games:
-        return {}, {}
+def _compute_prices(own_avg: bool = False) -> tuple[dict, dict]:
+    """Every ticker's price history, and its current price.
 
-    games.sort(key=lambda g: g["date"])
-
-    from collections import defaultdict
-    team_season: dict = defaultdict(list)
-    for g in games:
-        team_season[(g["team"], g["season_year"])].append(g)
-
-    game_meta: dict = {}
-    for (team, _sy), sg in team_season.items():
-        sg.sort(key=lambda x: x["date"])
-        cum = 0.0
-        for i, g in enumerate(sg):
-            game_meta[(team, g["date"])] = {"lag_cum": cum, "g": i + 1}
-            cum += g["diff"]
-
-    for g in games:
-        opp_meta = game_meta.get((g["opp_raw"], g["date"]))
-        if opp_meta and opp_meta["g"] > 1:
-            opp_avg = opp_meta["lag_cum"] / (opp_meta["g"] - 1)
-        else:
-            opp_avg = None
-
-        if opp_avg is None:
-            g["diff_diff"] = None
-            g["pct_chg"]   = 1.0
-        else:
-            dd = g["diff"] + opp_avg
-            if g["is_playoff"]:
-                dd *= 2.0
-            g["diff_diff"] = dd
-            g["pct_chg"]   = 1.0 + dd / 1000.0
-
-    team_games: dict = defaultdict(list)
-    for g in games:
-        team_games[g["team"]].append(g)
-
-    prices: dict  = {}
-    current: dict = {}
-    for team, tg in team_games.items():
-        tg.sort(key=lambda x: x["date"])
-        price = 100.0
-        history = []
-        for i, g in enumerate(tg):
-            price = round(price * g["pct_chg"], 2)
-            history.append({
-                "date":       g["date"],
-                "price":      price,
-                "game_num":   i + 1,
-                "is_playoff": g["is_playoff"],
-                "diff":       g["diff"],
-                "diff_diff":  round(g["diff_diff"], 2) if g["diff_diff"] is not None else None,
-            })
-        prices[team]  = history
-        current[team] = price
-
-    _inject_index_prices(team_games, prices, current)
-    return prices, current
-
-
-def _compute_prices_v2() -> tuple[dict, dict]:
-    """Preview algorithm: DIFF_DIFF = DIFF + OPP_AVG_DIFF - OWN_AVG_DIFF.
-    Measures performance vs. expectation — upsets are amplified, routine
-    wins/losses are dampened."""
+    `own_avg` is the preview algorithm (`/invest/preview`): it also subtracts
+    the team's own average margin, so a routine win by a good team moves it
+    less than an upset does.
+    """
     from collections import defaultdict
     games = _load_game_data()
     if not games:
@@ -277,22 +248,21 @@ def _compute_prices_v2() -> tuple[dict, dict]:
             game_meta[(team, g["date"])] = {"lag_cum": cum, "g": i + 1}
             cum += g["diff"]
 
+    def _avg(meta):
+        return meta["lag_cum"] / (meta["g"] - 1) if meta and meta["g"] > 1 else None
+
     for g in games:
-        opp_meta = game_meta.get((g["opp_raw"], g["date"]))
-        own_meta = game_meta.get((g["team"],    g["date"]))
-
-        opp_avg = opp_meta["lag_cum"] / (opp_meta["g"] - 1) if opp_meta and opp_meta["g"] > 1 else None
-        own_avg = own_meta["lag_cum"] / (own_meta["g"] - 1) if own_meta and own_meta["g"] > 1 else None
-
-        if opp_avg is None or own_avg is None:
+        opp_avg = _avg(game_meta.get((g["opp_raw"], g["date"])))
+        own     = _avg(game_meta.get((g["team"],    g["date"]))) if own_avg else 0.0
+        if opp_avg is None or own is None:
             g["diff_diff"] = None
             g["pct_chg"]   = 1.0
         else:
-            dd = g["diff"] + opp_avg - own_avg
+            dd = g["diff"] + opp_avg - own
             if g["is_playoff"]:
                 dd *= 2.0
             g["diff_diff"] = dd
-            g["pct_chg"]   = 1.0 + dd / 1000.0
+            g["pct_chg"]   = 1.0 + dd / MOVE_DIVISOR
 
     team_games: dict = defaultdict(list)
     for g in games:
@@ -305,10 +275,10 @@ def _compute_prices_v2() -> tuple[dict, dict]:
         price = 100.0
         history = []
         for i, g in enumerate(tg):
-            price = round(price * g["pct_chg"], 2)
+            price *= g["pct_chg"]
             history.append({
                 "date":       g["date"],
-                "price":      price,
+                "price":      round(price, 4),
                 "game_num":   i + 1,
                 "is_playoff": g["is_playoff"],
                 "diff":       g["diff"],
@@ -338,10 +308,10 @@ def _inject_index_prices(team_games: dict, prices: dict, current: dict) -> None:
         idx_history: list[dict] = []
         for date in sorted(date_chgs):
             chgs = date_chgs[date]
-            idx_price = round(idx_price * (sum(chgs) / len(chgs)), 2)
+            idx_price *= sum(chgs) / len(chgs)
             idx_history.append({
                 "date":       date,
-                "price":      idx_price,
+                "price":      round(idx_price, 4),
                 "game_num":   len(idx_history) + 1,
                 "is_playoff": date_playoff.get(date, False),
                 "diff":       None,
@@ -359,7 +329,7 @@ def _get_prices(algo: str = "current") -> tuple[dict, dict]:
             label = "v2/preview" if algo == "preview" else "current"
             logger.info("[invest] recomputing prices (%s, mtime changed)", label)
             cache["prices"], cache["current"] = (
-                _compute_prices_v2() if algo == "preview" else _compute_prices()
+                _compute_prices(own_avg=(algo == "preview"))
             )
             cache["mtime"] = mt
         return cache["prices"], cache["current"]
@@ -411,8 +381,6 @@ def _save_market(m: dict):
 
 
 def _check_market_open():
-    # Paused at the 2026-09 NB¥ reset. Before it reopens: buy_shares debits
-    # before it checks for an open short, so that refusal keeps the money.
     wallet.require_enabled("invest")
     m = _load_market()
     if m.get("locked"):
@@ -424,44 +392,92 @@ def _short_equity(shares: float, avg_open: float, current_price: float) -> float
     return round(max(0.0, shares * (2 * avg_open - current_price)), 2)
 
 
-# ── Sentiment ─────────────────────────────────────────────────────────────────
-#
-# Each trade records `game_count` (all-time games played by the team at trade
-# time) and `sentiment_delta` (±nbyen / SENTIMENT_DIVISOR).  Sentiment decays
-# linearly to zero over 82 games.  The market price = algo_price × (1 + s).
-
-SENTIMENT_DIVISOR = 50_000.0
-SENTIMENT_CAP     = 0.50   # ±50% max
+def _live_trades(all_trades: list) -> list:
+    """Trades since the NB¥ reset — the only ones that built today's positions."""
+    return [t for t in all_trades if t.get("ts", "") >= RESET_AT]
 
 
-def _sentiment_at(N: int, team_trades: list) -> float:
-    """Sentiment for a team at all-time game N, derived from its trade records."""
-    s = 0.0
-    for t in team_trades:
-        delta = t.get("sentiment_delta", 0.0)
-        gc    = t.get("game_count", 0)
-        if not delta or gc > N:
+# ── Pending games ─────────────────────────────────────────────────────────────
+
+def _pending_games(prices_hist: dict) -> dict[str, dict]:
+    """Team → its earliest scheduled game that has been played but has no box
+    score yet. A game is played once its date is past, or today once Pick'em's
+    lock says the day's games have started (the stream went live, a box score
+    or the VOD came in)."""
+    from .league_time import league_today_str
+    from .schedule import _load as load_schedule
+    import season_clock
+
+    today  = league_today_str()
+    games  = load_schedule(season_clock.season_for_date(today)).get("games", [])
+    played = {(t, h["date"]) for t, hist in prices_hist.items() for h in hist}
+    started: Optional[bool] = None
+    out: dict[str, dict] = {}
+    for g in sorted(games, key=lambda g: g.get("date") or ""):
+        d = g.get("date") or ""
+        if not d or d > today:
             continue
-        elapsed = N - gc
-        if elapsed >= 82:
+        missing = [t for t in (g.get("away_team"), g.get("home_team")) if t and (t, d) not in played]
+        if not missing:
             continue
-        s += delta * (1.0 - elapsed / 82.0)
-    return max(-SENTIMENT_CAP, min(SENTIMENT_CAP, s))
+        if d == today:
+            if started is None:
+                from .pickem import lock_state
+                rows = [{"DATE": today}] if any(day == today for _, day in played) else []
+                started = lock_state(today, rows) is not None
+            if not started:
+                continue
+        for t in missing:
+            out.setdefault(t, {k: g.get(k) for k in ("date", "away_team", "home_team")})
+    return out
 
 
-def _sentiment_series(team_history: list, team_trades: list) -> list[float]:
-    """One sentiment value per game in team_history."""
-    return [_sentiment_at(i + 1, team_trades) for i in range(len(team_history))]
+def _ticker_pending(ticker: str, pending: dict) -> Optional[dict]:
+    for team in INDEXES.get(ticker, [ticker]):
+        if team in pending:
+            return pending[team]
+    return None
 
 
-def _current_sentiment(team: str, prices_hist: dict, all_trades: list) -> float:
-    team_trades = [t for t in all_trades if t.get("team") == team]
-    N = len(prices_hist.get(team, []))
-    return _sentiment_at(N, team_trades)
+def _check_ticker_open(ticker: str, prices_hist: dict) -> None:
+    g = _ticker_pending(ticker, _pending_games(prices_hist))
+    if g:
+        raise HTTPException(status_code=423, detail=(
+            f"{ticker} can't be traded until the box score for "
+            f"{g['away_team']} @ {g['home_team']} on {g['date']} is in."))
 
 
-def _market_price(algo_price: float, sentiment: float) -> float:
-    return round(algo_price * (1.0 + sentiment), 2)
+# ── Limits and fee ────────────────────────────────────────────────────────────
+
+def _deployed(mh: dict) -> dict[str, float]:
+    """Ticker → NB¥ at cost in one member's open positions, long and short."""
+    out = {}
+    for ticker, entry in mh.items():
+        lp, sp = entry.get("long", {}), entry.get("short", {})
+        cost = (lp.get("shares", 0.0) * lp.get("avg_buy_price", 0.0)
+                + sp.get("shares", 0.0) * sp.get("avg_open_price", 0.0))
+        if cost > 0:
+            out[ticker] = cost
+    return out
+
+
+def _check_caps(mh: dict, ticker: str, amount: float) -> None:
+    dep   = _deployed(mh)
+    here  = dep.get(ticker, 0.0)
+    total = sum(dep.values())
+    room  = max(0.0, min(TICKER_CAP - here, TOTAL_CAP - total))
+    if here + amount > TICKER_CAP + 0.005:
+        raise HTTPException(status_code=400, detail=(
+            f"The limit is ¥{TICKER_CAP:,.0f} per ticker and you have ¥{here:,.2f} in {ticker}. "
+            f"You can add up to ¥{room:,.2f}."))
+    if total + amount > TOTAL_CAP + 0.005:
+        raise HTTPException(status_code=400, detail=(
+            f"The limit is ¥{TOTAL_CAP:,.0f} across all tickers and you have ¥{total:,.2f} in. "
+            f"You can add up to ¥{room:,.2f}."))
+
+
+def _fee(amount: float) -> float:
+    return round(amount * FEE_RATE, 2)
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
@@ -495,11 +511,11 @@ class LockIn(BaseModel):
 
 @router.get("/api/invest/market")
 def get_market(algo: str = "current"):
-    """Current market status + latest price for all 30 teams."""
-    prices_hist, algo_current = _get_prices(algo)
-    market     = _load_market()
-    holdings   = _load_holdings()
-    all_trades = _load_trades()
+    """Current market status + latest price for every ticker."""
+    prices_hist, current = _get_prices(algo)
+    market   = _load_market()
+    holdings = _load_holdings()
+    pending  = _pending_games(prices_hist) if algo == "current" else {}
 
     team_long:  dict[str, float] = {}
     team_short: dict[str, float] = {}
@@ -512,55 +528,35 @@ def get_market(algo: str = "current"):
             if sp.get("shares", 0) > 0:
                 team_short[team] = round(team_short.get(team, 0.0) + sp["shares"], 6)
 
-    teams = []
-    for team in sorted(VALID_TEAMS):
-        ap = algo_current.get(team)
-        if ap is None:
-            continue
-        s  = _current_sentiment(team, prices_hist, all_trades)
-        mp = _market_price(ap, s)
-        ls = round(team_long.get(team, 0.0), 4)
-        ss = round(team_short.get(team, 0.0), 4)
-        teams.append({
-            "team":              team,
-            "price":             mp,
-            "algo_price":        ap,
-            "sentiment":         round(s, 4),
-            "change":            round(mp - 100.0, 2),
-            "change_pct":        round((mp - 100.0) / 100.0 * 100, 2),
+    def _row(ticker: str) -> dict:
+        p  = current[ticker]
+        ls = round(team_long.get(ticker, 0.0), 4)
+        ss = round(team_short.get(ticker, 0.0), 4)
+        return {
+            "price":             round(p, 4),
+            "change":            round(p - 100.0, 2),
+            "change_pct":        round(p - 100.0, 2),
             "total_shares":      ls,
-            "total_value":       round(ls * mp, 2),
+            "total_value":       round(ls * p, 2),
             "total_short":       ss,
-            "total_short_value": round(ss * mp, 2),
-        })
+            "total_short_value": round(ss * p, 2),
+            "pending":           _ticker_pending(ticker, pending),
+        }
+
+    teams = [{"team": t, **_row(t)} for t in sorted(VALID_TEAMS) if t in current]
     indexes = []
-    for idx_ticker in INDEXES:
-        ap = algo_current.get(idx_ticker)
-        if ap is None:
+    for idx_ticker, meta in INDEX_META.items():
+        if idx_ticker not in current:
             continue
-        s  = _current_sentiment(idx_ticker, prices_hist, all_trades)
-        mp = _market_price(ap, s)
-        ls = round(team_long.get(idx_ticker, 0.0), 4)
-        ss = round(team_short.get(idx_ticker, 0.0), 4)
-        meta = INDEX_META[idx_ticker]
-        indexes.append({
-            "ticker":       idx_ticker,
-            "name":         meta["name"],
-            "conf":         meta.get("conf"),
-            "div":          meta.get("div"),
-            "price":        mp,
-            "algo_price":   ap,
-            "sentiment":    round(s, 4),
-            "change":       round(mp - 100.0, 2),
-            "change_pct":   round((mp - 100.0) / 100.0 * 100, 2),
-            "total_shares": ls,
-            "total_short":  ss,
-        })
+        indexes.append({"ticker": idx_ticker, "name": meta["name"],
+                        "conf": meta.get("conf"), "div": meta.get("div"), **_row(idx_ticker)})
 
     return {
-        "locked":        market.get("locked", False),
-        "locked_reason": market.get("locked_reason", ""),
+        "locked":        market.get("locked", False) or not wallet.enabled("invest"),
+        "locked_reason": market.get("locked_reason", "") or
+                         ("" if wallet.enabled("invest") else "The market is paused while NB¥ restarts."),
         "locked_until":  market.get("locked_until"),
+        "rules":         {"ticker_cap": TICKER_CAP, "total_cap": TOTAL_CAP, "fee_rate": FEE_RATE},
         "teams":         teams,
         "indexes":       indexes,
     }
@@ -572,28 +568,18 @@ def get_team_prices(team: str, algo: str = "current"):
     if team not in VALID_TEAMS and team not in INDEXES:
         raise HTTPException(status_code=404, detail="Unknown team or index")
     prices_hist, _ = _get_prices(algo)
-    history        = prices_hist.get(team, [])
-    all_trades     = _load_trades()
-    team_trades    = [t for t in all_trades if t.get("team") == team]
-    sentiments     = _sentiment_series(history, team_trades)
-    enriched = [
-        {**g, "sentiment": round(s, 4), "market_price": _market_price(g["price"], s)}
-        for g, s in zip(history, sentiments)
-    ]
-    return {"team": team, "history": enriched}
+    return {"team": team, "history": prices_hist.get(team, [])}
 
 
 @router.get("/api/invest/holdings")
 def get_my_holdings(info: dict = Depends(get_token_info)):
-    prices_hist, algo_cur = _get_prices()
+    _, current = _get_prices()
     holdings   = _load_holdings()
-    all_trades = _load_trades()
     member     = info["name"]
     result     = []
 
     for team, entry in holdings.get(member, {}).items():
-        s     = _current_sentiment(team, prices_hist, all_trades)
-        price = _market_price(algo_cur.get(team, 0.0), s)
+        price = round(current.get(team, 0.0), 4)
         lp    = entry.get("long",  {})
         sp    = entry.get("short", {})
 
@@ -604,8 +590,8 @@ def get_my_holdings(info: dict = Depends(get_token_info)):
             cost = round(sh * avg, 2)
             result.append({
                 "team": team, "side": "long",
-                "shares": round(sh, 6), "avg_price": round(avg, 2),
-                "current_price": price, "equity": eq,
+                "shares": round(sh, 6), "avg_price": round(avg, 4),
+                "current_price": price, "equity": eq, "cost": cost,
                 "pl":     round(eq - cost, 2),
                 "pl_pct": round((eq - cost) / cost * 100, 2) if cost else 0.0,
             })
@@ -617,8 +603,8 @@ def get_my_holdings(info: dict = Depends(get_token_info)):
             eq       = _short_equity(sh, avg_open, price)
             result.append({
                 "team": team, "side": "short",
-                "shares": round(sh, 6), "avg_price": round(avg_open, 2),
-                "current_price": price, "equity": eq,
+                "shares": round(sh, 6), "avg_price": round(avg_open, 4),
+                "current_price": price, "equity": eq, "cost": collat,
                 "pl":     round(eq - collat, 2),
                 "pl_pct": round((eq - collat) / collat * 100, 2) if collat else 0.0,
             })
@@ -671,20 +657,18 @@ def _compute_realized_pnl_all(all_trades: list) -> dict[str, float]:
 
 @router.get("/api/invest/holdings/all")
 def get_all_holdings():
-    prices_hist, algo_cur = _get_prices()
+    _, current = _get_prices()
     holdings   = _load_holdings()
     balances   = _load_balances()
-    all_trades = _load_trades()
     members    = set(list(holdings.keys()) + list(balances.keys()))
-    realized_map = _compute_realized_pnl_all(all_trades)
+    realized_map = _compute_realized_pnl_all(_live_trades(_load_trades()))
 
     rows = []
     for member in members:
         liquid = balances.get(member, NBY_START)
         equity = 0.0
         for team, entry in holdings.get(member, {}).items():
-            s     = _current_sentiment(team, prices_hist, all_trades)
-            price = _market_price(algo_cur.get(team, 0.0), s)
+            price = current.get(team, 0.0)
             lp = entry.get("long",  {})
             sp = entry.get("short", {})
             if lp.get("shares", 0) > 0:
@@ -710,8 +694,8 @@ def compute_member_pnl(member: str) -> dict:
     unrealized marks open positions to the current market price (same valuation
     as get_all_holdings). Returns {positions: [...], total_realized,
     total_unrealized}, positions sorted by total P&L descending."""
-    prices_hist, cur = _get_prices()
-    all_trades = _load_trades()
+    _, cur = _get_prices()
+    all_trades = _live_trades(_load_trades())
     holdings   = _load_holdings().get(member, {})
     member_trades = sorted([t for t in all_trades if t["member"] == member],
                            key=lambda t: t["ts"])
@@ -747,8 +731,7 @@ def compute_member_pnl(member: str) -> dict:
         open_pos = lp.get("shares", 0) > 0 or sp.get("shares", 0) > 0
         unreal = 0.0
         if open_pos:
-            price = _market_price(cur.get(team, 0.0),
-                                  _current_sentiment(team, prices_hist, all_trades))
+            price = cur.get(team, 0.0)
             if lp.get("shares", 0) > 0:
                 unreal += lp["shares"] * (price - lp.get("avg_buy_price", 0.0))
             if sp.get("shares", 0) > 0:
@@ -861,7 +844,7 @@ def get_member_invest_stats(member: str):
 @router.get("/api/invest/portfolio")
 def get_portfolio(info: dict = Depends(get_token_info)):
     member = info["name"]
-    trades = [t for t in _load_trades() if t["member"] == member]
+    trades = [t for t in _live_trades(_load_trades()) if t["member"] == member]
     if not trades:
         return {"equity_chart": [], "summary": None}
 
@@ -932,8 +915,15 @@ def get_my_trades(info: dict = Depends(get_token_info)):
     return trades
 
 
-@router.post("/api/invest/buy")
-def buy_shares(body: BuyIn, info: dict = Depends(get_token_info)):
+def _record(trades_entry: dict) -> None:
+    trades = _load_trades()
+    trades.append(trades_entry)
+    _save_trades(trades)
+
+
+def _open_position(body, info: dict, side: str) -> dict:
+    """Buy (side "long") or short. `body.nbyen` goes into the position; the
+    fee is charged on top. Every refusal comes before any NB¥ moves."""
     team = body.team.upper()
     if team not in VALID_TEAMS and team not in INDEXES:
         raise HTTPException(status_code=400, detail="Unknown team or index")
@@ -941,51 +931,54 @@ def buy_shares(body: BuyIn, info: dict = Depends(get_token_info)):
         raise HTTPException(status_code=400, detail="Amount must be positive")
     _check_market_open()
 
-    prices_hist, algo_cur = _get_prices()
-    ap = algo_cur.get(team)
-    if ap is None:
+    prices_hist, current = _get_prices()
+    price = current.get(team)
+    if price is None:
         raise HTTPException(status_code=400, detail="No price data for team")
+    _check_ticker_open(team, prices_hist)
 
-    all_trades = _load_trades()
-    s          = _current_sentiment(team, prices_hist, all_trades)
-    price      = _market_price(ap, s)
-    game_count = len(prices_hist.get(team, []))
-    s_delta    = round(body.nbyen / SENTIMENT_DIVISOR, 8)
-
-    shares = body.nbyen / price
+    amount = round(body.nbyen, 2)
+    fee    = _fee(amount)
+    shares = amount / price
     member = info["name"]
-    ts     = datetime.now(timezone.utc).isoformat()
-
-    new_balance = wallet.debit(member, round(body.nbyen, 2), "invest", f"Share purchase: {team}")
+    other  = "short" if side == "long" else "long"
+    action = "buy" if side == "long" else "short"
+    avg_k  = "avg_buy_price" if side == "long" else "avg_open_price"
 
     with _invest_lock:
         holdings = _load_holdings()
-        if holdings.get(member, {}).get(team, {}).get("short", {}).get("shares", 0.0) > 0:
-            raise HTTPException(status_code=400, detail=f"Cover your short position in {team} before going long")
+        mh = holdings.get(member, {})
+        if mh.get(team, {}).get(other, {}).get("shares", 0.0) > 0:
+            raise HTTPException(status_code=400, detail=(
+                f"Cover your short position in {team} before going long" if side == "long"
+                else f"Sell your long position in {team} before shorting"))
+        _check_caps(mh, team, amount)
+
+        what = "Share purchase" if side == "long" else "Short position"
+        new_balance = wallet.debit(member, round(amount + fee, 2), "invest",
+                                   f"{what}: {team} (incl. ¥{fee:,.2f} fee)")
+
         entry = holdings.setdefault(member, {}).setdefault(team, {})
-        lp    = entry.get("long", {"shares": 0.0, "avg_buy_price": 0.0})
-        total = lp["shares"] + shares
-        entry["long"] = {
-            "shares":        round(total, 6),
-            "avg_buy_price": round((lp["shares"] * lp["avg_buy_price"] + shares * price) / total, 6),
+        pos   = entry.get(side, {"shares": 0.0, avg_k: 0.0})
+        total = pos["shares"] + shares
+        entry[side] = {
+            "shares": round(total, 6),
+            avg_k:    round((pos["shares"] * pos[avg_k] + shares * price) / total, 6),
         }
-        trades = _load_trades()
-        trades.append({"ts": ts, "member": member, "team": team, "action": "buy",
-                       "shares": round(shares, 6), "price": price,
-                       "nbyen": round(body.nbyen, 2), "balance_after": new_balance,
-                       "game_count": game_count, "sentiment_delta": s_delta})
         _save_holdings(holdings)
-        _save_trades(trades)
+        _record({"ts": datetime.now(timezone.utc).isoformat(), "member": member, "team": team,
+                 "action": action, "shares": round(shares, 6), "price": round(price, 4),
+                 "nbyen": amount, "fee": fee, "balance_after": new_balance,
+                 "game_count": len(prices_hist.get(team, []))})
 
-    _discord_trade("buy", member, team, shares, price, round(body.nbyen, 2),
-                   new_balance, _load_holdings(), algo_cur)
-    return {"team": team, "shares": round(shares, 6), "price": price,
-            "algo_price": ap, "sentiment": round(s, 4),
-            "nbyen": round(body.nbyen, 2), "balance_after": new_balance}
+    _discord_trade(action, member, team, shares, price, amount,
+                   new_balance, _load_holdings(), current)
+    return {"team": team, "shares": round(shares, 6), "price": round(price, 4),
+            "nbyen": amount, "fee": fee, "balance_after": new_balance}
 
 
-@router.post("/api/invest/sell")
-def sell_shares(body: SellIn, info: dict = Depends(get_token_info)):
+def _close_position(body, info: dict, side: str) -> dict:
+    """Sell (side "long") or cover. The fee comes out of what is paid back."""
     team = body.team.upper()
     if team not in VALID_TEAMS and team not in INDEXES:
         raise HTTPException(status_code=400, detail="Unknown team or index")
@@ -993,172 +986,76 @@ def sell_shares(body: SellIn, info: dict = Depends(get_token_info)):
         raise HTTPException(status_code=400, detail="Shares must be positive")
     _check_market_open()
 
-    prices_hist, algo_cur = _get_prices()
-    ap = algo_cur.get(team)
-    if ap is None:
+    prices_hist, current = _get_prices()
+    price = current.get(team)
+    if price is None:
         raise HTTPException(status_code=400, detail="No price data for team")
-
-    all_trades = _load_trades()
-    s          = _current_sentiment(team, prices_hist, all_trades)
-    price      = _market_price(ap, s)
-    game_count = len(prices_hist.get(team, []))
+    _check_ticker_open(team, prices_hist)
 
     member = info["name"]
-    ts     = datetime.now(timezone.utc).isoformat()
-    nbyen  = round(body.shares * price, 2)
-    s_delta = -round(nbyen / SENTIMENT_DIVISOR, 8)
+    action = "sell" if side == "long" else "cover"
 
     with _invest_lock:
         holdings = _load_holdings()
-        mh       = holdings.get(member, {})
-        lp       = mh.get(team, {}).get("long", {})
-        held     = lp.get("shares", 0.0)
+        mh   = holdings.get(member, {})
+        pos  = mh.get(team, {}).get(side, {})
+        held = pos.get("shares", 0.0)
         if held < body.shares - 1e-9:
-            raise HTTPException(status_code=400, detail=f"Only hold {held:.6f} long shares of {team}")
+            raise HTTPException(status_code=400, detail=f"Only hold {held:.6f} {side} shares of {team}")
+
+        if side == "long":
+            nbyen = round(body.shares * price, 2)
+        else:
+            nbyen = _short_equity(body.shares, pos["avg_open_price"], price)
+        fee = _fee(nbyen)
+        net = round(nbyen - fee, 2)
+
+        what = "Share sale" if side == "long" else "Cover short"
+        new_balance = (wallet.credit(member, net, "invest", f"{what}: {team} (after ¥{fee:,.2f} fee)")
+                       if net > 0 else wallet.balance(member))
+
         new_sh = round(held - body.shares, 6)
         if new_sh < 1e-9:
-            mh.get(team, {}).pop("long", None)
+            mh[team].pop(side, None)
         else:
-            mh[team]["long"]["shares"] = new_sh
+            mh[team][side]["shares"] = new_sh
         if team in mh and not mh[team]:
             del mh[team]
         if member in holdings and not holdings[member]:
             del holdings[member]
-        trades = _load_trades()
-        trades.append({"ts": ts, "member": member, "team": team, "action": "sell",
-                       "shares": round(body.shares, 6), "price": price,
-                       "nbyen": nbyen, "balance_after": None,
-                       "game_count": game_count, "sentiment_delta": s_delta})
         _save_holdings(holdings)
+        _record({"ts": datetime.now(timezone.utc).isoformat(), "member": member, "team": team,
+                 "action": action, "shares": round(body.shares, 6), "price": round(price, 4),
+                 "nbyen": nbyen, "fee": fee, "balance_after": new_balance,
+                 "game_count": len(prices_hist.get(team, []))})
 
-    new_balance = wallet.balance(member) if nbyen <= 0 else wallet.credit(member, nbyen, "invest", f"Share sale: {team}")
+    _discord_trade(action, member, team, body.shares, price, nbyen,
+                   new_balance, _load_holdings(), current)
+    return {"team": team, "shares": round(body.shares, 6), "price": round(price, 4),
+            "nbyen": nbyen, "fee": fee, "balance_after": new_balance}
 
-    trades[-1]["balance_after"] = new_balance
-    _save_trades(trades)
-    _discord_trade("sell", member, team, body.shares, price, nbyen,
-                   new_balance, _load_holdings(), algo_cur)
-    return {"team": team, "shares": round(body.shares, 6), "price": price,
-            "algo_price": ap, "sentiment": round(s, 4),
-            "nbyen": nbyen, "balance_after": new_balance}
+
+@router.post("/api/invest/buy")
+def buy_shares(body: BuyIn, info: dict = Depends(get_token_info)):
+    return _open_position(body, info, "long")
+
+
+@router.post("/api/invest/sell")
+def sell_shares(body: SellIn, info: dict = Depends(get_token_info)):
+    return _close_position(body, info, "long")
 
 
 @router.post("/api/invest/short")
 def short_shares(body: ShortIn, info: dict = Depends(get_token_info)):
     """Open a short position: pay collateral, profit if price falls.
     Max loss = collateral (if price doubles). Cover to close."""
-    team = body.team.upper()
-    if team not in VALID_TEAMS and team not in INDEXES:
-        raise HTTPException(status_code=400, detail="Unknown team or index")
-    if body.nbyen <= 0:
-        raise HTTPException(status_code=400, detail="Amount must be positive")
-    _check_market_open()
-
-    prices_hist, algo_cur = _get_prices()
-    ap = algo_cur.get(team)
-    if ap is None:
-        raise HTTPException(status_code=400, detail="No price data for team")
-
-    all_trades = _load_trades()
-    s          = _current_sentiment(team, prices_hist, all_trades)
-    price      = _market_price(ap, s)
-    game_count = len(prices_hist.get(team, []))
-    s_delta    = -round(body.nbyen / SENTIMENT_DIVISOR, 8)
-
-    shares = body.nbyen / price
-    member = info["name"]
-    ts     = datetime.now(timezone.utc).isoformat()
-
-    new_balance = wallet.debit(member, round(body.nbyen, 2), "invest", f"Short position: {team}")
-
-    with _invest_lock:
-        holdings = _load_holdings()
-        if holdings.get(member, {}).get(team, {}).get("long", {}).get("shares", 0.0) > 0:
-            raise HTTPException(status_code=400, detail=f"Sell your long position in {team} before shorting")
-        entry = holdings.setdefault(member, {}).setdefault(team, {})
-        sp    = entry.get("short", {"shares": 0.0, "avg_open_price": 0.0})
-        total = sp["shares"] + shares
-        entry["short"] = {
-            "shares":          round(total, 6),
-            "avg_open_price":  round(
-                (sp["shares"] * sp["avg_open_price"] + shares * price) / total, 6
-            ),
-        }
-        trades = _load_trades()
-        trades.append({"ts": ts, "member": member, "team": team, "action": "short",
-                       "shares": round(shares, 6), "price": price,
-                       "nbyen": round(body.nbyen, 2), "balance_after": new_balance,
-                       "game_count": game_count, "sentiment_delta": s_delta})
-        _save_holdings(holdings)
-        _save_trades(trades)
-
-    _discord_trade("short", member, team, shares, price, round(body.nbyen, 2),
-                   new_balance, _load_holdings(), algo_cur)
-    return {"team": team, "shares": round(shares, 6), "price": price,
-            "algo_price": ap, "sentiment": round(s, 4),
-            "nbyen": round(body.nbyen, 2), "balance_after": new_balance}
+    return _open_position(body, info, "short")
 
 
 @router.post("/api/invest/cover")
 def cover_shares(body: CoverIn, info: dict = Depends(get_token_info)):
     """Close a short position. Receive collateral ± P/L (floored at 0)."""
-    team = body.team.upper()
-    if team not in VALID_TEAMS and team not in INDEXES:
-        raise HTTPException(status_code=400, detail="Unknown team or index")
-    if body.shares <= 0:
-        raise HTTPException(status_code=400, detail="Shares must be positive")
-    _check_market_open()
-
-    prices_hist, algo_cur = _get_prices()
-    ap = algo_cur.get(team)
-    if ap is None:
-        raise HTTPException(status_code=400, detail="No price data for team")
-
-    all_trades = _load_trades()
-    s          = _current_sentiment(team, prices_hist, all_trades)
-    price      = _market_price(ap, s)
-    game_count = len(prices_hist.get(team, []))
-
-    member = info["name"]
-    ts     = datetime.now(timezone.utc).isoformat()
-
-    with _invest_lock:
-        holdings = _load_holdings()
-        mh       = holdings.get(member, {})
-        sp       = mh.get(team, {}).get("short", {})
-        held     = sp.get("shares", 0.0)
-        if held < body.shares - 1e-9:
-            raise HTTPException(status_code=400, detail=f"Only hold {held:.6f} short shares of {team}")
-
-        avg_open = sp["avg_open_price"]
-        nbyen    = _short_equity(body.shares, avg_open, price)
-        s_delta  = round(nbyen / SENTIMENT_DIVISOR, 8)
-
-        new_sh = round(held - body.shares, 6)
-        if new_sh < 1e-9:
-            mh.get(team, {}).pop("short", None)
-        else:
-            mh[team]["short"]["shares"] = new_sh
-        if team in mh and not mh[team]:
-            del mh[team]
-        if member in holdings and not holdings[member]:
-            del holdings[member]
-
-        trades = _load_trades()
-        trades.append({"ts": ts, "member": member, "team": team, "action": "cover",
-                       "shares": round(body.shares, 6), "price": price,
-                       "nbyen": nbyen, "balance_after": None,
-                       "game_count": game_count, "sentiment_delta": s_delta})
-        _save_holdings(holdings)
-
-    new_balance = wallet.balance(member) if nbyen <= 0 else wallet.credit(member, nbyen, "invest", f"Cover short: {team}")
-
-    trades[-1]["balance_after"] = new_balance
-    _save_trades(trades)
-    _discord_trade("cover", member, team, body.shares, price, nbyen,
-                   new_balance, _load_holdings(), algo_cur)
-    return {"team": team, "shares": round(body.shares, 6), "price": price,
-            "algo_price": ap, "sentiment": round(s, 4),
-            "avg_open": round(avg_open, 2), "nbyen": nbyen, "balance_after": new_balance}
+    return _close_position(body, info, "short")
 
 
 @router.post("/api/invest/lock")
