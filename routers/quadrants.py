@@ -56,7 +56,7 @@ class Labels(BaseModel):
 
 
 class Split(BaseModel):
-    mode: Literal["median", "mean", "custom"] = "median"
+    mode: Literal["median", "mean", "league", "custom"] = "median"
     x: Optional[float] = None
     y: Optional[float] = None
 
@@ -87,6 +87,7 @@ class Config(BaseModel):
     minG: int = Field(0, ge=0, le=200)
     invertX: bool = False
     invertY: bool = False
+    names: bool = True
     split: Split = Field(default_factory=Split)
     labels: Labels = Field(default_factory=Labels)
     pick: Pick = Field(default_factory=Pick)

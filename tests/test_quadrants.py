@@ -96,6 +96,8 @@ c = make()
 check("a deleted number is never reissued", c["id"] == 3)
 
 print("\nvalidation")
+check("a league-median split is accepted",
+      qd.QuadrantCreate(title="t", config={"x": "ppg", "y": "rpg", "split": {"mode": "league"}}).config.split.mode == "league")
 invalid("an unknown X stat", title="t", config={"x": "vibes", "y": "ppg"})
 invalid("an unknown top-N stat", title="t", config={"x": "ppg", "y": "rpg", "pick": {"by": "aura"}})
 invalid("too many players", title="t",
