@@ -136,9 +136,9 @@ bet = r.json()
 home, away = bet["options"][0]["id"], bet["options"][1]["id"]
 
 give("Ben", 1000)
-r = c.post(f"/api/bets/{bet['id']}/wager", json={"option_id": home, "amount": 150}, headers=H("Ann"))
+r = c.post(f"/api/bets/{bet['id']}/wager", json={"option_id": home, "amount": 250}, headers=H("Ann"))
 check("a wager over the per-bet cap is refused", r.status_code == 422 and B("Ann") == 1000)
-check("the cap is 100", bets.NBY_MAX_WAGER == 100)
+check("the cap is 200", bets.NBY_MAX_WAGER == 200)
 c.post(f"/api/bets/{bet['id']}/wager", json={"option_id": home, "amount": 100}, headers=H("Ann"))
 c.post(f"/api/bets/{bet['id']}/wager", json={"option_id": away, "amount": 60}, headers=H("Ben"))
 check("wagers are debited", B("Ann") == 900 and B("Ben") == 940)

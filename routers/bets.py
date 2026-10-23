@@ -21,7 +21,7 @@ NBY_BOXSCORE_REWARD  = 50.0
 NBY_BIO_REWARD       = 1.0
 # Per member, per bet. Bookies price by hand and there's no house bank, so this
 # is what keeps one badly priced long shot from paying out thousands.
-NBY_MAX_WAGER        = 100.0
+NBY_MAX_WAGER        = 200.0
 
 DISCORD_BETS_WEBHOOK = os.environ.get("DISCORD_BETS_WEBHOOK", "")
 
