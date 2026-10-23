@@ -55,17 +55,25 @@ def coaching_saved(team: str, was_pending: bool, saved_by: Optional[str]) -> Non
     """Handoff 1. Call after a save, with whether the team was already pending."""
     if was_pending:
         return
-    _tell_next_streamer(team, saved_by, "saved new coaching settings", "they need", "coaching_saved")
+    _tell_next_streamer(team, saved_by, "saved new coaching settings", "they need entering in 2K", "coaching_saved")
 
 
 def positions_changed(team: str, saved_by: Optional[str]) -> None:
     """Handoff 1 again, for a player's secondary position or jersey number.
     Call only when the team had no such change waiting already, for the same reason a
     coaching save notifies only on the way into pending."""
-    _tell_next_streamer(team, saved_by, "changed a player's position or jersey number", "it needs", "positions_changed")
+    _tell_next_streamer(team, saved_by, "changed a player's position or jersey number", "it needs entering in 2K", "positions_changed")
 
 
-def _tell_next_streamer(team: str, saved_by: Optional[str], what: str, needs: str, label: str) -> None:
+def note_left(team: str, saved_by: Optional[str], already_waiting: bool) -> None:
+    """Handoff 1, for a note to the streamer. Quiet when the team already has
+    changes waiting: the streamer will see the note on the same card."""
+    if already_waiting:
+        return
+    _tell_next_streamer(team, saved_by, "left a note for the streamer", "read it before the game", "note_left")
+
+
+def _tell_next_streamer(team: str, saved_by: Optional[str], what: str, tail: str, label: str) -> None:
     try:
         g = _next_game(team)
         if not g:
@@ -73,7 +81,7 @@ def _tell_next_streamer(team: str, saved_by: Optional[str], what: str, needs: st
         opp = g["away_team"] if g["home_team"] == team else g["home_team"]
         at = "vs" if g["home_team"] == team else "@"
         text = (f"{team} {what} for {_fmt_date(g['date'])} "
-                f"{at} {opp} — {needs} entering in 2K")
+                f"{at} {opp} — {tail}")
         link = "/committees/stream/"
         streamer = g.get("streamer")
         if streamer:
@@ -103,6 +111,15 @@ def positions_set(team: str, set_by: Optional[str]) -> None:
                           link=f"/teams/{team}/#coaching")
     except Exception as exc:
         logger.warning("positions_set notify failed for %s: %s", team, exc)
+
+
+def note_cleared(team: str, cleared_by: Optional[str]) -> None:
+    """Handoff 2, for a note: the team's receipt."""
+    try:
+        inbox.notify_team(team, f"Your note to the streamer was marked clear by {cleared_by or 'a streamer'}",
+                          link=f"/teams/{team}/#coaching")
+    except Exception as exc:
+        logger.warning("note_cleared notify failed for %s: %s", team, exc)
 
 
 def streamer_assigned(name: str, date: str, games: list, by: Optional[str],

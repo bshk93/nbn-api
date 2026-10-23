@@ -41,7 +41,8 @@ def _twok_secondary(slug: str, attrs: Optional[dict] = None) -> Optional[str]:
 
 # `secondary_pos` on a bio: null means the team hasn't chosen, so 2K's own
 # secondary stands if it is one step from the primary (none if it isn't);
-# "none" means the team removed it; a position is the team's pick (§ 2.3).
+# "none" means the team removed it; a position is the team's pick, which may
+# be outside § 2.3's one step (see _check_secondary_pos).
 NO_SECONDARY = "none"
 
 
@@ -64,15 +65,26 @@ def secondary_pos_options(primary: Optional[str]) -> list[str]:
     return [POSITION_ORDER[j] for j in (i - 1, i + 1) if 0 <= j < len(POSITION_ORDER)]
 
 
+def secondary_is_legal(primary: Optional[str], secondary: Optional[str]) -> bool:
+    """§ 2.3's one step. No secondary is always legal."""
+    if not secondary or secondary == NO_SECONDARY:
+        return True
+    return secondary in secondary_pos_options(primary)
+
+
 def _check_secondary_pos(slug: str, secondary: Optional[str]):
+    """A team may pick any position but the primary. One outside § 2.3's one
+    step is saved anyway: there are exceptions, so it is flagged for the
+    streamer, and setting it in 2K is the streamer's OK."""
     if not secondary or secondary == NO_SECONDARY:
         return
+    if secondary not in POSITION_ORDER:
+        raise HTTPException(status_code=422, detail=f"Unknown position: {secondary}")
     primary = _primary_pos(slug)
     if primary is None:
         raise HTTPException(status_code=422, detail="This player has no 2K primary position yet, so no secondary position can be set (§ 2.3)")
-    options = secondary_pos_options(primary)
-    if secondary not in options:
-        raise HTTPException(status_code=422, detail=f"A {primary}'s secondary position must be {' or '.join(options)} (§ 2.3): got {secondary}")
+    if secondary == primary:
+        raise HTTPException(status_code=422, detail=f"{secondary} is already his primary position")
 
 
 def load_player_bios() -> dict:
@@ -337,7 +349,8 @@ def update_team_settings(slug: str, body: TeamSettingsUpdate, info: dict = Depen
         # A failed check only costs the message, never the save.
         try:
             already_waiting = pos_changed and (coaching_settings.has_position_changes(player_team)
-                                               or coaching_settings.coaching_pending(player_team))
+                                               or coaching_settings.coaching_pending(player_team)
+                                               or coaching_settings.note_open(player_team))
         except Exception:
             already_waiting = True
 

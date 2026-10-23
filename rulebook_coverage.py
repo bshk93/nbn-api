@@ -164,10 +164,9 @@ CHECK_SECTIONS: dict[str, tuple[str, ...]] = {
 # A section here is 🔒 because the system performs the rule rather than
 # validating it — there is nothing for a check to reject.
 SECTION_ENFORCED_BY: dict[str, str] = {
-    "2.3": "secondary positions are set only through the Roster Settings "
-           "endpoints, which refuse anything but a neighbour of the 2K primary "
-           "(`_check_secondary_pos` in `routers/players.py`); the primary is "
-           "never entered, it is read from the 2K scrape",
+    "2.3": "the primary is never entered, it is read from the 2K scrape; a "
+           "starter out of position is refused (`_illegal_starters` in "
+           "`routers/coaching_settings.py`)",
     "5.2": "dead cap is computed at release by `_dead_cap_from_schedule` / "
            "`_apply_release`, never entered by hand, so there is no submission "
            "to reject",
@@ -176,6 +175,8 @@ SECTION_ENFORCED_BY: dict[str, str] = {
 
 # ── Declared: why a section still needs a human (the 👁 badge) ────────────────
 SECTION_REVIEW: dict[str, str] = {
+    "2.3":  "a secondary outside the one step is saved and flagged, not "
+            "refused: the streamer OKs the exception by setting it in 2K",
     "1.2":  "no check blocks a team for being over the soft cap; the position "
             "is reported and read by a human",
     "1.3":  "the ceiling is enforced on every write, but the grace period is not "

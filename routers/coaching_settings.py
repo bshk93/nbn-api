@@ -22,7 +22,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
-from .constants import COACHING_SETTINGS_FILE, POSITION_CHECKS_FILE, DATA_DIR, VALID_TEAMS, _coaching_lock
+from .constants import COACHING_SETTINGS_FILE, COACHING_NOTES_FILE, POSITION_CHECKS_FILE, DATA_DIR, VALID_TEAMS, _coaching_lock
 from .storage import _load_json, _save_json, log_write, read_csv
 from .league_time import league_today_str
 from .auth import _resolve_token, get_token_info, has_role, require_role
@@ -49,12 +49,21 @@ class CoachingSettingsBody(BaseModel):
 
 
 # A starter has to play near his slot: his 2K primary position, one step
-# either side of it (PG-SG-SF-PF-C), or the secondary his team gave him
-# (§ 2.3 already keeps that within one step, so today it adds nothing, but it
-# is part of the rule as the league states it). The one rule this
-# schema-blind store enforces, because it is a league rule rather than a
-# coaching preference.
+# either side of it (PG-SG-SF-PF-C), or the secondary his team gave him. A
+# secondary outside § 2.3's one step counts only once a streamer has OK'd it
+# (`counted_secondary`). The one rule this schema-blind store enforces,
+# because it is a league rule rather than a coaching preference.
 STARTER_SLOTS = ("PG", "SG", "SF", "PF", "C")
+
+
+def counted_secondary(slug: str, bio: dict, attrs: Optional[dict], entered: dict) -> Optional[str]:
+    """The secondary that counts for starting: a legal one, or one outside
+    § 2.3 that a streamer has OK'd by setting it in 2K (`entered`)."""
+    from .players import _primary_pos, effective_secondary, secondary_is_legal
+    sec = effective_secondary(slug, bio, attrs)
+    if secondary_is_legal(_primary_pos(slug, attrs), sec):
+        return sec
+    return sec if slug in entered and entered[slug] == sec else None
 
 
 def starter_positions(primary: Optional[str], secondary: Optional[str]) -> list[str]:
@@ -69,7 +78,7 @@ def starter_positions(primary: Optional[str], secondary: Optional[str]) -> list[
     return [p for p in POSITION_ORDER if p in ok]
 
 
-def _illegal_starters(minutes: dict, prev_minutes: dict) -> list[str]:
+def _illegal_starters(minutes: dict, prev_minutes: dict, team: str = "") -> list[str]:
     """What's wrong with the starting five, one line per bad slot. A slot left
     exactly as it was already saved passes, so a rotation saved before this
     rule existed doesn't block the team's next save of something else (the
@@ -77,6 +86,7 @@ def _illegal_starters(minutes: dict, prev_minutes: dict) -> list[str]:
     primary yet can't be checked, and isn't blocked."""
     from .players import _primary_pos, effective_secondary, load_player_bios
     bios = None
+    entered = None
     problems = []
     for slot in STARTER_SLOTS:
         row = minutes.get(slot)
@@ -91,11 +101,16 @@ def _illegal_starters(minutes: dict, prev_minutes: dict) -> list[str]:
             continue
         if bios is None:
             bios = load_player_bios()
+            entered = (load_position_checks().get(team) or {}).get("entered") or {}
         bio = bios.get(slug) or {}
-        legal = starter_positions(primary, effective_secondary(slug, bio))
+        sec = counted_secondary(slug, bio, None, entered)
+        legal = starter_positions(primary, sec)
         if slot not in legal:
-            problems.append(f"{bio.get('name') or slug} can't start at {slot}: "
-                            f"his 2K position is {primary}, so he can start at {', '.join(legal)}")
+            line = (f"{bio.get('name') or slug} can't start at {slot}: "
+                    f"his 2K position is {primary}, so he can start at {', '.join(legal)}")
+            if effective_secondary(slug, bio) == slot:
+                line += f" ({slot} counts once a streamer has OK'd it)"
+            problems.append(line)
     return problems
 
 
@@ -175,7 +190,7 @@ def put_coaching_settings(
     with _coaching_lock:
         data = load_coaching_settings()
         prev = data.get(team, {})
-        problems = _illegal_starters(body.minutes or {}, prev.get("minutes") or {})
+        problems = _illegal_starters(body.minutes or {}, prev.get("minutes") or {}, team)
         if problems:
             raise HTTPException(status_code=422, detail="; ".join(problems))
         was_pending = bool(prev.get("pending"))
@@ -197,7 +212,7 @@ def put_coaching_settings(
     # One message per batch of changes: a team that already has positions
     # waiting has already pinged the streamer, who will see these with them.
     try:
-        was_pending = was_pending or has_position_changes(team)
+        was_pending = was_pending or has_position_changes(team) or note_open(team)
     except Exception:
         was_pending = True
     game_day_notify.coaching_saved(team, was_pending, info.get("name"))
@@ -300,7 +315,7 @@ def position_items(team: str, rec: dict, bios: dict, roster: list[str], today: s
     Jersey numbers ride along: `jerseys` is the number 2K has, recorded when
     a team first changes it (`note_jersey_change`). We have no scrape of 2K's
     numbers, so a player with no record there has nothing to enter."""
-    from .players import _primary_pos, _twok_secondary, effective_secondary, load_attributes
+    from .players import _primary_pos, _twok_secondary, effective_secondary, load_attributes, secondary_is_legal
     # Loaded once: the file is 2.7MB, and reading it per player made the
     # all-teams list take over a minute, so nginx timed it out (2026-10-22).
     attrs = load_attributes() if attrs is None else attrs
@@ -320,11 +335,14 @@ def position_items(team: str, rec: dict, bios: dict, roster: list[str], today: s
         jersey_changed = jersey is not None and slug in jerseys and (jerseys[slug] or None) != jersey
         if not (changed or jersey_changed or locked):
             continue
+        primary = _primary_pos(slug, attrs)
         items.append({
             "slug": slug,
             "name": bio.get("name") or slug,
-            "primary": _primary_pos(slug, attrs),
+            "primary": primary,
             "secondary": sec,
+            # False: outside § 2.3's one step. Setting it is the streamer's OK.
+            "legal": secondary_is_legal(primary, sec),
             "was": in_2k,
             "changed": changed,
             "jersey": jersey,
@@ -336,16 +354,33 @@ def position_items(team: str, rec: dict, bios: dict, roster: list[str], today: s
     return items
 
 
+def position_exceptions(rec: dict, bios: dict, roster: list[str], attrs: dict) -> dict:
+    """slug → {secondary, approved} for each roster player whose secondary is
+    outside § 2.3's one step. Approved once a streamer has set that exact
+    position in 2K, which is how a streamer OKs an exception."""
+    from .players import _primary_pos, effective_secondary, secondary_is_legal
+    entered = rec.get("entered") or {}
+    out = {}
+    for slug in roster:
+        sec = effective_secondary(slug, bios.get(slug) or {}, attrs)
+        if secondary_is_legal(_primary_pos(slug, attrs), sec):
+            continue
+        out[slug] = {"secondary": sec, "approved": slug in entered and entered[slug] == sec}
+    return out
+
+
 def team_positions_view(team: str, data: Optional[dict] = None, bios: Optional[dict] = None,
                         attrs: Optional[dict] = None) -> dict:
-    from .players import load_player_bios
+    from .players import load_player_bios, load_attributes
     data = load_position_checks() if data is None else data
     bios = load_player_bios() if bios is None else bios
+    attrs = load_attributes() if attrs is None else attrs
     rec = data.get(team) or {}
     roster = _roster_slugs(team)
     pins = set(rec.get("pins") or [])
     return {
         "items": position_items(team, rec, bios, roster, league_today_str(), attrs),
+        "exceptions": position_exceptions(rec, bios, roster, attrs),
         "pinned": [s for s in roster if s in pins],
         "checked_at": rec.get("checked_at"),
         "checked_by": rec.get("checked_by"),
@@ -451,3 +486,106 @@ def confirm_positions(team: str, body: ConfirmBody, info: dict = Depends(require
 def _bios() -> dict:
     from .players import load_player_bios
     return load_player_bios()
+
+
+# ── Notes to the streamer ────────────────────────────────────────────────────
+#
+# One free-text note per team ("make sure X plays in the 4th"), for whoever
+# streams its games. A streamer marks it clear once handled; the team saving
+# again reopens it. Kept out of coaching-settings.json so a note never makes
+# a team look like it has a coach profile, and so the full-replace profile
+# PUT can't wipe it. Private the same way as the profile: the team and the
+# streamers.
+
+NOTE_MAX = 1000
+
+
+class NoteBody(BaseModel):
+    text: str = ""
+
+
+class ClearNoteBody(BaseModel):
+    # Same stale-read guard as EnterBody: a note rewritten since the streamer
+    # loaded it stays open.
+    expected_updated_at: Optional[str] = None
+
+
+def load_coaching_notes() -> dict:
+    return _load_json(COACHING_NOTES_FILE, {})
+
+
+def save_coaching_notes(data: dict):
+    _save_json(COACHING_NOTES_FILE, data)
+
+
+def note_open(team: str) -> bool:
+    note = load_coaching_notes().get(team) or {}
+    return bool(note.get("text")) and not note.get("cleared_at")
+
+
+@router.get("/api/coaching-notes")
+def get_coaching_notes(authorization: Optional[str] = Header(None)):
+    """Scoped like GET /api/coaching-settings: streamers get every team, a
+    team role its own, anyone else nothing."""
+    data = load_coaching_notes()
+    info = _resolve_token(authorization)
+    if not info:
+        return {}
+    if has_role(info, "streamer") or has_role(info, "admin"):
+        return data
+    return {team: rec for team, rec in data.items() if has_role(info, team.lower())}
+
+
+@router.put("/api/coaching-notes/{team}")
+def put_coaching_note(team: str, body: NoteBody, info: dict = Depends(get_token_info)):
+    """Write the team's note. Empty text deletes it."""
+    team = team.upper()
+    if team not in VALID_TEAMS:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    if not has_role(info, team.lower()) and not has_role(info, "admin"):
+        raise HTTPException(status_code=403, detail=f"'{team.lower()}' role required")
+    text = body.text.strip()
+    if len(text) > NOTE_MAX:
+        raise HTTPException(status_code=422, detail=f"Keep the note under {NOTE_MAX} characters")
+    with _coaching_lock:
+        data = load_coaching_notes()
+        prev = data.get(team) or {}
+        was_open = bool(prev.get("text")) and not prev.get("cleared_at")
+        if text:
+            data[team] = {"text": text, "updated_at": _now(), "updated_by": info.get("name"),
+                          "cleared_at": None, "cleared_by": None}
+        else:
+            data.pop(team, None)
+        save_coaching_notes(data)
+        rec = data.get(team)
+    log_write(info, f"PUT coaching-notes/{team}" + ("" if text else " — deleted"))
+    if text and not was_open:
+        try:
+            busy = coaching_pending(team) or has_position_changes(team)
+        except Exception:
+            busy = False
+        game_day_notify.note_left(team, info.get("name"), busy)
+    return rec or {}
+
+
+@router.post("/api/coaching-notes/{team}/clear")
+def clear_coaching_note(team: str, body: ClearNoteBody = ClearNoteBody(),
+                        info: dict = Depends(require_role("streamer"))):
+    team = team.upper()
+    if team not in VALID_TEAMS:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    with _coaching_lock:
+        data = load_coaching_notes()
+        rec = data.get(team)
+        if not rec or not rec.get("text"):
+            raise HTTPException(status_code=404, detail="No note for this team")
+        if body.expected_updated_at and rec.get("updated_at") != body.expected_updated_at:
+            raise HTTPException(status_code=409, detail="The note changed since you loaded it — refresh")
+        was_open = not rec.get("cleared_at")
+        rec["cleared_at"] = _now()
+        rec["cleared_by"] = info.get("name")
+        save_coaching_notes(data)
+    log_write(info, f"POST coaching-notes/{team}/clear")
+    if was_open:
+        game_day_notify.note_cleared(team, info.get("name"))
+    return rec

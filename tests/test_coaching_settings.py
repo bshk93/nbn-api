@@ -60,6 +60,7 @@ auth.load_members = lambda: MEMBERS
 
 TMP = Path(tempfile.mkdtemp(prefix="nbn-coaching-settings-test-"))
 cs.COACHING_SETTINGS_FILE = TMP / "coaching-settings.json"
+cs.COACHING_NOTES_FILE = TMP / "coaching-notes.json"
 cs.log_write = lambda info, msg: None
 # The routes under test send game-day inbox messages. Stub them: the real
 # ones read the live members.json and write the live inboxes.json.
@@ -70,6 +71,10 @@ RECEIPTS = []
 gdn.positions_set = lambda team, by: RECEIPTS.append(team)
 SAVED = []  # (team, was_pending) per coaching save
 gdn.coaching_saved = lambda team, was_pending, by: SAVED.append((team, was_pending))
+NOTES_LEFT = []  # (team, already_waiting) per note that opened
+gdn.note_left = lambda team, by, waiting: NOTES_LEFT.append((team, waiting))
+NOTES_CLEARED = []
+gdn.note_cleared = lambda team, by: NOTES_CLEARED.append(team)
 # A save asks whether positions are waiting too; keep that off the live files.
 cs.POSITION_CHECKS_FILE = TMP / "position-checks.json"
 cs._roster_slugs = lambda team: []
@@ -334,6 +339,73 @@ cs.has_position_changes = lambda team: True
 c.put("/api/coaching-settings/ATL", json=BODY, headers=ATL)
 cs.has_position_changes = _real
 check("a save with positions already waiting doesn't notify again", SAVED[-1] == ("ATL", True))
+
+# ── a secondary outside § 2.3 needs a streamer's OK ─────────────────────────
+
+print("secondary exceptions")
+PRIMARY["far-sf"] = "SF"
+BIOS["far-sf"] = {"name": "SF, FAR", "secondary_pos": "C"}
+ROSTERS["BOS"].append("far-sf")
+item = items()["far-sf"]
+check("an exception is listed for the streamer, flagged illegal", item["changed"] and item["legal"] is False)
+check("a legal one isn't flagged", all(i["legal"] for s, i in items().items() if s != "far-sf"))
+view = c.get("/api/position-checks/BOS").json()
+check("the team sees it as an exception waiting for an OK",
+      view["exceptions"] == {"far-sf": {"secondary": "C", "approved": False}})
+r = c.put("/api/coaching-settings/BOS", json=five(C="far-sf"), headers=BOS)
+check("it doesn't count for starting before the OK",
+      r.status_code == 422 and "counts once a streamer has OK'd it" in r.json()["detail"])
+c.post("/api/position-checks/BOS/confirm", json={"seen": {"far-sf": "C"}}, headers=STREAM)
+check("setting it in 2K is the OK",
+      c.get("/api/position-checks/BOS").json()["exceptions"]["far-sf"]["approved"] is True)
+check("...and then he may start there",
+      c.put("/api/coaching-settings/BOS", json=five(C="far-sf"), headers=BOS).status_code == 200)
+BIOS["far-sf"]["secondary_pos"] = "PG"
+check("a different exception needs a new OK",
+      c.get("/api/position-checks/BOS").json()["exceptions"]["far-sf"]["approved"] is False)
+check("players.secondary_is_legal", players.secondary_is_legal("SF", "PF")
+      and not players.secondary_is_legal("SF", "C") and players.secondary_is_legal("SF", None)
+      and players.secondary_is_legal("SF", "none"))
+
+# ── notes to the streamer ────────────────────────────────────────────────────
+
+print("notes")
+
+
+def notes(headers=ADMIN):
+    return c.get("/api/coaching-notes", headers=headers).json()
+
+
+check("another team can't write a note",
+      c.put("/api/coaching-notes/BOS", json={"text": "hi"}, headers=ATL).status_code == 403)
+check("a note can't be too long",
+      c.put("/api/coaching-notes/BOS", json={"text": "x" * 1001}, headers=BOS).status_code == 422)
+r = c.put("/api/coaching-notes/BOS", json={"text": "  Play Tatum 40 in the finale  "}, headers=BOS)
+check("the team writes one, trimmed", r.status_code == 200 and r.json()["text"] == "Play Tatum 40 in the finale")
+check("the streamer is told", [t for t, _ in NOTES_LEFT] == ["BOS"])
+c.put("/api/coaching-notes/BOS", json={"text": "Play Tatum 42"}, headers=BOS)
+check("rewriting an open note doesn't tell them again", len(NOTES_LEFT) == 1)
+check("a visitor sees no notes", c.get("/api/coaching-notes").json() == {})
+check("another team sees none of BOS's", notes(ATL) == {})
+check("the team sees its own", "BOS" in notes(BOS))
+check("a streamer sees every team's", "BOS" in notes(STREAM))
+check("only a streamer clears",
+      c.post("/api/coaching-notes/BOS/clear", json={}, headers=BOS).status_code == 403)
+stale = c.post("/api/coaching-notes/BOS/clear", json={"expected_updated_at": "1999"}, headers=STREAM)
+check("a stale clear is a 409", stale.status_code == 409)
+r = c.post("/api/coaching-notes/BOS/clear",
+           json={"expected_updated_at": notes()["BOS"]["updated_at"]}, headers=STREAM)
+check("a streamer clears it", r.status_code == 200 and r.json()["cleared_by"] == "Streamy")
+check("the team gets a receipt for it", NOTES_CLEARED == ["BOS"])
+check("the text stays, marked clear", notes()["BOS"]["text"] == "Play Tatum 42" and not cs.note_open("BOS"))
+c.put("/api/coaching-notes/BOS", json={"text": "Play Tatum 42"}, headers=BOS)
+check("saving again reopens it, and tells the streamer", cs.note_open("BOS") and len(NOTES_LEFT) == 2)
+check("a coaching save while a note is open counts as already waiting",
+      c.put("/api/coaching-settings/BOS", json=BODY, headers=BOS).status_code == 200 and SAVED[-1] == ("BOS", True))
+c.put("/api/coaching-notes/BOS", json={"text": "  "}, headers=BOS)
+check("empty text deletes it", "BOS" not in notes())
+check("clearing a missing note is a 404",
+      c.post("/api/coaching-notes/BOS/clear", json={}, headers=STREAM).status_code == 404)
 
 # ── the file on disk ─────────────────────────────────────────────────────────
 

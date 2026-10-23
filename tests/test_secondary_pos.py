@@ -1,4 +1,5 @@
-"""Rulebook § 2.3: a secondary position is one step from the 2K primary."""
+"""Rulebook § 2.3: a secondary position is one step from the 2K primary.
+A team may still save one further away; it is flagged for the streamer."""
 import pytest
 from fastapi import HTTPException
 
@@ -23,17 +24,23 @@ def attrs(monkeypatch):
     monkeypatch.setattr(players, "load_attributes", lambda: data)
 
 
-@pytest.mark.parametrize("sec", ["SG", "PF", None, ""])
-def test_neighbour_or_blank_is_allowed(attrs, sec):
+@pytest.mark.parametrize("sec", ["SG", "PF", "PG", "C", None, ""])
+def test_any_other_position_or_blank_is_allowed(attrs, sec):
     players._check_secondary_pos("wing", sec)
 
 
-@pytest.mark.parametrize("sec", ["SF", "PG", "C"])
-def test_primary_itself_or_two_steps_away_is_refused(attrs, sec):
+@pytest.mark.parametrize("sec", ["SF", "G", "XX"])
+def test_primary_itself_or_not_a_position_is_refused(attrs, sec):
     with pytest.raises(HTTPException) as e:
         players._check_secondary_pos("wing", sec)
     assert e.value.status_code == 422
-    assert "SG or PF" in e.value.detail
+
+
+def test_two_steps_away_is_flagged_not_legal():
+    assert players.secondary_is_legal("SF", "PF")
+    assert not players.secondary_is_legal("SF", "C")
+    assert not players.secondary_is_legal("C", "PG")
+    assert players.secondary_is_legal("C", "none")
 
 
 def test_no_2k_primary_means_no_secondary(attrs):
@@ -144,6 +151,7 @@ def test_one_message_when_coaching_is_already_waiting(monkeypatch, coaching_wait
     calls = iter([False, True])  # nothing waiting before the save, a change after
     monkeypatch.setattr(coaching_settings, "has_position_changes", lambda team: next(calls))
     monkeypatch.setattr(coaching_settings, "coaching_pending", lambda team: coaching_waiting)
+    monkeypatch.setattr(coaching_settings, "note_open", lambda team: False)
     sent = []
     monkeypatch.setattr(game_day_notify, "positions_changed", lambda team, by: sent.append(team))
     players.update_team_settings("p0", players.TeamSettingsUpdate(secondary_pos="SG"),
@@ -177,6 +185,7 @@ def test_a_jersey_save_records_what_2k_had(monkeypatch):
     monkeypatch.setattr(coaching_settings, "load_position_checks", lambda: disk["checks"])
     monkeypatch.setattr(coaching_settings, "save_position_checks", lambda d: disk.update(checks=d))
     monkeypatch.setattr(coaching_settings, "coaching_pending", lambda team: False)
+    monkeypatch.setattr(coaching_settings, "note_open", lambda team: False)
     monkeypatch.setattr(coaching_settings, "_roster_slugs", lambda team: ["p0"])
     monkeypatch.setattr(coaching_settings, "position_items",
                         lambda team, rec, bios, roster, today, attrs=None: [{"changed": False, "jersey_changed": bool(rec.get("jerseys"))}])
