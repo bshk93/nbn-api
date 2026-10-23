@@ -398,7 +398,7 @@ def notify(date: str, events: list[dict], names: dict) -> None:
 async def upload_injury_report(
     image: UploadFile = File(...),
     date: Optional[str] = Form(None),
-    info: dict = Depends(require_any_role("streamer", "stats", "rosters")),
+    info: dict = Depends(require_any_role("stats", "rosters")),
 ):
     """One screenshot of the injury screen. The first of a date creates that
     date's pending report; later ones are added to it."""
@@ -430,14 +430,14 @@ async def upload_injury_report(
 
 
 @router.get("/api/injuries/pending")
-def list_pending(info: dict = Depends(require_any_role("streamer", "stats", "rosters"))):
+def list_pending(info: dict = Depends(require_any_role("stats", "rosters"))):
     """Pending reports, oldest first — what /parse-injuries reads."""
     items = [_public(m, "pending") for _, m in _items(PENDING_DIR)]
     return sorted(items, key=lambda m: m["date"] or "")
 
 
 @router.delete("/api/injuries/pending/{item_id}")
-def delete_pending(item_id: str, info: dict = Depends(require_any_role("streamer", "stats", "rosters"))):
+def delete_pending(item_id: str, info: dict = Depends(require_any_role("stats", "rosters"))):
     # Checked against the pattern before it goes near a path: ".." would
     # otherwise rmtree the data directory.
     if not _ID_RE.match(item_id):
@@ -453,7 +453,7 @@ def delete_pending(item_id: str, info: dict = Depends(require_any_role("streamer
 
 @router.delete("/api/injuries/pending/{item_id}/images/{fname}")
 def delete_pending_image(item_id: str, fname: str,
-                         info: dict = Depends(require_any_role("streamer", "stats", "rosters"))):
+                         info: dict = Depends(require_any_role("stats", "rosters"))):
     if not _ID_RE.match(item_id) or not _FILE_RE.match(fname):
         raise HTTPException(status_code=404, detail="Screenshot not found")
     with _lock:

@@ -856,7 +856,7 @@ command parses → commit.
 
 | Route | Auth | What |
 |---|---|---|
-| `POST /api/injuries/upload` | `streamer`/`stats`/`rosters` | one screenshot (`image`, optional `date`, default league today) into that date's pending report — one per date, up to 6 images, since the list scrolls |
+| `POST /api/injuries/upload` | `stats`/`rosters` (not `streamer`: the upload lives on `/committees/stats`) | one screenshot (`image`, optional `date`, default league today) into that date's pending report — one per date, up to 6 images, since the list scrolls |
 | `GET /api/injuries/pending`, `DELETE /api/injuries/pending/{id}[/images/{file}]` | same | what `/parse-injuries` reads; remove a mistaken upload |
 | `POST /api/injuries/commit` | `stats`/`rosters` | `{date, report_id?, confirm_heals?, rows:[{slug, status, injury, duration, ovr?, ovr_delta?, team_shown?, player?}]}` |
 | `GET /api/injuries`, `GET /api/injuries/history?team=&slug=&since=` | public | the current list; every change, newest first |

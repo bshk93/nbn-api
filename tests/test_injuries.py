@@ -3,7 +3,7 @@
 What is pinned:
 
   * **One pending report per date.** A second screenshot the same day joins
-    the first; the upload is gated to streamer/stats/rosters and refuses an
+    the first; the upload is gated to stats/rosters (not streamer) and refuses an
     unreadable format.
   * **The diff.** New, changed (status, injury or duration — not OVR) and
     healed. A player on the current list who isn't on the new report is
@@ -104,7 +104,7 @@ def png(color=(20, 40, 60)) -> bytes:
     return buf.getvalue()
 
 
-def upload(headers=STREAM, data=None, date="2026-10-22"):
+def upload(headers=STATS, data=None, date="2026-10-22"):
     return c.post("/api/injuries/upload", data={"date": date},
                   files={"image": ("shot.png", data or png(), "image/png")}, headers=headers)
 
@@ -128,10 +128,11 @@ def pinged(payload):
 print("upload")
 check("no token cannot upload", upload(headers={}).status_code in (401, 403))
 check("a member without the role cannot upload", upload(headers=PLAIN).status_code == 403)
+check("a streamer cannot upload", upload(headers=STREAM).status_code == 403)
 check("an unreadable format is refused", upload(data=b"not an image").status_code == 415)
 check("a bad date is refused", upload(date="10/22").status_code == 422)
 r = upload()
-check("a streamer uploads", r.status_code == 200, r.text)
+check("the stats role uploads", r.status_code == 200, r.text)
 item = r.json()["item"]
 r2 = upload(headers=STATS)
 check("a second screenshot joins the same date's report",
@@ -141,7 +142,9 @@ pending = c.get("/api/injuries/pending", headers=STATS).json()
 check("pending lists both dates, oldest first", [p["date"] for p in pending] == ["2026-10-21", "2026-10-22"])
 check("pending needs a role", c.get("/api/injuries/pending", headers=PLAIN).status_code == 403)
 older = pending[0]
-r = c.delete(f"/api/injuries/pending/{older['id']}/images/shot-1.png", headers=STREAM)
+check("a streamer cannot remove an image",
+      c.delete(f"/api/injuries/pending/{older['id']}/images/shot-1.png", headers=STREAM).status_code == 403)
+r = c.delete(f"/api/injuries/pending/{older['id']}/images/shot-1.png", headers=STATS)
 check("removing a report's last image removes the report", r.status_code == 200 and r.json()["item"] is None)
 check("a non-id is a 404", c.delete("/api/injuries/pending/..%2F..", headers=STATS).status_code == 404)
 check("a non-id image is a 404", c.delete("/api/injuries/pending/xx/images/shot-1.png", headers=STATS).status_code == 404)
