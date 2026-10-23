@@ -76,6 +76,8 @@ KINDS: dict[str, bool] = {
     "boxscore":        True,
     # Pick'em winners: 100 a day, 1,000 the season (2026-10-22)
     "pickem":          True,
+    # Wall Street, back on 2026-10-23 under § 3's rules (routers/invest.py)
+    "invest":          True,
     # Paused at the reset — see the module docstring
     "tip":             False,
     "achievement":     False,
@@ -83,7 +85,6 @@ KINDS: dict[str, bool] = {
     "poeltl":          False,
     "perry":           False,
     "trivia":          False,
-    "invest":          False,
     "theme":           False,
     "cosmetic":        False,
     "avatar":          False,
