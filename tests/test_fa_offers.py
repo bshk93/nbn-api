@@ -1306,6 +1306,38 @@ check("...without freezing a version twice", [v["version"] for v in out["version
 fa.finalize_player("decl-ufa", HEAD)
 raises("a finalized player's offer can't be amended", 409, lambda: fa.amend_offer(am["id"], agreed, HEAD))
 
+# ══ a player who leaves the pool with bids on him ═════════════════════════════
+# Marked retired after he was nominated (Chris Paul and Bojan Bogdanovic,
+# 2026-10). He can't be signed, so he must not sit in the agent queue, and his
+# bids must stay reachable so the head can void them out of the teams'
+# commitments. Once they are voided he is history.
+
+print("\nleft the pool — retired after nomination")
+POOL["retiring-ufa"] = {"class_year": "26-27", "hold_type": "UFA",
+                        "prior_salary": 2_000_000, "rfa": False, "qo_amount": None}
+BIOS["retiring-ufa"] = {}
+fa.open_round(fa.RoundIn(name="Retiring"), HEAD)
+fa.set_player_state("retiring-ufa", fa.PlayerStateIn(status="open"), HEAD)
+ro = fa.submit_offer(make_offer(PHX_OWNER, player="retiring-ufa", y1="$2,500,000")["id"], PHX_OWNER)
+del POOL["retiring-ufa"]
+BIOS["retiring-ufa"] = {"retired": True}
+
+lp = fa.get_state(HEAD)["players"]["retiring-ufa"]
+check("he is out of the agent queue", lp["stage"] == "left_pool")
+check("…and flagged for the head to void his bids", lp["needs_void"] is True)
+rv_lp = fa.review_player("retiring-ufa", HEAD)
+check("his review is still served, saying why he left",
+      rv_lp["left_pool"] == "retired" and [o["id"] for o in rv_lp["offers"]] == [ro["id"]])
+check("the bid still counts against PHX until it is voided",
+      "PHX" in rv_lp["commitments"])
+fa.void_offer(ro["id"], fa.VoidIn(reason="Player retired"), HEAD)
+check("once voided he no longer needs the head",
+      fa.get_state(HEAD)["players"]["retiring-ufa"]["needs_void"] is False)
+raises("…and his review is history again", 404,
+       lambda: fa.review_player("retiring-ufa", HEAD))
+check("a pool player's review carries no left_pool flag",
+      fa.review_player("young-rfa", HEAD)["left_pool"] is None)
+
 print("\n" + ("=" * 40))
 if FAILS:
     print(f"FAILURES: {FAILS}")

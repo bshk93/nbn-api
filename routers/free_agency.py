@@ -590,9 +590,17 @@ def _window_closed(state: dict, slug: str, pool: dict) -> bool:
 
 
 def _agent_stage(state: dict, slug: str, pool: dict, finalized: bool) -> str:
-    """`open` → `awaiting_agent` → `with_agent` → `with_committee` → `decided`."""
+    """`open` → `awaiting_agent` → `with_agent` → `with_committee` → `decided`.
+
+    `left_pool` is the side exit: a player on the board who is no longer a free
+    agent at all, most often one marked retired after he was nominated. He
+    can't be signed, so he isn't waiting on an agent; what's left is voiding
+    any bids still on him, which the head does from his review.
+    """
     if finalized:
         return "decided"
+    if slug not in pool:
+        return "left_pool"
     if _is_advanced(state, slug):
         return "with_committee"
     if _claim_holder(state, slug):
@@ -947,6 +955,8 @@ def get_state(info: dict = Depends(require_any_role("fac", "agent", "poext"))):
             "balloted": info["name"] in cast,
             "finalized": finalized,
             "needs_result": _needs_result(node.get("final")),
+            # Left the pool with bids still live: the head has to void them.
+            "needs_void": slug not in pool and not finalized and counts.get(slug, 0) > 0,
             # § 4.7 — derived, never stored.
             "stage": _agent_stage(state, slug, pool, finalized),
             "claimed_by": _claim_holder(state, slug),
@@ -1946,10 +1956,14 @@ def review_player(slug: str, info: dict = Depends(get_token_info)):
     _require_reviewer(info, state, slug)
     _sweep_ffa_expiry(state)
     pool = _live_pool()
-    if slug not in pool:
-        raise HTTPException(404, f"'{slug}' is not in the free-agent pool")
     offers = _load_offers()
     live = [o for o in _offers_for(offers, slug) if o["status"] in ("submitted", "returned")]
+    # A player who left the pool with bids still on him (marked retired after
+    # he was nominated) is still served, so those bids can be voided. With none
+    # left he is history, and the 404 sends the page to the history panel.
+    left_pool = slug not in pool
+    if left_pool and not live:
+        raise HTTPException(404, f"'{slug}' is not in the free-agent pool")
 
     ctx = _validation_ctx()
     rendered = []
@@ -1979,7 +1993,9 @@ def review_player(slug: str, info: dict = Depends(get_token_info)):
     finalized = bool(_ballot_node(_load_ballots(), slug, round_id or "").get("final"))
     return {
         "player": slug,
-        "pool": pool[slug],
+        "pool": pool.get(slug, {}),
+        "left_pool": ("retired" if (load_player_bios().get(slug) or {}).get("retired")
+                      else "not_in_pool") if left_pool else None,
         "state": {**entry, "ffa_expired": _ffa_expired(entry),
                   # § 4.7 — the panel needs to know which actions to offer, and
                   # deriving that in page JS would be a second copy of the rule.
