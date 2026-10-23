@@ -20,6 +20,42 @@ GAMES: dict[str, set[str]] = {
     "bets":    {"wager", "payout", "bet_refund"},
 }
 
+# Where every NB¥ a member has came from or went, one column each on /nbyen's
+# Breakdown tab. Every kind is in exactly one, so a member's sources sum to
+# their net worth (the games count what is still held in them, as `pnl` does).
+# A kind missing here lands in "other" rather than vanishing from the sum.
+SOURCES: list[tuple[str, str, set[str]]] = [
+    ("start",     "Starting grant", {"start"}),
+    ("donations", "Donations",      {"donation"}),
+    ("twitch",    "Twitch subs",    {"twitch_sub"}),
+    ("bets",      "Bets",           GAMES["bets"]),
+    ("futures",   "Futures",        GAMES["futures"]),
+    ("stocks",    "Stocks",         GAMES["stocks"]),
+    ("pickem",    "Pick'em",        {"pickem"}),
+    ("boxscores", "Box scores",     {"boxscore"}),
+    ("rewards",   "Rewards",        {"achievement", "bio", "poeltl", "perry", "trivia"}),
+    ("tips",      "Tips",           {"tip"}),
+    ("streams",   "Streams bought", {"stream_purchase", "stream_refund"}),
+    ("shop",      "Shop",           {"theme", "cosmetic", "avatar"}),
+    ("admin",     "Adjustments",    {"admin"}),
+    ("other",     "Other",          set()),
+]
+_SOURCE_OF = {k: key for key, _, kinds in SOURCES for k in kinds}
+
+# Adjustments that undo a specific kind's mistake are counted against that
+# kind, so a member's Donations column reads what they actually donated.
+# Keyed by the adjustment's ledger `ref`.
+CORRECTS: dict[str, str] = {
+    # tests/test_donations.py credited KVL 3 × 5,000 on the live ledger
+    # (2026-09-29 to 10-19) before it was isolated; reversed 2026-10-22.
+    "donation-test-leak": "donation",
+}
+
+
+def _source(r: dict) -> str:
+    kind = CORRECTS.get(r.get("ref") or "", r["kind"]) if r["kind"] == "admin" else r["kind"]
+    return _SOURCE_OF.get(kind, "other")
+
 
 def net_worth_rows() -> list[dict]:
     """Every member's money, the one definition every page and command uses:
@@ -31,10 +67,14 @@ def net_worth_rows() -> list[dict]:
     held = {"stocks": invest.open_holdings(), "futures": markets.open_holdings(),
             "bets": bets.open_stakes()}
     flow: dict[str, dict[str, float]] = {g: {} for g in GAMES}
+    src: dict[str, dict[str, float]] = {}
     for r in wallet.read_ledger():
         for g, kinds in GAMES.items():
             if r["kind"] in kinds:
                 flow[g][r["member"]] = flow[g].get(r["member"], 0.0) + r["delta"]
+        s = src.setdefault(r["member"], {})
+        k = _source(r)
+        s[k] = s.get(k, 0.0) + r["delta"]
     names = set(members) | set(bal)
     for d in (*held.values(), *flow.values()):
         names |= set(d)
@@ -42,11 +82,16 @@ def net_worth_rows() -> list[dict]:
     for n in names:
         h = {g: round(held[g].get(n, 0.0), 2) for g in GAMES}
         b = round(bal.get(n, 0.0), 2)
+        pnl = {g: (round(flow[g].get(n, 0.0) + h[g], 2)
+                   if n in flow[g] or h[g] else None) for g in GAMES}
+        # Sources a member never touched are left out, so 0 means "broke even".
+        sources = {k: round(v, 2) for k, v in src.get(n, {}).items()}
+        sources.update({g: v for g, v in pnl.items() if v is not None})
         rows.append({
             "name": n, "balance": b, **h,
             "net_worth": round(b + sum(h.values()), 2),
-            "pnl": {g: (round(flow[g].get(n, 0.0) + h[g], 2)
-                        if n in flow[g] or h[g] else None) for g in GAMES},
+            "pnl": pnl,
+            "sources": sources,
             "member": n in members,
         })
     rows.sort(key=lambda r: (-r["net_worth"], r["name"].lower()))
@@ -56,8 +101,9 @@ def net_worth_rows() -> list[dict]:
 @router.get("/api/nbyen/summary")
 def nbyen_summary():
     """Every member's money (`net_worth_rows`), the total in circulation, and
-    the total moved by each kind since the reset. `paused` lists the kinds
-    switched off."""
+    the total moved by each kind since the reset. `sources` is the Breakdown
+    tab's columns in order, each with its league-wide net. `paused` lists the
+    kinds switched off."""
     rows = net_worth_rows()
     bal = wallet.balances()
     by_kind: dict[str, float] = {}
@@ -65,6 +111,11 @@ def nbyen_summary():
         by_kind[r["kind"]] = round(by_kind.get(r["kind"], 0.0) + r["delta"], 2)
     return {
         "balances": rows,
+        "sources": [{"key": key, "label": label,
+                     "kinds": sorted(kinds),
+                     "total": round(sum(r["sources"].get(key, 0.0) for r in rows), 2),
+                     "members": sum(key in r["sources"] for r in rows)}
+                    for key, label, kinds in SOURCES],
         "total": round(sum(bal.values()), 2),
         **{f"{g}_total": round(sum(r[g] for r in rows), 2) for g in GAMES},
         "by_kind": by_kind,

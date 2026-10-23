@@ -370,6 +370,20 @@ check("a member's history is theirs only, newest first",
 check("filter by kind", all(e["kind"] == "donation" for e in c.get("/api/nbyen/ledger?kind=donation").json()["entries"]))
 check("an unknown kind is a 422", c.get("/api/nbyen/ledger?kind=nope").status_code == 422)
 
+summ = c.get("/api/nbyen/summary").json()
+check("every member's sources sum to their net worth",
+      all(abs(sum(r["sources"].values()) - r["net_worth"]) < 0.01 for r in summ["balances"]))
+check("every kind is in exactly one source",
+      sorted(k for s in nbyen_r.SOURCES for k in s[2]) == sorted(set(wallet.KINDS)))
+ann = next(r for r in summ["balances"] if r["name"] == "Ann")
+check("a game's source is its P&L", ann["sources"]["stocks"] == ann["pnl"]["stocks"] == -5.0)
+wallet.post([{"member": "Ann", "delta": 5000, "kind": "donation", "reason": "test leak"},
+             {"member": "Ann", "delta": -5000, "kind": "admin", "reason": "undo", "ref": "donation-test-leak"}])
+ann2 = next(r for r in c.get("/api/nbyen/summary").json()["balances"] if r["name"] == "Ann")
+check("an adjustment that corrects a donation counts against Donations",
+      ann2["sources"]["donations"] == ann["sources"].get("donations", 0)
+      and ann2["sources"].get("admin") == ann["sources"].get("admin"))
+
 print("\n" + ("=" * 40))
 if FAILS:
     print(f"FAILED: {FAILS}")
