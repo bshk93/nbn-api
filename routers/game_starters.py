@@ -27,10 +27,16 @@ Its own append-only file rather than a column on the raw box scores, which are
 fixed-shape and guarded (`allstats_guard.py`). Re-recording a game appends a
 new line; the last line for a game wins (`load`).
 
+It is also where 6MOY eligibility lives (`sixth_man_status`, rulebook § 8.1):
+a player who started at least half his games with known starters can't get
+6MOY votes. `put_team_ballot` refuses him and the ballot page reads
+`GET /api/game-starters/sixth-man` to leave him out of its search.
+
     venv/bin/python -m tests.test_game_starters
 """
 from __future__ import annotations
 
+import csv
 import json
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -39,13 +45,14 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Query
 
-from .constants import DATA_DIR, logger
+from .constants import DATA_DIR, DERIVED_DIR, logger
 from .coaching_settings import load_coaching_settings, _entered_snapshot
 from .storage import _current_league_year
 
 router = APIRouter()
 
 STARTERS_FILE = DATA_DIR / "game-starters.jsonl"
+PLAYER_SEASONS_CSV = DERIVED_DIR / "players" / "player_seasons.csv"
 SLOTS = ("PG", "SG", "SF", "PF", "C")
 _ET = ZoneInfo("America/New_York")
 
@@ -179,6 +186,12 @@ def get_start_counts(season: Optional[str] = Query(None),
     "nobody knows"."""
     season = season or _current_league_year()
     entries = load(season)
+    return {"season": season, "game_type": game_type,
+            "players": starts_by_player(entries, game_type),
+            "team_games_known": _team_games_known(entries, game_type)}
+
+
+def _team_games_known(entries: list[dict], game_type: str = "REG") -> dict:
     known: dict[str, int] = defaultdict(int)
     for e in entries:
         if e.get("game_type") != game_type:
@@ -186,5 +199,52 @@ def get_start_counts(season: Optional[str] = Query(None),
         for team, t in (e.get("teams") or {}).items():
             if t.get("starters"):
                 known[team] += 1
-    return {"season": season, "game_type": game_type,
-            "players": starts_by_player(entries, game_type), "team_games_known": dict(known)}
+    return dict(known)
+
+
+def _season_games(season: str) -> dict:
+    """slug → (games played, [teams]) for a regular season, from the stats build."""
+    out: dict[str, tuple[int, list]] = {}
+    try:
+        with PLAYER_SEASONS_CSV.open(newline="") as fh:
+            for r in csv.DictReader(fh):
+                if r.get("SEASON") != season or not r.get("SLUG"):
+                    continue
+                try:
+                    g = int(r.get("G") or 0)
+                except ValueError:
+                    continue
+                games, teams = out.get(r["SLUG"], (0, []))
+                out[r["SLUG"]] = (games + g, teams + [r.get("TEAM")])
+    except OSError:
+        return {}
+    return out
+
+
+def sixth_man_status(season: str) -> dict:
+    """slug → {gs, known, eligible} for 6MOY (rulebook § 8.1).
+
+    `known` is his games with a known starting five: his games played, capped
+    by how many of his teams' games have known starters — the same count the
+    award race (`award-race.js` in nbn-today) uses. He is eligible unless he
+    started at least half of those. With nothing known (seasons before 26-27,
+    or a player with no recorded games) there is no evidence against him, so
+    he is eligible: the rule only refuses what the record shows.
+    """
+    entries = load(season)
+    known_by_team = _team_games_known(entries)
+    starts = starts_by_player(entries)
+    out = {}
+    for slug, (games, teams) in _season_games(season).items():
+        known = min(games, sum(known_by_team.get(t, 0) for t in teams))
+        gs = (starts.get(slug) or {}).get("gs", 0)
+        out[slug] = {"gs": gs, "known": known, "eligible": not (known and 2 * gs >= known)}
+    return out
+
+
+@router.get("/api/game-starters/sixth-man")
+def get_sixth_man(season: Optional[str] = Query(None)):
+    """Who can get 6MOY votes. A player not listed has no games this season and
+    is eligible."""
+    season = season or _current_league_year()
+    return {"season": season, "players": sixth_man_status(season)}

@@ -31,6 +31,8 @@ from .auth import (
 from . import wallet
 from .picks_scheduler import wake_picks_horizon_scheduler
 from . import season_calendar
+from . import game_starters
+from .names import player_name
 from .league_time import league_today_str
 
 router = APIRouter()
@@ -394,6 +396,28 @@ def get_team_ballot(season: str, team: str, authorization: Optional[str] = Heade
     return json.loads(path.read_text()).get(team, {})
 
 
+def _check_sixth_men(season: str, body: dict) -> None:
+    """§ 8.1: a 6MOY vote for a player who started at least half his games with
+    known starters is a 422 naming him, and nothing is saved. Only the owners'
+    own ballot save checks this; the office's whole-season PUT stays a
+    correction path."""
+    picks = [s for s in (body.get("6MOY") or []) if s]
+    if not picks:
+        return
+    status = game_starters.sixth_man_status(season)
+    bad = [s for s in picks if not status.get(s, {"eligible": True})["eligible"]]
+    if not bad:
+        return
+    bios = _load_json(PLAYER_BIOS_FILE, {})
+    names = [f"{player_name((bios.get(s) or {}).get('name') or s)} (started {status[s]['gs']} of {status[s]['known']})"
+             for s in bad]
+    raise HTTPException(status_code=422, detail={
+        "message": "Not eligible for 6MOY, which needs more games off the bench than started (§ 8.1): "
+                   + "; ".join(names),
+        "ineligible": [{"slug": s, **status[s]} for s in bad],
+    })
+
+
 @router.put("/api/awards-ballots/{season}/{team}")
 def put_team_ballot(season: str, team: str, body: dict, authorization: Optional[str] = Header(None)):
     team = team.upper()
@@ -409,6 +433,7 @@ def put_team_ballot(season: str, team: str, body: dict, authorization: Optional[
     if config.get(season, {}).get("revealed", False):
         raise HTTPException(status_code=403, detail="Cannot edit a revealed season")
     path = _awards_ballots_path(season)
+    _check_sixth_men(season, body)
     ballots = json.loads(path.read_text()) if path.exists() else {}
     ballots[team] = body
     path.write_text(json.dumps(ballots, indent=2))

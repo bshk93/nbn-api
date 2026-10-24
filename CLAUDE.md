@@ -962,3 +962,15 @@ player page's GS column and the award race's 6MOY). Recorded from 26-27;
 `reconstructed: true`. It is append-only and can't be rebuilt, and the data
 backup tracks it by default. Tests that run a real commit must point
 `STARTERS_FILE` at a temp dir, as `tests/test_boxscore_commit_gate.py` does.
+
+**6MOY eligibility (rulebook § 8.1) lives here too.** `sixth_man_status`
+counts a player's known games (his games, capped by his teams' games with
+known starters, from `player_seasons.csv`) and makes him ineligible once he
+started at least half of them. It's the same count as the award race in
+nbn-today's `award-race.js`, so change both together. `GET /api/game-starters/sixth-man`
+(public) serves it to the ballot page, which leaves ineligible players out of
+its 6MOY search. `put_team_ballot` (`misc.py`, `_check_sixth_men`) refuses a
+6MOY pick who's out with a 422 naming him, and saves nothing. The office's
+whole-season `PUT /api/awards-ballots/{season}` isn't checked, so it can still
+correct a ballot. Nothing known means eligible: the rule refuses only what the
+record shows. Pinned by `tests/test_sixth_man.py`.
