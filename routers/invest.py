@@ -76,6 +76,8 @@ INDEXES: dict[str, list[str]] = {
     "NW":   ["DEN", "MIN", "OKC", "POR", "UTA"],
     "PAC":  ["GSW", "LAC", "LAL", "PHX", "SAC"],
     "SW":   ["DAL", "HOU", "MEM", "NOP", "SAS"],
+    "TX":   ["DAL", "HOU", "SAS"],
+    "CA":   ["GSW", "LAC", "LAL", "SAC"],
 }
 INDEX_META: dict[str, dict] = {
     "EAST": {"name": "Eastern Conference", "conf": "East"},
@@ -86,6 +88,8 @@ INDEX_META: dict[str, dict] = {
     "NW":   {"name": "Northwest Division", "conf": "West", "div": "Northwest"},
     "PAC":  {"name": "Pacific Division",   "conf": "West", "div": "Pacific"},
     "SW":   {"name": "Southwest Division", "conf": "West", "div": "Southwest"},
+    "TX":   {"name": "Texas",              "group": "State"},
+    "CA":   {"name": "California",         "group": "State"},
 }
 
 from .bets import DISCORD_BETS_WEBHOOK
