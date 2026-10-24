@@ -75,6 +75,7 @@ DRAFT_LIVE_PICKS_FILE = DATA_DIR / "draft-live-picks.csv"
 DRAFT_GRADES_FILE = DATA_DIR / "draft-grades.json"
 SUGGESTIONS_FILE = DATA_DIR / "suggestions.json"
 QUADRANTS_FILE = DATA_DIR / "quadrants.json"
+TWEETS_FILE = DATA_DIR / "tweets.json"       # NBN Twitter, the homepage card — routers/tweets.py
 # Trade Request Committee — see nbn-today/docs/trc-trade-pipeline.md.
 TRADE_REQUESTS_FILE = DATA_DIR / "trade-requests.json"
 # PDC free agency — see nbn-today/docs/pdc-free-agency-spec.md § 4.
