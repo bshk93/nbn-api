@@ -136,6 +136,25 @@ check(f"few games at the floor ({floor:.1%})", floor < 0.02)
 check("every finished season has stars", all(
     sum(by[(s, t)]["STARS"] for t in {r["TEAM"] for r in rows}) > 0 for s in done))
 
+print("bad blood and the champ in town")
+from stats_build import pipeline  # noqa: E402
+_, po_rows = pipeline.prepare(DATA_DIR, season)
+met = {(g["season"], frozenset((g["home"], g["away"]))) for g in f.games(po_rows, playoffs=True)}
+champs_by = {s: t for (s, t), res in pipeline.playoff_results(po_rows).items() if res == "Champion"}
+rival, other, visit = [], [], []
+for a in reg:
+    s, home, away, crowd = a[0], a[4], a[5], a[7]
+    i = seasons.index(s)
+    seen = any((seasons[j], frozenset((home, away))) in met for j in range(max(0, i - f.RIVAL_WINDOW), i))
+    (rival if seen else other).append(crowd)
+    if i and champs_by.get(seasons[i - 1]) == away:
+        visit.append(crowd)
+mean = lambda xs: sum(xs) / len(xs)
+check(f"recent playoff opponents draw more ({mean(rival):.0f} vs {mean(other):.0f})",
+      rival and mean(rival) > mean(other))
+check(f"so does the defending champ on the road ({mean(visit):.0f})",
+      visit and mean(visit) > mean(other))
+
 profit = [r for r in rows if r["PROFIT"] is not None]
 check("profit only where payroll is on record", all(r["PAYROLL"] is not None for r in profit))
 check("no profit before payroll records begin", all(r["SEASON"] >= "26-27" for r in profit))

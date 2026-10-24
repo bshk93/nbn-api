@@ -18,7 +18,7 @@ from stats_build import checks as stats_checks
 
 from .constants import (
     DATA_DIR, PLAYER_BIOS_FILE, PENDING_BOXSCORES_DIR, MANUAL_QUEUE_FILE,
-    BUILD_STATUS_FILE, BUILD_SCRIPT, VALID_TEAMS, _manual_queue_lock,
+    BUILD_STATUS_FILE, BUILD_SCRIPT, DERIVED_DIR, VALID_TEAMS, _manual_queue_lock,
     _build_trigger_lock, logger,
 )
 from .storage import read_csv, log_write, _current_league_year, _atomic_write
@@ -759,57 +759,93 @@ def get_boxscores(date: str = Query(...), season: str = Query(default=None)):
         all_rows.extend(r for r in rows if r.get("DATE", "").strip() == date)
 
     bios = _bios_by_name()
-    games: dict[tuple, dict] = {}
-    for r in all_rows:
-        opp_raw = r.get("OPP_RAW", r.get("OPP", "")).strip().lstrip("@")
-        opp_field = r.get("OPP", "").strip()
-        team = r.get("TEAM", "").strip()
-        if not team or not opp_raw:
-            continue
-        is_home = not opp_field.startswith("@")
-        if is_home:
-            key = (team, opp_raw)
-        else:
-            key = (opp_raw, team)
-        if key not in games:
-            games[key] = {
-                "home_team": key[0],
-                "away_team": key[1],
-                "home_score": None,
-                "away_score": None,
-                "gametype": r.get("gametype", "REG"),
-                "home_players": [],
-                "away_players": [],
-            }
+    return [_with_attendance(g, date) for g in _group_games(all_rows, bios)]
 
-    for r in all_rows:
-        opp_raw = r.get("OPP_RAW", r.get("OPP", "")).strip().lstrip("@")
-        opp_field = r.get("OPP", "").strip()
+
+def _group_games(rows: list[dict], bios: dict) -> list[dict]:
+    """One game per pair of teams, home being the side whose rows carry no `@`.
+
+    19 regular-season games (20-21 to 25-26) have an `@` on both sides or on
+    neither. Keying a game by (home, away) split each of those into two half
+    games with an empty side, so a game is keyed by its two teams and only then
+    told home from away. When the rows can't say, the teams go alphabetically
+    and `home_known` is False; nothing on file says which side was home.
+    """
+    by_pair: dict[frozenset, dict] = {}
+    for r in rows:
         team = r.get("TEAM", "").strip()
-        if not team or not opp_raw:
+        opp_field = r.get("OPP", "").strip()
+        opp = r.get("OPP_RAW", opp_field).strip().lstrip("@")
+        if not team or not opp or team == opp:
             continue
-        is_home = not opp_field.startswith("@")
-        key = (team, opp_raw) if is_home else (opp_raw, team)
-        if key not in games:
-            continue
-        g = games[key]
+        g = by_pair.setdefault(frozenset((team, opp)), {
+            "gametype": r.get("gametype", "REG"), "away": set(), "rows": {}})
+        if opp_field.startswith("@"):
+            g["away"].add(team)
+        g["rows"].setdefault(team, []).append(r)
+
+    games = []
+    for pair, g in by_pair.items():
+        a, b = sorted(pair)
+        if len(g["away"]) == 1:
+            away = next(iter(g["away"]))
+            home, known = (b if away == a else a), True
+        elif len(g["rows"]) == 1 and not g["away"]:
+            # Only one side has rows, and they say home.
+            home = next(iter(g["rows"]))
+            away, known = (b if home == a else a), True
+        else:
+            home, away, known = a, b, False
+        out = {"home_team": home, "away_team": away, "home_score": None,
+               "away_score": None, "gametype": g["gametype"], "home_known": known,
+               "home_players": [], "away_players": []}
+        for side, team in (("home", home), ("away", away)):
+            for r in g["rows"].get(team, []):
+                if out[f"{side}_score"] is None:
+                    try:
+                        out[f"{side}_score"] = int(r.get("TEAM_PTS", 0) or 0)
+                    except ValueError:
+                        out[f"{side}_score"] = 0
+                out[f"{side}_players"].append(_boxscore_player_row(r, bios))
+        # A side with no rows still has a score: the other side's OPP_TEAM_PTS.
+        for side, other in (("home", away), ("away", home)):
+            if out[f"{side}_score"] is None and g["rows"].get(other):
+                try:
+                    out[f"{side}_score"] = int(g["rows"][other][0].get("OPP_TEAM_PTS", 0) or 0)
+                except ValueError:
+                    out[f"{side}_score"] = 0
+        games.append(out)
+    return sorted(games, key=lambda g: (g["home_team"], g["away_team"]))
+
+
+# The Front Office Ledger's crowd for each game (stats_build/finances.py, run
+# by the build). Flavor: a game the ledger hasn't seen yet just has none.
+ATTENDANCE_CSV = DERIVED_DIR / "data" / "franchise-attendance.csv"
+_attendance_cache: dict = {"mtime": None, "by_game": {}}
+
+
+def _attendance_index() -> dict:
+    try:
+        mtime = ATTENDANCE_CSV.stat().st_mtime
+    except OSError:
+        return {}
+    if _attendance_cache["mtime"] != mtime:
+        _, rows = read_csv(ATTENDANCE_CSV)
+        _attendance_cache["by_game"] = {
+            (r["DATE"], frozenset((r["HOME"], r["AWAY"]))): r for r in rows}
+        _attendance_cache["mtime"] = mtime
+    return _attendance_cache["by_game"]
+
+
+def _with_attendance(g: dict, date: str) -> dict:
+    r = _attendance_index().get((date, frozenset((g["home_team"], g["away_team"]))))
+    if r:
         try:
-            team_pts = int(r.get("TEAM_PTS", 0) or 0)
-            opp_pts = int(r.get("OPP_TEAM_PTS", 0) or 0)
-        except ValueError:
-            team_pts, opp_pts = 0, 0
-        if is_home:
-            if g["home_score"] is None:
-                g["home_score"] = team_pts
-                g["away_score"] = opp_pts
-            g["home_players"].append(_boxscore_player_row(r, bios))
-        else:
-            if g["away_score"] is None:
-                g["away_score"] = team_pts
-                g["home_score"] = opp_pts
-            g["away_players"].append(_boxscore_player_row(r, bios))
-
-    return sorted(games.values(), key=lambda g: (g["home_team"], g["away_team"]))
+            g["attendance"] = {"count": int(r["ATTENDANCE"]), "sellout": r["SELLOUT"] == "TRUE",
+                               "arena": None if r.get("ARENA") in ("", "NA", None) else r["ARENA"]}
+        except (KeyError, ValueError):
+            pass
+    return g
 
 
 def _gamelog_row(r: dict, season: str) -> dict:

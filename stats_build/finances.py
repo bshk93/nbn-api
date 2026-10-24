@@ -54,6 +54,10 @@ FILL_HOME_STAR = 0.05          # per star on the home team, up to STAR_CAP
 FILL_AWAY_STAR = 0.02          # per star on the visitors, up to STAR_CAP
 STAR_CAP = 2
 FILL_NOISE = 0.04              # ± this, seeded on the game
+FILL_RIVAL = 0.03              # per playoff series the two met in the last RIVAL_WINDOW seasons
+RIVAL_CAP = 2
+RIVAL_WINDOW = 3
+FILL_CHAMP_VISIT = 0.04        # last season's champion is the visiting team
 FILL_MIN, FILL_MAX = 0.45, 1.00
 FORM_WINDOW = 10
 
@@ -315,12 +319,26 @@ def ledger(data_dir: Path, season: str):
         i = seasons.index(s)
         return final_pct.get((seasons[i - 1], t), 0.5) if i else 0.5
 
+    # Bad blood: every playoff series two teams played, by season.
+    series = {(g["season"], frozenset((g["home"], g["away"]))) for g in po}
+
+    def rivalry(s, h, a):
+        i = seasons.index(s)
+        met = sum((seasons[j], frozenset((h, a))) in series
+                  for j in range(max(0, i - RIVAL_WINDOW), i))
+        return FILL_RIVAL * min(RIVAL_CAP, met)
+
+    def champ_visiting(s, a):
+        i = seasons.index(s)
+        return FILL_CHAMP_VISIT if i and results.get((seasons[i - 1], a)) == "Champion" else 0.0
+
     for i, s in enumerate(seasons):
         for g in (x for x in reg if x["season"] == s):
             h, a = g["home"], g["away"]
             fill = (FILL_BASE + FILL_FORM * form(s, h)
                     + FILL_HOME_STAR * stars(s, h) + FILL_AWAY_STAR * stars(s, a)
-                    + bandwagon(results, seasons, s, h) + _noise(g))
+                    + bandwagon(results, seasons, s, h) + rivalry(s, h, a)
+                    + champ_visiting(s, a) + _noise(g))
             fill = min(FILL_MAX, max(FILL_MIN, fill))
             crowd = round(SEATS * fill)
             gate = crowd * TICKET
