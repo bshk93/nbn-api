@@ -102,6 +102,11 @@ ATTENDANCE_COLS = [
     "SEASON", "DATE", "gametype", "ROUND", "HOME", "AWAY", "HOME_KNOWN",
     "ATTENDANCE", "SELLOUT", "ARENA",
 ]
+OWNERS_FILE = Path("data") / "franchise-owners.csv"
+OWNER_COLS = [
+    "OWNER", "TEAM", "SEASONS", "FIRST", "LAST", "IN_PROGRESS", "TITLES",
+    "START_VALUE", "END_VALUE", "VALUE_ADDED", "VS_LEAGUE",
+]
 
 
 # ── Games ─────────────────────────────────────────────────────────────────────
@@ -463,11 +468,71 @@ def _int(x):
     return None if x is None else int(round(x))
 
 
+def _midseason(season: str):
+    """Jan 1 of a season: whoever owns the team then owns its season. A season
+    that hasn't reached it yet belongs to whoever owns the team today."""
+    from datetime import date
+    return min(date(2000 + int(season[3:5]), 1, 1), date.today())
+
+
+def owner_ledger(fin_rows: list[list], tenures: list[dict]) -> list[list]:
+    """One row per owner per team they ran: what the franchise was worth.
+
+    Each season's change in value goes to whoever owned the team at mid-season
+    (Jan 1). The playoff stats credit a season to every owner whose tenure
+    touched it (`pipeline.tenure_seasons`), which is right for "was there for
+    the run" and wrong for money: a summer takeover would count twice.
+
+    `VS_LEAGUE` is the change beyond what the league average did over the same
+    seasons, so a long tenure isn't rewarded just for the multiple growing.
+    """
+    rows = [dict(zip(FINANCE_COLS, r)) for r in fin_rows]
+    seasons = sorted({r["SEASON"] for r in rows})
+    value = {(r["SEASON"], r["TEAM"]): r["VALUE"] for r in rows}
+    league = {s: sum(r["VALUE"] for r in rows if r["SEASON"] == s) / max(1, sum(r["SEASON"] == s for r in rows))
+              for s in seasons}
+    by_team_row = {(r["SEASON"], r["TEAM"]): r for r in rows}
+
+    def prev(s, t):
+        i = seasons.index(s)
+        return value[(seasons[i - 1], t)] if i else START_VALUE
+
+    def league_prev(s):
+        i = seasons.index(s)
+        return league[seasons[i - 1]] if i else START_VALUE
+
+    acc: dict[tuple[str, str], dict] = {}
+    for s in seasons:
+        mid = _midseason(s)
+        for ten in tenures:
+            t = ten["TEAM"]
+            if (s, t) not in value or not (ten["start"] <= mid <= ten["end"]):
+                continue
+            a = acc.setdefault((ten["owner"], t), {"seasons": [], "added": 0.0, "vs": 0.0, "titles": 0,
+                                                   "start": prev(s, t), "in_progress": False})
+            change = value[(s, t)] - prev(s, t)
+            expected = prev(s, t) * (league[s] / league_prev(s) - 1)
+            a["seasons"].append(s)
+            a["added"] += change
+            a["vs"] += change - expected
+            a["end"] = value[(s, t)]
+            a["titles"] += by_team_row[(s, t)]["PLAYOFF_RESULT"] == "Champion"
+            a["in_progress"] |= bool(by_team_row[(s, t)]["IN_PROGRESS"])
+    out = []
+    for (owner, team), a in sorted(acc.items(), key=lambda kv: -kv[1]["vs"]):
+        out.append([owner, team, len(a["seasons"]), a["seasons"][0], a["seasons"][-1],
+                    a["in_progress"], a["titles"], _int(a["start"]), _int(a["end"]),
+                    _int(a["added"]), _int(a["vs"])])
+    return out
+
+
 def write(out_dir: Path, data_dir: Path, season: str) -> list[str]:
     fin, att = ledger(data_dir, season)
+    owners = owner_ledger(fin, pipeline.load_owner_tenures(data_dir))
     csvio.write_csv(out_dir / FINANCES_FILE, FINANCE_COLS, fin)
     csvio.write_csv(out_dir / ATTENDANCE_FILE, ATTENDANCE_COLS, att)
-    return [str(FINANCES_FILE), str(ATTENDANCE_FILE)]
+    csvio.write_csv(out_dir / OWNERS_FILE, OWNER_COLS, owners)
+    return [str(FINANCES_FILE), str(ATTENDANCE_FILE), str(OWNERS_FILE)]
 
 
 def summary(fin_rows: list[list]) -> str:
