@@ -127,6 +127,10 @@ check("price is the unrounded product of the game factors", abs(current["BOS"] -
 # BOS and NYK are both Atlantic and every move is one beating the other, so the
 # index's daily average of their factors is exactly 1.
 check("an index is the daily average of its teams' moves", abs(current["ATLC"] - 100) < 1e-9)
+check("every index names only real teams, and has a label",
+      all(set(t) <= set(inv.VALID_TEAMS) and k in inv.INDEX_META for k, t in inv.INDEXES.items()))
+check("the state indexes are the Texas and California teams",
+      inv.INDEXES["TX"] == ["DAL", "HOU", "SAS"] and inv.INDEXES["CA"] == ["GSW", "LAC", "LAL", "SAC"])
 
 print("\nPlayoffs")
 # Two good teams (both +20 a game) meet in the playoffs. The old formula
