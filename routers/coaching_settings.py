@@ -48,7 +48,7 @@ class CoachingSettingsBody(BaseModel):
     minutes: dict = {}
 
 
-# A starter has to play near his slot: his 2K primary position, one step
+# A starter has to play near his slot: his primary position, one step
 # either side of it (PG-SG-SF-PF-C), or the secondary his team gave him. A
 # secondary outside § 2.3's one step counts only once a streamer has OK'd it
 # (`counted_secondary`). The one rule this schema-blind store enforces,
@@ -59,9 +59,9 @@ STARTER_SLOTS = ("PG", "SG", "SF", "PF", "C")
 def counted_secondary(slug: str, bio: dict, attrs: Optional[dict], entered: dict) -> Optional[str]:
     """The secondary that counts for starting: a legal one, or one outside
     § 2.3 that a streamer has OK'd by setting it in 2K (`entered`)."""
-    from .players import _primary_pos, effective_secondary, secondary_is_legal
+    from .players import effective_secondary, secondary_is_legal
     sec = effective_secondary(slug, bio, attrs)
-    if secondary_is_legal(_primary_pos(slug, attrs), sec):
+    if secondary_is_legal(slug, bio, sec, attrs):
         return sec
     return sec if slug in entered and entered[slug] == sec else None
 
@@ -82,7 +82,7 @@ def _illegal_starters(minutes: dict, prev_minutes: dict, team: str = "") -> list
     """What's wrong with the starting five, one line per bad slot. A slot left
     exactly as it was already saved passes, so a rotation saved before this
     rule existed doesn't block the team's next save of something else (the
-    Coaching Profile resends the minutes untouched). A player with no 2K
+    Coaching Profile resends the minutes untouched). A player with no
     primary yet can't be checked, and isn't blocked."""
     from .players import _primary_pos, effective_secondary, load_player_bios
     bios = None
@@ -96,18 +96,18 @@ def _illegal_starters(minutes: dict, prev_minutes: dict, team: str = "") -> list
         prev = prev_minutes.get(slot)
         if isinstance(prev, dict) and prev.get("slug") == slug:
             continue
-        primary = _primary_pos(slug)
-        if primary is None:
-            continue
         if bios is None:
             bios = load_player_bios()
             entered = (load_position_checks().get(team) or {}).get("entered") or {}
         bio = bios.get(slug) or {}
+        primary = _primary_pos(slug, None, bio)
+        if primary is None:
+            continue
         sec = counted_secondary(slug, bio, None, entered)
         legal = starter_positions(primary, sec)
         if slot not in legal:
             line = (f"{bio.get('name') or slug} can't start at {slot}: "
-                    f"his 2K position is {primary}, so he can start at {', '.join(legal)}")
+                    f"his primary is {primary}, so he can start at {', '.join(legal)}")
             if effective_secondary(slug, bio) == slot:
                 line += f" ({slot} counts once a streamer has OK'd it)"
             problems.append(line)
@@ -250,14 +250,20 @@ def enter_coaching_settings(
 
 # ── Position checks ──────────────────────────────────────────────────────────
 #
-# A team's secondary positions (§ 2.3) live on the player bios, but they only
-# matter once a streamer has set them in 2K, and 2K resets them when ratings
-# are updated. So this tracks, per team, what the streamer last confirmed:
+# A team's positions (§ 2.3) live on the player bios, but they only matter
+# once a streamer has set them in 2K, and 2K resets them when ratings are
+# updated. Our primary is frozen (routers/players.py, "Positions"), so after
+# a re-rating 2K can have a different primary too. This tracks, per team,
+# what the streamer last confirmed:
 #
 # - `entered`: slug → the secondary position as it was when a streamer last
 #   said it was set (null for "none"). A roster player whose bio differs is a
 #   change waiting to be entered. A player missing from it has never been
 #   confirmed, so his secondary, if he has one, is waiting too.
+# - `entered_primary`: slug → the primary he set, the same way.
+# - `entered_2k`: slug → 2K's position list at that confirm. When the scrape
+#   shows a different one, 2K has re-rated him and the game reset both, so
+#   what he entered no longer stands and 2K's own positions are what it has.
 # - `pins`: slugs the team ticked 📌 for: check this player before every
 #   game, not just once after a change. Opt-in, and kept per team, so a
 #   player traded away leaves his pin behind. A pin is due again on any
@@ -283,6 +289,8 @@ class ConfirmBody(BaseModel):
     # slug → the jersey number the streamer was shown and set (null for
     # none). Same rule as `seen`: only these values are confirmed.
     jerseys: dict[str, Optional[str]] = {}
+    # slug → the primary position the streamer was shown and set.
+    primaries: dict[str, Optional[str]] = {}
 
 
 def load_position_checks() -> dict:
@@ -304,7 +312,7 @@ def _roster_slugs(team: str) -> list[str]:
 def position_items(team: str, rec: dict, bios: dict, roster: list[str], today: str,
                    attrs: Optional[dict] = None) -> list[dict]:
     """The players a streamer has to look at for this team, in roster order:
-    a secondary that differs from what 2K has, or a locked player not yet
+    a primary or secondary that differs from what 2K has, or a locked player not yet
     checked today. Locked players already checked today are listed too, with
     `due` false, so the streamer sees what the team asked for.
 
@@ -315,11 +323,14 @@ def position_items(team: str, rec: dict, bios: dict, roster: list[str], today: s
     Jersey numbers ride along: `jerseys` is the number 2K has, recorded when
     a team first changes it (`note_jersey_change`). We have no scrape of 2K's
     numbers, so a player with no record there has nothing to enter."""
-    from .players import _primary_pos, _twok_secondary, effective_secondary, load_attributes, secondary_is_legal
+    from .players import (_primary_pos, _twok_pos, _twok_primary, _twok_secondary, effective_secondary,
+                          load_attributes, secondary_is_legal)
     # Loaded once: the file is 2.7MB, and reading it per player made the
     # all-teams list take over a minute, so nginx timed it out (2026-10-22).
     attrs = load_attributes() if attrs is None else attrs
     entered = rec.get("entered") or {}
+    entered_primary = rec.get("entered_primary") or {}
+    entered_2k = rec.get("entered_2k") or {}
     pins = set(rec.get("pins") or [])
     checked = rec.get("checked") or {}
     jerseys = rec.get("jerseys") or {}
@@ -327,43 +338,51 @@ def position_items(team: str, rec: dict, bios: dict, roster: list[str], today: s
     for slug in roster:
         bio = bios.get(slug) or {}
         sec = effective_secondary(slug, bio, attrs)
-        in_2k = (entered.get(slug) or None) if slug in entered else _twok_secondary(slug, attrs)
+        reset = slug in entered_2k and entered_2k[slug] != _twok_pos(slug, attrs)
+        in_2k = (entered.get(slug) or None) if slug in entered and not reset else _twok_secondary(slug, attrs)
         changed = in_2k != sec
+        primary = _primary_pos(slug, attrs, bio)
+        primary_was = (entered_primary.get(slug) if slug in entered_primary and not reset
+                       else _twok_primary(slug, attrs))
+        # Unknown on either side is nothing a streamer can act on.
+        primary_changed = bool(primary and primary_was and primary_was != primary)
         locked = slug in pins
         jersey = bio.get("jersey_number") or None
         # A cleared number is nothing to enter: 2K always shows one.
         jersey_changed = jersey is not None and slug in jerseys and (jerseys[slug] or None) != jersey
-        if not (changed or jersey_changed or locked):
+        if not (changed or primary_changed or jersey_changed or locked):
             continue
-        primary = _primary_pos(slug, attrs)
         items.append({
             "slug": slug,
             "name": bio.get("name") or slug,
             "primary": primary,
             "secondary": sec,
             # False: outside § 2.3's one step. Setting it is the streamer's OK.
-            "legal": secondary_is_legal(primary, sec),
+            "legal": secondary_is_legal(slug, bio, sec, attrs),
             "was": in_2k,
             "changed": changed,
+            "primary_was": primary_was,
+            "primary_changed": primary_changed,
             "jersey": jersey,
             "jersey_was": jerseys.get(slug) or None,
             "jersey_changed": jersey_changed,
             "locked": locked,
-            "due": changed or jersey_changed or checked.get(slug) != today,
+            "due": changed or primary_changed or jersey_changed or checked.get(slug) != today,
         })
     return items
 
 
 def position_exceptions(rec: dict, bios: dict, roster: list[str], attrs: dict) -> dict:
     """slug → {secondary, approved} for each roster player whose secondary is
-    outside § 2.3's one step. Approved once a streamer has set that exact
+    outside the pool (§ 2.3). Approved once a streamer has set that exact
     position in 2K, which is how a streamer OKs an exception."""
-    from .players import _primary_pos, effective_secondary, secondary_is_legal
+    from .players import effective_secondary, secondary_is_legal
     entered = rec.get("entered") or {}
     out = {}
     for slug in roster:
-        sec = effective_secondary(slug, bios.get(slug) or {}, attrs)
-        if secondary_is_legal(_primary_pos(slug, attrs), sec):
+        bio = bios.get(slug) or {}
+        sec = effective_secondary(slug, bio, attrs)
+        if secondary_is_legal(slug, bio, sec, attrs):
             continue
         out[slug] = {"secondary": sec, "approved": slug in entered and entered[slug] == sec}
     return out
@@ -388,7 +407,7 @@ def team_positions_view(team: str, data: Optional[dict] = None, bios: Optional[d
 
 
 def _waiting(item: dict) -> bool:
-    return item["changed"] or item["jersey_changed"]
+    return item["changed"] or item["primary_changed"] or item["jersey_changed"]
 
 
 def has_position_changes(team: str) -> bool:
@@ -463,11 +482,19 @@ def confirm_positions(team: str, body: ConfirmBody, info: dict = Depends(require
         data = load_position_checks()
         rec = data.setdefault(team, {})
         before = {i["slug"] for i in position_items(team, rec, _bios(), _roster_slugs(team), today) if _waiting(i)}
+        from .players import _twok_pos, load_attributes
+        attrs = load_attributes()
         entered = rec.setdefault("entered", {})
+        entered_primary = rec.setdefault("entered_primary", {})
+        entered_2k = rec.setdefault("entered_2k", {})
         checked = rec.setdefault("checked", {})
         for slug, sec in body.seen.items():
             entered[slug] = sec or None
             checked[slug] = today
+        for slug, prim in body.primaries.items():
+            entered_primary[slug] = prim or None
+        for slug in set(body.seen) | set(body.primaries):
+            entered_2k[slug] = _twok_pos(slug, attrs)
         jerseys = rec.setdefault("jerseys", {})
         for slug, num in body.jerseys.items():
             jerseys[slug] = num or None

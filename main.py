@@ -3,6 +3,7 @@ import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 
 from routers import audit as audit_ctx
@@ -26,6 +27,10 @@ async def lifespan(app: FastAPI):
     start_picks_horizon_scheduler()
     start_roster_log_relay()
     start_youtube_vods()
+    try:
+        players.reconcile_positions_now(force=True)
+    except Exception as exc:
+        logger.warning("positions: startup reconcile failed: %s", exc)
     yield
 
 
@@ -42,6 +47,23 @@ async def audit_context(request: Request, call_next):
     `set_actor` mutates this dict rather than replacing it."""
     audit_ctx.begin_request(request.method, request.url.path)
     return await call_next(request)
+
+
+@app.middleware("http")
+async def refreeze_positions(request: Request, call_next):
+    """A player who joined a new team gets his positions frozen again from 2K
+    (routers/players.py, "Positions"). Roster files are written from a dozen
+    paths, several of which save the bios after the roster, so this runs once
+    the write request is done rather than inside any one of them. Cheap when
+    nothing moved: it compares roster file mtimes first."""
+    response = await call_next(request)
+    if request.method != "GET" and response.status_code < 400:
+        try:
+            await run_in_threadpool(players.reconcile_positions_now)
+        except Exception as exc:
+            logger.warning("positions: reconcile after %s %s failed: %s",
+                           request.method, request.url.path, exc)
+    return response
 
 
 app.add_middleware(

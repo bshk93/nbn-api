@@ -16,73 +16,243 @@ router = APIRouter()
 
 VALID_POSITIONS = {"PG", "SG", "SF", "PF", "C"}
 
-# Rulebook § 2.3. Positions in floor order: a secondary position is one step
-# up or down from the player's 2K primary, so a PG can only add SG and a C
-# only PF. The primary itself always stays the 2K one.
+# Rulebook § 2.3. Positions in floor order.
 POSITION_ORDER = ["PG", "SG", "SF", "PF", "C"]
 
-
-def _primary_pos(slug: str, attrs: Optional[dict] = None) -> Optional[str]:
-    """The player's 2K-designated primary position, from the latest scrape.
-    Pass `attrs` (load_attributes()) when asking about many players: the file
-    is 2.7MB, and loading it per player made a 400-player slate take a minute."""
-    entries = (attrs if attrs is not None else load_attributes()).get(slug) or []
-    pos = entries[-1].get("2k_pos") if entries else None
-    return pos[0] if isinstance(pos, list) and pos and pos[0] in POSITION_ORDER else None
-
-
-def _twok_secondary(slug: str, attrs: Optional[dict] = None) -> Optional[str]:
-    """The secondary position 2K gives the player, from the latest scrape, as
-    2K has it. It may break § 2.3's one step; effective_secondary drops it then."""
-    entries = (attrs if attrs is not None else load_attributes()).get(slug) or []
-    pos = entries[-1].get("2k_pos") if entries else None
-    return pos[1] if isinstance(pos, list) and len(pos) > 1 and pos[1] in POSITION_ORDER else None
-
-
-# `secondary_pos` on a bio: null means the team hasn't chosen, so 2K's own
-# secondary stands if it is one step from the primary (none if it isn't);
-# "none" means the team removed it; a position is the team's pick, which may
-# be outside § 2.3's one step (see _check_secondary_pos).
+# ── Positions ─────────────────────────────────────────────────────────────────
+#
+# A player's primary is 2K's primary as it was when we froze it, not 2K's
+# today: a 2K re-rating doesn't move a player off his position. It is frozen
+# again, from 2K as it is then, only when he joins a team other than the one
+# it was frozen on (a spell in free agency is not a change). The frozen record
+# is the bio's `position`:
+#
+#   {"primary": "SG", "secondary": "SF", "team": "BOS",
+#    "set": "2026-10-24", "reason": "initial" | "team change" | "bio"}
+#
+# `secondary` there is 2K's secondary at the same moment: the default, used
+# while the team hasn't chosen. "bio" marks a record seeded from the old
+# hand-kept `pos` list for a player 2K had no rating for; it is replaced from
+# 2K as soon as one exists.
+#
+# The team's own choice is the bio's `secondary_pos`: null means it hasn't
+# chosen, "none" means it removed the secondary, a position is its pick. A
+# legal pick is one step from the primary or any position 2K has ever listed
+# for him (`secondary_pool`). One outside that is saved anyway and flagged
+# for the streamer, whose setting it in 2K is the OK.
+#
+# The bio's `pos` is derived: [primary, effective secondary], rewritten
+# whenever either changes, so the many pages that read it agree with this.
 NO_SECONDARY = "none"
 
 
+def _snaps(slug: str, attrs: Optional[dict]) -> list:
+    return (attrs if attrs is not None else load_attributes()).get(slug) or []
+
+
+def _twok_pos(slug: str, attrs: Optional[dict] = None) -> list[str]:
+    """2K's position list as of the latest scrape, valid positions only."""
+    entries = _snaps(slug, attrs)
+    pos = entries[-1].get("2k_pos") if entries else None
+    return [p for p in pos if p in POSITION_ORDER] if isinstance(pos, list) else []
+
+
+def _twok_primary(slug: str, attrs: Optional[dict] = None) -> Optional[str]:
+    """2K's primary today. Not the player's primary: see _primary_pos."""
+    pos = _twok_pos(slug, attrs)
+    return pos[0] if pos else None
+
+
+def _twok_secondary(slug: str, attrs: Optional[dict] = None) -> Optional[str]:
+    """2K's secondary today, as 2K has it."""
+    pos = _twok_pos(slug, attrs)
+    return pos[1] if len(pos) > 1 and pos[1] != pos[0] else None
+
+
+def twok_positions_seen(slug: str, attrs: Optional[dict] = None) -> list[str]:
+    """Every position 2K has listed for him in any scrape, in PG→C order."""
+    seen = set()
+    for e in _snaps(slug, attrs):
+        pos = e.get("2k_pos")
+        if isinstance(pos, list):
+            seen.update(p for p in pos if p in POSITION_ORDER)
+    return [p for p in POSITION_ORDER if p in seen]
+
+
+def _primary_pos(slug: str, attrs: Optional[dict] = None, bio: Optional[dict] = None) -> Optional[str]:
+    """The player's primary: the frozen one, or 2K's today if he has none
+    yet. Pass `attrs` (load_attributes()) and `bio` when asking about many
+    players: attributes is 2.7MB, and loading it per player made a 400-player
+    slate take a minute."""
+    if bio is None:
+        bio = load_player_bios().get(slug) or {}
+    rec = bio.get("position") or {}
+    if rec.get("primary") in POSITION_ORDER:
+        return rec["primary"]
+    return _twok_primary(slug, attrs)
+
+
+def default_secondary(slug: str, bio: dict, attrs: Optional[dict] = None) -> Optional[str]:
+    """The secondary he has while his team hasn't chosen: the one frozen with
+    his primary, or 2K's today if nothing is frozen."""
+    rec = bio.get("position") or {}
+    if rec.get("primary") in POSITION_ORDER:
+        sec = rec.get("secondary")
+        return sec if sec in POSITION_ORDER and sec != rec["primary"] else None
+    return _twok_secondary(slug, attrs)
+
+
 def effective_secondary(slug: str, bio: dict, attrs: Optional[dict] = None) -> Optional[str]:
-    """The secondary position a player actually has: his team's pick, or 2K's
-    when that is one step from the primary (§ 2.3)."""
+    """The secondary a player actually has: his team's pick, or the default."""
     sec = bio.get("secondary_pos") or None
     if sec == NO_SECONDARY:
         return None
     if sec:
         return sec
-    twok = _twok_secondary(slug, attrs)
-    return twok if twok in secondary_pos_options(_primary_pos(slug, attrs)) else None
+    return default_secondary(slug, bio, attrs)
 
 
 def secondary_pos_options(primary: Optional[str]) -> list[str]:
+    """§ 2.3's one step either side of the primary."""
     if primary not in POSITION_ORDER:
         return []
     i = POSITION_ORDER.index(primary)
     return [POSITION_ORDER[j] for j in (i - 1, i + 1) if 0 <= j < len(POSITION_ORDER)]
 
 
-def secondary_is_legal(primary: Optional[str], secondary: Optional[str]) -> bool:
-    """§ 2.3's one step. No secondary is always legal."""
+def secondary_pool(slug: str, bio: dict, attrs: Optional[dict] = None) -> list[str]:
+    """Every legal secondary: one step from the primary, or any position 2K
+    has ever listed for him. Never the primary itself."""
+    primary = _primary_pos(slug, attrs, bio)
+    if primary is None:
+        return []
+    ok = set(secondary_pos_options(primary)) | set(twok_positions_seen(slug, attrs))
+    rec = bio.get("position") or {}
+    if rec.get("secondary") in POSITION_ORDER:
+        ok.add(rec["secondary"])   # a "bio" seed, which 2K may never have listed
+    ok.discard(primary)
+    return [p for p in POSITION_ORDER if p in ok]
+
+
+def secondary_is_legal(slug: str, bio: dict, secondary: Optional[str], attrs: Optional[dict] = None) -> bool:
+    """No secondary is always legal; otherwise it must be in the pool."""
     if not secondary or secondary == NO_SECONDARY:
         return True
-    return secondary in secondary_pos_options(primary)
+    return secondary in secondary_pool(slug, bio, attrs)
 
 
-def _check_secondary_pos(slug: str, secondary: Optional[str]):
-    """A team may pick any position but the primary. One outside § 2.3's one
-    step is saved anyway: there are exceptions, so it is flagged for the
-    streamer, and setting it in 2K is the streamer's OK."""
+def eligible_positions(slug: str, bio: dict, attrs: Optional[dict] = None) -> list[str]:
+    """[primary, effective secondary]: what the bio's `pos` holds."""
+    primary = _primary_pos(slug, attrs, bio)
+    if primary is None:
+        return []
+    sec = effective_secondary(slug, bio, attrs)
+    return [primary] + ([sec] if sec in POSITION_ORDER and sec != primary else [])
+
+
+def _sync_pos(slug: str, bio: dict, attrs: Optional[dict]) -> bool:
+    """Rewrite the bio's derived `pos`. True if it changed."""
+    new = eligible_positions(slug, bio, attrs)
+    if not new or bio.get("pos") == new:
+        return False
+    bio["pos"] = new
+    return True
+
+
+def _freeze(slug: str, bio: dict, team: Optional[str], attrs: Optional[dict], reason: str, today: str) -> bool:
+    """Freeze his positions from 2K as it is now (or, with no 2K rating, from
+    the old `pos` list). True if anything on the bio changed."""
+    twok = _twok_pos(slug, attrs)
+    if twok:
+        primary, secondary = twok[0], (twok[1] if len(twok) > 1 else None)
+    else:
+        old = [p for p in (bio.get("pos") or []) if p in POSITION_ORDER]
+        if not old:
+            return False
+        primary, secondary, reason = old[0], (old[1] if len(old) > 1 else None), "bio"
+    if secondary == primary:
+        secondary = None
+    bio["position"] = {"primary": primary, "secondary": secondary, "team": team,
+                       "set": today, "reason": reason}
+    _sync_pos(slug, bio, attrs)
+    return True
+
+
+def reconcile_positions(bios: dict, team_map: dict, attrs: dict, today: str) -> list[str]:
+    """Freeze whoever needs it, in place. Returns the slugs changed.
+
+    - no record yet: frozen from 2K now ("initial");
+    - a "bio" seed and 2K now rates him: frozen from 2K;
+    - on a team other than the one frozen on: frozen from 2K, and the old
+      team's chosen secondary is dropped ("team change");
+    - otherwise only the derived `pos` is brought up to date."""
+    changed = []
+    for slug, bio in bios.items():
+        if not isinstance(bio, dict):
+            continue
+        team = team_map.get(slug)
+        rec = bio.get("position")
+        if not isinstance(rec, dict) or rec.get("primary") not in POSITION_ORDER:
+            hit = _freeze(slug, bio, team, attrs, "initial", today)
+        elif rec.get("reason") == "bio" and _twok_pos(slug, attrs):
+            hit = _freeze(slug, bio, team or rec.get("team"), attrs, "initial", today)
+        elif team and team != rec.get("team"):
+            bio["secondary_pos"] = None
+            hit = _freeze(slug, bio, team, attrs, "team change", today)
+        else:
+            hit = _sync_pos(slug, bio, attrs)
+        if hit:
+            changed.append(slug)
+    return changed
+
+
+_roster_mtimes: Optional[tuple] = None
+
+
+def _roster_stamp() -> tuple:
+    out = []
+    for team in sorted(VALID_TEAMS):
+        p = DATA_DIR / f"{team.lower()}-roster.csv"
+        try:
+            out.append(p.stat().st_mtime_ns)
+        except OSError:
+            out.append(0)
+    return tuple(out)
+
+
+def reconcile_positions_now(force: bool = False) -> list[str]:
+    """Run reconcile_positions against the files, if any roster has changed
+    since the last run (or `force`). Called after every API write and at
+    startup, so a trade or signing re-freezes the player within the request
+    that made it."""
+    global _roster_mtimes
+    from .league_time import league_today_str
+    stamp = _roster_stamp()
+    if not force and stamp == _roster_mtimes:
+        return []
+    with _txn_lock:
+        bios = load_player_bios()
+        changed = reconcile_positions(bios, _build_team_map(), load_attributes(), league_today_str())
+        if changed:
+            save_player_bios(bios)
+        _roster_mtimes = stamp
+    if changed:
+        logger.info("positions: froze/updated %d player(s): %s", len(changed),
+                    ", ".join(changed[:20]) + (" …" if len(changed) > 20 else ""))
+    return changed
+
+
+def _check_secondary_pos(slug: str, secondary: Optional[str], bio: Optional[dict] = None):
+    """A team may pick any position but the primary. One outside the pool is
+    saved anyway: there are exceptions, so it is flagged for the streamer,
+    and setting it in 2K is the streamer's OK."""
     if not secondary or secondary == NO_SECONDARY:
         return
     if secondary not in POSITION_ORDER:
         raise HTTPException(status_code=422, detail=f"Unknown position: {secondary}")
-    primary = _primary_pos(slug)
+    primary = _primary_pos(slug, None, bio)
     if primary is None:
-        raise HTTPException(status_code=422, detail="This player has no 2K primary position yet, so no secondary position can be set (§ 2.3)")
+        raise HTTPException(status_code=422, detail="This player has no primary position yet, so no secondary position can be set (§ 2.3)")
     if secondary == primary:
         raise HTTPException(status_code=422, detail=f"{secondary} is already his primary position")
 
@@ -268,6 +438,10 @@ def create_player(body: PlayerCreate, info: dict = Depends(require_any_role("ros
         raise HTTPException(status_code=409, detail="Player already exists")
     data = body.model_dump()
     data.pop("slug")
+    # `pos` on a new player is only the seed for his frozen positions, used
+    # until 2K rates him.
+    from .league_time import league_today_str
+    _freeze(slug, data, _build_team_map().get(slug), None, "initial", league_today_str())
     bios[slug] = data
     save_player_bios(bios)
     log_write(info, f"POST players — created {slug!r} ({body.name})")
@@ -287,7 +461,9 @@ def update_player(slug: str, body: PlayerBio, info: dict = Depends(require_any_r
         # § 2.3 applies only when this write changes secondary_pos, so a bio edit
         # that carries an older, now-invalid value along doesn't fail on it.
         if 'secondary_pos' in body.model_fields_set and body.secondary_pos != old_bio.get('secondary_pos'):
-            _check_secondary_pos(slug, body.secondary_pos)
+            _check_secondary_pos(slug, body.secondary_pos, old_bio)
+        # `pos` is derived from the frozen positions (see "Positions" above),
+        # so a bio edit can't set it.
         if has_role(info, "curator") and not has_role(info, "rosters") and not has_role(info, "admin"):
             existing = bios.get(slug, {})
             update_data = body.model_dump()
@@ -301,8 +477,12 @@ def update_player(slug: str, body: PlayerBio, info: dict = Depends(require_any_r
             # directly by the draft-pick transaction) or that this particular caller
             # simply didn't include in its JSON body must survive untouched — a full
             # replace has silently wiped fields like this before (jersey_number).
-            bios[slug] = {**old_bio, **body.model_dump(exclude_unset=True)}
+            update = body.model_dump(exclude_unset=True)
+            if old_bio.get("position"):
+                update.pop("pos", None)
+            bios[slug] = {**old_bio, **update}
             new_bio = bios[slug]
+        _sync_pos(slug, bios[slug], None)
         save_player_bios(bios)
     log_write(info, f"PUT players/{slug} ({body.name})")
     if existed:
@@ -330,6 +510,9 @@ def update_team_settings(slug: str, body: TeamSettingsUpdate, info: dict = Depen
 
     if body.jersey_number is not None and not re.fullmatch(r'\d{1,2}', body.jersey_number):
         raise HTTPException(status_code=422, detail="jersey_number must be 1–2 digits")
+    # A player who just changed teams is frozen again first, so this team's
+    # pick lands on his new record rather than being dropped with the old.
+    reconcile_positions_now()
     _check_secondary_pos(slug, body.secondary_pos)
 
     from . import coaching_settings, game_day_notify
@@ -356,6 +539,7 @@ def update_team_settings(slug: str, body: TeamSettingsUpdate, info: dict = Depen
 
         bios[slug]["jersey_number"] = body.jersey_number
         bios[slug]["secondary_pos"] = body.secondary_pos
+        _sync_pos(slug, bios[slug], None)
         save_player_bios(bios)
     log_write(info, f"PUT players/{slug}/team-settings — jersey={body.jersey_number} secondary_pos={body.secondary_pos}")
     if jersey_changed:
@@ -450,8 +634,11 @@ def get_attributes():
 
 @router.get("/api/attributes/current")
 def get_attributes_current():
+    # `2k_pos_seen` rides along: every position 2K has listed for him, which
+    # the team page needs for the secondary pool (see "Positions" above).
     history = load_attributes()
-    return {slug: entries[-1] for slug, entries in history.items() if entries}
+    return {slug: {**entries[-1], "2k_pos_seen": twok_positions_seen(slug, history)}
+            for slug, entries in history.items() if entries}
 
 
 @router.get("/api/attributes/{slug}")

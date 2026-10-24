@@ -134,7 +134,7 @@ pl.load_player_bios = lambda: BIOS
 pl.save_player_bios = lambda data: None
 pl._build_team_map = lambda: {"booker-devin": "PHX", "beal-bradley": "PHX"}
 pl._check_secondary_pos = lambda slug, sec: None
-pl._primary_pos = lambda slug, attrs=None: "SG"
+pl._primary_pos = lambda slug, attrs=None, bio=None: "SG"
 pl.log_write = lambda *a, **k: None
 app.include_router(pl.router)
 # Section 1 left PHX's coaching saved and not entered, which already pinged the

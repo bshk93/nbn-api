@@ -84,7 +84,7 @@ import routers.players as players  # noqa: E402
 PRIMARY = {"mann-tre": "PG", "big-man": "C", "wing-guy": "SF", "combo-sf": "SF"}
 BIOS = {"big-man": {"name": "MAN, BIG"}, "wing-guy": {"name": "GUY, WING"},
         "combo-sf": {"name": "SF, COMBO", "secondary_pos": "PF"}}
-players._primary_pos = lambda slug, attrs=None: PRIMARY.get(slug)
+players._primary_pos = lambda slug, attrs=None, bio=None: PRIMARY.get(slug)
 players.load_player_bios = lambda: BIOS
 
 app = FastAPI()
@@ -363,9 +363,9 @@ check("...and then he may start there",
 BIOS["far-sf"]["secondary_pos"] = "PG"
 check("a different exception needs a new OK",
       c.get("/api/position-checks/BOS").json()["exceptions"]["far-sf"]["approved"] is False)
-check("players.secondary_is_legal", players.secondary_is_legal("SF", "PF")
-      and not players.secondary_is_legal("SF", "C") and players.secondary_is_legal("SF", None)
-      and players.secondary_is_legal("SF", "none"))
+_legal = lambda sec: players.secondary_is_legal("wing-guy", {}, sec, {})
+check("players.secondary_is_legal", _legal("PF") and not _legal("C")
+      and _legal(None) and _legal("none"))
 
 # ── notes to the streamer ────────────────────────────────────────────────────
 

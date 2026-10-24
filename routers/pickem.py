@@ -206,7 +206,7 @@ def reopen(date: str, by: str) -> dict:
 
 
 def positions_of(slug: str, bio: dict, attrs: dict) -> list[str]:
-    primary = _primary_pos(slug, attrs)
+    primary = _primary_pos(slug, attrs, bio)
     if not primary:
         return [p for p in POSITIONS if p in (bio.get("pos") or [])]
     sec = effective_secondary(slug, bio, attrs)

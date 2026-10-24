@@ -234,7 +234,7 @@ ROLE_IMPLIES: dict[str, set[str]] = {
 }
 
 CURATOR_FIELDS = {
-    "name", "pos", "dob", "college", "country",
+    "name", "dob", "college", "country",
     "draft_year", "draft_round", "draft_pick",
     "photo_url", "height", "weight", "wingspan", "jersey_number", "retired",
 }
