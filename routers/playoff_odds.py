@@ -169,7 +169,7 @@ def simulate(results: list[dict], schedule: list[dict], priors: dict[str, float]
             remaining.append((g["home_team"], g["away_team"]))
 
     conf_of = {t: ("East" if t in EAST else "West") for t in teams}
-    keys = ("playoffs", "top6", "play_in", "seed1", "conf_finals", "finals", "title")
+    keys = ("playoffs", "top6", "play_in", "seed1", "second_round", "conf_finals", "finals", "title")
     count = {t: dict.fromkeys(keys, 0) for t in teams}
     wins_total = defaultdict(float)
     seed_count = {t: defaultdict(int) for t in teams}
@@ -221,6 +221,8 @@ def simulate(results: list[dict], schedule: list[dict], priors: dict[str, float]
             seeds = ranked[:6] + [win78, last]           # seeds 1..8
             r1 = [series(seeds[0], seeds[7]), series(seeds[3], seeds[4]),
                   series(seeds[2], seeds[5]), series(seeds[1], seeds[6])]
+            for t in r1:
+                count[t]["second_round"] += 1
             order = {t: i for i, t in enumerate(seeds)}
             better = lambda x, y: (x, y) if order[x] < order[y] else (y, x)
             r2 = [series(*better(r1[0], r1[1])), series(*better(r1[2], r1[3]))]

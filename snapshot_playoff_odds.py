@@ -7,13 +7,19 @@
 Saves playoff-odds.json (what GET /api/playoff-odds serves) and the day's row in
 playoff-odds-history.jsonl. The model is in routers/playoff_odds.py. Skips the
 offseason: nothing runs until the season's schedule file exists.
+
+Then the fair value (routers/fair_value.py), which simulates on the same
+inputs: fair-value.json and the day's row in fair-value-history.jsonl. A
+failure there is logged and does not fail the odds run.
 """
 import argparse
 import json
 import sys
 import time
 
-from routers import playoff_odds
+import traceback
+
+from routers import fair_value, playoff_odds
 from routers.constants import DATA_DIR
 from routers.league_time import league_today_str
 from season_clock import current_season
@@ -39,6 +45,14 @@ def main() -> int:
         return 0
     playoff_odds.save_run(run)
     print(json.dumps({"date": run["date"], "season": season, "games_played": run["games_played"], "seconds": took}))
+    try:
+        t0 = time.time()
+        fv = fair_value.compute(season, run["date"])
+        fair_value.save_run(fv)
+        print(json.dumps({"fair_value": fv["date"], "model": fv["model"], "seconds": round(time.time() - t0, 1)}))
+    except Exception:
+        traceback.print_exc()
+        print(json.dumps({"fair_value": "failed"}))
     return 0
 
 
