@@ -96,12 +96,30 @@ FINANCE_COLS = [
     "HOME_GAMES", "AVG_ATTENDANCE", "SELLOUTS", "GATE",
     "PLAYOFF_HOME_GAMES", "PLAYOFF_GATE", "MERCH", "MEDIA", "NBNTV", "TITLE_BONUS",
     "REVENUE", "PAYROLL", "DEAD_MONEY", "LUXURY_TAX", "ARENA_OPS", "EXPENSES", "PROFIT",
-    "TITLES_6Y", "VALUE", "VALUE_CHANGE",
+    "TITLES_6Y", "VALUE", "VALUE_CHANGE", "JERSEY_PATCH",
 ]
 ATTENDANCE_COLS = [
     "SEASON", "DATE", "gametype", "ROUND", "HOME", "AWAY", "HOME_KNOWN",
     "ATTENDANCE", "SELLOUT", "ARENA",
 ]
+# Jersey-patch sponsors. Pure flavor; a team renews last season's deal more
+# often than not, seeded like everything else.
+SPONSORS = (
+    "Tank Commander Energy", "Big Lead Insurance", "Fourth Quarter Collapse Mattresses",
+    "Load Management Hotels", "Brick City Masonry", "And-One Dental",
+    "Garbage Time Waste Management", "Flop Shop Footwear", "Pump Fake Gas & Go",
+    "Full Court Press Dry Cleaning", "Box Out Storage", "Buzzer Beater Alarm Co.",
+    "Salary Dump Truck Rental", "Second Apron Bakery", "Cap Space Realty",
+    "Hard Cap Hat Co.", "Bird Rights Seed & Feed", "Sign-and-Trade Auto Sales",
+    "Draft Night Regret Counseling", "Trade Machine Repair", "Two-Way Street Parking",
+    "Moral Victory Brewing", "Trust the Process Credit Union", "Lottery Odds Casino",
+    "Free Throw Line Dancing", "Air Ball Balloons", "Technical Foul Plumbing",
+    "Bench Mob Furniture", "Paint Protection Auto Detailing", "Rebound Relationship Coaching",
+    "Pick-and-Roll Sushi", "Dead Money Funeral Home", "Luxury Tax Accountants LLP",
+    "Stream Sniper Webcams", "2K Realism Physical Therapy", "Play-In Tournament Mini Golf",
+)
+SPONSOR_RENEW = 0.6
+
 OWNERS_FILE = Path("data") / "franchise-owners.csv"
 OWNER_COLS = [
     "OWNER", "TEAM", "SEASONS", "FIRST", "LAST", "IN_PROGRESS", "TITLES",
@@ -160,6 +178,22 @@ def _noise(g: dict) -> float:
     digest = hashlib.sha256(f"{g['date']}|{g['home']}|{g['away']}".encode()).digest()
     unit = int.from_bytes(digest[:8], "big") / 2**64
     return (unit * 2 - 1) * FILL_NOISE
+
+
+def _unit(*parts) -> float:
+    digest = hashlib.sha256("|".join(parts).encode()).digest()
+    return int.from_bytes(digest[:8], "big") / 2**64
+
+
+def jersey_patches(teams: list[str], seasons: list[str]) -> dict[tuple[str, str], str]:
+    out = {}
+    for t in teams:
+        for i, s in enumerate(seasons):
+            if i and _unit("renew", t, s) < SPONSOR_RENEW:
+                out[(s, t)] = out[(seasons[i - 1], t)]
+            else:
+                out[(s, t)] = SPONSORS[int(_unit("sponsor", t, s) * len(SPONSORS))]
+    return out
 
 
 # ── Awards and playoff finishes ───────────────────────────────────────────────
@@ -435,6 +469,7 @@ def ledger(data_dir: Path, season: str):
             values[(s, t)] = multiple * (sum(window) / len(window)) * (1 + BRAND_PER_TITLE * titles)
             lines[(s, t)]["titles"] = titles
 
+    patches = jersey_patches(teams, seasons)
     fin_rows = []
     for i, s in enumerate(seasons):
         for t in teams:
@@ -460,6 +495,7 @@ def ledger(data_dir: Path, season: str):
                 _int(ln["nbntv"]), ln["title"], _int(ln["revenue"]),
                 _int(payroll), _int(dead), _int(tax), _int(ops), _int(expenses), _int(profit),
                 ln["titles"], _int(values[(s, t)]), _int(values[(s, t)] - prev),
+                patches[(s, t)],
             ])
     return fin_rows, att_rows
 
