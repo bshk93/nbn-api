@@ -91,7 +91,9 @@ required = {"date", "season", "team", "salary", "salary_ex_holds", "holds", "cap
             # /committees/rosters reads these to price a § 2.1a charge rather
             # than recomputing one — dropping them puts the board back to
             # naming the floor with no number.
-            "empty_roster_charge", "empty_roster_deficiency"}
+            "empty_roster_charge", "empty_roster_deficiency",
+            # The Front Office Ledger's payroll.
+            "payroll", "dead_cap"}
 check("every row carries the full shape", all(required <= set(r) for r in rows))
 check("holds is the difference between the two bases",
       all(r["holds"] == r["salary"] - r["salary_ex_holds"] for r in rows))
@@ -125,6 +127,33 @@ check("draft-rights and dead are excluded from the standard count", synth_counts
 check("two-way is still counted separately", synth_counts["two_way"] == 1)
 check("a hold is still in the standard count", synth_counts["roster"] == 4)
 check("only this season's UFA/RFA holds are counted as holds", synth_counts["fa_holds"] == 1)
+
+print("payroll is money paid, never a hold")
+# The Front Office Ledger shows this as money a team spent. Every placeholder
+# the cap counts has to stay out of it, or a team in free agency "pays" for
+# players it does not have.
+pay_dir = TMP / "payroll-data"
+pay_dir.mkdir()
+(pay_dir / "zzz-roster.csv").write_text("SLUG\nreal\ntwo\nopt\nufa\nrfa\nrights\n")
+(pay_dir / "zzz-deadcap.csv").write_text("SLUG,26-27,27-28\ngone,\"$3,000,000\",$500\n")
+pay_bios = {
+    "real": {"type": "player", "salaries": {"26-27": "$10,000,000"}},
+    "two": {"type": "two-way", "salaries": {"26-27": "1000000"}},
+    "opt": {"type": "player", "salaries": {"26-27": "$2,000,000"},
+            "cap_holds": {"26-27": "TEAM_OPT"}},
+    "ufa": {"type": "player", "salaries": {"26-27": "$40,000,000"},
+            "cap_holds": {"26-27": "UFA"}},
+    "rfa": {"type": "two-way", "salaries": {"26-27": "$1"}, "cap_holds": {"26-27": "RFA"}},
+    "rights": {"type": "draft-rights", "salaries": {"26-27": "$5,000,000"}},
+}
+try:
+    ch.DATA_DIR = pay_dir
+    pay, dead = ch._payroll("zzz", pay_bios, "26-27")
+finally:
+    ch.DATA_DIR = real_data_dir
+check("dead cap is returned on its own", dead == 3_000_000)
+check("payroll is contracts plus dead cap, and no UFA, RFA or draft-rights hold",
+      pay == 10_000_000 + 1_000_000 + 2_000_000 + 3_000_000)
 
 print("the figures are the validators' own, not a second implementation")
 bios = _load_json(DATA_DIR / "player-bios.json", {})

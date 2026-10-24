@@ -41,7 +41,7 @@ from .auth import require_role
 from .players import _display_name
 from .constants import CAP_LEVELS_FILE, DATA_DIR, VALID_TEAMS, logger
 from .roster_picks import get_season_state, load_team_state
-from .storage import _current_league_year, _load_json, read_csv
+from .storage import _current_league_year, _load_json, _parse_dollar, read_csv
 from . import season_calendar
 from .league_time import league_today_str
 from .transactions import (_compute_team_salary, _compute_team_salary_ex_holds,
@@ -126,6 +126,39 @@ def _draft_rights(team: str, bios: dict) -> list[dict]:
     return out
 
 
+_NOT_MONEY_TYPES = {"draft-rights"}
+_HOLD_TAGS = {"UFA", "RFA"}
+
+
+def _payroll(team: str, bios: dict, season: str) -> tuple[int, int]:
+    """(payroll, dead cap): what the team actually pays this season.
+
+    Not a cap figure, and not to be used as one. Cap math counts placeholders
+    that cost nothing: a UFA/RFA hold, the hold on unsigned draft rights, a
+    § 3.15 offer-sheet hold and the § 2.1a Empty Roster Charge. All four are
+    left out here. Kept for the Front Office Ledger (`stats_build/finances.py`),
+    which shows payroll as money spent. Dead cap is in the total, because it is
+    money owed, and is also returned on its own so the ledger can show it.
+    """
+    payroll = dead = 0
+    path = DATA_DIR / f"{team.lower()}-roster.csv"
+    if path.exists():
+        _, rows = read_csv(path)
+        for row in rows:
+            bio = bios.get((row.get("SLUG") or "").strip(), {})
+            if bio.get("type") in _NOT_MONEY_TYPES:
+                continue
+            if (bio.get("cap_holds") or {}).get(season) in _HOLD_TAGS:
+                continue
+            payroll += _parse_dollar((bio.get("salaries") or {}).get(season, ""))
+    dc_path = DATA_DIR / f"{team.lower()}-deadcap.csv"
+    if dc_path.exists():
+        _, dc_rows = read_csv(dc_path)
+        for row in dc_rows:
+            dead += _parse_dollar(row.get(season, ""))
+    return payroll + dead, dead
+
+
 def build_rows(on_date: Optional[str] = None, season: Optional[str] = None) -> list[dict]:
     """One row per team for `on_date`. Pure — computes, writes nothing."""
     on_date = on_date or league_today_str()
@@ -158,6 +191,7 @@ def build_rows(on_date: Optional[str] = None, season: Optional[str] = None) -> l
             counts["roster"], season, all_levels)
         salary = raw + erc_charge
         ex_holds = raw_ex_holds + erc_charge
+        payroll, dead_cap = _payroll(team, bios, season)
         rows.append({
             "date": on_date,
             "season": season,
@@ -171,6 +205,10 @@ def build_rows(on_date: Optional[str] = None, season: Optional[str] = None) -> l
             "holds": raw - raw_ex_holds,
             "empty_roster_charge": erc_charge,
             "empty_roster_deficiency": erc_deficiency,
+            # Money, not cap: no holds and no Empty Roster Charge (`_payroll`).
+            # Rows before 2026-10-24 lack both fields.
+            "payroll": payroll,
+            "dead_cap": dead_cap,
             "cap": levels["cap"],
             "apron1": levels["apron1"],
             "apron2": levels["apron2"],
