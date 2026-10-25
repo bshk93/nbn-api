@@ -171,6 +171,11 @@ SECTION_ENFORCED_BY: dict[str, str] = {
     "5.2": "dead cap is computed at release by `_dead_cap_from_schedule` / "
            "`_apply_release`, never entered by hand, so there is no submission "
            "to reject",
+    "8.1": "a 6MOY vote for a player who started at least half his games with "
+           "known starters is refused when the ballot is saved "
+           "(`_check_sixth_men` in `routers/misc.py`, from `sixth_man_status` "
+           "in `routers/game_starters.py`); it is a ballot, not a transaction, "
+           "so it emits no check",
 }
 
 
