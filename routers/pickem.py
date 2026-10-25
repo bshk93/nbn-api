@@ -15,7 +15,8 @@ salary cap; the skill is guessing who has the big night.
     when something asks Twitch (the homepage banner does, every minute while
     anyone browses), so a day also locks on the first box score for that
     date, its VOD link or "done" mark on the streaming day, and at the
-    latest at midnight ET. The first of these is recorded in
+    latest at midnight ET. A stream that began before the day did (last
+    night's, running past midnight) never locks it. The first of these is recorded in
     `pickem-locks.json` and is permanent. Other members' lineups stay hidden
     until the lock.
   * **Scoring.** DraftKings classic: PTS 1, 3PM +0.5, REB 1.25, AST 1.5,
@@ -142,11 +143,21 @@ def _record_lock(date: str, why: str, stream: Optional[dict] = None) -> dict:
 
 def _game_stream(date: str, status: dict) -> bool:
     """A live stream counts as the day's games starting unless someone
-    reopened the day because of that very stream."""
+    reopened the day because of that very stream, or it began before the day
+    did: a stream still running past midnight ET is the previous day's games
+    (it locked 2026-10-25 on the 10/24 stream once)."""
     if not status.get("live"):
         return False
+    started = status.get("started_at")
+    if started:
+        try:
+            began = datetime.fromisoformat(started.replace("Z", "+00:00")).astimezone(LEAGUE_TZ)
+            if began.date().isoformat() < date:
+                return False
+        except ValueError:
+            pass
     ignored = (_load_json(LOCKS_FILE, {}).get(date) or {}).get("ignore_streams") or []
-    return status.get("started_at") not in ignored
+    return started not in ignored
 
 
 def lock_state(date: str, rows: list[dict]) -> Optional[dict]:

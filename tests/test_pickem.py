@@ -144,6 +144,14 @@ pk.note_stream_live(GAMES_ON)
 check("stamped", pk.lock_state("2026-11-01", [])["why"] == "stream")
 pk.LOCKS_FILE.unlink()
 
+print("last night's stream running past midnight doesn't lock today")
+LATE = {"live": True, "started_at": "2026-11-01T03:10:00Z", "title": "NBN 10/31"}   # 11:10pm ET on 10/31
+NOW[0] = datetime(2026, 11, 1, 0, 1, tzinfo=pk.LEAGUE_TZ)
+pk.note_stream_live(LATE)
+LIVE[0] = LATE
+check("not locked by the banner", pk.lock_state("2026-11-01", []) is None)
+LIVE[0] = OFF
+
 LIVE[0] = GAMES_ON
 NOW[0] = datetime(2026, 11, 1, 13, 5, tzinfo=pk.LEAGUE_TZ)
 try:
