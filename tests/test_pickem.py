@@ -188,6 +188,18 @@ avg = pk.season_averages([{"DATE": "2026-10-30", "PLAYER": "ONE, PG", "M": 30, "
 check("per game, from games before the day only", avg["pg-one"] == (15.0, 2))
 check("a DNP isn't a game", "c-one" not in avg)
 
+print("season leaders, for reference")
+lead = pk.leaders("26-27", [{"DATE": "2026-10-30", "TEAM": "BOS", "PLAYER": "ONE, PG", "M": 30, "P": 20},
+                            {"DATE": "2026-10-31", "TEAM": "BOS", "PLAYER": "ONE, PG", "M": 20, "P": 10},
+                            {"DATE": "2026-10-31", "TEAM": "BOS", "PLAYER": "ONE, C", "M": 0, "P": 0},
+                            {"DATE": "2026-10-31", "TEAM": "LAL", "PLAYER": "ONE, PF", "M": 30, "P": 40, "R": 10}])
+check("ranked by points per game", [p["slug"] for p in lead] == ["pf-one", "pg-one"])
+check("scored like a lineup", lead[0]["fp"] == 40 + 12.5 + 1.5)
+check("per game, best game and minutes", (lead[1]["fp_avg"], lead[1]["best"], lead[1]["min"]) == (15.0, 20.0, 25.0))
+check("a DNP isn't a game", "c-one" not in {p["slug"] for p in lead})
+check("the team is today's roster", lead[1]["team"] == "BOS" and lead[0]["team"] == "LAL")
+check("with his pick'em positions", lead[1]["positions"] == ["PG"])
+
 print("reopening a day a stray stream locked")
 ROWS.clear()   # no box scores yet: those would lock the day for real
 pk.LOCKS_FILE.unlink()

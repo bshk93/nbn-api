@@ -25,6 +25,8 @@ salary cap; the skill is guessing who has the big night.
     box scores, so a day fills in as its games are uploaded; a player with no
     line that day scores 0.
   * **Standings.** Daily, weekly (Monday to Sunday) and season totals.
+  * **Leaders.** `GET /api/pickem/leaders`: every player's fantasy points this
+    season, scored as above, for reference while picking.
   * **Prizes.** `PRIZES`, in NB¥, to first place: 100 for each day, 1,000 for
     the season, none for the week. Every tied winner gets the full prize. A
     day pays once all its box scores are in; the season pays once its last
@@ -54,7 +56,7 @@ from pydantic import BaseModel
 from .auth import _resolve_token, get_token_info, require_any_role
 from .boxscores import allstats_path
 from .coaching_settings import _roster_slugs
-from .constants import DATA_DIR, logger
+from .constants import DATA_DIR, VALID_TEAMS, logger
 from .league_time import LEAGUE_TZ, league_now
 from .names import player_name
 from .players import _primary_pos, effective_secondary, load_attributes, load_ovr, load_player_bios
@@ -239,6 +241,46 @@ def season_averages(rows: list[dict], bios: dict, before: str) -> dict[str, tupl
     return {k: (round(v[0] / v[1], 1), v[1]) for k, v in tot.items()}
 
 
+def leaders(season: str, rows: Optional[list[dict]] = None) -> list[dict]:
+    """Every player's fantasy points this season, scored the same way as a
+    lineup: total, per game, last five, best game. A DNP isn't a game. The
+    team is today's roster, else the last team he played for."""
+    rows = box_rows(season) if rows is None else rows
+    bios = load_player_bios()
+    attrs = load_attributes()
+    by_name = _slug_by_name(bios)
+    roster_team = {s: t for t in sorted(VALID_TEAMS) for s in _roster_slugs(t)}
+    games: dict[str, list[tuple[str, str, float, int]]] = {}
+    for r in rows:
+        mins = _int(r.get("M"))
+        if not mins:
+            continue
+        slug = by_name.get((r.get("PLAYER") or "").strip().upper())
+        if slug:
+            games.setdefault(slug, []).append(((r.get("DATE") or "").strip(), (r.get("TEAM") or "").strip(),
+                                               fantasy_points(r), mins))
+    out = []
+    for slug, g in games.items():
+        g.sort()
+        fps = [x[2] for x in g]
+        last5 = fps[-5:]
+        bio = bios.get(slug) or {}
+        out.append({
+            "slug": slug,
+            "name": bio.get("name", slug),
+            "team": roster_team.get(slug) or g[-1][1],
+            "positions": positions_of(slug, bio, attrs),
+            "gp": len(g),
+            "min": round(sum(x[3] for x in g) / len(g), 1),
+            "fp": round(sum(fps), 2),
+            "fp_avg": round(sum(fps) / len(fps), 1),
+            "last5": round(sum(last5) / len(last5), 1),
+            "best": max(fps),
+            "best_date": g[fps.index(max(fps))][0],
+        })
+    return sorted(out, key=lambda p: (-p["fp_avg"], -p["gp"], p["name"]))
+
+
 def player_pool(games: list[dict], averages: Optional[dict] = None) -> dict[str, dict]:
     bios = load_player_bios()
     ovr = load_ovr()
@@ -373,6 +415,13 @@ def week_of(date: str) -> str:
 
 class EntryIn(BaseModel):
     lineup: dict[str, str]
+
+
+@router.get("/api/pickem/leaders")
+def get_leaders(season: Optional[str] = None):
+    """Declared before /api/pickem/{date}, which would otherwise take it."""
+    season = season or season_clock.current_season()
+    return {"season": season, "players": leaders(season)}
 
 
 @router.get("/api/pickem/{date}")
