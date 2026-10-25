@@ -11,7 +11,8 @@ each step instead:
    whole committee.
 2. **A streamer marks those changes entered** → the team, as a receipt.
 3. **A streamer marks a day done** → the Stats committee: the day's games are
-   ready for screenshots.
+   ready for screenshots. Only the games still without them are counted, and a
+   day Stats has already finished sends nothing.
 4. **Every game on a day has both sides uploaded** → whoever parses, which is
    the `admin` role for now.
 
@@ -179,12 +180,34 @@ def streamer_assigned(name: str, date: str, games: list, by: Optional[str],
 
 
 def day_done(date: str, done_by: Optional[str]) -> None:
-    """Handoff 3. Call only when the date goes from not-done to done."""
+    """Handoff 3. Call only when the date goes from not-done to done.
+
+    Counts only the games still needing screenshots: a day is often marked done
+    after Stats has already uploaded and entered it, and then there is nothing
+    to ask for. A scheduled game with no box score and no screenshots item
+    with both sides counts; a day with none of those sends nothing."""
     try:
+        from .boxscores import _game_teams
+        from .boxscore_shots import find_pending, is_ready
         from .schedule import _load
-        n = sum(1 for g in _load(_current_league_year())["games"] if g["date"] == date)
+        season = _current_league_year()
+        fixtures = [g for g in _load(season)["games"] if g["date"] == date]
+        if fixtures:
+            boxed = _boxed_games(season)
+
+            def needs(g: dict) -> bool:
+                if (date, _game_teams(g["home_team"], g["away_team"])) in boxed:
+                    return False
+                item = find_pending(date, g["home_team"], g["away_team"])
+                return not (item and is_ready(item[1]))
+
+            n = sum(1 for g in fixtures if needs(g))
+            if not n:
+                return
+        else:
+            n = 0  # a date the schedule doesn't carry (a playoff game)
         games = f"{n} game{'' if n == 1 else 's'}" if n else "The games"
-        inbox.notify_role("stats", f"{_fmt_date(date)} is streamed — {games} need box score screenshots",
+        inbox.notify_role("stats", f"{_fmt_date(date)} is streamed — {games} need{'s' if n == 1 else ''} box score screenshots",
                           link="/committees/stats/")
     except Exception as exc:
         logger.warning("day_done notify failed for %s: %s", date, exc)
