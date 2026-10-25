@@ -6,9 +6,15 @@ Every NBN video is titled one of two ways, and the title is the whole match:
     NBN 1/29: Box Scores     the night's unstreamed games → that date's
                              `youtube_url` in streaming-days.json
 
-So there is no fuzzy matching on team names or publish times. A title of either
-shape that names a game or date the schedule doesn't have is `unmatched` and
-waits for Stats; any other title (a draft stream, a podcast) is `ignored`.
+When the league runs behind, one stream catches up on several days, and its
+title has no fixed shape ("NBN 10/24 and 10/25", "NBN: Box Scores 10/24-10/25",
+"NBN 10/24-25"). So any title starting "NBN" that names dates, and isn't one
+game, is a day video for each of those dates (a range counts every day in it).
+
+There is no fuzzy matching on team names or publish times. A title that names
+a game or date the schedule doesn't have is `unmatched` and waits for Stats, as
+is a multi-date title that also names a matchup. A title naming dates with no
+games and no "box scores" (a draft night) is `ignored`, like any other title.
 
 The source is the channel's public Atom feed, which lists the newest 15 uploads
 and live streams with no API key or quota. A thread polls it every
@@ -57,6 +63,12 @@ NS = {"a": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/sche
 TITLE_RE = re.compile(r"^\s*NBN\s+(\d{1,2})/(\d{1,2})\s*:\s*(.+?)\s*$", re.I)
 GAME_RE  = re.compile(r"^([A-Z]{2,4})\s*@\s*([A-Z]{2,4})$", re.I)
 BOX_RE   = re.compile(r"^box\s*scores?$", re.I)
+# The looser shapes of a catch-up stream's title.
+NBN_RE   = re.compile(r"^\s*NBN\b", re.I)
+DATES_RE = re.compile(r"(?<![\d/])(\d{1,2})/(\d{1,2})(?:\s*(?:-|–|—|to|thru|through)\s*(?:(\d{1,2})/)?(\d{1,2}))?(?![\d/])", re.I)
+ANY_GAME_RE = re.compile(r"\b[A-Z]{2,4}\s*@\s*[A-Z]{2,4}\b", re.I)
+ANY_BOX_RE  = re.compile(r"box\s*scores?", re.I)
+MAX_RANGE_DAYS = 7
 
 _state_lock = threading.Lock()
 _thread_started = False
@@ -66,21 +78,42 @@ _thread_lock = threading.Lock()
 # ── titles ────────────────────────────────────────────────────────────────────
 
 def parse_title(title: str) -> Optional[dict]:
-    """{"kind": "game", month, day, away, home} or {"kind": "box", month, day},
-    or None for a title that isn't an NBN game or box-score video."""
-    m = TITLE_RE.match(title or "")
-    if not m:
+    """What a title names, or None for a title that isn't an NBN game or
+    box-score video:
+
+      {"kind": "game", month, day, away, home}   one game
+      {"kind": "box",  days}                      the dates' day video
+      {"kind": "day",  days}                      the same, with no "box scores"
+      {"kind": "unclear", days}                   several dates and a matchup
+
+    `days` is a list of (month, day) or ((month, day), (month, day)) ranges."""
+    title = title or ""
+    m = TITLE_RE.match(title)
+    if m:
+        month, day, rest = int(m.group(1)), int(m.group(2)), m.group(3)
+        g = GAME_RE.match(rest)
+        if g and 1 <= month <= 12 and 1 <= day <= 31:
+            return {"kind": "game", "month": month, "day": day,
+                    "away": g.group(1).upper(), "home": g.group(2).upper()}
+    if not NBN_RE.match(title):
         return None
-    month, day, rest = int(m.group(1)), int(m.group(2)), m.group(3)
-    if not (1 <= month <= 12 and 1 <= day <= 31):
+    days = []
+    for d in DATES_RE.finditer(title):
+        m1, d1 = int(d.group(1)), int(d.group(2))
+        if not (1 <= m1 <= 12 and 1 <= d1 <= 31):
+            continue
+        if d.group(4):
+            m2, d2 = int(d.group(3) or m1), int(d.group(4))
+            if not (1 <= m2 <= 12 and 1 <= d2 <= 31):
+                continue
+            days.append(((m1, d1), (m2, d2)))
+        else:
+            days.append((m1, d1))
+    if not days:
         return None
-    if BOX_RE.match(rest):
-        return {"kind": "box", "month": month, "day": day}
-    g = GAME_RE.match(rest)
-    if g:
-        return {"kind": "game", "month": month, "day": day,
-                "away": g.group(1).upper(), "home": g.group(2).upper()}
-    return None
+    if ANY_GAME_RE.search(title):
+        return {"kind": "unclear", "days": days}
+    return {"kind": "box" if ANY_BOX_RE.search(title) else "day", "days": days}
 
 
 def resolve_date(month: int, day: int, published: datetime) -> Optional[str]:
@@ -187,23 +220,75 @@ def _link_day(on: str, url: str) -> tuple[str, str]:
     return "linked", on
 
 
+def _expand(days: list, published: datetime) -> Optional[list[str]]:
+    """The full dates a title's `days` name, oldest first, or None when one
+    can't be placed (no such date, or a range backwards or over a week)."""
+    out = set()
+    for d in days:
+        if isinstance(d[0], tuple):
+            a, b = resolve_date(*d[0], published), resolve_date(*d[1], published)
+            if not a or not b:
+                return None
+            a, b = date.fromisoformat(a), date.fromisoformat(b)
+            if a > b:   # 12/30-1/2: the start is the year before
+                try:
+                    a = a.replace(year=a.year - 1)
+                except ValueError:
+                    return None
+            if (b - a).days >= MAX_RANGE_DAYS:
+                return None
+            out.update((a + timedelta(days=i)).isoformat() for i in range((b - a).days + 1))
+        else:
+            on = resolve_date(*d, published)
+            if not on:
+                return None
+            out.add(on)
+    return sorted(out)
+
+
+def _game_dates() -> set[str]:
+    return {g["date"] for season in sched._known_seasons() for g in sched._load(season)["games"]}
+
+
 def match_video(video: dict) -> dict:
-    """What to do with one feed entry: {status, kind?, date?, note?}."""
+    """What to do with one feed entry: {status, kind?, date?, dates?, note?}."""
     parsed = parse_title(video["title"])
     if not parsed:
         return {"status": "ignored"}
     published = datetime.fromisoformat(video["published"])
-    on = resolve_date(parsed["month"], parsed["day"], published)
-    if not on:
-        return {"status": "unmatched", "kind": parsed["kind"], "note": "date doesn't exist"}
     url = f"https://www.youtube.com/watch?v={video['id']}"
-    if parsed["kind"] == "box":
-        status, note = _link_day(on, url)
-    elif parsed["away"] not in VALID_TEAMS or parsed["home"] not in VALID_TEAMS:
-        status, note = "unmatched", f"unknown team in {parsed['away']} @ {parsed['home']}"
-    else:
-        status, note = _link_game(on, parsed["away"], parsed["home"], url)
-    return {"status": status, "kind": parsed["kind"], "date": on, "note": note}
+    if parsed["kind"] == "game":
+        on = resolve_date(parsed["month"], parsed["day"], published)
+        if not on:
+            return {"status": "unmatched", "kind": "game", "note": "date doesn't exist"}
+        if parsed["away"] not in VALID_TEAMS or parsed["home"] not in VALID_TEAMS:
+            status, note = "unmatched", f"unknown team in {parsed['away']} @ {parsed['home']}"
+        else:
+            status, note = _link_game(on, parsed["away"], parsed["home"], url)
+        return {"status": status, "kind": "game", "date": on, "note": note}
+
+    kind = parsed["kind"]
+    dates = _expand(parsed["days"], published)
+    if not dates:
+        return {"status": "unmatched", "kind": kind, "note": "dates don't make sense"}
+    if kind == "unclear":
+        return {"status": "unmatched", "kind": kind, "date": dates[0], "dates": dates,
+                "note": "names several dates and a game"}
+    played = _game_dates()
+    on_schedule = [d for d in dates if d in played]
+    if not on_schedule:
+        if kind == "day":
+            return {"status": "ignored"}
+        return {"status": "unmatched", "kind": kind, "date": dates[0], "dates": dates,
+                "note": f"no games on {', '.join(dates)}"}
+    results = [(d, *_link_day(d, url)) for d in on_schedule]
+    statuses = {r[1] for r in results}
+    status = "linked" if "linked" in statuses else "skipped"
+    note = "; ".join(f"{d}: {n}" if s != "linked" else d for d, s, n in results)
+    missing = [d for d in dates if d not in played]
+    if missing:
+        note += f"; no games on {', '.join(missing)}"
+    return {"status": status, "kind": kind, "date": on_schedule[0], "dates": on_schedule, "note": note}
 
 
 def process(videos: list[dict], state: dict) -> list[dict]:

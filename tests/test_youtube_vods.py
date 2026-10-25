@@ -93,10 +93,18 @@ def feed(*entries):
 print("titles")
 check("game title", yv.parse_title("NBN 10/21: MIN @ MIA")
       == {"kind": "game", "month": 10, "day": 21, "away": "MIN", "home": "MIA"})
-check("box scores title", yv.parse_title("NBN 1/29: Box Scores") == {"kind": "box", "month": 1, "day": 29})
+check("box scores title", yv.parse_title("NBN 1/29: Box Scores") == {"kind": "box", "days": [(1, 29)]})
 check("loose spacing and case", yv.parse_title(" nbn 1/29 : box score ")["kind"] == "box")
 check("anything else is not ours", yv.parse_title("NBN Draft Night 2026") is None)
 check("impossible month is not ours", yv.parse_title("NBN 13/2: MIN @ MIA") is None)
+check("catch-up: two dates with and", yv.parse_title("NBN 10/24 and 10/25") == {"kind": "day", "days": [(10, 24), (10, 25)]})
+check("catch-up: box scores after the colon",
+      yv.parse_title("NBN 10/25: Box Scores 10/24 and 10/25") == {"kind": "box", "days": [(10, 25), (10, 24), (10, 25)]})
+check("catch-up: a range", yv.parse_title("NBN: Box Scores 10/24-10/26")["days"] == [((10, 24), (10, 26))])
+check("catch-up: a short range", yv.parse_title("NBN 10/24-25")["days"] == [((10, 24), (10, 25))])
+check("catch-up: ampersand, no colon", yv.parse_title("NBN 10/24 & 10/25 box scores")["kind"] == "box")
+check("several dates and a matchup is unclear", yv.parse_title("NBN 10/24-10/25: CHI @ MIL")["kind"] == "unclear")
+check("a title not starting NBN is not ours", yv.parse_title("Recap 10/24 and 10/25") is None)
 
 print("\nyears")
 check("same-year date", yv.resolve_date(10, 21, datetime.fromisoformat("2026-10-22T03:10:00+00:00")) == "2026-10-21")
@@ -120,6 +128,30 @@ check("box scores doesn't touch any game", "youtube_url" not in game("g2"))
 check("podcast ignored", state["videos"]["Podcast0001"]["status"] == "ignored")
 check("game not on the schedule is unmatched", state["videos"]["Missing0001"]["status"] == "unmatched")
 check("four changes reported", len(changed) == 4)
+
+print("\ncatch-up streams")
+(TMP / "schedule-26-27.json").write_text(json.dumps({**sched._load("26-27"), "games": sched._load("26-27")["games"] + [
+    {"id": "c1", "date": "2026-10-24", "time_et": "7:30p", "away_team": "CHI", "home_team": "MIL", "arena": "", "note": "", "source_id": ""},
+    {"id": "c2", "date": "2026-10-25", "time_et": "7:30p", "away_team": "NOP", "home_team": "DEN", "arena": "", "note": "", "source_id": ""},
+    {"id": "c3", "date": "2026-10-26", "time_et": "7:30p", "away_team": "BOS", "home_team": "NYK", "arena": "", "note": "", "source_id": ""}]}))
+cst = {"videos": {}}
+yv.process(yv.parse_feed(feed(("CatchUp0001", "NBN 10/24 and 10/25", "2026-10-26T05:00:00+00:00"))), cst)
+days = sd.load_streaming_days()
+check("one video links both dates",
+      all(days.get(d, {}).get("youtube_url", "").endswith("CatchUp0001") for d in ("2026-10-24", "2026-10-25")))
+check("and only those", "youtube_url" not in days.get("2026-10-26", {}))
+check("the result lists both", cst["videos"]["CatchUp0001"]["dates"] == ["2026-10-24", "2026-10-25"])
+yv.process(yv.parse_feed(feed(("CatchUp0002", "NBN: Box Scores 10/25-10/26", "2026-10-27T05:00:00+00:00"))), cst)
+days = sd.load_streaming_days()
+check("a range links the date that had no video", days["2026-10-26"]["youtube_url"].endswith("CatchUp0002"))
+check("and leaves the one that did", days["2026-10-25"]["youtube_url"].endswith("CatchUp0001"))
+check("still counts as linked", cst["videos"]["CatchUp0002"]["status"] == "linked")
+yv.process(yv.parse_feed(feed(("Draft000001", "NBN 6/25 Draft Night", "2026-06-26T05:00:00+00:00"),
+                              ("Unclear0001", "NBN 10/24-10/25: CHI @ MIL", "2026-10-26T05:00:00+00:00"),
+                              ("NoGames0001", "NBN 11/30: Box Scores", "2026-12-01T05:00:00+00:00"))), cst)
+check("dates with no games and no box scores are ignored", cst["videos"]["Draft000001"]["status"] == "ignored")
+check("several dates and a game goes to Stats", cst["videos"]["Unclear0001"]["status"] == "unmatched")
+check("box scores for a date with no games goes to Stats", cst["videos"]["NoGames0001"]["status"] == "unmatched")
 
 print("\nsecond poll")
 check("nothing new the second time", yv.process(yv.parse_feed(xml), state) == [])

@@ -62,7 +62,7 @@ gdn.league_today = lambda: TODAY
 gdn._current_league_year = lambda: "26-27"
 
 GAMES = [
-    {"id": "g1", "date": "2026-10-23", "home_team": "PHX", "away_team": "LAL"},
+    {"id": "g1", "date": "2026-10-23", "home_team": "POR", "away_team": "LAL"},
     {"id": "g2", "date": "2026-10-23", "home_team": "NYK", "away_team": "BOS"},
     {"id": "g3", "date": "2026-10-25", "home_team": "PHX", "away_team": "DEN", "streamer": "streamy"},
     {"id": "g4", "date": "2026-10-24", "home_team": "MIA", "away_team": "ORL"},
@@ -184,7 +184,7 @@ def up(team, home, away):
 
 
 SENT.clear()
-up("PHX", "PHX", "LAL"); up("LAL", "PHX", "LAL")
+up("POR", "POR", "LAL"); up("LAL", "POR", "LAL")
 check("one of two games ready: nothing yet", SENT == [])
 up("BOS", "NYK", "BOS")
 check("half of the last game: nothing yet", SENT == [])
@@ -193,6 +193,24 @@ check("the whole day ready: the parser hears", SENT and SENT[0][:2] == ("role", 
 check("naming the day and count", SENT and "Fri Oct 23" in SENT[0][2] and "2 games" in SENT[0][2])
 up("NYK", "NYK", "BOS")
 check("a further upload that day sends nothing", len(SENT) == 1)
+
+# ── 5. running behind ─────────────────────────────────────────────────────────
+
+print("the league is a day behind")
+GAMES.append({"id": "g6", "date": "2026-10-27", "home_team": "SAC", "away_team": "PHX", "streamer": "otherstreamer"})
+TODAY = date(2026, 10, 26)
+c.post("/api/coaching-settings/PHX/enter", json={}, headers=H["streamy"])
+cs.has_position_changes = lambda team: False   # 1b left a jersey number waiting
+SENT.clear()
+c.put("/api/coaching-settings/PHX", json={"values": {"a": 4}}, headers=H["phxowner"])
+check("a change goes to the unplayed 10/25 game's streamer, not the next date's",
+      len(SENT) == 1 and SENT[0][1] == "streamy" and "Oct 25" in SENT[0][2], SENT)
+c.post("/api/coaching-settings/PHX/enter", json={}, headers=H["streamy"])
+c.post("/api/streaming-days/2026-10-25/done", headers=H["streamy"])
+SENT.clear()
+c.put("/api/coaching-settings/PHX", json={"values": {"a": 5}}, headers=H["phxowner"])
+check("once that day is streamed, the next game's streamer hears instead",
+      len(SENT) == 1 and SENT[0][1] == "otherstreamer" and "Oct 27" in SENT[0][2], SENT)
 
 print()
 if FAILS:

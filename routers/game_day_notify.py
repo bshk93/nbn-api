@@ -5,7 +5,8 @@ next person checking a dashboard. These put one message in the right inbox at
 each step instead:
 
 1. **A team saves coaching changes** → the streamer who claimed that team's
-   next game. If nobody has claimed it yet, every streamer — but only when the
+   next game to be played (an unplayed game from the last week comes before
+   today's, since the league can run behind). If nobody has claimed it yet, every streamer — but only when the
    game is today or tomorrow, so a change saved a week out doesn't ping the
    whole committee.
 2. **A streamer marks those changes entered** → the team, as a receipt.
@@ -41,14 +42,49 @@ def _fmt_date(d: str) -> str:
         return d
 
 
+# How far back a team's unplayed game still counts as its next one. The league
+# runs a day or two behind when it's busy; a game left unplayed longer than
+# this is a schedule problem, not the game a coaching change is for.
+LOOKBACK_DAYS = 7
+
+
+def _played(g: dict, done: set[str], boxed: set[tuple]) -> bool:
+    """Its day is marked streamed, or it has a box score or screenshots."""
+    from .boxscores import _game_teams, _game_in_pending_screenshots
+    return (g["date"] in done
+            or (g["date"], _game_teams(g["home_team"], g["away_team"])) in boxed
+            or _game_in_pending_screenshots(g["date"], g["home_team"], g["away_team"]))
+
+
+def _boxed_games(season: str) -> set[tuple]:
+    from .boxscores import _game_teams, allstats_path, read_csv
+    path = allstats_path(season, "REG")
+    if not path.exists():
+        return set()
+    _, rows = read_csv(path)
+    return {(r.get("DATE", "").strip(), _game_teams(r.get("TEAM", "").strip(), r.get("OPP", "").strip().lstrip("@")))
+            for r in rows}
+
+
 def _next_game(team: str) -> Optional[dict]:
+    """The team's next game to be played: the earliest of its games from the
+    last week that hasn't been, so a change saved while the league is behind
+    goes to the game it's really for, not the next date on the calendar."""
     from .schedule import _load
-    today = league_today().isoformat()
-    games = _load(_current_league_year())["games"]
-    for g in games:  # stored in date order
-        if g["date"] >= today and team in (g["home_team"], g["away_team"]):
-            return g
-    return None
+    from .streaming_days import load_streaming_days
+    today = league_today()
+    since = (today - timedelta(days=LOOKBACK_DAYS)).isoformat()
+    season = _current_league_year()
+    games = [g for g in _load(season)["games"]  # stored in date order
+             if g["date"] >= since and team in (g["home_team"], g["away_team"])]
+    past = [g for g in games if g["date"] < today.isoformat()]
+    if past:
+        done = {d for d, rec in load_streaming_days().items() if rec.get("done")}
+        boxed = _boxed_games(season)
+        for g in past:
+            if not _played(g, done, boxed):
+                return g
+    return next((g for g in games if g["date"] >= today.isoformat()), None)
 
 
 def coaching_saved(team: str, was_pending: bool, saved_by: Optional[str]) -> None:
