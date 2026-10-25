@@ -155,6 +155,21 @@ check(f"recent playoff opponents draw more ({mean(rival):.0f} vs {mean(other):.0
 check(f"so does the defending champ on the road ({mean(visit):.0f})",
       visit and mean(visit) > mean(other))
 
+print("owners")
+tenures = pipeline.load_owner_tenures(DATA_DIR)
+owners = [dict(zip(f.OWNER_COLS, r)) for r in f.owner_ledger(fin, tenures)]
+check("every team-season is credited to exactly one owner",
+      sum(o["SEASONS"] for o in owners) == len(rows))
+check("beating the league is zero-sum", abs(sum(o["VS_LEAGUE"] for o in owners)) < 30)
+check("every team has an owner for the season in progress",
+      len({o["TEAM"] for o in owners if o["IN_PROGRESS"]}) == len({r["TEAM"] for r in rows}))
+# A summer takeover gets the season, the outgoing owner doesn't: one owner per
+# team at mid-season, unlike the playoff stats' overlap rule.
+dup = [(s, t) for s in seasons for t in {r["TEAM"] for r in rows}
+       if sum(1 for ten in tenures if ten["TEAM"] == t
+              and ten["start"] <= f._midseason(s) <= ten["end"]) > 1]
+check(f"no team has two owners at any mid-season ({dup[:3] or 'none'})", not dup)
+
 profit = [r for r in rows if r["PROFIT"] is not None]
 check("profit only where payroll is on record", all(r["PAYROLL"] is not None for r in profit))
 check("no profit before payroll records begin", all(r["SEASON"] >= "26-27" for r in profit))

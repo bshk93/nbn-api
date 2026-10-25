@@ -40,14 +40,14 @@ MODULES = ["test_route_bindings",
            "test_boxscore_provenance", "test_boxscore_upload_format",
            "test_boxscore_player_slugs", "test_boxscore_commit_gate",
            "test_boxscore_screenshots", "test_game_day_notify", "test_game_highs", "test_game_starters", "test_sixth_man", "test_on_this_day",
-           "test_player_insights", "test_players_slugs_filter", "test_playoff_odds",
+           "test_player_insights", "test_players_slugs_filter", "test_playoff_odds", "test_fair_value",
            "test_drive_backup",
            "test_data_paths",
            "test_declared_experience", "test_two_way_release", "test_trade_releases",
            "test_apply_extension", "test_extension_trade_freeze", "test_extensions",
            "test_nbnfl", "test_qualifying_offers", "test_signing_books",
            "test_split_players", "test_trc_discord", "test_injuries", "test_tetris",
-           "test_quadrants", "test_headshots"]
+           "test_quadrants", "test_headshots", "test_tweets"]
 
 # The picks_conveyance package keeps its tests beside it. They were never in
 # this list, which is how test_curated sat broken for two months (2026-09-30).

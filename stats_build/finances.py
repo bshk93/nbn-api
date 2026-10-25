@@ -96,11 +96,34 @@ FINANCE_COLS = [
     "HOME_GAMES", "AVG_ATTENDANCE", "SELLOUTS", "GATE",
     "PLAYOFF_HOME_GAMES", "PLAYOFF_GATE", "MERCH", "MEDIA", "NBNTV", "TITLE_BONUS",
     "REVENUE", "PAYROLL", "DEAD_MONEY", "LUXURY_TAX", "ARENA_OPS", "EXPENSES", "PROFIT",
-    "TITLES_6Y", "VALUE", "VALUE_CHANGE",
+    "TITLES_6Y", "VALUE", "VALUE_CHANGE", "JERSEY_PATCH",
 ]
 ATTENDANCE_COLS = [
     "SEASON", "DATE", "gametype", "ROUND", "HOME", "AWAY", "HOME_KNOWN",
     "ATTENDANCE", "SELLOUT", "ARENA",
+]
+# Jersey-patch sponsors. Pure flavor; a team renews last season's deal more
+# often than not, seeded like everything else.
+SPONSORS = (
+    "Tank Commander Energy", "Big Lead Insurance", "Fourth Quarter Collapse Mattresses",
+    "Load Management Hotels", "Brick City Masonry", "And-One Dental",
+    "Garbage Time Waste Management", "Flop Shop Footwear", "Pump Fake Gas & Go",
+    "Full Court Press Dry Cleaning", "Box Out Storage", "Buzzer Beater Alarm Co.",
+    "Salary Dump Truck Rental", "Second Apron Bakery", "Cap Space Realty",
+    "Hard Cap Hat Co.", "Bird Rights Seed & Feed", "Sign-and-Trade Auto Sales",
+    "Draft Night Regret Counseling", "Trade Machine Repair", "Two-Way Street Parking",
+    "Moral Victory Brewing", "Trust the Process Credit Union", "Lottery Odds Casino",
+    "Free Throw Line Dancing", "Air Ball Balloons", "Technical Foul Plumbing",
+    "Bench Mob Furniture", "Paint Protection Auto Detailing", "Rebound Relationship Coaching",
+    "Pick-and-Roll Sushi", "Dead Money Funeral Home", "Luxury Tax Accountants LLP",
+    "Stream Sniper Webcams", "2K Realism Physical Therapy", "Play-In Tournament Mini Golf",
+)
+SPONSOR_RENEW = 0.6
+
+OWNERS_FILE = Path("data") / "franchise-owners.csv"
+OWNER_COLS = [
+    "OWNER", "TEAM", "SEASONS", "FIRST", "LAST", "IN_PROGRESS", "TITLES",
+    "START_VALUE", "END_VALUE", "VALUE_ADDED", "VS_LEAGUE",
 ]
 
 
@@ -155,6 +178,22 @@ def _noise(g: dict) -> float:
     digest = hashlib.sha256(f"{g['date']}|{g['home']}|{g['away']}".encode()).digest()
     unit = int.from_bytes(digest[:8], "big") / 2**64
     return (unit * 2 - 1) * FILL_NOISE
+
+
+def _unit(*parts) -> float:
+    digest = hashlib.sha256("|".join(parts).encode()).digest()
+    return int.from_bytes(digest[:8], "big") / 2**64
+
+
+def jersey_patches(teams: list[str], seasons: list[str]) -> dict[tuple[str, str], str]:
+    out = {}
+    for t in teams:
+        for i, s in enumerate(seasons):
+            if i and _unit("renew", t, s) < SPONSOR_RENEW:
+                out[(s, t)] = out[(seasons[i - 1], t)]
+            else:
+                out[(s, t)] = SPONSORS[int(_unit("sponsor", t, s) * len(SPONSORS))]
+    return out
 
 
 # ── Awards and playoff finishes ───────────────────────────────────────────────
@@ -430,6 +469,7 @@ def ledger(data_dir: Path, season: str):
             values[(s, t)] = multiple * (sum(window) / len(window)) * (1 + BRAND_PER_TITLE * titles)
             lines[(s, t)]["titles"] = titles
 
+    patches = jersey_patches(teams, seasons)
     fin_rows = []
     for i, s in enumerate(seasons):
         for t in teams:
@@ -455,6 +495,7 @@ def ledger(data_dir: Path, season: str):
                 _int(ln["nbntv"]), ln["title"], _int(ln["revenue"]),
                 _int(payroll), _int(dead), _int(tax), _int(ops), _int(expenses), _int(profit),
                 ln["titles"], _int(values[(s, t)]), _int(values[(s, t)] - prev),
+                patches[(s, t)],
             ])
     return fin_rows, att_rows
 
@@ -463,11 +504,71 @@ def _int(x):
     return None if x is None else int(round(x))
 
 
+def _midseason(season: str):
+    """Jan 1 of a season: whoever owns the team then owns its season. A season
+    that hasn't reached it yet belongs to whoever owns the team today."""
+    from datetime import date
+    return min(date(2000 + int(season[3:5]), 1, 1), date.today())
+
+
+def owner_ledger(fin_rows: list[list], tenures: list[dict]) -> list[list]:
+    """One row per owner per team they ran: what the franchise was worth.
+
+    Each season's change in value goes to whoever owned the team at mid-season
+    (Jan 1). The playoff stats credit a season to every owner whose tenure
+    touched it (`pipeline.tenure_seasons`), which is right for "was there for
+    the run" and wrong for money: a summer takeover would count twice.
+
+    `VS_LEAGUE` is the change beyond what the league average did over the same
+    seasons, so a long tenure isn't rewarded just for the multiple growing.
+    """
+    rows = [dict(zip(FINANCE_COLS, r)) for r in fin_rows]
+    seasons = sorted({r["SEASON"] for r in rows})
+    value = {(r["SEASON"], r["TEAM"]): r["VALUE"] for r in rows}
+    league = {s: sum(r["VALUE"] for r in rows if r["SEASON"] == s) / max(1, sum(r["SEASON"] == s for r in rows))
+              for s in seasons}
+    by_team_row = {(r["SEASON"], r["TEAM"]): r for r in rows}
+
+    def prev(s, t):
+        i = seasons.index(s)
+        return value[(seasons[i - 1], t)] if i else START_VALUE
+
+    def league_prev(s):
+        i = seasons.index(s)
+        return league[seasons[i - 1]] if i else START_VALUE
+
+    acc: dict[tuple[str, str], dict] = {}
+    for s in seasons:
+        mid = _midseason(s)
+        for ten in tenures:
+            t = ten["TEAM"]
+            if (s, t) not in value or not (ten["start"] <= mid <= ten["end"]):
+                continue
+            a = acc.setdefault((ten["owner"], t), {"seasons": [], "added": 0.0, "vs": 0.0, "titles": 0,
+                                                   "start": prev(s, t), "in_progress": False})
+            change = value[(s, t)] - prev(s, t)
+            expected = prev(s, t) * (league[s] / league_prev(s) - 1)
+            a["seasons"].append(s)
+            a["added"] += change
+            a["vs"] += change - expected
+            a["end"] = value[(s, t)]
+            a["titles"] += by_team_row[(s, t)]["PLAYOFF_RESULT"] == "Champion"
+            a["in_progress"] |= bool(by_team_row[(s, t)]["IN_PROGRESS"])
+    out = []
+    for (owner, team), a in sorted(acc.items(), key=lambda kv: -kv[1]["vs"]):
+        out.append([owner, team, len(a["seasons"]), a["seasons"][0], a["seasons"][-1],
+                    a["in_progress"], a["titles"], _int(a["start"]), _int(a["end"]),
+                    _int(a["added"]), _int(a["vs"])])
+    return out
+
+
 def write(out_dir: Path, data_dir: Path, season: str) -> list[str]:
     fin, att = ledger(data_dir, season)
+    owners = owner_ledger(fin, pipeline.load_owner_tenures(data_dir))
     csvio.write_csv(out_dir / FINANCES_FILE, FINANCE_COLS, fin)
     csvio.write_csv(out_dir / ATTENDANCE_FILE, ATTENDANCE_COLS, att)
-    return [str(FINANCES_FILE), str(ATTENDANCE_FILE)]
+    csvio.write_csv(out_dir / OWNERS_FILE, OWNER_COLS, owners)
+    return [str(FINANCES_FILE), str(ATTENDANCE_FILE), str(OWNERS_FILE)]
 
 
 def summary(fin_rows: list[list]) -> str:

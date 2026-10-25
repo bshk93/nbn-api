@@ -7,7 +7,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 
 from routers import audit as audit_ctx
-from routers import auth, players, roster_picks, transactions, boxscores, game_highs, player_insights, playoff_odds, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, og, discord, trade_finder, picks_preview, suggestions, google_sheets, free_agency, roster_log_relay, waivers, inbox, poext, themes, cap_history, poopoo, schedule, coaching_settings, streaming_days, donations, nbnfl, irl, trade_requests, nbyen, markets, lore, game_starters, on_this_day, stream_live, pickem, youtube_vods, injuries, tetris, headshots, quadrants
+from routers import auth, players, roster_picks, transactions, boxscores, game_highs, player_insights, playoff_odds, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, og, discord, trade_finder, picks_preview, suggestions, google_sheets, free_agency, roster_log_relay, waivers, inbox, poext, themes, cap_history, poopoo, schedule, coaching_settings, streaming_days, donations, nbnfl, irl, trade_requests, nbyen, markets, lore, game_starters, on_this_day, fair_value, stream_live, pickem, youtube_vods, injuries, tetris, headshots, quadrants, tweets
 from routers.picks_scheduler import start_picks_horizon_scheduler
 from routers.roster_log_relay import start_roster_log_relay
 from routers.youtube_vods import start_youtube_vods
@@ -82,6 +82,7 @@ app.include_router(boxscores.router)
 app.include_router(game_highs.router)    # GET /api/game-highs, behind /stats/highs
 app.include_router(player_insights.router)  # GET /api/players/{slug}/insights — feats, streaks, teammates
 app.include_router(playoff_odds.router)     # GET /api/playoff-odds (+ /history), behind /standings; computed by nbn-playoff-odds.timer
+app.include_router(fair_value.router)       # GET /api/fair-value (+ /history), behind the hidden /invest/fair; computed after the playoff odds
 app.include_router(bets.router)
 app.include_router(proposals.router)
 app.include_router(misc.router)
@@ -124,3 +125,4 @@ app.include_router(injuries.router)         # the 2K injury report: upload, pars
 app.include_router(tetris.router)           # homepage Tetris card's leaderboard: members' best scores
 app.include_router(headshots.router)        # same-origin square headshots, so /frivolities can export a PNG
 app.include_router(quadrants.router)        # saved quadrant charts — the /frivolities#quadrant gallery
+app.include_router(tweets.router)           # NBN Twitter: made-up posts on each game day, the homepage card

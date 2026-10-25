@@ -55,6 +55,7 @@ for conf in ("East", "West"):
     check(f"{conf}: six direct spots", abs(sum(r["top6"] for r in cr) - 6) < 1e-6)
     check(f"{conf}: four play-in spots", abs(sum(r["play_in"] for r in cr) - 4) < 1e-6)
     check(f"{conf}: one #1 seed", abs(sum(r["seed1"] for r in cr) - 1) < 1e-6)
+    check(f"{conf}: four teams reach the second round", abs(sum(r["second_round"] for r in cr) - 4) < 1e-6)
     check(f"{conf}: one conference champion", abs(sum(r["finals"] for r in cr) - 1) < 1e-6)
 check("one champion", abs(sum(r["title"] for r in out["teams"]) - 1) < 1e-6)
 

@@ -292,6 +292,8 @@ def _compute_prices(own_avg: bool = False) -> tuple[dict, dict]:
                 "is_playoff": g["is_playoff"],
                 "diff":       g["diff"],
                 "diff_diff":  round(g["diff_diff"], 2) if g["diff_diff"] is not None else None,
+                "opp":        g["opp_raw"],
+                "season":     g["season_year"],
             })
         prices[team]  = history
         current[team] = price
@@ -572,6 +574,39 @@ def get_team_prices(team: str, algo: str = "current"):
         raise HTTPException(status_code=404, detail="Unknown team or index")
     prices_hist, _ = _get_prices(algo)
     return {"team": team, "history": prices_hist.get(team, [])}
+
+
+@router.get("/api/invest/daily")
+def get_daily_moves(season: Optional[str] = None, algo: str = "current"):
+    """Every team's move on every game day of a season, for the movers view.
+
+    A team plays at most once a day, so a day's move is that game's: the price
+    after it against the price before it (the last game of the season before,
+    for an opener). A team that didn't play that day has no entry.
+    """
+    prices_hist, _ = _get_prices(algo)
+    seasons = sorted({h["season"] for t in VALID_TEAMS for h in prices_hist.get(t, [])})
+    if not seasons:
+        return {"season": None, "seasons": [], "days": [], "teams": {}}
+    season = season if season in seasons else seasons[-1]
+    days: set = set()
+    teams: dict[str, dict] = {}
+    for t in sorted(VALID_TEAMS):
+        prev = None
+        out = {}
+        for h in prices_hist.get(t, []):
+            if h["season"] == season and prev:
+                out[h["date"]] = {
+                    "pct":     round((h["price"] / prev - 1) * 100, 4),
+                    "price":   h["price"],
+                    "opp":     h["opp"],
+                    "diff":    h["diff"],
+                    "playoff": h["is_playoff"],
+                }
+                days.add(h["date"])
+            prev = h["price"]
+        teams[t] = out
+    return {"season": season, "seasons": seasons, "days": sorted(days), "teams": teams}
 
 
 @router.get("/api/invest/holdings")

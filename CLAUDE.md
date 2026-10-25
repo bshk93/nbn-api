@@ -933,6 +933,31 @@ real values.
 
 Pinned by `tests/test_quadrants.py` and `tests/test_headshots.py`.
 
+## NBN Twitter (`routers/tweets.py`)
+
+Made-up posts reacting to each game day, shown on the homepage card. A cast of
+fictional accounts (stats account, insider, beat writers, fan accounts, the
+players) written at the end of the daily box score run
+(`nbn-today/.claude/commands/parse-boxscores.md` § 8). No model runs here; the
+session doing the box scores writes them.
+
+| Route | Auth | What |
+|---|---|---|
+| `GET /api/tweets` | Public | newest first; `?limit=` (≤100), `?before=<n>` to page, `?team=` |
+| `POST /api/tweets` | `stats` or `rosters` | `{date, tweets: [{handle, name, text, teams?, slug?, team?, likes?, retweets?}]}`, up to 20 |
+| `DELETE /api/tweets/{n}` | `stats` or `rosters` | |
+
+- **The text is fiction; the numbers are not.** The skill checks every stat in
+  a tweet against the committed box score. The server can't, so it only checks
+  the shape: 280 characters, a real handle, real teams.
+- **`teams` is `[away, home]` or empty**, so the card can link the tweet to its
+  box score. `slug` marks a player's own account (the card shows his face);
+  `team` is a fan account's team.
+- Stored in `tweets.json` with a monotonic `seq`, like quadrants. It is
+  written league content, so it is backed up with the data dir.
+
+Pinned by `tests/test_tweets.py`.
+
 ## Docs discipline
 
 Keep `CLAUDE.md` and `docs/` in sync with every code change. If a change affects an endpoint, a data field, a transaction type, or any behavior described in the docs, update the relevant doc in the same commit.
