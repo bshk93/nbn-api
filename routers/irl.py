@@ -1,7 +1,7 @@
 """IRL feed — real-world game logs for the players on a fantasy roster.
 
 Kept apart from NBN's own stats on purpose: its own data files, its own
-routes, its own tab (the IRL tab on `/nbnfl`, drawn by `nbn-today/irl-feed.js`).
+routes, its own tab (the IRL tab on `/media/nbnfl`, drawn by `nbn-today/irl-feed.js`).
 Nothing here reads or writes a box score, a roster CSV or a bio, and nothing in
 the stats build reads this. The rosters are hand-kept in `irl-rosters.json`
 rather than derived — the NBNFL has no roster model on the site at all.

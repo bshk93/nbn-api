@@ -530,7 +530,7 @@ def create_market(body: MarketCreate, info: dict = Depends(require_role("bookie"
     _discord_post_bet({
         "title": f"📈 New market: {m['title']}",
         "description": (m["description"] + "\n\n" if m["description"] else "")
-                       + f"{len(outs)} outcomes. Buy and sell at [nbn.today/bet](https://nbn.today/bet/#futures).",
+                       + f"{len(outs)} outcomes. Buy and sell at [nbn.today/nbyen/bet](https://nbn.today/nbyen/bet/#futures).",
         "color": 0x3B82F6,
     })
     return _view(m)

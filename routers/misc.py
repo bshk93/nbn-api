@@ -733,7 +733,7 @@ def _build_standings_payload(season: str) -> dict:
                 {"name": "\U0001f535 Eastern Conference", "value": fmt_conf(east)},
                 {"name": "\U0001f534 Western Conference", "value": fmt_conf(west)},
             ],
-            "footer": {"text": "Nothing But Net · nbn.today/standings"},
+            "footer": {"text": "Nothing But Net · nbn.today/season/standings"},
             "timestamp": now,
         }],
     }

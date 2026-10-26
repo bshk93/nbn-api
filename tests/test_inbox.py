@@ -46,10 +46,10 @@ ib.log_write = lambda info, msg: None
 BRYN = {"name": "bryn", "roles": []}
 
 print("\nbasic append + read")
-ib.notify_member("bryn", "Your offer was remanded", link="/free-agency")
+ib.notify_member("bryn", "Your offer was remanded", link="/fo/free-agency")
 resp = ib.get_inbox(BRYN)
 check("one unread item", resp["unread_count"] == 1)
-check("item carries the link", resp["items"][0]["link"] == "/free-agency")
+check("item carries the link", resp["items"][0]["link"] == "/fo/free-agency")
 
 item_id = resp["items"][0]["id"]
 ib.mark_read(item_id, BRYN)

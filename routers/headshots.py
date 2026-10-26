@@ -2,7 +2,7 @@
 
 Most bios' `photo_url` is hotlinked from basketball-reference, which sends no
 CORS headers. An <img> can show it, but a canvas that draws it is tainted and
-can't be exported, so the quadrant chart creator on /frivolities had no way to
+can't be exported, so the quadrant chart creator on /stats/frivolities had no way to
 make a PNG. This serves the same picture from our own origin.
 
 Three things it must keep doing, pinned by tests/test_headshots.py:

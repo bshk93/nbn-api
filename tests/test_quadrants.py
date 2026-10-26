@@ -1,4 +1,4 @@
-"""Saved quadrant charts — routers/quadrants.py, the /frivolities#quadrant gallery.
+"""Saved quadrant charts — routers/quadrants.py, the /stats/frivolities#quadrant gallery.
 
 Three things worth pinning:
 

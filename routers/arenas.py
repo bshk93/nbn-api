@@ -1,7 +1,7 @@
 """Arena naming rights — members bid NB¥ to name any team's arena.
 
 Flavor with a real price. The name shows on that team's box scores (the
-attendance line) from the day it is bought, on `/finances` and on the team
+attendance line) from the day it is bought, on `/fo/finances` and on the team
 page. It confers nothing else: no cap, no rule, no ledger revenue.
 
 The rules, settled with the user 2026-10-26:
@@ -64,7 +64,7 @@ TEAMS = {
     "HOU", "IND", "LAC", "LAL", "MEM", "MIA", "MIL", "MIN", "NOP", "NYK",
     "OKC", "ORL", "PHI", "PHX", "POR", "SAC", "SAS", "TOR", "UTA", "WAS",
 }
-_LINK = "/finances/#arenas"
+_LINK = "/fo/finances/#arenas"
 _URLISH = re.compile(r"://|\bwww\.|\.(com|net|org|gg|tv|io|ly)\b", re.I)
 
 _lock = threading.Lock()

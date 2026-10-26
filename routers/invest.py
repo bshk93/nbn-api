@@ -1,4 +1,4 @@
-"""NBN Wall Street (`/invest`) — shares in teams, priced by game results.
+"""NBN Wall Street (`/nbyen/invest`) — shares in teams, priced by game results.
 
 A league-subsidised game, not a market (`docs/nbyen-economy.md` § 3). There is
 no counterparty: profit is minted and losses are burned. The rules:

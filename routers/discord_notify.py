@@ -60,7 +60,7 @@ TYPE_LABELS = {
     "waiver_clear": "Waiver Claim",
 }
 
-# Mirrors the badge colours on /transactions so the channel reads the same way
+# Mirrors the badge colours on /fo/transactions so the channel reads the same way
 # the log does.
 TYPE_COLORS = {
     "sign": 0x22C55E, "pick": 0x60A5FA, "sign_pick": 0x60A5FA,
@@ -266,7 +266,7 @@ def _headline_team(txn: dict) -> str:
 
 def _describe(txn: dict, bios: dict) -> str:
     """One-line summary of what the transaction did — the same content
-    `renderDetailsCell` shows on /transactions, so the channel and the log never
+    `renderDetailsCell` shows on /fo/transactions, so the channel and the log never
     tell different stories about the same move."""
     t, d = txn.get("type"), (txn.get("details") or {})
 
@@ -425,16 +425,16 @@ def build_embed(txn: dict, forced_checks: Optional[list[str]] = None,
         name = _player_name(d["player"], bios)
         fields.append({
             "name": "Player",
-            "value": f"[{name}]({SITE}/players/?p={d['player']})",
+            "value": f"[{name}]({SITE}/stats/players/?p={d['player']})",
             "inline": True,
         })
     if teams:
         if t in ("offer_sheet", "offer_sheet_decision"):
             offering, retaining = _offer_sheet_sides(d)
-            value = (f"[{offering}]({SITE}/teams/{offering}) offering · "
-                     f"[{retaining}]({SITE}/teams/{retaining}) incumbent")
+            value = (f"[{offering}]({SITE}/stats/teams/{offering}) offering · "
+                     f"[{retaining}]({SITE}/stats/teams/{retaining}) incumbent")
         else:
-            value = " · ".join(f"[{tm}]({SITE}/teams/{tm})" for tm in teams)
+            value = " · ".join(f"[{tm}]({SITE}/stats/teams/{tm})" for tm in teams)
         fields.append({
             "name": "Team" if len(teams) == 1 else "Teams",
             "value": value,
@@ -454,7 +454,7 @@ def build_embed(txn: dict, forced_checks: Optional[list[str]] = None,
         description += f"\n\n*{txn['description']}*"
 
     # A forced transaction overrode a rulebook check that failed. That is already
-    # in the ledger as _forced_checks and visible on /transactions; saying it here
+    # in the ledger as _forced_checks and visible on /fo/transactions; saying it here
     # keeps the channel a faithful record rather than a flattering one.
     if forced_checks:
         fields.append({
@@ -500,7 +500,7 @@ def build_embed(txn: dict, forced_checks: Optional[list[str]] = None,
         "description": description or None,
         "color": 0xF59E0B if forced_checks else TYPE_COLORS.get(t, 0x64748B),
         "fields": fields,
-        "url": f"{SITE}/transactions",
+        "url": f"{SITE}/fo/transactions",
         "footer": {"text": footer},
     }
 

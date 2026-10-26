@@ -1,5 +1,5 @@
 """Regression tests for routers.tradeblock_notify — the optional per-save
-Discord post for manual /tradeblock edits.
+Discord post for manual /fo/tradeblock edits.
 
 Two things matter here:
 

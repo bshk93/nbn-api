@@ -24,7 +24,7 @@ import rulebook_coverage as rc  # noqa: E402
 # still run the suite.
 RULEBOOK = Path(os.environ.get(
     "NBN_RULEBOOK_HTML",
-    Path(__file__).resolve().parents[2] / "nbn-today" / "rulebook" / "index.html",
+    Path(__file__).resolve().parents[2] / "nbn-today" / "about" / "rulebook" / "index.html",
 ))
 
 FAILS = []

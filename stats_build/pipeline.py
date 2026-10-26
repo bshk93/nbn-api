@@ -126,7 +126,7 @@ PLAYER_FIXES = {
     # DIATKE. A stub bio had been created for the typo, which satisfied the
     # unknown_player check, so his two games went to a player who does not
     # exist and the real Mamadi Diakite (2020 draft class) was listed on
-    # /players as never having played. checks.py's near_duplicate_bio now
+    # /stats/players as never having played. checks.py's near_duplicate_bio now
     # catches that shape.
     "DIATKE, MAMADI": "DIAKITE, MAMADI",
 }
@@ -515,7 +515,7 @@ def player_seasons(rows: list[dict], data_dir: Path, playoff_rows: list[dict] | 
     """One row per player per season per team, with a bio snapshot attached.
 
     A *full* join with the bios, so a drafted player who has never played gets
-    a row of NAs — that is how `/players` lists this year's draft class before
+    a row of NAs — that is how `/stats/players` lists this year's draft class before
     anyone has taken the floor. The other side of the join keeps a player whose
     bio is missing entirely, so stats are never dropped for want of a bio.
     """

@@ -75,7 +75,7 @@ POOL = {
     "young-rfa":     {"class_year": "26-27", "hold_type": "RFA",
                       "prior_salary": 4_000_000, "rfa": True, "qo_amount": 5_000_000},
     # Under contract for two more years. `_fa_pool` spans future league years by
-    # design — /free-agency's year chips are built from it — so most of the real
+    # design — /fo/free-agency's year chips are built from it — so most of the real
     # pool looks like this: 361 of 570 entries on the day this was added.
     "future-ufa":    {"class_year": "28-29", "hold_type": "UFA",
                       "prior_salary": 20_000_000, "rfa": False, "qo_amount": None},
@@ -540,7 +540,7 @@ OFFERS[:] = [o for o in OFFERS if o["player"] != "curry-stephen"]
 check("in FFA every pool player is offerable regardless of status",
       fa._accepts_offers(STATE, "curry-stephen", POOL)[0] is True)
 
-# The pool spans future league years — it is what /free-agency's year chips are
+# The pool spans future league years — it is what /fo/free-agency's year chips are
 # built from — so "every player in the pool" would otherwise offer a contract to
 # someone under contract for two more seasons. This is the one place the bug
 # bites hardest, because FFA has no per-player gate to catch it.
@@ -692,7 +692,7 @@ check("but it does carry the FFA deadline the league needs to act on",
 check("and says why a player isn't accepting",
       board["players"]["curry-stephen"]["accepting"] is False)
 # Phase 7's ⋯ menu renders `reason` verbatim as its disabled copy. Listing only
-# the accepting players would make /free-agency reinvent those strings, and the
+# the accepting players would make /fo/free-agency reinvent those strings, and the
 # two explanations would drift.
 check("every pool player is listed, taking offers or not",
       set(board["players"]) == set(POOL))

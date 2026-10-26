@@ -64,7 +64,7 @@ Revocation is instant — their next save attempt will fail and their browser wi
 
 ## How rosters members use it
 
-1. Go to any team page on nbn.today (e.g. `/teams/GSW`)
+1. Go to any team page on nbn.today (e.g. `/stats/teams/GSW`)
 2. Click the small **Edit** button next to the **Roster** or **Draft Picks** heading
 3. The first time, a prompt appears asking for their token — they paste it in and click Continue
 4. The table becomes editable:

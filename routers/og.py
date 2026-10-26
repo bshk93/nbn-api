@@ -3,8 +3,8 @@
 Six pages on the site are one shell serving many items — an article, a player,
 a proposal, a member, a game, a team's season — with the item fetched from the API after load:
 
-    /news/view/?id=…      /players/?p=…      /proposals/view/?id=…   /members/{name}
-    /boxscores/?date=…&game=AWAY-HOME     /recap/?team=…&season=…
+    /news/view/?id=…      /stats/players/?p=…      /proposals/view/?id=…   /members/{name}
+    /stats/boxscores/?date=…&game=AWAY-HOME     /history/recap/?team=…&season=…
 
 No link unfurler runs JavaScript, so all of them fetch the shell and see the
 placeholder tags nbn-today/build/og_tags.py bakes into it. Every article
@@ -223,7 +223,7 @@ def player_head(slug: str) -> str:
     bios = load_player_bios() if slug else {}
     bio = bios.get(slug)
     if not bio:
-        return _static_head("/players/")
+        return _static_head("/stats/players/")
 
     name = player_name(bio.get("name", "")) or slug
     bits = []
@@ -248,7 +248,7 @@ def player_head(slug: str) -> str:
     return _document(
         title=f"{name} — NBN",
         desc=desc or f"{name} on NBN: career stats, contract, ratings, awards and game logs.",
-        url=f"{SITE}/players/?p={slug}",
+        url=f"{SITE}/stats/players/?p={slug}",
         image=_abs_url(bio.get("photo_url")) or DEFAULT_IMAGE,
         image_alt=name,
         og_type="profile",
@@ -392,7 +392,7 @@ def boxscore_head(d: str, game: str) -> str:
     unpublished to guard; an unknown game falls back to the page's card."""
     teams = sorted(t for t in (game or "").upper().split("-") if t)
     if not _DATE_RE.match(d or "") or len(teams) != 2:
-        return _static_head("/boxscores/")
+        return _static_head("/stats/boxscores/")
     try:
         games = _games_on(d)
     except Exception as exc:  # a crawler should get a card, never a 500
@@ -400,7 +400,7 @@ def boxscore_head(d: str, game: str) -> str:
         games = []
     g = next((x for x in games if sorted((x["home_team"], x["away_team"])) == teams), None)
     if not g or g.get("home_score") is None:
-        return _static_head("/boxscores/")
+        return _static_head("/stats/boxscores/")
 
     away, home = g["away_team"], g["home_team"]
     a, h = g["away_score"], g["home_score"]
@@ -415,7 +415,7 @@ def boxscore_head(d: str, game: str) -> str:
     return _document(
         title=f"{away} {a}, {home} {h} — NBN",
         desc=desc,
-        url=f"{SITE}/boxscores/?date={d}&game={away}-{home}",
+        url=f"{SITE}/stats/boxscores/?date={d}&game={away}-{home}",
         image=f"{SITE}/og/team-{winner.lower()}.png",
         image_alt=f"{TEAM_NAMES.get(winner, winner)} — Nothing But Net",
     )
@@ -459,10 +459,10 @@ def _season_leader(team: str, season: str) -> Optional[str]:
 def recap_head(team: str, season: str) -> str:
     team = (team or "").upper()
     if team not in TEAM_NAMES or not _SEASON_RE.match(season or ""):
-        return _static_head("/recap/")
+        return _static_head("/history/recap/")
     row = _team_season(team, season)
     if not row:
-        return _static_head("/recap/")
+        return _static_head("/history/recap/")
     label = f"20{season[:2]}–{season[3:]}"
     name = TEAM_NAMES[team]
     bits = [f"{row.get('W')}–{row.get('L')}"]
@@ -475,7 +475,7 @@ def recap_head(team: str, season: str) -> str:
     return _document(
         title=f"{label} {name} — Season Recap",
         desc=desc,
-        url=f"{SITE}/recap/?team={team}&season={season}",
+        url=f"{SITE}/history/recap/?team={team}&season={season}",
         image=f"{SITE}/og/team-{team.lower()}.png",
         image_alt=f"{name} — Nothing But Net",
     )

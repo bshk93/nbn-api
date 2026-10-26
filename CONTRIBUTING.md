@@ -56,5 +56,5 @@ routers do.
 - `routers/` holds one file per feature. A new router is registered in
   `main.py`.
 - The league's rules are in the site's rulebook
-  ([nbn.today/rulebook](https://nbn.today/rulebook)). Validation code cites
+  ([nbn.today/about/rulebook](https://nbn.today/about/rulebook)). Validation code cites
   the section it enforces.

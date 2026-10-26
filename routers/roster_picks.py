@@ -476,7 +476,7 @@ def put_trading_block_player(
     """Add (or re-note) one player on a team's block, without rewriting the rest.
 
     The whole-block `PUT` above is a last-write-wins replace — fine for the
-    /tradeblock editor, which owns the entire form, but wrong for a one-click add
+    /fo/tradeblock editor, which owns the entire form, but wrong for a one-click add
     from the roster page, where a stale read would silently wipe whatever else
     the team had listed. Same permission as the whole-block PUT.
     """

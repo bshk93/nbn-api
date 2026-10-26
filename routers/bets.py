@@ -67,7 +67,7 @@ def _discord_bet_created(bet: dict) -> None:
     if description:
         body += f"\n{description}"
     body += f"\n\n**Type:** {type_label}\n**Options:**\n{options_lines}"
-    body += "\n\nPlace your wagers at **[nbn.today/bet](https://nbn.today/bet)**"
+    body += "\n\nPlace your wagers at **[nbn.today/nbyen/bet](https://nbn.today/nbyen/bet)**"
 
     _discord_post_bet({
         "title": "🎲  New Bet Opened",

@@ -389,7 +389,7 @@ def _extension_details(p: dict) -> ExtensionDetails:
 
 def _run_validation(p: dict, ctx: dict) -> dict:
     """The one legality call — same `_validate_extension` the submit path of
-    `POST /api/transactions` runs, plus the same fact sheet `/transaction-sim`
+    `POST /api/transactions` runs, plus the same fact sheet `/fo/transaction-sim`
     renders, so nothing in this module does cap math of its own."""
     details = _extension_details(p)
     _require_validatable(details.team, details.player, ctx)
@@ -589,7 +589,7 @@ def remand_proposal(proposal_id: str, body: dict, info: dict = Depends(get_token
     if recipient:
         inbox.notify_member(recipient, f"Your extension proposal for {_player_display_name(p['player'])} "
                                        f"was sent back: {note}",
-                            link="/extensions")
+                            link="/fo/extensions")
     return p
 
 
@@ -623,7 +623,7 @@ def void_proposal(proposal_id: str, body: dict, info: dict = Depends(get_token_i
     if recipient:
         inbox.notify_member(recipient, f"Your extension proposal for {_player_display_name(p['player'])} "
                                        f"was voided: {reason}",
-                            link="/extensions")
+                            link="/fo/extensions")
     return p
 
 
@@ -655,7 +655,7 @@ def restore_proposal(proposal_id: str, info: dict = Depends(get_token_info)):
     if recipient:
         inbox.notify_member(recipient, f"Your extension proposal for {_player_display_name(p['player'])} "
                                        f"was restored — it's live again",
-                            link="/extensions")
+                            link="/fo/extensions")
     return p
 
 
@@ -975,7 +975,7 @@ def finalize_player(slug: str, body: FinalizeBody = FinalizeBody(),
     error still hard-blocks with no override, regardless of that flag: if
     conditions shifted since the vote and the deal no longer validates,
     finalize raises and nothing is saved — the vote isn't lost, it just needs
-    finalizing again once resolved (by hand on /transactions if the head
+    finalizing again once resolved (by hand on /fo/transactions if the head
     decides to push it through anyway).
     """
     with _poext_lock:
@@ -1069,7 +1069,7 @@ def finalize_player(slug: str, body: FinalizeBody = FinalizeBody(),
     if recipient:
         tail = (" — no further extension opportunities arise (§ 6.3)" if outcome == "rejected" and exhausted else "")
         inbox.notify_member(recipient, f"Voting closed on {_player_display_name(slug)}'s extension: {outcome}{tail}",
-                            link="/extensions")
+                            link="/fo/extensions")
     return node["final"]
 
 

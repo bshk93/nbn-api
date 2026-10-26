@@ -81,8 +81,8 @@ app.include_router(transactions.router)
 app.include_router(boxscores.router)
 app.include_router(game_highs.router)    # GET /api/game-highs, behind /stats/highs
 app.include_router(player_insights.router)  # GET /api/players/{slug}/insights — feats, streaks, teammates
-app.include_router(playoff_odds.router)     # GET /api/playoff-odds (+ /history), behind /standings; computed by nbn-playoff-odds.timer
-app.include_router(fair_value.router)       # GET /api/fair-value (+ /history), behind the hidden /invest/fair; computed after the playoff odds
+app.include_router(playoff_odds.router)     # GET /api/playoff-odds (+ /history), behind /season/standings; computed by nbn-playoff-odds.timer
+app.include_router(fair_value.router)       # GET /api/fair-value (+ /history), behind the hidden /nbyen/invest/fair; computed after the playoff odds
 app.include_router(bets.router)
 app.include_router(proposals.router)
 app.include_router(misc.router)
@@ -114,16 +114,16 @@ app.include_router(donations.router)       # league funding tracker — GET publ
 app.include_router(nbnfl.router)           # NBNFL — one team's game log and stats, entered by the stats role
 app.include_router(irl.router)             # IRL feed — real-world game logs for a fantasy roster, from ESPN; apart from NBN stats
 app.include_router(trade_requests.router)  # Trade Request Committee — nbn-today/docs/trc-trade-pipeline.md
-app.include_router(markets.router)          # futures markets on /bet
+app.include_router(markets.router)          # futures markets on /nbyen/bet
 app.include_router(nbyen.router)           # public read of NB¥ balances and the ledger, for /nbyen
 app.include_router(lore.router)            # league lore for NBN Today writers — $DATA_DIR/lore/*.md, member-read
 app.include_router(game_starters.router)   # who started each game, from the entered coaching settings
 app.include_router(on_this_day.router)     # homepage On This Day: past seasons' games, clinches, trades
 app.include_router(stream_live.router)     # homepage live banner: is twitch.tv/nothingbutnet live
 app.include_router(pickem.router)           # /pickem: daily six-man fantasy lineups on NBN box scores
-app.include_router(injuries.router)         # the 2K injury report: upload, parse, /injuries, #injury-report
+app.include_router(injuries.router)         # the 2K injury report: upload, parse, /season/injuries, #injury-report
 app.include_router(tetris.router)           # homepage Tetris card's leaderboard: members' best scores
-app.include_router(headshots.router)        # same-origin square headshots, so /frivolities can export a PNG
-app.include_router(quadrants.router)        # saved quadrant charts — the /frivolities#quadrant gallery
+app.include_router(headshots.router)        # same-origin square headshots, so /stats/frivolities can export a PNG
+app.include_router(quadrants.router)        # saved quadrant charts — the /stats/frivolities#quadrant gallery
 app.include_router(tweets.router)           # NBN Twitter: made-up posts on each game day, the homepage card
 app.include_router(arenas.router)           # arena naming rights: members bid NB¥ to name any team's arena

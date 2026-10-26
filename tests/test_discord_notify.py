@@ -192,7 +192,7 @@ check("title names team and type", e["title"] == "GSW — Signing", e["title"])
 check("description carries years and total", "2 yrs · $104.0M" in e["description"], e["description"])
 check("...and the funding method", "Bird Rights (QVFA)" in e["description"])
 check("player field links to the profile",
-      any("/players/?p=curry-stephen" in f["value"] for f in e["fields"]))
+      any("/stats/players/?p=curry-stephen" in f["value"] for f in e["fields"]))
 check("footer names the submitter", "tester" in e["footer"]["text"], e["footer"]["text"])
 
 reset()
@@ -247,7 +247,7 @@ e = SENT[0]
 check("a waiver claim's title names the claiming team", e["title"] == "MIA — Waiver Claim", e["title"])
 check("...says where he came from and how it was funded",
       "Claimed off waivers from UTA" in e["description"] and "NTMLE" in e["description"], e["description"])
-check("...links the player", any("/players/?p=curry-stephen" in f["value"] for f in e["fields"]))
+check("...links the player", any("/stats/players/?p=curry-stephen" in f["value"] for f in e["fields"]))
 check("...and is relayed to #roster-log", dn.NO_RELAY_MARKER not in e["footer"]["text"])
 
 import routers.waivers as wv  # noqa: E402

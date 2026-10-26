@@ -147,7 +147,7 @@ def patch_suggestion(suggestion_id: str, body: SuggestionPatch, info: dict = Dep
     log_write(info, f"PATCH suggestions/{suggestion_id}")
     if notify_status_change:
         author, title, new_status = notify_status_change
-        inbox.notify_member(author, f"Your suggestion \"{title}\" is now {new_status}", link="/suggestions")
+        inbox.notify_member(author, f"Your suggestion \"{title}\" is now {new_status}", link="/office/suggestions")
     return s
 
 
@@ -171,7 +171,7 @@ def add_comment(suggestion_id: str, body: CommentBody, info: dict = Depends(get_
         title = s.get("title")
     log_write(info, f"POST suggestions/{suggestion_id}/comments")
     if author and author != info["name"]:
-        inbox.notify_member(author, f"New comment on your suggestion \"{title}\"", link="/suggestions")
+        inbox.notify_member(author, f"New comment on your suggestion \"{title}\"", link="/office/suggestions")
     return comment
 
 

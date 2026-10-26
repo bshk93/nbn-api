@@ -49,11 +49,11 @@ og.SITE_DIR = SITE_DIR
 
 SHELLS = {
     "news/view": ("Article — NBN News", "An article from NBN News."),
-    "players": ("Players — NBN", "Every player in NBN — career stats and contracts."),
+    "stats/players": ("Players — NBN", "Every player in NBN — career stats and contracts."),
     "proposals/view": ("Proposal — NBN", "A rule proposal before the NBN league."),
     "members/profile": ("Member — NBN", "An NBN member’s tenures and league history."),
-    "boxscores": ("Box Scores — NBN", "Every NBN box score."),
-    "recap": ("Season Recap — NBN", "One NBN team’s season on a page."),
+    "stats/boxscores": ("Box Scores — NBN", "Every NBN box score."),
+    "history/recap": ("Season Recap — NBN", "One NBN team’s season on a page."),
 }
 for path, (title, desc) in SHELLS.items():
     d = SITE_DIR / path
@@ -69,7 +69,7 @@ for path, (title, desc) in SHELLS.items():
         "  <!-- /NBN:og -->\n</head>\n<body></body>\n</html>\n")
 
 print("static fallback comes from the shell on disk")
-doc = og._static_head("/players/")
+doc = og._static_head("/stats/players/")
 check("title", "<title>Players — NBN</title>" in doc)
 check("og:title is the shell's", meta(doc, "og:title") == "Players — NBN")
 check("og:description is the shell's",
@@ -81,7 +81,7 @@ check("a missing shell still yields a card, not an exception",
 
 ARTICLES = [
     {"id": "a1", "status": "published", "title": "Hawks fleece the Kings",
-     "body": "# Deadline\n\nThe **Hawks** landed [a star](/players/?p=x) for two firsts.",
+     "body": "# Deadline\n\nThe **Hawks** landed [a star](/stats/players/?p=x) for two firsts.",
      "author": "bryn", "tags": ["Trades", "ATL"], "cover_image": "/img/hawks.png",
      "published_at": "2026-08-24T12:00:00+00:00"},
     {"id": "a2", "status": "draft", "title": "Secret scoop nobody should see",
@@ -140,7 +140,7 @@ og._career_line = lambda slug: "25.4 PPG, 5.1 RPG, 6.3 APG over 412 games" if sl
 print("\nplayer")
 doc = og.player_head("curry-stephen")
 check("name is flipped to first-last", meta(doc, "og:title") == "Stephen Curry — NBN")
-check("url keeps the slug", meta(doc, "og:url") == "https://nbn.today/players/?p=curry-stephen")
+check("url keeps the slug", meta(doc, "og:url") == "https://nbn.today/stats/players/?p=curry-stephen")
 desc = meta(doc, "og:description")
 check("positions", desc.startswith("PG/SG · "))
 check("team is spelled out", "Golden State Warriors" in desc)
@@ -242,7 +242,7 @@ check("date and stage lead", desc.startswith("Final · Oct 20, 2026"))
 check("each side's top scorer", "BOS: Jayson Tatum 34 pts, 9 reb, 5 ast" in desc
       and "DET: Cade Cunningham 28 pts, 6 reb, 10 ast" in desc)
 check("the winner's team card is the image", meta(doc, "og:image") == "https://nbn.today/og/team-bos.png")
-check("url is canonical away-home", meta(doc, "og:url") == "https://nbn.today/boxscores/?date=2026-10-20&amp;game=BOS-DET")
+check("url is canonical away-home", meta(doc, "og:url") == "https://nbn.today/stats/boxscores/?date=2026-10-20&amp;game=BOS-DET")
 check("teams match in either order", meta(og.boxscore_head("2026-10-20", "det-bos"), "og:title") == "BOS 112, DET 94 — NBN")
 doc = og.boxscore_head("2026-04-30", "MIA-NYK")
 check("a playoff game says so", html.unescape(meta(doc, "og:description")) == "Playoffs · Apr 30, 2026")
@@ -269,7 +269,7 @@ check("title names the season and team", meta(doc, "og:title") == "2025–26 Orl
 check("record, seed, result and leader", html.unescape(meta(doc, "og:description"))
       == "58–24 · East 2 seed · Won the championship. Led by Paolo Banchero 27.1 PPG.")
 check("team card image", meta(doc, "og:image") == "https://nbn.today/og/team-orl.png")
-check("canonical url, team upper-cased", meta(doc, "og:url") == "https://nbn.today/recap/?team=ORL&amp;season=25-26")
+check("canonical url, team upper-cased", meta(doc, "og:url") == "https://nbn.today/history/recap/?team=ORL&amp;season=25-26")
 for name, args in [("unknown season", ("ORL", "19-20")), ("unknown team", ("XXX", "25-26")),
                    ("bad season", ("ORL", "2025")), ("nothing", ("", ""))]:
     check(f"{name} → the shell's card", meta(og.recap_head(*args), "og:title") == "Season Recap — NBN")

@@ -14,7 +14,7 @@ What it does, in order:
    `invest-holdings-pre-reset.json` (and then emptied, so shares bought with old
    NB¥ can never be sold into new NB¥). `bets-ledger.json` is left exactly where
    it is, untouched; nothing writes it any more. The market is marked locked,
-   so /invest shows why its buttons are off.
+   so /nbyen/invest shows why its buttons are off.
 3. Writes the opening ledger: 1,000 to every member (`start`), and 100 NB¥ per
    dollar of every donation on record whose donor is a member (`donation`).
 

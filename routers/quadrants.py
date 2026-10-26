@@ -1,4 +1,4 @@
-"""Saved quadrant charts — the gallery on /frivolities#quadrant.
+"""Saved quadrant charts — the gallery on /stats/frivolities#quadrant.
 
 A chart is the page's own config object (stat per axis, filters, the four
 quadrant captions, which players), stored as-is. The page draws it from live
@@ -32,7 +32,7 @@ router = APIRouter()
 
 _lock = threading.Lock()
 
-# Mirrors AXIS_VARS in nbn-today/frivolities/index.html, plus "ovr". A key the
+# Mirrors AXIS_VARS in nbn-today/stats/frivolities/index.html, plus "ovr". A key the
 # page doesn't know would load as a chart with no axis.
 STAT_KEYS = {
     "age", "salary", "ppg", "rpg", "apg", "spg", "bpg", "topg", "pfpg",

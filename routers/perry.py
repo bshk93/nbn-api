@@ -282,7 +282,7 @@ def _discord_submission(member: str, score: float, solution_score: float) -> Non
         "description": (
             f"**{member}** just completed the **Daily Perry Game**!\n"
             f"Score: **{score:,.1f}** / {solution_score:,.1f} ({pct}% of optimal)\n\n"
-            f"Think you can beat it? **[nbn.today/perry](https://nbn.today/perry)**"
+            f"Think you can beat it? **[nbn.today/games/perry](https://nbn.today/games/perry)**"
         ),
     })
 
@@ -304,7 +304,7 @@ def _discord_daily_results(state: dict) -> None:
         if p:
             lines.append(f"**{slot}**: {p['name']} ({p['team']}, {p['season']}) — {p['gmsc']:,.1f}")
     lines.append(f"**Solution score**: {state['solution_score']:,.1f}")
-    lines.append(f"\nNew game available now! **[nbn.today/perry](https://nbn.today/perry)**")
+    lines.append(f"\nNew game available now! **[nbn.today/games/perry](https://nbn.today/games/perry)**")
     _discord_post({"color": 0xf59e0b, "description": "\n".join(lines)})
 
 

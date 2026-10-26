@@ -1,4 +1,4 @@
-"""Same-origin headshots — routers/headshots.py, behind the /frivolities PNG export.
+"""Same-origin headshots — routers/headshots.py, behind the /stats/frivolities PNG export.
 
 Pinned:
 

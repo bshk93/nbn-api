@@ -377,7 +377,7 @@ raises_http("no contract history and no salary lines is refused", 422,
 
 # Half the league's two-ways predate `contracts`; their deal is read off the
 # bio's own lines (ryan-cormac, 2026-10-16: the owner was sent to the
-# office-only /transactions form instead).
+# office-only /fo/transactions form instead).
 legacy = {"name": "TEST, PLAYER", "type": "two-way", "draft_year": 2026,
           "salaries": {"24-25": "$2,000,000", "25-26": "$0", SEASON: "$0", NEXT: "$1"},
           "cap_holds": {NEXT: "RFA"}}

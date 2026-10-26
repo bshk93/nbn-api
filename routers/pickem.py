@@ -649,7 +649,7 @@ def day_embed(date: str, day: dict, entries: dict, lines: dict, bios: dict) -> d
             for s, v in sc.items())
         parts.append(f"{'Winning lineup' if len(winners) == 1 else m}: {picks}")
     parts.append(f"{len(scores)} lineup{'s' if len(scores) != 1 else ''} · "
-                 f"[Full scores](https://nbn.today/bet/?date={date}#pickem)")
+                 f"[Full scores](https://nbn.today/nbyen/bet/?date={date}#pickem)")
     return {"title": f"🎯  Pick'em — {label}", "description": "\n\n".join(parts), "color": 0x3498db}
 
 
@@ -666,7 +666,7 @@ def season_embed(season: str, st: dict) -> dict:
         for w in winners)
     rest = [t for t in totals if t["total"] != top][:4]
     board = "\n".join(f"{i}. {t['member']} {t['total']:,.1f}" for i, t in enumerate(rest, len(winners) + 1))
-    parts = [head, detail] + ([board] if board else []) + ["[Standings](https://nbn.today/bet/#pickem)"]
+    parts = [head, detail] + ([board] if board else []) + ["[Standings](https://nbn.today/nbyen/bet/#pickem)"]
     return {"title": f"🏆  Pick'em season champion — {season}", "description": "\n\n".join(parts), "color": 0xf1c40f}
 
 

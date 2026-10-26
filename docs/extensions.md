@@ -29,7 +29,7 @@ compensation for finalize producing no real transaction, now obsolete.
 Rulebook § 6.2/§ 6.3 already carry the 🔒+👁 badges this implies (see § 12
 below — that item was already done).
 
-**Still not built:** the `/extensions` team-facing page (Phase D — a proposal
+**Still not built:** the `/fo/extensions` team-facing page (Phase D — a proposal
 is still created via direct API calls, not a page a team owner would find),
 and the § 4.5 six-month trade-freeze *check* in `_validate_trade` (Phase F) —
 `announced_date` is now stamped correctly, but nothing yet reads it back to
@@ -355,7 +355,7 @@ Then replay every historical extension-shaped transaction, as was done for
 
 ## 12. Docs to update on ship
 
-- `rulebook/index.html` § 6.2 and § 6.3 badges 👁 → 🔒 + 👁, with a "what the
+- `about/rulebook/index.html` § 6.2 and § 6.3 badges 👁 → 🔒 + 👁, with a "what the
   system enforces" paragraph (§ 3.8 has the pattern to copy)
 - `nbn-today/CLAUDE.md` — validation endpoints table and transaction table
 - `nbn-api/docs/transactions.md` — the type list

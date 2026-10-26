@@ -160,7 +160,7 @@ def main():
           pool["renounced-guy"]["class_year"] == "26-27"
           and pool["unsigned-guy"]["class_year"] == "26-27")
 
-    # The pool spans future league years by design — /free-agency's year chips
+    # The pool spans future league years by design — /fo/free-agency's year chips
     # are built from it — so it answers "who has a hold on file", never "who can
     # be signed today". `current` is that second question, stamped once here so
     # no picker or menu re-derives it (§ 4.1).

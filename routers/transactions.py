@@ -295,7 +295,7 @@ def _refuse_unlock_over_txn(txn_id: Optional[str]):
     if txn_id and any(t.get("id") == txn_id for t in _load_transactions()):
         raise HTTPException(409, f"This result was written to the ledger as transaction {txn_id}. "
                                  f"Take the contract off the player's bio and delete that entry "
-                                 f"on /transactions first, then unlock.")
+                                 f"on /fo/transactions first, then unlock.")
 
 
 def _append_transaction(txn: dict):
@@ -1805,7 +1805,7 @@ def _apply_pick(details: PickDetails, txn_date: str, info: dict):
     bio["type"] = "draft-rights"
     # Stamp the canonical draft record on the bio. draft_team is the source of
     # truth for "who drafted this player" across the whole site (team Draft
-    # History, /draft); the slot fields are the authoritative draft position.
+    # History, /history/draft); the slot fields are the authoritative draft position.
     bio["draft_team"] = team
     bio["draft_year"] = details.pick.year
     bio["draft_round"] = details.pick.round
@@ -3036,7 +3036,7 @@ def sweep_team_options(now: Optional[datetime] = None) -> dict:
                                   for o in sorted(mine_opts, key=lambda o: o["slug"]))
                 inbox.notify_team(team, f"{left} left: team options are due by the end of {pretty}. "
                                         f"Still undecided: {names}. Anything not exercised by then is "
-                                        f"declined automatically (§ 6.1).", link=f"/teams/{team}/")
+                                        f"declined automatically (§ 6.1).", link=f"/stats/teams/{team}/")
                 done["notices"].append((mark, closes, team, len(mine_opts)))
             mine[mark] = now.isoformat()
             if mark == "24h":
@@ -3078,7 +3078,7 @@ def sweep_team_options(now: Optional[datetime] = None) -> dict:
         when = "now" if d["year"] == cur else "after this season"
         inbox.notify_team(d["team"], f"{_player_name(d['player'], bios)}'s {d['year']} team option wasn't "
                                      f"exercised in its window, so it was declined. He becomes an "
-                                     f"unrestricted free agent {when} (§ 6.1).", link=f"/teams/{d['team']}/")
+                                     f"unrestricted free agent {when} (§ 6.1).", link=f"/stats/teams/{d['team']}/")
         done["declined"].append((d["team"], d["player"], d["year"]))
     return done
 
@@ -3156,7 +3156,7 @@ def sweep_fa_holds(today: Optional[str] = None) -> dict:
         announce_roster_move(txn)
         inbox.notify_team(d["team"], f"{_player_name(d['player'], bios)} was still a free-agent hold "
                                      f"on opening night, so he was renounced. He's now an unsigned "
-                                     f"free agent (§ 3.10).", link=f"/teams/{d['team']}/")
+                                     f"free agent (§ 3.10).", link=f"/stats/teams/{d['team']}/")
         done["renounced"].append((d["team"], d["player"]))
     return done
 
@@ -8886,7 +8886,7 @@ def notify_offer_sheet_received(stored_details: dict) -> None:
         stored_details["retaining_team"],
         f"{stored_details['teams'][0]} submitted an offer sheet on your restricted free agent "
         f"{stored_details.get('player')} — you have 48 hours to match (§ 3.15).",
-        link="/transactions",
+        link="/fo/transactions",
     )
 
 
@@ -8947,7 +8947,7 @@ def apply_extension(details: ExtensionDetails, txn_date: str, info: dict, *,
                     relay_to_roster_log: bool = False) -> dict:
     """Same shape as apply_sign, for extension — factored out so POEXT's
     finalize (routers/poext.py) can execute an agreed extension directly
-    instead of the manual /transactions hand-off it used before. See
+    instead of the manual /fo/transactions hand-off it used before. See
     apply_sign's docstring for what `force_warnings_only` does and why."""
     val_ctx = {
         "bios":        load_player_bios(),
@@ -9378,7 +9378,7 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
                 if matched else
                 f"{stored_details.get('retaining_team')} did not match your offer sheet for "
                 f"{stored_details.get('player')} — the player signs with you.")
-        inbox.notify_team(stored_details.get("offering_team"), text, link="/transactions")
+        inbox.notify_team(stored_details.get("offering_team"), text, link="/fo/transactions")
     return txn
 
 
@@ -9793,7 +9793,7 @@ def validate_convert_twoway(body: ConvertTwoWayDetails):
     request — same as `_apply_convert_twoway` and the same reasoning as
     `validate_sign_pick`.
 
-    This is why `/transactions` used to be able to demand an EAPS answer with
+    This is why `/fo/transactions` used to be able to demand an EAPS answer with
     nowhere to give one: `_apply_convert_twoway` prices the trailing § 3.10
     hold through the same `_autofill_fa_hold_amounts` a signing goes through,
     and rejects with a 422 when that hold is Full Bird and the season has no
@@ -9838,7 +9838,7 @@ def get_rookie_scale_contract(slug: str):
     straight into a contract form.
 
     Exists so the office form doesn't reimplement § 7.1 to prefill itself —
-    same doctrine as `/free-agency`: the page renders figures, it never derives
+    same doctrine as `/fo/free-agency`: the page renders figures, it never derives
     them. Returns `{"scale": null, ...}` for a second-rounder or a draft year
     with no table loaded, which the form shows as "enter terms by hand".
     """

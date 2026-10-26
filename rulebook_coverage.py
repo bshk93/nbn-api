@@ -1,6 +1,6 @@
 """Which rulebook sections the transaction validators actually enforce.
 
-The rulebook (`nbn-today/rulebook/index.html`) badges each section 🔒
+The rulebook (`nbn-today/about/rulebook/index.html`) badges each section 🔒
 system-enforced or 👁 manual review. Those badges were curated by hand against
 code that moves underneath them, and they went stale repeatedly — § 7.2 read
 👁-only for two and a half weeks after Stepien went live, § 3.12's story

@@ -213,8 +213,8 @@ def _offer_embed(offer: dict, prev: Optional[dict]) -> dict:
 
     fields = [
         {"name": "Player",
-         "value": f"[{_name(slug)}]({SITE}/players/?p={slug})", "inline": True},
-        {"name": "Team", "value": f"[{team}]({SITE}/teams/{team})", "inline": True},
+         "value": f"[{_name(slug)}]({SITE}/stats/players/?p={slug})", "inline": True},
+        {"name": "Team", "value": f"[{team}]({SITE}/stats/teams/{team})", "inline": True},
         {"name": "Offer", "value": f"#{offer['number']} · v{offer.get('version', 1)}",
          "inline": True},
     ]
@@ -264,7 +264,7 @@ def _offer_embed(offer: dict, prev: Optional[dict]) -> dict:
 def _remand_embed(offer: dict, remand: dict) -> dict:
     slug = offer["player"]
     fields = [
-        {"name": "Player", "value": f"[{_name(slug)}]({SITE}/players/?p={slug})", "inline": True},
+        {"name": "Player", "value": f"[{_name(slug)}]({SITE}/stats/players/?p={slug})", "inline": True},
         {"name": "Offer", "value": f"#{offer['number']} · v{remand.get('from_version', 1)}",
          "inline": True},
         {"name": "Outstanding notes",
@@ -301,8 +301,8 @@ def _void_embed(offer: dict, void: dict) -> dict:
     slug = offer["player"]
     contract = (offer.get("offer") or {}).get("contract") or {}
     fields = [
-        {"name": "Player", "value": f"[{_name(slug)}]({SITE}/players/?p={slug})", "inline": True},
-        {"name": "Team", "value": f"[{offer['team']}]({SITE}/teams/{offer['team']})", "inline": True},
+        {"name": "Player", "value": f"[{_name(slug)}]({SITE}/stats/players/?p={slug})", "inline": True},
+        {"name": "Team", "value": f"[{offer['team']}]({SITE}/stats/teams/{offer['team']})", "inline": True},
         {"name": "Offer", "value": f"#{offer['number']} · v{offer.get('version', 1)}", "inline": True},
         {"name": "Reason", "value": _truncate(void.get("reason"), 1000) or "—", "inline": False},
     ]
@@ -609,7 +609,7 @@ def notify_ffa_closed(slug: str, ffa: dict) -> None:
 def notify_player_finalized(slug: str, final: dict, offers: list[dict]) -> None:
     """Private only — the allocation totals are the committee's record, and
     nothing here signs anybody (§ 11.1). The site never resolves an outcome; the
-    FAC enters the signing on /transactions by hand."""
+    FAC enters the signing on /fo/transactions by hand."""
     def build():
         by_id = {o["id"]: o for o in offers}
         totals = final.get("totals") or {}

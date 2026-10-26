@@ -329,7 +329,7 @@ def _discord_result(member: str, solved: bool, guess_count: int, grid: str) -> N
     else:
         desc = f"**{member}** did not solve today's **Daily NBN Poeltl**.\n\n{grid}"
         color = 0xf87171
-    desc += "\n\nPlay at **[nbn.today/poeltl](https://nbn.today/poeltl)**"
+    desc += "\n\nPlay at **[nbn.today/games/poeltl](https://nbn.today/games/poeltl)**"
     _discord_post({"color": color, "description": desc})
 
 
@@ -347,7 +347,7 @@ def _discord_daily_results(state: dict) -> None:
     else:
         lines.append("No one solved it today.")
     lines.append(f"\n**Answer:** {answer.get('name', '?')} ({answer.get('team', '?')})")
-    lines.append("\nNew game available now! **[nbn.today/poeltl](https://nbn.today/poeltl)**")
+    lines.append("\nNew game available now! **[nbn.today/games/poeltl](https://nbn.today/games/poeltl)**")
     _discord_post({"color": 0xf59e0b, "description": "\n".join(lines)})
 
 

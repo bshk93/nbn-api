@@ -155,8 +155,8 @@ reset()
 msg(BOT_LOG, "", bot=True, author="NBN API bot", embeds=[{
     "title": "BOS — Release",
     "description": "Dead cap: $2.2M (26-27)",
-    "fields": [{"name": "Player", "value": "[Hunter Sallis](https://nbn.today/players/?p=sallis-hunter)"},
-               {"name": "Team", "value": "[BOS](https://nbn.today/teams/BOS)"}],
+    "fields": [{"name": "Player", "value": "[Hunter Sallis](https://nbn.today/stats/players/?p=sallis-hunter)"},
+               {"name": "Team", "value": "[BOS](https://nbn.today/stats/teams/BOS)"}],
     "footer": {"text": "bryn · 2026-08-09"}}])
 rl.relay_once()
 check("#roster-log-nbn-today relays our own bot", len(texts()) == 1, texts())
@@ -195,8 +195,8 @@ reset()
 msg(BOT_LOG, "", bot=True, embeds=[{
     "title": "GSW — Renounce",
     "description": "Renounced — free agent, no dead cap\n\n*GSW renounce Monte Morris*",
-    "fields": [{"name": "Player", "value": "[Monte Morris](https://nbn.today/players/?p=morris-monte)"},
-               {"name": "Team", "value": "[GSW](https://nbn.today/teams/GSW)"}]}])
+    "fields": [{"name": "Player", "value": "[Monte Morris](https://nbn.today/stats/players/?p=morris-monte)"},
+               {"name": "Team", "value": "[GSW](https://nbn.today/stats/teams/GSW)"}]}])
 rl.relay_once()
 out = texts()[0]
 check("an embed becomes plain text", out.startswith("GSW — Renounce"), out)
@@ -207,7 +207,7 @@ reset()
 msg(BOT_LOG, "", bot=True, embeds=[{
     "title": "BOS — Release",
     "description": "Dead cap: $2.2M (26-27)",
-    "fields": [{"name": "Player", "value": "[Hunter Sallis](https://nbn.today/players/?p=sallis-hunter)"}]}])
+    "fields": [{"name": "Player", "value": "[Hunter Sallis](https://nbn.today/stats/players/?p=sallis-hunter)"}]}])
 rl.relay_once()
 check("...and the player added when the description doesn't name them",
       "Hunter Sallis" in texts()[0], texts())
@@ -216,8 +216,8 @@ reset()
 msg(BOT_LOG, "", bot=True, embeds=[{
     "title": "PHX — Signing",
     "description": "2+1 PO · $30.0M · Bird Rights (QVFA)",
-    "fields": [{"name": "Player", "value": "[Kris Dunn](https://nbn.today/players/?p=dunn-kris)"},
-               {"name": "Team", "value": "[PHX](https://nbn.today/teams/PHX)"},
+    "fields": [{"name": "Player", "value": "[Kris Dunn](https://nbn.today/stats/players/?p=dunn-kris)"},
+               {"name": "Team", "value": "[PHX](https://nbn.today/stats/teams/PHX)"},
                {"name": "Year by year",
                 "value": "```\n26-27  $14,500,000\n27-28  $15,500,000   Player Option\n28-29            —   UFA hold\n```"}]}])
 rl.relay_once()

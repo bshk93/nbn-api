@@ -135,8 +135,8 @@ def _proposal_fields(p: dict) -> list[dict]:
     slug, team = p["player"], p["team"]
     contract = p.get("contract") or {}
     fields = [
-        {"name": "Player", "value": f"[{_name(slug)}]({SITE}/players/?p={slug})", "inline": True},
-        {"name": "Team", "value": f"[{team}]({SITE}/teams/{team})", "inline": True},
+        {"name": "Player", "value": f"[{_name(slug)}]({SITE}/stats/players/?p={slug})", "inline": True},
+        {"name": "Team", "value": f"[{team}]({SITE}/stats/teams/{team})", "inline": True},
         {"name": "Proposal", "value": f"#{p['number']} · v{p.get('version', 1)} · {KIND_LABELS.get(p.get('kind'), p.get('kind') or '—')}",
          "inline": True},
     ]

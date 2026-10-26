@@ -330,7 +330,7 @@ def _player_embed(slug: str, name: str, meta_rows: list[dict],
         description = description[:4080] + "\n…"
     embed = {
         "title": name,
-        "url": f"https://nbn.today/players/?p={slug}",
+        "url": f"https://nbn.today/stats/players/?p={slug}",
         "color": TEAM_COLORS.get(team, NBN_BLUE),
         "description": description,
         "footer": {"text": footer + (f" · {team}" if team else "")},
@@ -489,7 +489,7 @@ def ratings_response(query: str) -> dict:
     photo = (bios.get(slug, {}).get("photo_url") or "").strip()
     embed = {
         "title": name,
-        "url": f"https://nbn.today/players/?p={slug}",
+        "url": f"https://nbn.today/stats/players/?p={slug}",
         "color": _ovr_color(ovr),
         "description": header,
         "fields": fields,
@@ -501,7 +501,7 @@ def ratings_response(query: str) -> dict:
 
 
 # ── /team-ratings ────────────────────────────────────────────────────────────
-# Mirrors the "Team Attributes" tab on /frivolities: each team's average 2K
+# Mirrors the "Team Attributes" tab on /stats/frivolities: each team's average 2K
 # attributes across its top 8 rostered players by 2K overall, plus that team's
 # rank (1 = best) among all 30 teams in each attribute.
 
@@ -602,7 +602,7 @@ def team_ratings_response(team_arg: str) -> dict:
 
     embed = {
         "title": f"{TEAM_NAMES[team]} — Team Ratings",
-        "url": "https://nbn.today/frivolities/",
+        "url": "https://nbn.today/stats/frivolities/",
         "color": TEAM_COLORS.get(team, NBN_BLUE),
         "description": header,
         "fields": fields,
@@ -822,7 +822,7 @@ def roster_response(team_arg: str) -> dict:
 
     embed = {
         "title": f"{TEAM_NAMES[team]} — Roster",
-        "url": f"https://nbn.today/teams/{team}/",
+        "url": f"https://nbn.today/stats/teams/{team}/",
         "color": TEAM_COLORS.get(team, NBN_BLUE),
         "description": desc,
         "footer": {"text": ("NBN roster · starters from the team's saved rotation" if from_rotation
@@ -887,7 +887,7 @@ def lineups_response(t1_arg: str, t2_arg: str) -> dict:
     else:
         away, home = t1, t2
         desc = "No upcoming game between these two on this season's schedule."
-        url = f"https://nbn.today/teams/{home}/"
+        url = f"https://nbn.today/stats/teams/{home}/"
         title = f"{away} vs {home} — Starting Lineups"
 
     embed = {
@@ -1018,7 +1018,7 @@ def team_response(team_arg: str, season_arg: str) -> dict:
 
     embed = {
         "title": f"{TEAM_NAMES[team]} — {season}",
-        "url": f"https://nbn.today/teams/{team}/",
+        "url": f"https://nbn.today/stats/teams/{team}/",
         "color": TEAM_COLORS.get(team, NBN_BLUE),
         "description": desc,
         "footer": {"text": "NBN team season · per-game averages"},
@@ -1240,7 +1240,7 @@ def playoff_series_response(year_arg: str, t1_arg: str, t2_arg: str) -> dict:
 
     return _embed(f"{a} vs {b} — {season} {rd}", desc,
                   color=TEAM_COLORS.get(winner, NBN_BLUE),
-                  url=f"https://nbn.today/teams/{winner}/",
+                  url=f"https://nbn.today/stats/teams/{winner}/",
                   footer="NBN playoff series")
 
 
@@ -1491,7 +1491,7 @@ def nbntv_schedule_response() -> dict:
              if g.get("stream") and g["date"] >= today]
     if not games:
         return _embed("📺 NBNTV Schedule", "No upcoming streams are scheduled.",
-                      url="https://nbn.today/calendar")
+                      url="https://nbn.today/season/calendar")
     shown = games[:NBNTV_SCHEDULE_LIMIT]
     rows = []
     for g in shown:
@@ -1504,8 +1504,8 @@ def nbntv_schedule_response() -> dict:
     desc = "```\n" + table + "\n```"
     extra = len(games) - len(shown)
     if extra > 0:
-        desc += f"\n+{extra} more on [the calendar](https://nbn.today/calendar)"
-    return _embed("📺 NBNTV Schedule", desc, url="https://nbn.today/calendar",
+        desc += f"\n+{extra} more on [the calendar](https://nbn.today/season/calendar)"
+    return _embed("📺 NBNTV Schedule", desc, url="https://nbn.today/season/calendar",
                   footer=f"{season} · upcoming streams")
 
 

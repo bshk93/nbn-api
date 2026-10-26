@@ -1,6 +1,6 @@
 """`routers/donations.py` — the league funding tracker.
 
-Read is public (the site's /donations/ page has no auth gate), writes are
+Read is public (the site's /nbyen/donations/ page has no auth gate), writes are
 `bod`-only. Pins:
 
   * add and edit both validate team/member/amount/date the same way

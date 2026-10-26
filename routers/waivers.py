@@ -2,7 +2,7 @@
 
 Design record: nbn-today/docs/waiver-wire-spec.md. Phases 0-1 of that doc's
 § 9 build plan: the ledger model, the claim/resolve endpoints, and the
-sweep-on-read priority resolution. Discord (§ 6) and the `/free-agency` UI
+sweep-on-read priority resolution. Discord (§ 6) and the `/fo/free-agency` UI
 (§ 3) are later phases.
 
 **State model** (spec § 4): `_apply_release` is untouched — it still removes
@@ -179,7 +179,7 @@ def _open_waivers(info: Optional[dict] = None) -> list[dict]:
 
 def _forward_contract(snapshot: dict, from_season: str) -> dict:
     """The snapshot's going-forward years only (>= the release's own season) —
-    what a `/free-agency` claim card should show as "what you'd be taking on"."""
+    what a `/fo/free-agency` claim card should show as "what you'd be taking on"."""
     keep = lambda d: {k: v for k, v in (d or {}).items() if k >= from_season}
     return {
         "type": snapshot.get("type") or "player",
@@ -517,11 +517,11 @@ def _notify_waiver_claimants(released_txn_id: str, player: str, claimed_by: Opti
             continue
         if claimed_by and claim["team"] == claimed_by:
             inbox.notify_member(recipient, f"Your waiver claim on {player} was awarded to {claim['team']}",
-                                link="/transactions")
+                                link="/fo/transactions")
         else:
             text = (f"Your waiver claim on {player} lost priority to {claimed_by}" if claimed_by
                     else f"Your waiver claim on {player} was not awarded")
-            inbox.notify_member(recipient, text, link="/transactions")
+            inbox.notify_member(recipient, text, link="/fo/transactions")
 
 
 def _announce_claim(clear_txn: Optional[dict]) -> None:

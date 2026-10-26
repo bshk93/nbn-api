@@ -136,7 +136,7 @@ def coaching_entered(team: str, entered_by: Optional[str]) -> None:
     """Handoff 2."""
     try:
         inbox.notify_team(team, f"Your coaching settings were entered in 2K by {entered_by or 'a streamer'}",
-                          link=f"/teams/{team}/")
+                          link=f"/stats/teams/{team}/")
     except Exception as exc:
         logger.warning("coaching_entered notify failed for %s: %s", team, exc)
 
@@ -145,7 +145,7 @@ def positions_set(team: str, set_by: Optional[str]) -> None:
     """Handoff 2, for positions: the team's receipt."""
     try:
         inbox.notify_team(team, f"Your player positions and numbers were set in 2K by {set_by or 'a streamer'}",
-                          link=f"/teams/{team}/#coaching")
+                          link=f"/stats/teams/{team}/#coaching")
     except Exception as exc:
         logger.warning("positions_set notify failed for %s: %s", team, exc)
 
@@ -154,7 +154,7 @@ def note_cleared(team: str, cleared_by: Optional[str]) -> None:
     """Handoff 2, for a note: the team's receipt."""
     try:
         inbox.notify_team(team, f"Your note to the streamer was marked clear by {cleared_by or 'a streamer'}",
-                          link=f"/teams/{team}/#coaching")
+                          link=f"/stats/teams/{team}/#coaching")
     except Exception as exc:
         logger.warning("note_cleared notify failed for %s: %s", team, exc)
 

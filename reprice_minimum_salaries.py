@@ -48,7 +48,7 @@ it (falling back to "system") rather than leaving every entry generic.
 
 Deliberately not built: no hook on `PUT /api/cap-levels/{season}`, no timer.
 A mutation triggered purely by editing a config value means a typo in
-`/cap-settings` would silently re-price the league — this stays a manual,
+`/office/cap-settings` would silently re-price the league — this stays a manual,
 reviewed step.
 """
 from __future__ import annotations

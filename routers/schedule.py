@@ -634,7 +634,7 @@ def accept_stream_request(game_id: str, season: str | None = None,
     log_write(info, f"POST schedule/{game_id}/stream-request/accept — {found_season} {_label(game)}, "
                     f"{buyer} charged")
     inbox.notify_member(buyer, f"{info['name']} accepted your stream of {_label(game)}. "
-                               f"NB¥{wallet.STREAM_PRICE:,} spent.", "/calendar/")
+                               f"NB¥{wallet.STREAM_PRICE:,} spent.", "/season/calendar/")
     return {**_public(game), "new_balance": new_balance}
 
 
@@ -652,7 +652,7 @@ def decline_stream_request(game_id: str, season: str | None = None,
     log_write(info, f"POST schedule/{game_id}/stream-request/decline — {found_season} {_label(game)}, "
                     f"{member}")
     inbox.notify_member(member, f"{info['name']} declined your stream request for {_label(game)}. "
-                                f"Nothing was spent.", "/calendar/")
+                                f"Nothing was spent.", "/season/calendar/")
     return _public(game)
 
 

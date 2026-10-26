@@ -1,7 +1,7 @@
 """NBN Fair Value — a discounted-cash-flow price for every franchise.
 
 `GET /api/fair-value` and `/api/fair-value/history`, behind the hidden
-`/invest/fair/` page. A shadow model: nothing trades on it and nothing pays out.
+`/nbyen/invest/fair/` page. A shadow model: nothing trades on it and nothing pays out.
 It runs next to NBN Wall Street so its behaviour can be watched over a season
 before anyone decides whether it should replace Wall Street's pricing.
 

@@ -1,7 +1,7 @@
 # Discord transaction backfill (in progress)
 
 Goal: pull historical trade-announcement messages out of the league's old Discord
-channels and log them so they show up on player profiles (`/players?p=slug` ->
+channels and log them so they show up on player profiles (`/stats/players?p=slug` ->
 "Transaction History", already wired to `GET /api/transactions?player=`).
 
 **Scope, deliberately narrow:** only player movement (from_team -> to_team) plus the

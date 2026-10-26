@@ -1,4 +1,4 @@
-"""Regression tests for the /suggestions board — comments and editing.
+"""Regression tests for the /office/suggestions board — comments and editing.
 
 Written 2026-08-08, when suggestion #5 ("Suggestions should be editable and
 support comments") was built. Two properties are worth pinning:

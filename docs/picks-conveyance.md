@@ -284,7 +284,7 @@ with `trading-block.json`, `trade-exceptions.json`, and `team-state.json`.
 
 **Compatibility read projection (the migration de-risker).** Every current
 reader consumes flat `(YEAR,ROUND,ORIG,OWNER,…)` rows — `buildPicksTable`
-(`teams/team.js`), `/draft`, `tradeblock/index.html`, and the live draft board
+(`stats/teams/team.js`), `/history/draft`, `fo/tradeblock/index.html`, and the live draft board
 (`_owners_swap_aware` / `_pick_owners` in `routers/draft.py`). Do **not** rewrite
 them all at once. The new model exposes a `current_owner(pick, as_of_year)` fold
 that projects the event log back to the old row shape, and the existing pick

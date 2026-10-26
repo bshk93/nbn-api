@@ -1,7 +1,7 @@
 """Regression tests for the § 3.12 minimum-scale exemption inside
 routers.transactions._check_contract_raises.
 
-Written 2026-08-10 after a team's multi-year minimum offer on /free-agency was
+Written 2026-08-10 after a team's multi-year minimum offer on /fo/free-agency was
 rejected as illegal. § 3.13 caps a year-over-year change at 5% of Year 1 (8%
 with Full Bird), but § 3.12 says a multi-year minimum deal pays "the scale for
 the player's years of experience that season" — and the scale's own steps at

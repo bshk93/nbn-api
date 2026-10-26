@@ -286,13 +286,13 @@ preview endpoint stays as a permanent no-op alias, harmless to leave.
 **Two real consumer bugs found and fixed before flipping the flag on**
 (compound-owner values, now common at 53/480 rows, exposed both):
 
-1. **`tradeblock/index.html`** (`activateEditPanel`) — client re-filtered
+1. **`fo/tradeblock/index.html`** (`activateEditPanel`) — client re-filtered
    `/api/picks/{team}` results with `p.owner === myTeam` (exact match), which
    is *more* restrictive than the server's own `team in owner.split("|")`
    check the endpoint already applies. Any compound-owner pick silently
    vanished from **both** candidate teams' "my picks" list. Fix: dropped the
    redundant client-side filter; the server result is already correct.
-2. **`draft/index.html`** (`renderFutureEditable`, the BOD pick-editing
+2. **`history/draft/index.html`** (`renderFutureEditable`, the BOD pick-editing
    table) — **real risk, not just display**: Save PUTs *every visible row*
    unconditionally as a full-row replace, and `owner` is a required field. A
    compound owner has no matching `<select>` option, so it silently defaulted
@@ -752,7 +752,7 @@ for the 2028 SAS/NOP/DET binary chain (`snd`), which the site showed as bare
 description per possible outcome, via `ownership.list_leaves`) for every
 protected/swap/binary pick, but (1) the curated binary-chain steps never
 carried a `txn_id` back to the real trade that created them, and (2)
-`teams/team.js`'s `buildPicksTable` never rendered `leaves` at all — only the
+`stats/teams/team.js`'s `buildPicksTable` never rendered `leaves` at all — only the
 flat `notes`/`swap_owner`/`protected` fields, which for the new-model picks are
 either stale or empty.
 
@@ -779,13 +779,13 @@ either stale or empty.
   `seed_store --curated`. Full test suite green after; service restarted so
   the `ownership.py` code change took effect (`GET /api/picks` is read
   live from imported Python, not just the JSON store).
-- `teams/team.js` (`buildPicksTable`): any pick row with a non-empty `leaves`
+- `stats/teams/team.js` (`buildPicksTable`): any pick row with a non-empty `leaves`
   array now gets a tooltip (click-to-toggle on touch, hover on pointer) on its
   Team cell, showing the real trade description(s) behind the swap/chain —
   fetched lazily from `GET /api/transactions/{id}` and cached across the page.
   Falls back to an explicit "not yet linked" message when a leg has no citation
   rather than showing nothing. Verified live via puppeteer against
-  `nbn.today/teams/SAS/`: clicking the `NOP | DET | SAS` cell on the 2028 1st
+  `nbn.today/stats/teams/SAS/`: clicking the `NOP | DET | SAS` cell on the 2028 1st
   rows surfaces both Trade 71 and Trade 46's full text; spot-checked 4 other
   team pages for zero regressions/console errors.
 
@@ -821,7 +821,7 @@ team's page overstates it N-fold.
   `test_projection_full`) the same way `leaves` did; fixed the same way (pop
   before comparison / add to `FLAT_KEYS`), plus new spot-checks that two
   same-group picks share a `group_id` and a settled pick's is `None`.
-- `teams/team.js` (`buildPicksTable`): new `dedupeByGroup` collapses same-
+- `stats/teams/team.js` (`buildPicksTable`): new `dedupeByGroup` collapses same-
   `group_id` rows in the "Owner TBD" section to one representative (preferring
   the row whose `orig` is the page's own team), tagging it with every `orig`
   it stood in for (`_groupOrigs`) so `buildLeavesTooltip` can open with "One

@@ -1,8 +1,8 @@
 """Public read of NB¥ — every balance and every movement, for the /nbyen page.
 
 Read-only. All writes are routers/wallet.py's. The history is public because
-nearly everything in it already is: bets are public on /bet, donations on
-/donations, balances on /api/bets/balances. What this adds is Twitch sub tiers.
+nearly everything in it already is: bets are public on /nbyen/bet, donations on
+/nbyen/donations, balances on /api/bets/balances. What this adds is Twitch sub tiers.
 """
 from fastapi import APIRouter, HTTPException, Query
 

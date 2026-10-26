@@ -94,7 +94,7 @@ def sweep_tradeblock_nudges(today: date | None = None, dry_run: bool = False) ->
                             "group": p, "team": team, "player": p})
             actions.append({"kind": "tradeblock_snooze", "label": f"{p} still available",
                             "short": "Still available", "group": p, "team": team, "player": p})
-        inbox.notify_team(team, text, link="/tradeblock/", actions=actions)
+        inbox.notify_team(team, text, link="/fo/tradeblock/", actions=actions)
         sent[team] = today.isoformat()
 
     if not dry_run:

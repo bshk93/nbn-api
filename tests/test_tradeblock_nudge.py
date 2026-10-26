@@ -132,7 +132,7 @@ check("legacy entry stamped, not nudged", BLOCK["BOS"]["players"][0]["added_at"]
 check("each GSW member got it, BOS didn't", sorted(INBOX) == ["ann", "bo"], sorted(INBOX))
 msg = INBOX["ann"][0]
 check("message names the ages", "Stephen Curry (5 weeks), Draymond Green (4 weeks)" in msg["text"], msg["text"])
-check("links to the block", msg["link"] == "/tradeblock/")
+check("links to the block", msg["link"] == "/fo/tradeblock/")
 check("remove + still available per player, grouped by player",
       [(a["kind"], a["label"], a["group"]) for a in msg["actions"]] == [
           ("tradeblock_remove", "Remove Stephen Curry", "Stephen Curry"),

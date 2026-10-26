@@ -5,7 +5,7 @@ block for reasons that have nothing to do with anyone editing it — most
 notably `_apply_trade`, which drops a dealt player from their old team's
 block as part of applying the trade. Silently reposting a message every time
 would announce noise, not moves, so this module is never called from a
-transaction apply path. It is opt-in, per save, from the /tradeblock editor
+transaction apply path. It is opt-in, per save, from the /fo/tradeblock editor
 itself: the caller (`roster_picks.put_trading_block`) computes what actually
 changed and hands over the diff only when the team checked the box.
 

@@ -75,7 +75,7 @@ def _is_current_fa(entry: dict, season: str) -> bool:
 
     `_fa_pool` returns every player with an actionable cap hold on file, keyed by
     the earliest year that hold lands — so it spans future league years by
-    design: it is what `/free-agency`'s year chips are built from, and 26-27's
+    design: it is what `/fo/free-agency`'s year chips are built from, and 26-27's
     tab sitting beside 29-30's is the point of that page.
 
     It is *not* the set of players who can be signed. Most of the pool is under
@@ -564,7 +564,7 @@ def _is_advanced(state: dict, slug: str) -> bool:
 def _blocked_reason(state: dict, slug: str, team: str) -> Optional[str]:
     """Why this team may not bid on this player, or None (§ 4.7, D21).
 
-    Server-composed, like every refusal string on `/free-agency` — the team is
+    Server-composed, like every refusal string on `/fo/free-agency` — the team is
     shown this verbatim rather than the page reasoning about claims. Read off
     `blocked_teams`, which lives on the player and not on the claim, so it
     survives both a release and a reopen.
@@ -885,7 +885,7 @@ def get_board(info: Optional[dict] = Depends(_optional_info)):
         accepting, reason = _accepts_offers(state, slug, pool)
         # Every pool player is listed, including the ones taking no offers.
         # `reason` is the exact copy § 8.1 puts in the team's disabled ⋯-menu
-        # entry, so omitting the closed players would force /free-agency to
+        # entry, so omitting the closed players would force /fo/free-agency to
         # reinvent those strings client-side and the two would drift. The pool
         # itself is already public, so listing it with a status leaks nothing.
         blocked = next((b for b in (_blocked_reason(state, slug, t) for t in sorted(my_teams))
@@ -1472,7 +1472,7 @@ def remand_offer(offer_id: str, body: RemandIn, info: dict = Depends(get_token_i
     recipient = offer.get("submitted_by") or offer.get("created_by")
     if recipient:
         inbox.notify_member(recipient, f"Your offer for {offer['player']} was sent back: {note}",
-                             link="/free-agency")
+                             link="/fo/free-agency")
     return offer
 
 
@@ -1553,7 +1553,7 @@ def amend_offer(offer_id: str, body: AmendIn, info: dict = Depends(require_role(
     if recipient:
         inbox.notify_member(recipient, f"The FAC head entered the agreed terms on your offer for "
                                        f"{_player_name(offer['player'])}: {note}",
-                            link="/free-agency")
+                            link="/fo/free-agency")
     return offer
 
 
@@ -1626,7 +1626,7 @@ def void_offer(offer_id: str, body: VoidIn, info: dict = Depends(get_token_info)
     recipient = offer.get("submitted_by") or offer.get("created_by")
     if recipient:
         inbox.notify_member(recipient, f"Your offer for {offer['player']} was voided: {reason}",
-                             link="/free-agency")
+                             link="/fo/free-agency")
     return offer
 
 
@@ -1675,7 +1675,7 @@ def restore_offer(offer_id: str, info: dict = Depends(get_token_info)):
     recipient = offer.get("submitted_by") or offer.get("created_by")
     if recipient:
         inbox.notify_member(recipient, f"Your offer for {offer['player']} was restored — it's live again",
-                             link="/free-agency")
+                             link="/fo/free-agency")
     return offer
 
 
@@ -2031,7 +2031,7 @@ def player_history(slug: str,
     on `review` — this route retires the pool gate, not the § 4.5 one. Because
     a slug drops out of the pool exactly when its cap hold resolves, and that
     only happens after the round that resolved it is finalized (finalize
-    records the outcome; the actual signing on `/transactions` comes after),
+    records the outcome; the actual signing on `/fo/transactions` comes after),
     a real "gone from the pool" player has nothing left unarchived to filter
     anyway — this is a belt-and-suspenders bound, not one expected to bite.
     """
@@ -2155,7 +2155,7 @@ def _declare_options(slug: str, final: dict, offers: list[dict], pool: dict,
 def _needs_result(final: Optional[dict]) -> bool:
     """A locked round still waiting on declare-winner. Only rounds locked
     since `result_required` was stamped count — the earlier ones were signed
-    by hand on /transactions and are left as they are."""
+    by hand on /fo/transactions and are left as they are."""
     return bool(final and final.get("result_required") and not final.get("winner"))
 
 
@@ -2547,7 +2547,7 @@ def _notify_bidders_of_result(slug: str, round_offers: list[dict], key: str,
                     else f"Your offer won: {name} signs with {o['team']}.")
         else:
             text = f"Your offer for {name} didn't win — {outcome}."
-        inbox.notify_member(recipient, text, link="/free-agency")
+        inbox.notify_member(recipient, text, link="/fo/free-agency")
 
 
 @router.post("/api/fa/players/{slug}/unlock")

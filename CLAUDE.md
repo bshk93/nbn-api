@@ -371,7 +371,7 @@ nearly every `#fa-news` signing still *render*, they just don't notify twice.
 uploads it to Google Drive with `mimeType: application/vnd.google-apps.spreadsheet`
 so Drive converts it to a native Sheet, shares it `anyone: reader`, and returns
 `{id, url}`. Used by the Transaction Simulator's "Create Google Sheet" button (trade mode) — the
-browser builds the workbook (`nbn-today/transaction-sim/xlsx.js`) and posts it here.
+browser builds the workbook (`nbn-today/fo/transaction-sim/xlsx.js`) and posts it here.
 
 Requires a valid member token (`get_token_info` — any role). It is a write into
 a real Google account, so it is deliberately not public.
@@ -604,11 +604,11 @@ from the API after load:
 | Page | Endpoint | What the card says |
 |---|---|---|
 | `/news/view/?id=` | `GET /api/og/news` | headline, byline, a 200-char excerpt, the article's cover image |
-| `/players/?p=` | `GET /api/og/player` | positions, height, age, team, OVR, career per-game line, headshot |
+| `/stats/players/?p=` | `GET /api/og/player` | positions, height, age, team, OVR, career per-game line, headshot |
 | `/proposals/view/?id=` | `GET /api/og/proposal` | number, title, state or outcome, author, excerpt |
 | `/members/{name}` | `GET /api/og/member` | current team, seasons, record, championships, avatar |
-| `/recap/?team=&season=` | `GET /api/og/recap` | season, team, record, seed, result, the team's top player by Game Score, the team card |
-| `/boxscores/?date=&game=AWAY-HOME` | `GET /api/og/boxscore` | final score, date, each side's top scorer, the winner's team card. Without `game` it is the page's own card |
+| `/history/recap/?team=&season=` | `GET /api/og/recap` | season, team, record, seed, result, the team's top player by Game Score, the team card |
+| `/stats/boxscores/?date=&game=AWAY-HOME` | `GET /api/og/boxscore` | final score, date, each side's top scorer, the winner's team card. Without `game` it is the page's own card |
 
 No link unfurler runs JavaScript, so all of them fetched the shell and got the
 placeholder Open Graph tags `nbn-today/build/og_tags.py` bakes into it — every
@@ -777,7 +777,7 @@ Two invariants:
   § 2.1a counts it toward real guaranteed salary, hard cap and aprons included;
   it was missing until 2026-09-19, and a short-handed team's row read low by it
   while the team's own page — which has always charged it, via
-  `computeEmptyRosterCharge` in `nbn-today/teams/team.js` — read high. The row
+  `computeEmptyRosterCharge` in `nbn-today/stats/teams/team.js` — read high. The row
   reports it separately as `empty_roster_charge`, which is what lets
   `/committees/rosters` name the amount without a second implementation, and
   what makes a pre-2026-09-19 row recognisable rather than silently different.
@@ -798,7 +798,7 @@ the timer can fire twice after a reboot. Run it by hand with
 ## IRL feed (`routers/irl.py`)
 
 Real-world game logs and injury news for the players on a fantasy roster,
-served to the IRL tabs on `/nbnfl` and the NBN team pages (`nbn-today/irl-feed.js`). **Kept apart from NBN's stats on purpose** — it
+served to the IRL tabs on `/media/nbnfl` and the NBN team pages (`nbn-today/irl-feed.js`). **Kept apart from NBN's stats on purpose** — it
 reads no box score, roster CSV or bio, and the stats build never reads it.
 
 - **Rosters**, per sport (`SPORTS[...]["rosters"]`). NFL: hand-kept in
@@ -915,7 +915,7 @@ revenue, cap or rule reads it. Pinned by `tests/test_arenas.py`.
 
 ## Quadrant charts and headshots (`routers/quadrants.py`, `routers/headshots.py`)
 
-Behind the Quadrants tab on `nbn-today/frivolities/index.html`: pick a stat per
+Behind the Quadrants tab on `nbn-today/stats/frivolities/index.html`: pick a stat per
 axis, caption the four quadrants, and each player is drawn as his face at his
 real values.
 
