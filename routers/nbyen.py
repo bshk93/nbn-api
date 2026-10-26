@@ -36,6 +36,7 @@ SOURCES: list[tuple[str, str, set[str]]] = [
     ("rewards",   "Rewards",        {"achievement", "bio", "poeltl", "perry", "trivia"}),
     ("tips",      "Tips",           {"tip"}),
     ("streams",   "Streams bought", {"stream_purchase", "stream_refund"}),
+    ("arenas",    "Arena names",    {"arena_bid", "arena_refund"}),
     ("shop",      "Shop",           {"theme", "cosmetic", "avatar"}),
     ("admin",     "Adjustments",    {"admin"}),
     ("other",     "Other",          set()),

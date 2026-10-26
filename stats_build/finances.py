@@ -286,6 +286,7 @@ def load_streams(data_dir: Path) -> dict[tuple[str, frozenset], bool]:
 
 
 def load_arenas(data_dir: Path) -> dict[tuple[str, str], str]:
+    """(date, home team) -> the arena the schedule names for that game."""
     out = {}
     for path in sorted(data_dir.glob("schedule-*.json")):
         try:
@@ -296,6 +297,41 @@ def load_arenas(data_dir: Path) -> dict[tuple[str, str], str]:
             if g.get("arena"):
                 out[(g.get("date"), g.get("home_team"))] = g["arena"]
     return out
+
+
+def home_arenas(data_dir: Path) -> dict[str, str]:
+    """Team -> its home arena: the one the schedule names most for its home
+    games, so a neutral-site game doesn't become the default."""
+    counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for (_, team), arena in load_arenas(data_dir).items():
+        counts[team][arena] += 1
+    return {t: max(c.items(), key=lambda kv: (kv[1], kv[0]))[0] for t, c in counts.items()}
+
+
+def load_arena_names(data_dir: Path) -> dict[str, list[tuple[str, str]]]:
+    """Team -> [(first day, name)] for every bought name never pulled, oldest
+    first, from `arena-names.json` (routers/arenas.py). A name takes effect
+    the UTC day it was bought."""
+    try:
+        data = json.loads((data_dir / "arena-names.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    return {t: [(e["at"][:10], e["name"]) for e in hist if not e.get("pulled")]
+            for t, hist in data.items()}
+
+
+def arena_for(date: str, home: str, scheduled: dict, defaults: dict, bought: dict) -> str | None:
+    """The arena a game was played in, by name. A game the schedule puts
+    somewhere other than the home arena (a neutral site) keeps that; otherwise
+    the bought name in force that day, else the home arena's own name."""
+    sched = scheduled.get((date, home))
+    if sched and sched != defaults.get(home):
+        return sched
+    name = None
+    for day, n in bought.get(home, []):
+        if day <= date:
+            name = n
+    return name or defaults.get(home)
 
 
 def load_books(data_dir: Path) -> dict[tuple[str, str], dict]:
@@ -362,7 +398,12 @@ def ledger(data_dir: Path, season: str):
     _, award_rows = pipeline.player_awards(data_dir, playoff_rows)
     awards = award_counts(award_rows, reg_rows, seasons)
     streams = load_streams(data_dir)
-    arenas = load_arenas(data_dir)
+    scheduled = load_arenas(data_dir)
+    defaults = home_arenas(data_dir)
+    bought = load_arena_names(data_dir)
+
+    def arena(g):
+        return arena_for(g["date"], g["home"], scheduled, defaults, bought) if g["home_known"] else None
     books = load_books(data_dir)
 
     def stars(s, t):
@@ -420,7 +461,7 @@ def ledger(data_dir: Path, season: str):
                     tally[(s, t)]["streamed"] += 1
             att_rows.append([s, g["date"], "REG", None, h, a, g["home_known"],
                              crowd, fill >= FILL_MAX,
-                             arenas.get((g["date"], h)) if g["home_known"] else None])
+                             arena(g)])
         for t in teams:
             past = history[(s, t)]
             if past:
@@ -438,7 +479,7 @@ def ledger(data_dir: Path, season: str):
             if streams.get((g["date"], frozenset((h, a)))):
                 tally[(s, t)]["streamed"] += 1
         att_rows.append([s, g["date"], "PLAYOFF", g["round"], h, a, g["home_known"],
-                         SEATS, True, arenas.get((g["date"], h)) if g["home_known"] else None])
+                         SEATS, True, arena(g)])
 
     # Revenue per team-season. The season in progress is projected to a full
     # 41 home games, so its valuation isn't dragged down by the calendar.
