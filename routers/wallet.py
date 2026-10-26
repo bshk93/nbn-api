@@ -70,6 +70,9 @@ KINDS: dict[str, bool] = {
     # Buying a stream
     "stream_purchase": True,
     "stream_refund":   True,
+    # Arena naming rights (routers/arenas.py), 2026-10-26
+    "arena_bid":       True,
+    "arena_refund":    True,
     # The commissioner's correction, always with a reason
     "admin":           True,
     # Back on 2026-10-21, at 50 a game (25 per screenshot side)

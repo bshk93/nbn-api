@@ -901,6 +901,18 @@ score is the client's word: `_plausible` refuses only what no game with that
 many lines could reach. **Don't attach NB¥ or anything else to it** while that
 stays true. Pinned by `tests/test_tetris.py`.
 
+## Arena naming rights (`routers/arenas.py`)
+
+Any member bids NB¥ to name any team's arena (`POST /api/arenas/{team}`,
+`{name, bid}`); `GET /api/arenas` is public. A bid must beat the standing one
+by 10% (100 to open), the price never decays, and an outbid holder is **not**
+refunded, so every bid is a sink (`arena_bid`). An admin pulls a name with
+`DELETE /api/arenas/{team}`, which refunds it (`arena_refund`) and restores the
+name before it. History is kept in `arena-names.json`, never deleted: the
+ledger (`stats_build/finances.py`, `arena_for`) names each game for the arena in
+force that day, defaulting to the real arena the schedule names. Cosmetic: no
+revenue, cap or rule reads it. Pinned by `tests/test_arenas.py`.
+
 ## Quadrant charts and headshots (`routers/quadrants.py`, `routers/headshots.py`)
 
 Behind the Quadrants tab on `nbn-today/frivolities/index.html`: pick a stat per

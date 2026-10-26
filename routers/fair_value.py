@@ -32,8 +32,9 @@ The model, in full:
   * **Revenue.** The ledger's formulas on expected inputs: gate from projected
     win %, stars (players in the league's top `STAR_COUNT` OVRs) and the
     bandwagon from expected finishes; playoff gate at `HOME_PER_SERIES` home
-    games a series; merch, media, title bonus. NBNTV is left out, as in the
-    ledger's valuation.
+    games a series; concessions on both crowds; merch, media, title bonus.
+    NBNTV is left out, as in the ledger's valuation, and so is the tax share,
+    which would need every other team's payroll projected too.
   * **Costs.** Payroll is money, not cap (`cap_history._payroll`: contracts and
     dead cap, no holds), plus re-signings and replacement salaries for empty
     roster spots in later seasons; the ledger's tax on it; arena ops.
@@ -255,6 +256,18 @@ def aprons(season: str, base_season: str) -> tuple[Optional[float], Optional[flo
     return base["apron1"] * g, base["apron2"] * g
 
 
+def cap_level(season: str, base_season: str) -> Optional[float]:
+    """The cap, grown like `aprons` when the season isn't on file. The tax's
+    brackets are a share of it."""
+    cap = _cap_levels_for(season)["cap"]
+    if cap:
+        return cap
+    base = _cap_levels_for(base_season)["cap"]
+    if not base:
+        return None
+    return base * (1 + CAP_GROWTH) ** (season_index(season) - season_index(base_season))
+
+
 # ── Revenue on expected inputs ───────────────────────────────────────────────
 
 def finish_probs(row: dict) -> dict[str, float]:
@@ -289,8 +302,21 @@ def season_revenue(gate: float, row: dict, stars: int) -> dict:
     merch = fin.MERCH_BASE + fin.MERCH_STAR * stars + fin.MERCH_TITLE * row["title"]
     title = fin.TITLE_BONUS * row["title"]
     pog = playoff_gate(row)
-    return {"gate": gate, "playoff_gate": pog, "merch": merch, "media": fin.MEDIA_SHARE,
-            "title_bonus": title, "revenue": gate + pog + merch + fin.MEDIA_SHARE + title}
+    conc = concessions(gate, row)
+    return {"gate": gate, "playoff_gate": pog, "concessions": conc, "merch": merch,
+            "media": fin.MEDIA_SHARE, "title_bonus": title,
+            "revenue": gate + pog + conc + merch + fin.MEDIA_SHARE + title}
+
+
+def playoff_crowd(row: dict) -> float:
+    reach = (row["playoffs"], row["second_round"], row["conf_finals"], row["finals"])
+    return sum(p * HOME_PER_SERIES * fin.SEATS for p in reach)
+
+
+def concessions(gate: float, row: dict) -> float:
+    """Spend per head, on the regular-season crowd the gate implies plus a
+    sold-out playoff crowd, as the ledger counts it."""
+    return fin.CONCESSIONS_PER_FAN * (gate / fin.TICKET + playoff_crowd(row))
 
 
 def discount(t: float) -> float:
@@ -457,13 +483,13 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
             if k:
                 bk = later_books[s][t]
                 payroll += bk["resign_money"] + max(0, ROSTER_FILL - bk["standard"]) * rep_pay
-            a1, a2 = aprons(s, season)
-            tax = fin.luxury_tax(payroll, a1, a2)
+            tax = fin.luxury_tax(payroll, aprons(s, season)[0], cap_level(s, season))
             ops = fin.ARENA_OPS_PER_GAME * fin.REG_HOME_GAMES
             costs = payroll + tax + ops
 
             if k == 0:
                 cash_rev = (gate_left + rev["playoff_gate"] + rev["title_bonus"]
+                            + fin.CONCESSIONS_PER_FAN * (gate_left / fin.TICKET + playoff_crowd(r))
                             + (rev["merch"] + rev["media"]) * f)
                 cash_cost = costs * f
                 when = f / 2

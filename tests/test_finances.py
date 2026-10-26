@@ -65,11 +65,26 @@ check("noise stays inside its band", all(
     abs(f._noise({"date": f"2026-01-{d:02d}", "home": "NYK", "away": "BOS"})) <= f.FILL_NOISE
     for d in range(1, 29)))
 
-print("luxury tax")
-check("nothing under the first apron", f.luxury_tax(200, 209, 222) == 0)
-check("over the first only", f.luxury_tax(219, 209, 222) == f.TAX_RATE_APRON1 * 10)
-check("over both", f.luxury_tax(232, 209, 222) == f.TAX_RATE_APRON1 * 23 + f.TAX_RATE_APRON2 * 10)
-check("an unknown apron charges nothing", f.luxury_tax(400, None, None) == 0)
+print("luxury tax: brackets over the first apron")
+w = f.TAX_BRACKET * 100          # bracket width on a cap of 100
+check("nothing under the first apron", f.luxury_tax(200, 209, 100) == 0)
+check("inside the first bracket", abs(f.luxury_tax(211, 209, 100) - 1.5 * 2) < 1e-9)
+check("two brackets in, the second rate applies",
+      abs(f.luxury_tax(209 + w + 1, 209, 100) - (1.5 * w + 1.75 * 1)) < 1e-9)
+check("past the listed rates each bracket adds a step",
+      abs(f.luxury_tax(209 + 5 * w, 209, 100) - w * (1.5 + 1.75 + 2.5 + 3.25 + 3.75)) < 1e-6)
+check("an unknown apron or cap charges nothing",
+      f.luxury_tax(400, None, 100) == 0 and f.luxury_tax(400, 209, None) == 0)
+
+print("jersey patches")
+teams30 = [f"T{i:02d}" for i in range(30)]
+seas = [f"{y}-{y + 1}" for y in range(20, 30)]
+pp = f.jersey_patches(teams30, seas)
+check("no sponsor on two teams in one season",
+      all(len({pp[(s, t)] for t in teams30}) == 30 for s in seas))
+check("deals still renew", any(pp[(seas[i], t)] == pp[(seas[i - 1], t)]
+                               for i in range(1, len(seas)) for t in teams30))
+check("and are the same every run", pp == f.jersey_patches(teams30, seas))
 
 print("payroll is money, never cap")
 tmp = Path(tempfile.mkdtemp(prefix="nbn-fin-test-"))
@@ -173,6 +188,22 @@ check(f"no team has two owners at any mid-season ({dup[:3] or 'none'})", not dup
 profit = [r for r in rows if r["PROFIT"] is not None]
 check("profit only where payroll is on record", all(r["PAYROLL"] is not None for r in profit))
 check("no profit before payroll records begin", all(r["SEASON"] >= "26-27" for r in profit))
+
+print("the tax goes to the teams that didn't pay it")
+for s in sorted({r["SEASON"] for r in rows if r["TAX_SHARE"] is not None}):
+    rs = [r for r in rows if r["SEASON"] == s]
+    paid = sum(r["LUXURY_TAX"] for r in rs)
+    got = sum(r["TAX_SHARE"] for r in rs)
+    check(f"{s}: paid out what came in (¥{paid / 1e6:.0f}M)", abs(paid - got) <= 30)
+    check(f"{s}: no payer gets a share",
+          all(r["TAX_SHARE"] == 0 for r in rs if r["LUXURY_TAX"]))
+
+print("concessions follow the crowd")
+fin_done = [r for r in rows if r["SEASON"] in done and r["HOME_GAMES"] == 41]
+hi = max(fin_done, key=lambda r: r["AVG_ATTENDANCE"])
+lo = min(fin_done, key=lambda r: r["AVG_ATTENDANCE"])
+check(f"a fuller arena sells more hot dogs ({hi['CONCESSIONS'] / 1e6:.0f}M vs {lo['CONCESSIONS'] / 1e6:.0f}M)",
+      hi["CONCESSIONS"] > lo["CONCESSIONS"])
 
 if FAILS:
     print(f"\n{len(FAILS)} FAILED")

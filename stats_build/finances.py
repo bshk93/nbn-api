@@ -40,7 +40,7 @@ from pathlib import Path
 from stats_build import csvio, pipeline
 from stats_build.buildargs import DATA_DIR, OUT_DIR, BuildArgs
 
-MODEL = "v1"
+MODEL = "v2"
 
 # ── The model's constants. Every figure is NB¥. ──────────────────────────────
 
@@ -78,9 +78,15 @@ MEDIA_SHARE = 150_000_000
 NBNTV_PER_GAME = 1_500_000     # per streamed game played, home or away; 26-27 on
 TITLE_BONUS = 100_000_000
 
+CONCESSIONS_PER_FAN = 40       # food, parking and the team store, per head
 ARENA_OPS_PER_GAME = 800_000
-TAX_RATE_APRON1 = 1.5          # per NB¥ of payroll over the first apron
-TAX_RATE_APRON2 = 1.5          # and again over the second
+
+# The tax, NBA-style: charged in brackets over the first apron (NBN has no
+# separate tax line), each steeper than the last. A bracket is a share of the
+# cap, so it grows with it. Past the listed rates each bracket adds TAX_STEP.
+TAX_BRACKET = 0.035            # of the cap
+TAX_RATES = (1.5, 1.75, 2.5, 3.25)
+TAX_STEP = 0.5
 
 START_VALUE = 3_000_000_000    # every franchise, opening night 20-21
 VALUE_GROWTH = 0.06            # the league-wide multiple, per season
@@ -94,8 +100,8 @@ ATTENDANCE_FILE = Path("data") / "franchise-attendance.csv"
 FINANCE_COLS = [
     "TEAM", "SEASON", "MODEL", "IN_PROGRESS", "W", "L", "PLAYOFF_RESULT", "STARS",
     "HOME_GAMES", "AVG_ATTENDANCE", "SELLOUTS", "GATE",
-    "PLAYOFF_HOME_GAMES", "PLAYOFF_GATE", "MERCH", "MEDIA", "NBNTV", "TITLE_BONUS",
-    "REVENUE", "PAYROLL", "DEAD_MONEY", "LUXURY_TAX", "ARENA_OPS", "EXPENSES", "PROFIT",
+    "PLAYOFF_HOME_GAMES", "PLAYOFF_GATE", "CONCESSIONS", "MERCH", "MEDIA", "NBNTV",
+    "TITLE_BONUS", "TAX_SHARE", "REVENUE", "PAYROLL", "DEAD_MONEY", "LUXURY_TAX", "ARENA_OPS", "EXPENSES", "PROFIT",
     "TITLES_6Y", "VALUE", "VALUE_CHANGE", "JERSEY_PATCH",
 ]
 ATTENDANCE_COLS = [
@@ -186,13 +192,26 @@ def _unit(*parts) -> float:
 
 
 def jersey_patches(teams: list[str], seasons: list[str]) -> dict[tuple[str, str], str]:
+    """(season, team) -> sponsor. No sponsor is on two teams in one season.
+
+    Renewals keep last season's deal (last season had no repeats, so neither do
+    they). Everyone else draws from what's left, never the deal they just lost.
+    """
     out = {}
-    for t in teams:
-        for i, s in enumerate(seasons):
+    for i, s in enumerate(seasons):
+        taken = set()
+        shopping = []
+        for t in teams:
             if i and _unit("renew", t, s) < SPONSOR_RENEW:
                 out[(s, t)] = out[(seasons[i - 1], t)]
+                taken.add(out[(s, t)])
             else:
-                out[(s, t)] = SPONSORS[int(_unit("sponsor", t, s) * len(SPONSORS))]
+                shopping.append(t)
+        for t in shopping:
+            lost = out.get((seasons[i - 1], t)) if i else None
+            free = [x for x in SPONSORS if x not in taken and x != lost]
+            out[(s, t)] = free[int(_unit("sponsor", t, s) * len(free))]
+            taken.add(out[(s, t)])
     return out
 
 
@@ -267,6 +286,7 @@ def load_streams(data_dir: Path) -> dict[tuple[str, frozenset], bool]:
 
 
 def load_arenas(data_dir: Path) -> dict[tuple[str, str], str]:
+    """(date, home team) -> the arena the schedule names for that game."""
     out = {}
     for path in sorted(data_dir.glob("schedule-*.json")):
         try:
@@ -277,6 +297,41 @@ def load_arenas(data_dir: Path) -> dict[tuple[str, str], str]:
             if g.get("arena"):
                 out[(g.get("date"), g.get("home_team"))] = g["arena"]
     return out
+
+
+def home_arenas(data_dir: Path) -> dict[str, str]:
+    """Team -> its home arena: the one the schedule names most for its home
+    games, so a neutral-site game doesn't become the default."""
+    counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for (_, team), arena in load_arenas(data_dir).items():
+        counts[team][arena] += 1
+    return {t: max(c.items(), key=lambda kv: (kv[1], kv[0]))[0] for t, c in counts.items()}
+
+
+def load_arena_names(data_dir: Path) -> dict[str, list[tuple[str, str]]]:
+    """Team -> [(first day, name)] for every bought name never pulled, oldest
+    first, from `arena-names.json` (routers/arenas.py). A name takes effect
+    the UTC day it was bought."""
+    try:
+        data = json.loads((data_dir / "arena-names.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    return {t: [(e["at"][:10], e["name"]) for e in hist if not e.get("pulled")]
+            for t, hist in data.items()}
+
+
+def arena_for(date: str, home: str, scheduled: dict, defaults: dict, bought: dict) -> str | None:
+    """The arena a game was played in, by name. A game the schedule puts
+    somewhere other than the home arena (a neutral site) keeps that; otherwise
+    the bought name in force that day, else the home arena's own name."""
+    sched = scheduled.get((date, home))
+    if sched and sched != defaults.get(home):
+        return sched
+    name = None
+    for day, n in bought.get(home, []):
+        if day <= date:
+            name = n
+    return name or defaults.get(home)
 
 
 def load_books(data_dir: Path) -> dict[tuple[str, str], dict]:
@@ -308,18 +363,23 @@ def load_books(data_dir: Path) -> dict[tuple[str, str], dict]:
         out[key] = {
             "payroll": payroll,
             "dead": mean(lambda r: r.get("dead_cap")),
+            "cap": mean(lambda r: r.get("cap")),
             "apron1": mean(lambda r: r.get("apron1")),
-            "apron2": mean(lambda r: r.get("apron2")),
         }
     return out
 
 
-def luxury_tax(payroll: float, apron1: float | None, apron2: float | None) -> float:
-    tax = 0.0
-    if apron1:
-        tax += TAX_RATE_APRON1 * max(0.0, payroll - apron1)
-    if apron2:
-        tax += TAX_RATE_APRON2 * max(0.0, payroll - apron2)
+def luxury_tax(payroll: float, apron1: float | None, cap: float | None) -> float:
+    """The bill on payroll over the first apron, bracket by bracket."""
+    if not apron1 or not cap:
+        return 0.0
+    over, width = payroll - apron1, TAX_BRACKET * cap
+    tax, n = 0.0, 0
+    while over > 0:
+        rate = TAX_RATES[n] if n < len(TAX_RATES) else TAX_RATES[-1] + TAX_STEP * (n - len(TAX_RATES) + 1)
+        tax += rate * min(over, width)
+        over -= width
+        n += 1
     return tax
 
 
@@ -338,7 +398,12 @@ def ledger(data_dir: Path, season: str):
     _, award_rows = pipeline.player_awards(data_dir, playoff_rows)
     awards = award_counts(award_rows, reg_rows, seasons)
     streams = load_streams(data_dir)
-    arenas = load_arenas(data_dir)
+    scheduled = load_arenas(data_dir)
+    defaults = home_arenas(data_dir)
+    bought = load_arena_names(data_dir)
+
+    def arena(g):
+        return arena_for(g["date"], g["home"], scheduled, defaults, bought) if g["home_known"] else None
     books = load_books(data_dir)
 
     def stars(s, t):
@@ -396,7 +461,7 @@ def ledger(data_dir: Path, season: str):
                     tally[(s, t)]["streamed"] += 1
             att_rows.append([s, g["date"], "REG", None, h, a, g["home_known"],
                              crowd, fill >= FILL_MAX,
-                             arenas.get((g["date"], h)) if g["home_known"] else None])
+                             arena(g)])
         for t in teams:
             past = history[(s, t)]
             if past:
@@ -409,11 +474,12 @@ def ledger(data_dir: Path, season: str):
         for t, share in shares:
             tally[(s, t)]["po_home"] += share
             tally[(s, t)]["po_gate"] += share * gate
+            tally[(s, t)]["po_crowd"] += share * SEATS
         for t in (h, a):
             if streams.get((g["date"], frozenset((h, a)))):
                 tally[(s, t)]["streamed"] += 1
         att_rows.append([s, g["date"], "PLAYOFF", g["round"], h, a, g["home_known"],
-                         SEATS, True, arenas.get((g["date"], h)) if g["home_known"] else None])
+                         SEATS, True, arena(g)])
 
     # Revenue per team-season. The season in progress is projected to a full
     # 41 home games, so its valuation isn't dragged down by the calendar.
@@ -428,9 +494,12 @@ def ledger(data_dir: Path, season: str):
         for t in teams:
             tt = tally[(s, t)]
             gate = tt["gate"]
+            crowd = tt["crowd"]
             if in_progress:
                 per_game = gate / tt["home_games"] if tt["home_games"] else league_gate_per_game
                 gate = per_game * REG_HOME_GAMES
+                crowd = gate / TICKET
+            concessions = CONCESSIONS_PER_FAN * (crowd + tt["po_crowd"])
             aw = awards.get((s, t), {})
             champ = results.get((s, t)) == "Champion"
             merch = (MERCH_BASE + MERCH_STAR * aw.get("star", 0)
@@ -438,9 +507,10 @@ def ledger(data_dir: Path, season: str):
                      + MERCH_TITLE * champ)
             title = TITLE_BONUS if champ else 0
             nbntv = NBNTV_PER_GAME * tt["streamed"]
-            rev = gate + tt["po_gate"] + merch + MEDIA_SHARE + title
+            rev = gate + tt["po_gate"] + concessions + merch + MEDIA_SHARE + title
             revenue_ex_tv[(s, t)] = rev
             lines[(s, t)] = {"in_progress": in_progress, "gate": gate, "merch": merch,
+                             "concessions": concessions,
                              "title": title, "nbntv": nbntv, "revenue": rev + nbntv,
                              "champ": champ}
         if in_progress and s != seasons[0]:
@@ -449,6 +519,7 @@ def ledger(data_dir: Path, season: str):
             # calendar doesn't read as a crash and no team is favoured.
             done = seasons[seasons.index(s) - 1]
             postseason = sum(tally[(done, t)]["po_gate"]
+                             + CONCESSIONS_PER_FAN * tally[(done, t)]["po_crowd"]
                              + (TITLE_BONUS + MERCH_TITLE) * (results.get((done, t)) == "Champion")
                              for t in teams) / len(teams)
             for t in teams:
@@ -469,6 +540,20 @@ def ledger(data_dir: Path, season: str):
             values[(s, t)] = multiple * (sum(window) / len(window)) * (1 + BRAND_PER_TITLE * titles)
             lines[(s, t)]["titles"] = titles
 
+    # The tax is paid out in equal shares to every team that didn't pay any,
+    # as the NBA does. Only for a season every team has books for, so the
+    # pool is never split on a partial count.
+    taxes = {(s, t): luxury_tax(b["payroll"], b["apron1"], b["cap"])
+             for (s, t), b in books.items() if b["payroll"] is not None}
+    tax_share: dict[tuple[str, str], float] = {}
+    for s in seasons:
+        if all((s, t) in taxes for t in teams):
+            payers = [t for t in teams if taxes[(s, t)] > 0]
+            pool = sum(taxes[(s, t)] for t in payers)
+            clean = [t for t in teams if t not in payers]
+            for t in teams:
+                tax_share[(s, t)] = pool / len(clean) if clean and t in clean else 0.0
+
     patches = jersey_patches(teams, seasons)
     fin_rows = []
     for i, s in enumerate(seasons):
@@ -476,13 +561,15 @@ def ledger(data_dir: Path, season: str):
             tt, ln = tally[(s, t)], lines[(s, t)]
             book = books.get((s, t))
             payroll = dead = tax = ops = expenses = profit = None
-            if book and book["payroll"] is not None:
+            share = tax_share.get((s, t))
+            revenue = ln["revenue"] + (share or 0)
+            if (s, t) in taxes:
                 payroll = book["payroll"]
                 dead = book["dead"]
-                tax = luxury_tax(payroll, book["apron1"], book["apron2"])
+                tax = taxes[(s, t)]
                 ops = ARENA_OPS_PER_GAME * (REG_HOME_GAMES if ln["in_progress"] else tt["home_games"])
                 expenses = payroll + tax + ops
-                profit = ln["revenue"] - expenses
+                profit = revenue - expenses
             prev = values[(seasons[i - 1], t)] if i else START_VALUE
             fin_rows.append([
                 t, s, MODEL, ln["in_progress"], int(tt["w"]), int(tt["l"]),
@@ -491,8 +578,9 @@ def ledger(data_dir: Path, season: str):
                 _int(tt["home_games"]),
                 round(tt["crowd"] / tt["home_games"]) if tt["home_games"] else None,
                 _int(tt["sellouts"]), _int(ln["gate"]),
-                _int(tt["po_home"]), _int(tt["po_gate"]), _int(ln["merch"]), MEDIA_SHARE,
-                _int(ln["nbntv"]), ln["title"], _int(ln["revenue"]),
+                _int(tt["po_home"]), _int(tt["po_gate"]), _int(ln["concessions"]),
+                _int(ln["merch"]), MEDIA_SHARE, _int(ln["nbntv"]), ln["title"], _int(share),
+                _int(revenue),
                 _int(payroll), _int(dead), _int(tax), _int(ops), _int(expenses), _int(profit),
                 ln["titles"], _int(values[(s, t)]), _int(values[(s, t)] - prev),
                 patches[(s, t)],
