@@ -194,6 +194,24 @@ check("naming the day and count", SENT and "Fri Oct 23" in SENT[0][2] and "2 gam
 up("NYK", "NYK", "BOS")
 check("a further upload that day sends nothing", len(SENT) == 1)
 
+# ── 4b. a day marked done after Stats finished it ────────────────────────────
+
+print("a day is marked done after its screenshots are in")
+c.delete("/api/streaming-days/2026-10-23/done", headers=H["streamy"])
+SENT.clear()
+c.post("/api/streaming-days/2026-10-23/done", headers=H["streamy"])
+check("every game already uploaded: Stats hears nothing", SENT == [], SENT)
+
+print("a day with one game entered and one not")
+GAMES.append({"id": "g7", "date": "2026-10-22", "home_team": "CHI", "away_team": "MIL"})
+GAMES.append({"id": "g8", "date": "2026-10-22", "home_team": "DAL", "away_team": "HOU"})
+real_boxed = gdn._boxed_games
+gdn._boxed_games = lambda season: {("2026-10-22", frozenset({"CHI", "MIL"}))}
+SENT.clear()
+c.post("/api/streaming-days/2026-10-22/done", headers=H["streamy"])
+check("only the game still missing is counted", SENT and "1 game needs box score" in SENT[0][2], SENT)
+gdn._boxed_games = real_boxed
+
 # ── 5. running behind ─────────────────────────────────────────────────────────
 
 print("the league is a day behind")
