@@ -1659,13 +1659,9 @@ def _apply_sign(details: SignDetails, txn_date: str, info: dict, txn_id: Optiona
     bio["guarantee_schedule"] = {**past_gtd_sched, **details.contract.guarantee_schedule}
     bio["type"] = details.contract.type
 
-    past_bird = {k: v for k, v in bio.get("bird_tiers", {}).items() if k <= cur_season}
-    new_bird = {}
-    if details.bird_rights_type:
-        for season, hold_type in (details.contract.cap_holds or {}).items():
-            if hold_type in ("UFA", "RFA"):
-                new_bird[season] = details.bird_rights_type
-    bio["bird_tiers"] = {**past_bird, **new_bird}
+    # The new deal's hold tiers are written by _autofill_fa_hold_amounts below,
+    # from tenure at the hold season (_hold_bird_tier), never the signing tier.
+    bio["bird_tiers"] = {k: v for k, v in bio.get("bird_tiers", {}).items() if k <= cur_season}
 
     bio["contracts"] = (bio.get("contracts") or []) + [{
         "team": team,
@@ -3667,6 +3663,32 @@ def _compute_fa_hold_amount(
     return amount, note
 
 
+def _hold_bird_tier(bio: dict, team: str, season: str, slug: Optional[str],
+                    signing_tier: Optional[str]) -> str:
+    """§ 3.8 tier a trailing § 3.10 hold carries in `season`, the offseason
+    after the deal just signed ends.
+
+    `signing_tier` is the tier the deal was *signed* with: the player's
+    tenure at signing, not at the hold. Until 2026-10-26 it was copied
+    straight onto the hold, so a player re-signed on Early Bird kept Early
+    Bird after two more years with the team: Dadiet's and Bruce Brown's 28-29
+    holds were priced at 130% instead of Full Bird's 190%.
+
+    The tier is the higher of the tenure derived for `season` and the floor
+    the signing tier implies: its minimum seasons (§ 3.8) plus the new deal's
+    own years. The floor only matters where tenure can't be derived, since a
+    declared tier above the derived one is blocked at submit.
+    """
+    derived = _derive_bird_tier(bio, team, season, slug)
+    if not signing_tier:
+        return derived
+    deal = ((bio.get("contracts") or [None])[-1] or {}).get("salaries") or {}
+    years = sum(1 for yr in deal if _season_start(yr) < _season_start(season))
+    floor_seasons = {"QVFA": 3, "EQVFA": 2}.get(signing_tier, 0) + years
+    floor = "QVFA" if floor_seasons >= 3 else "EQVFA" if floor_seasons >= 2 else "Non-QVFA"
+    return max(derived, floor, key=lambda t: _BIRD_TIER_RANK.get(t, 0))
+
+
 def _autofill_fa_hold_amounts(
     bio: dict,
     team: str,
@@ -3699,7 +3721,11 @@ def _autofill_fa_hold_amounts(
     if signing_method is None and contracts:
         signing_method = contracts[-1].get("signing_method")
     for season, hold_type in (cap_holds or {}).items():
-        if hold_type not in ("UFA", "RFA") or season in explicit_salaries:
+        if hold_type not in ("UFA", "RFA"):
+            continue
+        tier = _hold_bird_tier(bio, team, season, slug, bird_rights_type)
+        bio["bird_tiers"] = {**(bio.get("bird_tiers") or {}), season: tier}
+        if season in explicit_salaries:
             continue
         prev_salary = salaries.get(_season_shift(season, -1))
         if not prev_salary:
@@ -3713,7 +3739,6 @@ def _autofill_fa_hold_amounts(
             else:
                 salaries[season] = f"${amount:,}"
             continue
-        tier = bird_rights_type or _derive_bird_tier(bio, team, season, slug)
         min_amt = _rookie_min_salary(season, cap_levels) or None
         max_amt = _max_salary(bio, season, cap_levels)
         amount, note = _compute_fa_hold_amount(
@@ -3795,7 +3820,7 @@ def _preview_fa_hold(
                   "team": team, "salaries": explicit, "signing_method": signing_method,
                   "cap_holds": contract.cap_holds or {},
                   "years_experience": getattr(contract, "years_experience", None)}]}
-    tier = bird_rights_type or _derive_bird_tier(probe, team, season, slug)
+    tier = _hold_bird_tier(probe, team, season, slug, bird_rights_type)
     out = {"season": season, "type": holds[season], "bird_tier": tier,
            "amount": None, "needs_eaps": False, "note": None}
 

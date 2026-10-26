@@ -254,6 +254,34 @@ def main():
     check("a hold row with an amount typed in still counts as the hold", r.passed)
     check("two-ways aren't checked", _check_trailing_hold(_C({"26-27": "$0"}, {}, "two-way")) is None)
 
+    print("\nThe hold carries tenure at the hold season, not the tier the deal was signed with")
+    # Dadiet, 2026-10-05: re-signed by MIL on Early Bird for 26-27/27-28. By
+    # 28-29 he has 2+2 seasons, so the hold is Full Bird (190%), not 130%.
+    levels = {**CAP_LEVELS, "28-29": {"min_salary_scale": {"0": 1357763}}}
+    deal = {"26-27": "$3000000", "27-28": "$3150000"}
+    bio = {"salaries": dict(deal),
+           "contracts": [{"team": "MIL", "salaries": deal, "signing_method": "bird_rights"}]}
+    _autofill_fa_hold_amounts(bio, "MIL", {"28-29": "UFA"}, deal, levels,
+                              bird_rights_type="EQVFA", eaps_assumption="below")
+    check("Early Bird re-sign + 2 years -> Full Bird hold", bio["bird_tiers"]["28-29"] == "QVFA")
+    check("priced at 190% of $3,150,000", bio["salaries"]["28-29"] == "$5,985,000")
+    src = {"salaries": {}, "contracts": []}
+    h = _preview_fa_hold(src, "MIL", _C(deal, {"28-29": "UFA"}), levels,
+                         bird_rights_type="EQVFA", eaps_assumption="below")
+    check("preview agrees", h["bird_tier"] == "QVFA" and h["amount"] == 5985000)
+    check("preview still doesn't mutate the bio", "bird_tiers" not in src)
+
+    one = {"26-27": "$5000000"}
+    bio = {"salaries": dict(one),
+           "contracts": [{"team": "IND", "salaries": one, "signing_method": "bird_rights"}]}
+    _autofill_fa_hold_amounts(bio, "IND", {"27-28": "UFA"}, one, levels, bird_rights_type="Non-QVFA")
+    check("Non-Bird + 1 year stays Non-Bird", bio["bird_tiers"]["27-28"] == "Non-QVFA")
+
+    priced = {"salaries": {}, "contracts": []}
+    _autofill_fa_hold_amounts(priced, "IND", {"27-28": "UFA"}, {**one, "27-28": "$9,000,000"},
+                              levels, bird_rights_type="QVFA")
+    check("a hand-priced hold still gets its tier recorded", priced["bird_tiers"]["27-28"] == "QVFA")
+
     print("\n" + ("=" * 40))
     if FAILS:
         print(f"FAILED: {FAILS}")
