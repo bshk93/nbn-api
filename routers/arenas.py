@@ -16,6 +16,9 @@ The rules, settled with the user 2026-10-26:
 - **Live at once; an admin can pull a name.** Pulling refunds that bid in full
   and the arena goes back to the name before it, at that name's price — as if
   the pulled bid never happened.
+- **Every winning bid is announced on NBN Twitter** (`announce`), from a
+  business-news account, tagged `arena:{TEAM}:{index}`. Pulling the name
+  deletes that tweet. A tweet that fails to post never fails the bid.
 
 Stored in `arena-names.json` in NBS_DATA_DIR: `{TEAM: [entry, ...]}`, oldest
 first, each entry `{name, by, bid, at}` plus `pulled: {by, at, reason}` once
@@ -31,6 +34,8 @@ Pinned by tests/test_arenas.py.
 """
 from __future__ import annotations
 
+import logging
+import random
 import re
 import threading
 from datetime import datetime, timezone
@@ -40,12 +45,14 @@ from pydantic import BaseModel, Field
 
 from stats_build import finances as fin
 
-from . import inbox, wallet
+from . import inbox, tweets, wallet
 from .auth import get_token_info, has_role, require_role
 from .constants import DATA_DIR
+from .league_time import league_today_str
 from .storage import _load_json, _save_json, log_write
 
 router = APIRouter()
+log = logging.getLogger(__name__)
 
 ARENAS_FILE = DATA_DIR / "arena-names.json"
 OPENING_BID = 100
@@ -98,6 +105,46 @@ def to_beat(history: list[dict]) -> int:
     if not cur:
         return OPENING_BID
     return cur["bid"] + max(1, -(-cur["bid"] * RAISE_PCT // 100))
+
+
+TWEET_HANDLE, TWEET_NAME = "NBNBizWire", "NBN Business Wire"
+
+
+def tweet_text(t: str, name: str, member: str, bid: int, prev: dict | None) -> str:
+    """The announcement for one winning bid. Facts only: who, which arena, what
+    it cost, and whose name it replaced."""
+    plain = name[4:] if name.lower().startswith("the ") else name
+    if prev and prev["by"] == member:
+        return random.choice([
+            f"{member} has renamed {t}'s arena again, paying NB¥{bid:,} to swap out the "
+            f"{prev['name']}. It's now the {plain}.",
+            f"Rebrand: {member} spends NB¥{bid:,} to rename their own {t} arena. "
+            f"Goodbye {prev['name']}, hello {plain}.",
+        ])
+    if prev:
+        return random.choice([
+            f"BREAKING: {member} has outbid {prev['by']} for {t}'s arena naming rights at "
+            f"NB¥{bid:,}. The {prev['name']} is no more. Welcome to the {plain}.",
+            f"Deal done: {member} pays NB¥{bid:,} to take {t}'s arena from {prev['by']}. "
+            f"The building is now the {plain}.",
+        ])
+    return random.choice([
+        f"BREAKING: {member} has bought the naming rights to {t}'s arena for NB¥{bid:,}. "
+        f"Welcome to the {plain}.",
+        f"Sources: {t}'s arena has a new name. {member} paid NB¥{bid:,} and it's now the {plain}.",
+    ])
+
+
+def announce(t: str, name: str, member: str, bid: int, prev: dict | None, ref: str) -> None:
+    try:
+        tweets.post_one(
+            tweets.TweetIn(handle=TWEET_HANDLE, name=TWEET_NAME, team=t,
+                           text=tweet_text(t, name, member, bid, prev),
+                           likes=random.randint(40, 400) + bid // 50,
+                           retweets=random.randint(5, 60) + bid // 400),
+            league_today_str(), "arenas", ref)
+    except Exception:
+        log.exception("arena tweet failed for %s", ref)
 
 
 def _rebuild() -> None:
@@ -176,6 +223,7 @@ def bid(team: str, body: BidIn, info: dict = Depends(get_token_info)):
             raise
     log_write(info, f"POST arenas/{t} — \"{name}\" for NB¥{body.bid:,}")
     _rebuild()
+    announce(t, name, member, body.bid, prev, ref)
     if prev and prev["by"] != member:
         inbox.notify_member(prev["by"], f"{member} outbid you on {t}'s arena (NB¥{body.bid:,}). "
                                         f"It's now the {name}.", _LINK)
@@ -201,6 +249,10 @@ def pull(team: str, body: PullIn, info: dict = Depends(require_role("admin"))):
                          "reason": body.reason.strip()}
         _save_json(ARENAS_FILE, data)
     _rebuild()
+    try:
+        tweets.delete_by_ref(f"arena:{t}:{i}")
+    except Exception:
+        log.exception("arena tweet delete failed for %s:%s", t, i)
     log_write(info, f"DELETE arenas/{t} — pulled \"{cur['name']}\" ({cur['by']}): {body.reason}")
     inbox.notify_member(cur["by"], f"An admin pulled your name for {t}'s arena (\"{cur['name']}\"): "
                                    f"{body.reason.strip()}. NB¥{cur['bid']:,} refunded.", _LINK)

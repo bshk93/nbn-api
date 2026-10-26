@@ -19,6 +19,11 @@ number stays its own after older ones are deleted.
     POST   /api/tweets             stats or rosters — one game day's batch
     DELETE /api/tweets/{n}         stats or rosters
 
+Other routers post through `post_one` for real events that happen off the box
+score: arena naming rights (routers/arenas.py) post one when a bid lands. Those
+carry a `ref` naming the event, so `delete_by_ref` can take the tweet down if
+the event is undone.
+
 Pinned by tests/test_tweets.py.
 """
 from __future__ import annotations
@@ -110,6 +115,31 @@ def _load_store() -> dict:
 
 def _save_store(store: dict):
     _save_json(TWEETS_FILE, store)
+
+
+def post_one(tweet: TweetIn, date: str, author: str, ref: str) -> dict:
+    """Store one tweet written by the API itself, tagged with the event it is about."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        store = _load_store()
+        store["seq"] += 1
+        item = {"id": store["seq"], "date": date, "created_at": now,
+                "author": author, "ref": ref, **tweet.model_dump()}
+        store["items"].append(item)
+        _save_store(store)
+    return item
+
+
+def delete_by_ref(ref: str) -> int:
+    """Remove every tweet tagged `ref`; returns how many went."""
+    with _lock:
+        store = _load_store()
+        keep = [t for t in store["items"] if t.get("ref") != ref]
+        gone = len(store["items"]) - len(keep)
+        if gone:
+            store["items"] = keep
+            _save_store(store)
+    return gone
 
 
 @router.get("/api/tweets")

@@ -6,6 +6,7 @@ Pinned:
 - **The outbid holder is not refunded**; every bid is a sink.
 - **Pulling a name refunds it and restores the one before**, at its price.
 - **Names are one short line with no links.**
+- **A winning bid posts a tweet; pulling the name deletes it.**
 - **The ledger names each game for the arena it was played in**: a bought
   name from its day on, a neutral site kept, the home arena otherwise.
 
@@ -23,7 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi import HTTPException  # noqa: E402
 
-from routers import arenas, wallet  # noqa: E402
+from routers import arenas, tweets, wallet  # noqa: E402
 from stats_build import finances as fin  # noqa: E402
 
 FAILS = []
@@ -51,6 +52,8 @@ arenas.inbox.notify_team = lambda team, text, link=None, **k: sent.append(("team
 arenas.fin.home_arenas = lambda _d: {"PHX": "Footprint Center"}
 arenas.log_write = lambda *a: None
 arenas._rebuild = lambda: None
+tweets.TWEETS_FILE = tmp / "tweets.json"
+tw = lambda: tweets._load_store()["items"]
 
 for m in ("alice", "bob"):
     wallet.credit(m, 1_000, "admin", "test grant")
@@ -74,6 +77,12 @@ check("a bid names the arena", r["name"] == "Tank Commander Dome" and r["by"] ==
 check("and costs the bid", wallet.balance("alice") == 900)
 check("the next bid has to beat it by 10%", r["to_beat"] == 110)
 check("the home team is told", ("team", "PHX", sent[-1][2]) == sent[-1])
+check("a bid posts one tweet", len(tw()) == 1)
+check("naming the arena, buyer and price",
+      all(x in tw()[0]["text"] for x in ("Tank Commander Dome", "alice", "NB¥100", "PHX")))
+check("from the business wire, in the team's colours",
+      tw()[0]["handle"] == arenas.TWEET_HANDLE and tw()[0]["team"] == "PHX")
+check("tagged with the bid", tw()[0]["ref"] == "arena:PHX:0")
 check("a lower bid is refused",
       status(arenas.bid, "PHX", arenas.BidIn(name="Sun Palace", bid=109), bob) == 409)
 check("more than the bidder has is refused (402)",
@@ -84,6 +93,21 @@ check("a winning bid renames it", r["name"] == "Sun Palace")
 check("the outbid holder is not refunded", wallet.balance("alice") == 900)
 check("and is told", any(s[0] == "member" and s[1] == "alice" for s in sent))
 check("the home team isn't told about its own owner's bid", not any(s[0] == "team" for s in sent))
+check("an outbid tweet names who lost it",
+      len(tw()) == 2 and "alice" in tw()[1]["text"] and "Sun Palace" in tw()[1]["text"])
+check("'The' isn't doubled", "the The" not in arenas.tweet_text("PHX", "The Dome", "x", 100, None))
+check("every variant fits in a tweet", all(
+    len(arenas.tweet_text("PHX", "x" * 40, "m" * 30, 9_999_999, p)) <= 280
+    for p in (None, {"by": "o" * 30, "name": "y" * 40}, {"by": "m" * 30, "name": "y" * 40})
+    for _ in range(20)))
+real_post = tweets.post_one
+tweets.post_one = lambda *a, **k: 1 / 0
+wallet.credit("alice", 500, "admin", "test grant")
+r = arenas.bid("PHX", arenas.BidIn(name="Broken Wire Arena", bid=121), alice)
+check("a tweet that fails to post doesn't fail the bid", r["name"] == "Broken Wire Arena")
+tweets.post_one = real_post
+arenas.pull("PHX", arenas.PullIn(reason="test"), admin)
+wallet.debit("alice", 621, "admin", "undo test grant")
 check("the unknown team is a 404",
       status(arenas.bid, "XXX", arenas.BidIn(name="Nowhere", bid=500), bob) == 404)
 
@@ -92,13 +116,14 @@ r = arenas.pull("PHX", arenas.PullIn(reason="not that"), admin)
 check("pulling restores the name before", r["name"] == "Tank Commander Dome")
 check("at its price", r["to_beat"] == 110)
 check("and refunds the pulled bid", wallet.balance("bob") == 1_000)
+check("and deletes its tweet", [t["ref"] for t in tw()] == ["arena:PHX:0"])
 arenas.pull("PHX", arenas.PullIn(reason="nor that"), admin)
 check("pulling the last one goes back to the home arena",
       arenas.get_arena("PHX")["name"] == "Footprint Center"
       and arenas.get_arena("PHX")["to_beat"] == arenas.OPENING_BID)
 check("nothing left to pull is a 404",
       status(arenas.pull, "PHX", arenas.PullIn(reason="x"), admin) == 404)
-check("history keeps every entry", len(arenas.get_arena("PHX")["history"]) == 2)
+check("history keeps every entry", len(arenas.get_arena("PHX")["history"]) == 3)
 
 print("the ledger's arena per game")
 (tmp / "arena-names.json").write_text(json.dumps({"PHX": [
