@@ -70,8 +70,8 @@ MEMBERS = {
 TMP = Path(tempfile.mkdtemp(prefix="nbn-themes-test-"))
 wallet.LEDGER_FILE = TMP / "nbyen-ledger.jsonl"
 wallet.BALANCES_FILE = TMP / "member-balances.json"
-# Buying themes is paused since the 2026-09 NB¥ reset; the purchase logic is
-# still what runs when it comes back, so it's tested switched on.
+# Buying themes is on (back 2026-10-26); set it explicitly so the test doesn't
+# depend on the live switch.
 wallet.KINDS["theme"] = True
 
 

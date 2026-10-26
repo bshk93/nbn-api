@@ -81,6 +81,10 @@ KINDS: dict[str, bool] = {
     "pickem":          True,
     # Wall Street, back on 2026-10-23 under § 3's rules (routers/invest.py)
     "invest":          True,
+    # Spends only, so they can't create NB¥. Back on 2026-10-26 at 500 / 50 / 500 (theme, cosmetic, avatar)
+    "theme":           True,
+    "cosmetic":        True,
+    "avatar":          True,
     # Paused at the reset — see the module docstring
     "tip":             False,
     "achievement":     False,
@@ -88,9 +92,6 @@ KINDS: dict[str, bool] = {
     "poeltl":          False,
     "perry":           False,
     "trivia":          False,
-    "theme":           False,
-    "cosmetic":        False,
-    "avatar":          False,
 }
 
 # Human names for the 423 a paused feature returns.
