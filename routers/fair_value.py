@@ -107,7 +107,7 @@ from stats_build import finances as fin
 
 router = APIRouter()
 
-MODEL = "fv1"
+MODEL = "fv2"
 
 # ── The model's constants. Every figure is NB¥. ──────────────────────────────
 
