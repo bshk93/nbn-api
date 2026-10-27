@@ -34,9 +34,18 @@ The model, in full:
     day uses the report as it stood that day (`injuries_as_of`).
   * **Who is under contract.** A season with a salary and no UFA/RFA tag. A
     player whose deal ends into a UFA/RFA hold the team holds can be re-signed
-    at the hold amount: best OVR first, while payroll stays under the first
-    apron, and not past `RESIGN_MAX_AGE`. The rest walk, and their spots are
-    filled at replacement level.
+    at the hold amount: best OVR first, while payroll stays under the second
+    apron, and past it when his market price (`fa_ask`) is at least his hold,
+    since nobody lets a bargain go; never past `RESIGN_MAX_AGE`. The rest walk.
+  * **Free agency.** The players who walk, league-wide, are the market
+    (`free_agency`). Best first, each signs with whoever offers the most:
+    cap room, else the non-taxpayer MLE under the first apron, else the
+    taxpayer MLE under the second; between equal offers, the better team. His
+    price is what 2026's signings paid for his OVR (`fa_ask`), up to the max
+    salary; he takes a bit less (`FA_TAKE_LESS`) rather than not sign, and
+    never goes back to the team that let him walk. A signing stays
+    on the books, at that salary, for the rest of the projection. Spots still
+    empty are filled at replacement level.
   * **Wins and playoffs.** Each season is simulated with the playoff odds
     model (`playoff_odds.simulate`), on this season's schedule. Revenue takes
     the expected value over every finish.
@@ -107,7 +116,7 @@ from stats_build import finances as fin
 
 router = APIRouter()
 
-MODEL = "fv2"
+MODEL = "fv3"
 
 # ── The model's constants. Every figure is NB¥. ──────────────────────────────
 
@@ -134,6 +143,13 @@ SIMS_NOW, SIMS_LATER = 4000, 2000
 # deep, too thin to fit a curve from yet.
 AGE_CURVE = ((22, 3), (24, 2), (26, 1), (29, 0), (31, -1), (33, -2), (99, -3))
 RESIGN_MAX_AGE = 34
+# A free agent's first-year salary as a share of the cap: ln(share) = a + b·OVR,
+# fit on the 2026 offseason's 50 signings above ¥4M (Bird re-signings in,
+# minimums out), ±0.44 in the log. A 80 asks ~¥11M, an 84 ~¥18M, an 88 ~¥30M.
+FA_PRICE = (-12.946, 0.1278)
+FA_MAX_SHARE = 0.35             # § 3.11's top tier; the fit passes 25% only above ~92 OVR
+FA_TAKE_LESS = 0.65             # one standard deviation of the fit under his price
+FA_EXCEPTIONS = ("ntmle_amount", "tmle_amount")
 STAR_COUNT = 15                 # All-NBN is 15 players a season
 ROSTER_FILL = 14                # later seasons fill the standard roster to this
 HOME_PER_SERIES = 2.6           # measured: 467 playoff games over 90 series, 21 to 26
@@ -368,17 +384,22 @@ def hold_amount(bio: dict, season: str, since: str) -> int:
 
 
 def books(team: str, season: str, years_out: int, bios: dict, ovr_now: dict,
-          contracted: float, ceiling: Optional[float], kept: set) -> dict:
+          contracted: float, ceiling: Optional[float], kept: set,
+          gone: frozenset = frozenset(), cap: Optional[float] = None) -> dict:
     """Players on the books for `season`: OVRs (aged), re-signing money, standard count.
 
     A team re-signs its free agents best OVR first, while payroll (`contracted`
-    plus re-signings) stays under `ceiling`, the first apron. The rest walk.
-    Anyone in `kept`, re-signed the season before, stays: that money is
-    committed.
+    plus re-signings) stays under `ceiling`, the second apron, or past it for
+    a player whose market price on `cap` is at least his hold. The rest walk,
+    and are returned as `walked`, the free agency pool. Anyone in `kept`,
+    re-signed the season before, stays: that money is committed. Anyone in
+    `gone` signed elsewhere in an earlier projected season.
     """
     since = season_after(season, -years_out)
     players, candidates = [], []
     for slug in _roster(team):
+        if slug in gone:
+            continue
         bio = bios.get(slug) or {}
         kind = contract_year(bio, season, since)
         if kind is None:
@@ -394,14 +415,17 @@ def books(team: str, season: str, years_out: int, bios: dict, ovr_now: dict,
             candidates.append(p)
         else:
             players.append(p)
-    resign_money = 0
+    resign_money, walked = 0, []
     candidates.sort(key=lambda p: (p["slug"] not in kept, -(p["ovr"] or 0)))
     for p in candidates:
         over = ceiling is not None and contracted + resign_money + p["money"] > ceiling
-        if p["slug"] in kept or not over:
+        bargain = bool(cap and p["ovr"] is not None and fa_ask(p["ovr"], cap) >= p["money"])
+        if p["slug"] in kept or not over or bargain:
             resign_money += p["money"]
             players.append(p)
-    return {"players": players, "resign_money": resign_money,
+        else:
+            walked.append({**p, "from": team})
+    return {"players": players, "resign_money": resign_money, "walked": walked,
             "resigned": {p["slug"] for p in players if p["kind"] == "resigned"},
             "standard": sum(1 for p in players if not p["two_way"])}
 
@@ -450,6 +474,67 @@ def cap_level(season: str, base_season: str) -> Optional[float]:
     if not base:
         return None
     return base * (1 + CAP_GROWTH) ** (season_index(season) - season_index(base_season))
+
+
+def exceptions(season: str, base_season: str) -> dict[str, float]:
+    """The two MLEs, grown like `aprons` when the season isn't on file."""
+    from .cap_history import CAP_LEVELS_FILE
+    levels = _load_json(CAP_LEVELS_FILE, {})
+    on_file = levels.get(season) or {}
+    base = levels.get(base_season) or {}
+    g = (1 + CAP_GROWTH) ** (season_index(season) - season_index(base_season))
+    return {k: float(on_file.get(k) or (base.get(k) or 0) * g) for k in FA_EXCEPTIONS}
+
+
+# ── Free agency: who signs the players who walk ──────────────────────────────
+
+def fa_ask(ovr: float, cap: float) -> float:
+    a, b = FA_PRICE
+    return cap * min(FA_MAX_SHARE, math.exp(a + b * ovr))
+
+
+def fa_budget(payroll: float, cap: Optional[float], apron1: Optional[float],
+              apron2: Optional[float], exc: dict[str, float]) -> float:
+    """The most a team can pay one free agent: its cap room, else the MLE its
+    payroll allows, else nothing."""
+    if cap and payroll < cap:
+        return max(cap - payroll, exc["ntmle_amount"] if apron1 and payroll < apron1 else 0.0)
+    if apron1 and payroll < apron1:
+        return exc["ntmle_amount"]
+    if apron2 and payroll < apron2:
+        return exc["tmle_amount"]
+    return 0.0
+
+
+def free_agency(pool: list[dict], budgets: dict[str, float], open_spots: dict[str, int],
+                cap: float, floor_ovr: float, floor_pay: float,
+                standing: Optional[dict[str, float]] = None) -> dict[str, list[dict]]:
+    """Team -> the free agents it signs, each with what he is paid.
+
+    Best OVR first. Each goes to the team with a roster spot that offers the
+    most, at least FA_TAKE_LESS of his price: his price or that team's whole
+    budget, whichever is less. Between equal offers he picks the better team
+    (`standing`, last season's rating), never the alphabet. Room and an MLE are
+    both spent down, so an MLE can be split, as § 3 allows. Nobody above replacement goes back to the team that
+    let him walk, and nobody at or below it is worth modelling: the roster fill
+    already covers him.
+    """
+    budgets, open_spots = dict(budgets), dict(open_spots)
+    out: dict[str, list[dict]] = {t: [] for t in budgets}
+    for p in sorted(pool, key=lambda p: (-(p["ovr"] or 0), p["slug"])):
+        if p["ovr"] is None or p["ovr"] <= floor_ovr:
+            break
+        ask = fa_ask(p["ovr"], cap)
+        need = max(floor_pay, FA_TAKE_LESS * ask)
+        bidders = [t for t in budgets if t != p["from"] and open_spots[t] > 0 and budgets[t] >= need]
+        if not bidders:
+            continue
+        t = max(bidders, key=lambda t: (min(ask, budgets[t]), (standing or {}).get(t, 0.0), t))
+        pay = min(ask, budgets[t])
+        out[t].append({**p, "kind": "fa", "money": round(pay)})
+        budgets[t] = budgets[t] - pay if budgets[t] > pay else 0.0
+        open_spots[t] -= 1
+    return out
 
 
 # ── Revenue on expected inputs ───────────────────────────────────────────────
@@ -630,6 +715,9 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
     rep_ovr, rep_pay = replacement(teams, bios, ovr_now, season)
     later_books, strengths = {}, [strength0]
     kept = {t: set() for t in teams}
+    signed: dict[str, list[dict]] = {t: [] for t in teams}   # free agents signed so far, with their base OVR
+    gone: set[str] = set()
+    went: dict[tuple[str, str], str] = {}                    # (season, slug) -> the team that signed him
     slots: dict[int, dict[str, int]] = {}
     drafted: dict[str, list[dict]] = {t: [] for t in teams}
 
@@ -640,9 +728,39 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
         # The draft after season k-1, slotted by that season's simulation.
         slots[k - 1] = draft_slots({t: r for t, r in ((x["team"], x) for x in sims[k - 1]["teams"])})
         s = seasons[k]
-        a1 = aprons(s, season)[0]
-        bk = {t: books(t, s, k, bios, ovr_now, _payroll(t, bios, s)[0], a1, kept[t]) for t in teams}
+        a1, a2 = aprons(s, season)
+        cap_s = cap_level(s, season)
+        carried = {t: sum(p["money"] for p in signed[t]) for t in teams}
+        bk = {t: books(t, s, k, bios, ovr_now, _payroll(t, bios, s)[0] + carried[t], a2, kept[t],
+                       frozenset(gone), cap_s) for t in teams}
         kept = {t: bk[t]["resigned"] for t in teams}
+        # Free agents signed in an earlier projected season stay, a year older.
+        for t in teams:
+            for p in signed[t]:
+                age = age_in((bios.get(p["slug"]) or {}).get("dob"), season)
+                bk[t]["players"].append({**p, "ovr": aged_ovr(p["base"], age, k)})
+            bk[t]["standard"] += len(signed[t])
+            bk[t]["fa_money"] = carried[t]
+            bk[t]["fa_signed"] = []
+        if cap_s:
+            exc = exceptions(s, season)
+            pay_now = {t: _payroll(t, bios, s)[0] + bk[t]["resign_money"] + carried[t] for t in teams}
+            budgets = {t: fa_budget(pay_now[t], cap_s, a1, a2, exc) for t in teams}
+            spots = {t: max(0, ROSTER_FILL - bk[t]["standard"]) for t in teams}
+            pool = [p for t in teams for p in bk[t]["walked"] if p["slug"] not in gone]
+            standing = {x["team"]: x["rating"] for x in sims[k - 1]["teams"]}
+            for t, got in free_agency(pool, budgets, spots, cap_s, rep_ovr, rep_pay, standing).items():
+                for p in got:
+                    base = ovr_now.get(p["slug"])
+                    signed[t].append({"slug": p["slug"], "kind": "fa", "two_way": False, "base": base,
+                                      "money": p["money"], "from": p["from"]})
+                    bk[t]["players"].append({**p})
+                    bk[t]["standard"] += 1
+                    bk[t]["fa_money"] += p["money"]
+                    bk[t]["fa_signed"].append({"slug": p["slug"], "ovr": round(p["ovr"], 1),
+                                               "salary": p["money"], "from": p["from"]})
+                    gone.add(p["slug"])
+                    went[(s, p["slug"])] = t
         later_books[s] = bk
         st = {}
         for t in teams:
@@ -787,7 +905,7 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
             payroll = float(contracted)
             if k:
                 bk = later_books[s][t]
-                payroll += bk["resign_money"] + max(0, ROSTER_FILL - bk["standard"]) * rep_pay
+                payroll += bk["resign_money"] + bk["fa_money"] + max(0, ROSTER_FILL - bk["standard"]) * rep_pay
             tax = fin.luxury_tax(payroll, aprons(s, season)[0], cap_level(s, season))
             ops = fin.ARENA_OPS_PER_GAME * fin.REG_HOME_GAMES
             costs = payroll + tax + ops
@@ -815,6 +933,11 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
                 "cash_in": round(cash_rev), "cash_out": round(cash_cost),
                 "pv_in": round(cash_rev * discount(when)), "pv_out": round(cash_cost * discount(when)),
                 "players": (len(later_books[s][t]["players"]) if k else None),
+                "fa_signed": ([{**p, "name": (bios.get(p["slug"]) or {}).get("name")}
+                               for p in later_books[s][t]["fa_signed"]] if k else None),
+                "walked": ([{"slug": p["slug"], "name": (bios.get(p["slug"]) or {}).get("name"),
+                             "ovr": None if p["ovr"] is None else round(p["ovr"], 1), "to": went.get((s, p["slug"]))}
+                            for p in later_books[s][t]["walked"]] if k else None),
             })
 
         # The sale: the ledger's valuation on the three projected seasons plus
