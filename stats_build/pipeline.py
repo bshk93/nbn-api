@@ -66,7 +66,11 @@ SEASON_SUMS = (("MIN", "M"), ("PTS", "P"), ("REB", "R"), ("AST", "A"), ("STL", "
                ("BLK", "B"), ("TOV", "TO"), ("PF", "PF"), ("FGM", "FGM"), ("FGA", "FGA"))
 SEASON_HIGHS = (("HIGH_P", "P"), ("HIGH_R", "R"), ("HIGH_A", "A"), ("HIGH_S", "S"),
                 ("HIGH_B", "B"), ("HIGH_3PM", "3PM"))
-SEASON_TAIL_SUMS = (("3PM", "3PM"), ("3PA", "3PA"), ("FTM", "FTM"), ("FTA", "FTA"))
+# OREB is the one column job.R did not originally write; it was added to both
+# engines together (2026-10-27) so the port gate still compares like for like.
+# Defensive rebounds are REB - OREB, so they are not stored twice.
+SEASON_TAIL_SUMS = (("3PM", "3PM"), ("3PA", "3PA"), ("FTM", "FTM"), ("FTA", "FTA"),
+                    ("OREB", "OR"))
 BIO_COLS = ("PHOTO_URL", "DOB", "COLLEGE", "COUNTRY", "NBN_DFT_YR", "NBN_DFT_R", "NBN_DFT_P")
 
 # Franchise record book: five deep, per team, per stat. Sorted by STAT as a
@@ -561,7 +565,8 @@ def player_seasons(rows: list[dict], data_dir: Path, playoff_rows: list[dict] | 
     for row in out:
         row[0] = title_case(row[0])
         row[-1] = player_slug(row[0])
-    out.sort(key=lambda r: (r[0], r[1] is None, r[1] or "", r[26] is None, r[26] or ""))
+    last = cols.index("LAST_DATE")
+    out.sort(key=lambda r: (r[0], r[1] is None, r[1] or "", r[last] is None, r[last] or ""))
     return cols, out
 
 
