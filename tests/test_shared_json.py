@@ -49,6 +49,23 @@ check("new content", set(third) == {"a", "b"})
 check("two parses", len(parses) == 2)
 storage.json.loads = real_loads
 
+print("an in-place rewrite with the same size, inode and mtime is still seen")
+# What a key on mtime/size/inode would miss: timestamps are coarse, so two
+# same-size writes can share an mtime. Keyed on content, it can't be missed.
+import os  # noqa: E402
+st = path.stat()
+with open(path, "r+") as f:   # same inode, same length
+    text = f.read()
+    f.seek(0)
+    f.write(text.replace('"TWO, B"', '"TWO, Z"'))
+os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+after = path.stat()
+check("same inode, size and mtime", (after.st_ino, after.st_size, after.st_mtime_ns) == (st.st_ino, st.st_size, st.st_mtime_ns))
+check("new content read", storage._load_json_shared(path, {})["b"]["name"] == "TWO, Z")
+
+print("matches _load_json exactly")
+check("same value", storage._load_json_shared(path, {}) == storage._load_json(path, {}))
+
 print("a missing file is the default")
 check("default", storage._load_json_shared(tmp / "missing.json", {"x": 1}) == {"x": 1})
 

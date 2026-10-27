@@ -990,9 +990,11 @@ Pinned by `tests/test_home_team.py`.
 
 ### Shared reads (`_load_json_shared`)
 
-`storage._load_json_shared` parses a JSON file once per change (keyed on mtime,
-size and inode, which every `_atomic_write` changes) and hands every caller the
-same object. `players.player_bios_shared()` and `ovr_shared()` are built on it,
+`storage._load_json_shared` parses a JSON file once per distinct content and
+hands every caller the same object. It still reads the file on every call and
+keys on a hash of the bytes, not on mtime/inode (timestamps are coarse, inodes
+are reused), and decodes as `read_text()` does, so it returns exactly what
+`_load_json` would; only the parse is saved. `players.player_bios_shared()` and `ovr_shared()` are built on it,
 for player-bios.json (~620KB) and ovr-history.json.
 
 **Read-only by contract.** Mutating the shared object changes what the next
@@ -1005,7 +1007,13 @@ Before widening it, check the new caller never writes into what it reads.
 Pinned by `tests/test_shared_json.py`.
 
 `_record_member_seen` (`/api/me`, every page load) writes member-seen.json only
-when a value is new (`tests/test_member_seen.py`).
+when a value is new or the member is seen for the first time, so the file holds
+exactly what it did when every call wrote (`tests/test_member_seen.py`).
+
+**Compatibility is pinned by `tests/test_api_compat.py`**: every endpoint and
+helper moved onto the shared parse is computed both ways (shared, and with the
+old `_load_json` forced back in) and must match, as must the defaults of the
+helpers that gained optional parameters.
 
 ## Docs discipline
 
