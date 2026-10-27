@@ -40,7 +40,7 @@ from pathlib import Path
 from stats_build import csvio, pipeline
 from stats_build.buildargs import DATA_DIR, OUT_DIR, BuildArgs
 
-MODEL = "v2"
+MODEL = "v3"
 
 # ── The model's constants. Every figure is NB¥. ──────────────────────────────
 
@@ -74,7 +74,20 @@ MERCH_MVP = 15_000_000
 MERCH_ROTY = 6_000_000
 MERCH_TITLE = 30_000_000
 
-MEDIA_SHARE = 150_000_000
+MEDIA_SHARE = 150_000_000      # national TV, the same for everyone
+LOCAL_MEDIA = 80_000_000       # local TV and sponsors at a market of 1.0
+
+# Market: how much a city spends on its team. Everyone starts at 1.0 in 20-21;
+# each finished season moves it by how far the team went and how often it won,
+# and the rest fades back toward 1.0 by MARKET_KEEP a season. It is relative:
+# the league's mean is held at 1.0 every season, so winners grow at losers'
+# expense and the multiple alone carries league-wide growth. It scales the
+# ticket price, base merch and local media.
+MARKET_STEP = {"Champion": 0.16, "Runner-Up": 0.11, "Conf Finals": 0.07,
+               "Second Round": 0.04, "First Round": 0.02, "Missed": -0.03}
+MARKET_WIN = 0.30              # times (win % − .500)
+MARKET_KEEP = 0.85
+MARKET_MIN, MARKET_MAX = 0.5, 2.0
 NBNTV_PER_GAME = 1_500_000     # per streamed game played, home or away; 26-27 on
 TITLE_BONUS = 100_000_000
 
@@ -98,7 +111,7 @@ FINANCES_FILE = Path("data") / "franchise-finances.csv"
 ATTENDANCE_FILE = Path("data") / "franchise-attendance.csv"
 
 FINANCE_COLS = [
-    "TEAM", "SEASON", "MODEL", "IN_PROGRESS", "W", "L", "PLAYOFF_RESULT", "STARS",
+    "TEAM", "SEASON", "MODEL", "IN_PROGRESS", "W", "L", "PLAYOFF_RESULT", "STARS", "MARKET",
     "HOME_GAMES", "AVG_ATTENDANCE", "SELLOUTS", "GATE",
     "PLAYOFF_HOME_GAMES", "PLAYOFF_GATE", "CONCESSIONS", "MERCH", "MEDIA", "NBNTV",
     "TITLE_BONUS", "TAX_SHARE", "REVENUE", "PAYROLL", "DEAD_MONEY", "LUXURY_TAX", "ARENA_OPS", "EXPENSES", "PROFIT",
@@ -269,6 +282,39 @@ def bandwagon(results: dict[tuple[str, str], str], seasons: list[str], season: s
     return lift
 
 
+def market_next(market: float, result: dict[str, float], win_pct: float) -> float:
+    """Next season's market from this one's, before the league is re-centred.
+
+    `result` is {finish: probability}; an actual finish is probability 1, so
+    fair value can pass the simulated odds instead."""
+    step = sum(MARKET_STEP.get(f, MARKET_STEP["Missed"]) * p for f, p in result.items())
+    return min(MARKET_MAX, max(MARKET_MIN, 1 + (market - 1) * MARKET_KEEP + step + MARKET_WIN * (win_pct - 0.5)))
+
+
+def recentre(markets: dict[str, float]) -> dict[str, float]:
+    """Hold the league's mean market at 1.0."""
+    mean = sum(markets.values()) / len(markets) if markets else 1.0
+    return {t: m / mean for t, m in markets.items()}
+
+
+def markets(seasons: list[str], teams: list[str], results: dict, records: dict) -> dict[tuple[str, str], float]:
+    """(season, team) -> market, from every finished season before it.
+    `records` is (season, team) -> win % for finished seasons only."""
+    out = {}
+    cur = {t: 1.0 for t in teams}
+    for s in seasons:
+        for t in teams:
+            out[(s, t)] = cur[t]
+        if not all((s, t) in records for t in teams):
+            break
+        cur = recentre({t: market_next(cur[t], {results.get((s, t), "Missed"): 1.0}, records[(s, t)])
+                        for t in teams})
+    for s in seasons:
+        for t in teams:
+            out.setdefault((s, t), cur[t])
+    return out
+
+
 # ── Inputs that only exist for recent seasons ─────────────────────────────────
 
 def load_streams(data_dir: Path) -> dict[tuple[str, frozenset], bool]:
@@ -436,6 +482,18 @@ def ledger(data_dir: Path, season: str):
         i = seasons.index(s)
         return FILL_CHAMP_VISIT if i and results.get((seasons[i - 1], a)) == "Champion" else 0.0
 
+    # Market needs each finished season's record before that season's games are
+    # priced, so count records first.
+    wl: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
+    for g in reg:
+        for t in (g["home"], g["away"]):
+            wl[(g["season"], t)][0 if g["wl"].get(t) == "W" else 1] += 1
+    finished = {k: v[0] / (v[0] + v[1]) for k, v in wl.items()
+                if k[0] != current and v[0] + v[1]}
+    if all(sum(wl[(current, t)]) >= 82 for t in teams):
+        finished.update({(current, t): wl[(current, t)][0] / 82 for t in teams})
+    market = markets(seasons, teams, results, finished)
+
     for i, s in enumerate(seasons):
         for g in (x for x in reg if x["season"] == s):
             h, a = g["home"], g["away"]
@@ -445,7 +503,7 @@ def ledger(data_dir: Path, season: str):
                     + champ_visiting(s, a) + _noise(g))
             fill = min(FILL_MAX, max(FILL_MIN, fill))
             crowd = round(SEATS * fill)
-            gate = crowd * TICKET
+            gate = crowd * TICKET * market[(s, h)]
             shares = [(h, 1.0)] if g["home_known"] else [(h, 0.5), (a, 0.5)]
             for t, share in shares:
                 tt = tally[(s, t)]
@@ -469,7 +527,7 @@ def ledger(data_dir: Path, season: str):
 
     for g in po:
         s, h, a = g["season"], g["home"], g["away"]
-        gate = SEATS * TICKET * PLAYOFF_MULT.get(g["round"] or 1, 2.0)
+        gate = SEATS * TICKET * market[(s, h)] * PLAYOFF_MULT.get(g["round"] or 1, 2.0)
         shares = [(h, 1.0)] if g["home_known"] else [(h, 0.5), (a, 0.5)]
         for t, share in shares:
             tally[(s, t)]["po_home"] += share
@@ -498,18 +556,20 @@ def ledger(data_dir: Path, season: str):
             if in_progress:
                 per_game = gate / tt["home_games"] if tt["home_games"] else league_gate_per_game
                 gate = per_game * REG_HOME_GAMES
-                crowd = gate / TICKET
+                crowd = gate / (TICKET * market[(s, t)])
             concessions = CONCESSIONS_PER_FAN * (crowd + tt["po_crowd"])
             aw = awards.get((s, t), {})
             champ = results.get((s, t)) == "Champion"
-            merch = (MERCH_BASE + MERCH_STAR * aw.get("star", 0)
+            mk = market[(s, t)]
+            media = MEDIA_SHARE + LOCAL_MEDIA * mk
+            merch = (MERCH_BASE * mk + MERCH_STAR * aw.get("star", 0)
                      + MERCH_MVP * aw.get("mvp", 0) + MERCH_ROTY * aw.get("roty", 0)
                      + MERCH_TITLE * champ)
             title = TITLE_BONUS if champ else 0
             nbntv = NBNTV_PER_GAME * tt["streamed"]
-            rev = gate + tt["po_gate"] + concessions + merch + MEDIA_SHARE + title
+            rev = gate + tt["po_gate"] + concessions + merch + media + title
             revenue_ex_tv[(s, t)] = rev
-            lines[(s, t)] = {"in_progress": in_progress, "gate": gate, "merch": merch,
+            lines[(s, t)] = {"in_progress": in_progress, "gate": gate, "merch": merch, "media": media,
                              "concessions": concessions,
                              "title": title, "nbntv": nbntv, "revenue": rev + nbntv,
                              "champ": champ}
@@ -574,12 +634,12 @@ def ledger(data_dir: Path, season: str):
             fin_rows.append([
                 t, s, MODEL, ln["in_progress"], int(tt["w"]), int(tt["l"]),
                 results.get((s, t), "Missed" if not ln["in_progress"] else None),
-                awards.get((s, t), {}).get("star", 0),
+                awards.get((s, t), {}).get("star", 0), round(market[(s, t)], 3),
                 _int(tt["home_games"]),
                 round(tt["crowd"] / tt["home_games"]) if tt["home_games"] else None,
                 _int(tt["sellouts"]), _int(ln["gate"]),
                 _int(tt["po_home"]), _int(tt["po_gate"]), _int(ln["concessions"]),
-                _int(ln["merch"]), MEDIA_SHARE, _int(ln["nbntv"]), ln["title"], _int(share),
+                _int(ln["merch"]), _int(ln["media"]), _int(ln["nbntv"]), ln["title"], _int(share),
                 _int(revenue),
                 _int(payroll), _int(dead), _int(tax), _int(ops), _int(expenses), _int(profit),
                 ln["titles"], _int(values[(s, t)]), _int(values[(s, t)] - prev),

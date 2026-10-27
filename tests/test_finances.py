@@ -131,7 +131,25 @@ check(f"a team that never made the playoffs is below average ({', '.join(above) 
 
 vals = sorted(r["VALUE"] for r in rows if r["SEASON"] == seasons[-1])
 spread = vals[-1] / vals[0]
-check(f"the spread stays plausible ({spread:.2f}x, want 1.3-2)", 1.3 <= spread <= 2.0)
+check(f"the spread stays plausible ({spread:.2f}x, want 1.8-3; the NBA's is about 3)", 1.8 <= spread <= 3.0)
+
+print("market follows success")
+check("a title grows it", f.market_next(1.0, {"Champion": 1.0}, 0.7) > 1.15)
+check("missing the playoffs shrinks it", f.market_next(1.0, {"Missed": 1.0}, 0.35) < 1.0)
+check("it fades back toward 1.0", 1.0 < f.market_next(1.5, {"First Round": 1.0}, 0.5) < 1.5)
+check("and stays in its band", f.market_next(1.99, {"Champion": 1.0}, 0.9) == f.MARKET_MAX
+      and f.market_next(0.51, {"Missed": 1.0}, 0.1) == f.MARKET_MIN)
+check("odds are an expectation", abs(f.market_next(1.0, {"Champion": 0.5, "Missed": 0.5}, 0.5)
+      - (f.market_next(1.0, {"Champion": 1.0}, 0.5) + f.market_next(1.0, {"Missed": 1.0}, 0.5)) / 2) < 1e-9)
+for s_ in seasons:
+    mean = sum(by[(s_, t)]["MARKET"] for t in {r["TEAM"] for r in rows}) / 30
+    if abs(mean - 1) > 0.002:
+        check(f"the league's mean market is 1.0 in {s_} ({mean:.3f})", False)
+check("everyone opens at 1.0", all(by[(seasons[0], t)]["MARKET"] == 1.0 for t in {r["TEAM"] for r in rows}))
+grew = [r for r in champs if r["SEASON"] in done[:-1]
+        and by[(seasons[seasons.index(r["SEASON"]) + 1], r["TEAM"])]["MARKET"] <= r["MARKET"]]
+check(f"a champion's market grows the next season ({', '.join(r['SEASON'] + ' ' + r['TEAM'] for r in grew) or 'all do'})",
+      not grew)
 
 # Valuation reads nothing that starts partway through history, so the league
 # average moves by the multiple's growth and very little else, every season.
