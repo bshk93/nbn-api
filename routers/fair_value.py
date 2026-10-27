@@ -62,7 +62,17 @@ The model, in full:
     season counts only what is left of it. As the season goes by every price
     drifts up a little from discounting alone, so the page also shows each
     team against the league average.
-  * **Price** = value ÷ `SHARES`.
+  * **Price** = value ÷ `SHARES`. That is fair value: no noise, it moves only
+    when something happened.
+  * **Outlook.** The sale price averages the three projected seasons and one
+    more, `OUTLOOK_YEARS` past the last: that roster held, everyone aged, every
+    pick up to then drafted. A young core or a top pick counts for its rise
+    without the far future pulling every team to .500.
+  * **Market price** (`market_series`) is what it would trade at: fair value
+    × exp(beta·league mood + team mood). Moods are mean-reverting walks with
+    seeded fat-tailed shocks and GARCH volatility; news is overdone by
+    `OVERREACT` and given back. Recomputed over the season's history on every
+    write, so a rebuilt day carries forward.
 
 Run hourly by `snapshot_playoff_odds.py`, after the odds. One row per team per
 day is kept in `fair-value-history.jsonl` (a later run replaces the day's row),
@@ -77,6 +87,7 @@ its own day by the next run (`stale_days`), not counted on the day it arrived.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -103,6 +114,12 @@ MODEL = "fv1"
 DISCOUNT_RATE = 0.08
 SHARES = 30_000_000             # so a ¥4.5B franchise prices at ¥150
 HORIZON = 3                     # this season and the next two, then the sale
+
+# The outlook a buyer pays for, one season past the horizon: the last projected
+# roster held as it is (nobody leaves, so it doesn't drift to .500), everyone
+# aged OUTLOOK_YEARS more, every pick up to then in. It is one of the seasons
+# the sale price averages, so a young core or a top pick counts for its rise.
+OUTLOOK_YEARS = 2
 
 # What a pick turns into: OVR = a + b·ln(pick number), fit on the 2025 and 2026
 # classes' first ratings (n = 109, ±1.8), at the class's average age.
@@ -650,6 +667,32 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
         strengths.append(st)
         pri = {t: v * REVERT ** k for t, v in po.roster_priors(st).items()}
         sims.append(po.simulate([], schedule, pri, sims=SIMS_LATER, seed=seed + k))
+    # The outlook season (see OUTLOOK_YEARS).
+    slots[total - 1] = draft_slots({x["team"]: x for x in sims[total - 1]["teams"]})
+    k_out = total - 1 + OUTLOOK_YEARS
+    outlook_strength = {}
+    for t in teams:
+        if total > 1:
+            held_players = later_books[seasons[-1]][t]["players"]
+            ovrs = [aged_ovr(p["ovr"], age_in((bios.get(p["slug"]) or {}).get("dob"), seasons[-1]), OUTLOOK_YEARS)
+                    for p in held_players if p["ovr"] is not None and not p["two_way"]]
+        else:
+            ovrs = list(rostered[t].values())
+        base = filled(ovrs)
+        gain = 0.0
+        for c in claims.get(t, []):
+            kd = season_index(draft_after(c["year"])) - season_index(season)
+            if kd >= k_out:
+                continue
+            slot = (slots.get(kd) or slots[max(slots)]).get(c["orig"], 15) + (30 if c["round"] == 2 else 0)
+            ovr = aged_ovr(rookie_ovr(slot), ROOKIE_AGE[c["round"]], k_out - kd - 1)
+            with_him = filled(ovrs + [ovr])
+            if base is not None and with_him is not None:
+                gain += c["share"] * max(0.0, with_him - base)
+        outlook_strength[t] = None if base is None else base + gain
+    pri = {t: v * REVERT ** (total - 1) for t, v in po.roster_priors(outlook_strength).items()}
+    outlook_sim = po.simulate([], schedule, pri, sims=SIMS_LATER, seed=seed + k_out)
+    outlook_rows = {r["team"]: r for r in outlook_sim["teams"]}
     rows = [{r["team"]: r for r in run["teams"]} for run in sims]
 
     # Stars: the league's top STAR_COUNT OVRs on the books that season.
@@ -704,6 +747,10 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
                                                     rows[k - 1][t]["proj_w"] / (rows[k - 1][t]["games"] or 82),
                                                     buzz[k - 1][t]["season"])
                                  for t in teams}))
+
+    mkt_out = fin.recentre({t: fin.market_next(mkt[-1][t], all_finishes(rows[-1][t]),
+                                               rows[-1][t]["proj_w"] / (rows[-1][t]["games"] or 82),
+                                               buzz[-1][t]["season"]) for t in teams})
 
     out_teams = []
     for t in teams:
@@ -770,17 +817,23 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
                 "players": (len(later_books[s][t]["players"]) if k else None),
             })
 
-        # The sale: the ledger's valuation on the three projected seasons.
-        # Pricing it on the seasons after them was tried (2026-10-27) and
-        # rejected: the far projection pulls every team to .500, which cut the
-        # spread from 2.3x to 1.7-2.0x. So a pick counts only once its player
-        # is in one of these three seasons.
+        # The sale: the ledger's valuation on the three projected seasons plus
+        # the outlook season. Pricing it on the seasons after the horizon, each
+        # projected like the others, was tried (2026-10-27) and rejected: the
+        # far projection pulls every team to .500, which cut the spread from
+        # 2.3x to 1.7-2.0x. The outlook holds the roster instead.
         held = years
         end = seasons[HORIZON - 1]
         titles_before = sum((led.get((season_after(season, -b), t)) or {}).get("PLAYOFF_RESULT") == "Champion"
                             for b in range(1, fin.BRAND_WINDOW - HORIZON + 1))
         exp_titles = titles_before + sum(y["title"] for y in held)
-        trailing = sum(y["revenue"] for y in held) / len(held)
+        ro = outlook_rows[t]
+        b_out = rating_buzz(ro["rating"])
+        bw_out = expected_bandwagon((expected_finish[::-1] + past)[:3])
+        gate_out = fin.REG_HOME_GAMES * gate_per_game(ro["proj_w"] / (ro["games"] or 82), stars[-1][t], away[-1],
+                                                      bw_out, mkt_out[t] * (1 + b_out))
+        rev_out = season_revenue(gate_out, ro, stars[-1][t], mkt_out[t], b_out)["revenue"]
+        trailing = (sum(y["revenue"] for y in held) + rev_out) / (len(held) + 1)
         multiple = (fin.START_VALUE / league0) * (1 + fin.VALUE_GROWTH) ** (season_index(end) + 1) if league0 else 0.0
         sale = multiple * trailing * (1 + fin.BRAND_PER_TITLE * exp_titles)
         pv_sale = sale * discount(f + HORIZON - 1)
@@ -798,6 +851,9 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
             "injuries": [{**i, "name": (bios.get(i["slug"]) or {}).get("name")} for i in healthy_or_not[t][1]],
             "w": r0["w"], "l": r0["l"], "season_left": round(f, 4), "years": years,
             "picks": drafted[t],
+            "outlook": {"season": season_after(season, k_out),
+                        "strength": None if outlook_strength[t] is None else round(outlook_strength[t], 2),
+                        "proj_w": ro["proj_w"], "revenue": round(rev_out)},
         })
 
     mean_price = sum(x["price"] for x in out_teams) / len(out_teams)
@@ -810,6 +866,86 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
                    "replacement_salary": rep_pay, "discount_rate": DISCOUNT_RATE, "shares": SHARES},
         "teams": out_teams,
     }
+
+
+# ── The market price ─────────────────────────────────────────────────────────
+#
+# Fair value is what a franchise is worth; the market price is what it would
+# trade at. A real stock wanders around its value: the whole market has moods,
+# each name has its own, news is overdone and then given back, and wild days
+# come in bunches. The market price is fair value times exp(beta·league mood +
+# team mood), every mood a mean-reverting walk with shocks seeded on the
+# season, date and team, so a rebuild gives the same series.
+
+MOOD_KEEP = 0.98                # the league's mood keeps this much a day
+MOOD_VOL = 0.009                # its daily shock
+SENT_KEEP = 0.97                # a team's own mood (half-life ~3 weeks)
+SENT_VOL = 0.011                # its daily shock, before clustering
+OVERREACT = 0.6                 # a fair-value move is overdone by this much, then fades
+VOL_MEMORY = 0.75               # clustering (GARCH): how much of yesterday's variance stays
+VOL_REACT = 0.20                # and how much the last shock adds
+NEWS_VOL, NEWS_CAP = 0.5, 9.0   # a big fair-value move counts as a shock too, capped
+TAIL_P, TAIL_X = 0.03, 3.0      # about one day in 33 is a shock this many times bigger
+# Tuned 2026-10-27 on a synthetic 180-day season against real single stocks:
+# daily sd 1.8% (real 1.5-2%), kurtosis 5.4 (5-10), |return| autocorrelation
+# +0.07 (+0.1-0.3), pairwise correlation +0.22 (+0.2-0.4), no autocorrelation
+# in returns, market vs fair value ±6.5% typical.
+BETA_RANGE = (0.7, 1.3)
+
+
+def _shock(*parts) -> float:
+    """A standard shock seeded on `parts`: normal, with fat tails, unit variance."""
+    d = hashlib.sha256("|".join(map(str, parts)).encode()).digest()
+    u1 = (int.from_bytes(d[:8], "big") + 1) / (2**64 + 1)
+    u2 = int.from_bytes(d[8:16], "big") / 2**64
+    u3 = int.from_bytes(d[16:24], "big") / 2**64
+    z = math.sqrt(-2 * math.log(u1)) * math.cos(2 * math.pi * u2)
+    if u3 < TAIL_P:
+        z *= TAIL_X
+    return z / math.sqrt(1 - TAIL_P + TAIL_P * TAIL_X ** 2)
+
+
+def team_beta(season: str, team: str) -> float:
+    """How hard a team swings with the league's mood, fixed for a season."""
+    d = hashlib.sha256(f"beta|{season}|{team}".encode()).digest()
+    lo, hi = BETA_RANGE
+    return lo + (hi - lo) * int.from_bytes(d[:8], "big") / 2**64
+
+
+def market_series(rows: list[dict], shock=None) -> list[dict]:
+    """Set every row's `market` price per team, oldest first, in place.
+
+    One season's rows, a day apart. Each team's mood carries over day to day:
+    it keeps SENT_KEEP of itself, adds OVERREACT of the day's fair-value move,
+    and takes a shock whose size follows the last few days' (VOL_MEMORY)."""
+    shock = shock or _shock
+    mood, sent, var, last = 0.0, {}, {}, {}
+    for row in rows:
+        mood = MOOD_KEEP * mood + MOOD_VOL * shock(row["season"], row["date"], "league")
+        for t, x in row["teams"].items():
+            fv_now = x["price"]
+            move = math.log(fv_now / last[t]) if last.get(t) else 0.0
+            z = shock(row["season"], row["date"], t)
+            v = var.get(t, 1.0)
+            e = math.sqrt(v) * z
+            sent[t] = SENT_KEEP * sent.get(t, 0.0) + OVERREACT * move + SENT_VOL * e
+            # GARCH(1,1) on the team's shock, in units of SENT_VOL: a wild day,
+            # or big news, makes the next days wilder; it fades by VOL_MEMORY.
+            news = min(NEWS_CAP, (move / SENT_VOL) ** 2)
+            var[t] = (1 - VOL_MEMORY - VOL_REACT) + VOL_REACT * (e * e + NEWS_VOL * news) + VOL_MEMORY * v
+            last[t] = fv_now
+            x["market"] = round(fv_now * math.exp(team_beta(row["season"], t) * mood + sent[t]), 4)
+            x["mood"] = round(sent[t], 5)
+        row["league_mood"] = round(mood, 5)
+    return rows
+
+
+def write_history(rows: list[dict]) -> None:
+    """Save the history, every season's market price recomputed first."""
+    rows.sort(key=lambda r: (r["season"], r["date"]))
+    for season in {r["season"] for r in rows}:
+        market_series([r for r in rows if r["season"] == season])
+    _atomic_write(HISTORY_FILE, "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows))
 
 
 # ── Runs and history ─────────────────────────────────────────────────────────
@@ -842,11 +978,28 @@ def read_history(season: Optional[str] = None) -> list[dict]:
 
 def save_run(run: dict) -> None:
     """Write the current run and make it the day's row in the history (one row per date)."""
-    _atomic_write(CURRENT_FILE, json.dumps(run, indent=1))
     rows = [r for r in read_history() if not (r["date"] == run["date"] and r["season"] == run["season"])]
     rows.append(_history_row(run))
-    rows.sort(key=lambda r: (r["season"], r["date"]))
-    _atomic_write(HISTORY_FILE, "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows))
+    write_history(rows)
+    _attach_market(run, rows)
+    _atomic_write(CURRENT_FILE, json.dumps(run, indent=1))
+
+
+def _attach_market(run: dict, rows: list[dict]) -> None:
+    """Copy the run's day's market price and mood from the history onto the run."""
+    day = next((r for r in rows if r["season"] == run["season"] and r["date"] == run["date"]), None)
+    if day:
+        for x in run["teams"]:
+            m = day["teams"].get(x["team"]) or {}
+            x["market"], x["mood"] = m.get("market"), m.get("mood")
+        run["league_mood"] = day.get("league_mood")
+
+
+def _refresh_current_market() -> None:
+    run = _load_json(CURRENT_FILE, None)
+    if run:
+        _attach_market(run, read_history(run["season"]))
+        _atomic_write(CURRENT_FILE, json.dumps(run, indent=1))
 
 
 def rebuild_history(season: str, days: list[str], results: Optional[list[dict]] = None) -> list[dict]:
@@ -883,8 +1036,8 @@ def rebuild_history(season: str, days: list[str], results: Optional[list[dict]] 
             row["backfill"] = True
         new[d] = row
     rows = [r for r in read_history() if not (r["season"] == season and r["date"] in new)] + list(new.values())
-    rows.sort(key=lambda r: (r["season"], r["date"]))
-    _atomic_write(HISTORY_FILE, "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows))
+    write_history(rows)
+    _refresh_current_market()
     return list(new.values())
 
 
@@ -914,7 +1067,8 @@ def get_fair_value():
     earlier = [r for r in read_history(run["season"]) if r["date"] < run["date"]]
     prev = earlier[-1] if earlier else None
     return {**run, "prev_date": prev["date"] if prev else None,
-            "prev": {t: v["price"] for t, v in prev["teams"].items()} if prev else {}}
+            "prev": {t: v["price"] for t, v in prev["teams"].items()} if prev else {},
+            "prev_market": {t: v.get("market") for t, v in prev["teams"].items()} if prev else {}}
 
 
 @router.get("/api/fair-value/history")

@@ -187,6 +187,24 @@ check("an undetermined pick stays with its team", cl["DDD"][0]["round"] == 2)
 slots = fv.draft_slots({"AAA": {"proj_w": 60}, "BBB": {"proj_w": 20}, "CCC": {"proj_w": 41}})
 check("the fewest wins pick first", slots == {"BBB": 1, "CCC": 2, "AAA": 3})
 
+print("\nthe market price")
+zs = [fv._shock("t", i) for i in range(4000)]
+check("a shock is seeded", fv._shock("a", 1) == fv._shock("a", 1) and fv._shock("a", 1) != fv._shock("a", 2))
+check("shocks are unit variance", abs(sum(z * z for z in zs) / len(zs) - 1) < 0.1)
+check("a beta is fixed for the season and in its band",
+      fv.team_beta("26-27", "AAA") == fv.team_beta("26-27", "AAA") and fv.BETA_RANGE[0] <= fv.team_beta("26-27", "AAA") <= fv.BETA_RANGE[1])
+def days(prices):
+    return [{"season": "26-27", "date": f"2026-11-{i + 1:02d}", "teams": {"AAA": {"price": p}}} for i, p in enumerate(prices)]
+calm = fv.market_series(days([100.0] * 5), shock=lambda *a: 0.0)
+check("no news, no shocks: the market sits at fair value", all(r["teams"]["AAA"]["market"] == 100.0 for r in calm))
+jump = fv.market_series(days([100.0, 110.0] + [110.0] * 40), shock=lambda *a: 0.0)
+m = [r["teams"]["AAA"]["market"] for r in jump]
+check("news is overdone", m[1] > 110.0)
+check("and given back", m[1] > m[10] > m[-1] > 110.0)
+a1 = fv.market_series(days([100.0, 101.0, 99.0, 102.0]))
+a2 = fv.market_series(days([100.0, 101.0, 99.0, 102.0]))
+check("a rebuild gives the same series", [r["teams"]["AAA"]["market"] for r in a1] == [r["teams"]["AAA"]["market"] for r in a2])
+
 if FAILS:
     print(f"\n{len(FAILS)} FAILED")
     sys.exit(1)
