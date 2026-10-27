@@ -3,7 +3,7 @@
 Pins: the floored prior lands the simulator on the floored rating; who counts
 as under contract or re-signed in a later season; re-signing stops at the
 ceiling, best OVR first, a kept player stays and a bargain is kept past it;
-who walks and who signs them in free agency; ageing; the bandwagon and
+who walks and who signs them in free agency; the staff playoff edge; ageing; the bandwagon and
 playoff gate on expected finishes; discounting. Nothing reads the data dir.
 
     venv/bin/python -m tests.test_fair_value
@@ -124,6 +124,43 @@ check("no roster spot, no signing",
       fv.free_agency(pool[1:2], {"AAA": 60e6}, {"AAA": 0}, cap, 77, 5e6) == {"AAA": []})
 check("an offer far under his price is turned down",
       fv.free_agency(pool[:1], {"BBB": 10e6}, {"BBB": 1}, cap, 77, 5e6) == {"BBB": []})
+
+print("\nplayoff edge")
+members = {
+    "owner": {"tenures": [{"team": "AAA", "start": "2020-07-01", "end": None, "position": "owner"}]},
+    "coach": {"tenures": [{"team": "AAA", "start": "2020-07-01", "end": "2022-06-30", "position": "coach"},
+                          {"team": "BBB", "start": "2022-07-01", "end": None, "position": "owner"}]},
+    "rival": {"tenures": [{"team": "CCC", "start": "2020-07-01", "end": None, "position": "gm"}]},
+}
+check("a staff is everyone on it that day, coach included", fv.staff_on(members, "AAA", "2021-05-01") == ["coach", "owner"])
+check("and not after he left", fv.staff_on(members, "AAA", "2023-05-01") == ["owner"])
+check("the playoff staff is read in May of the season's second year", fv.playoff_day("21-22") == "2022-05-01")
+standings = [{"SEASON": s_, "TEAM": t, "DIFF": "0"} for s_ in ("20-21", "21-22", "22-23") for t in ("AAA", "BBB", "CCC")]
+brackets = [{"SEASON": "20-21", "T1": "AAA", "T2": "CCC", "WINNER": "AAA"},
+            {"SEASON": "21-22", "T1": "CCC", "T2": "AAA", "WINNER": "AAA"},
+            {"SEASON": "22-23", "T1": "AAA", "T2": "CCC", "WINNER": "CCC"}]
+rec = fv.playoff_records(members, brackets, standings, "22-23")
+check("an even series won is +0.5 to everyone on the staff", rec["owner"] == [0.5, 0.5] and rec["coach"] == [0.5, 0.5])
+check("and lost is -0.5", rec["rival"] == [-0.5, -0.5])
+check("the season being priced, and later, don't count", len(fv.playoff_records(members, brackets, standings, "21-22")["owner"]) == 1)
+check("a record is shrunk", 0 < fv.person_edge(rec["owner"]) < 0.5 and fv.person_edge([]) == 0)
+ed = fv.playoff_edges("22-23", "2022-07-15", ["AAA", "BBB", "CCC", "DDD"], members, brackets, standings)
+check("the coach's record goes with him to his new team", ed["BBB"]["edge"] == round(fv.person_edge(rec["coach"]), 4))
+check("a team's edge is its staff's average", ed["AAA"]["edge"] == ed["BBB"]["edge"] > 0 > ed["CCC"]["edge"])
+check("no staff, no edge", ed["DDD"] == {"edge": 0.0, "points": 0.0, "staff": []})
+check("points are the edge at PLAYOFF_EDGE_POINTS",
+      ed["AAA"]["points"] == round(fv.PLAYOFF_EDGE_POINTS * ed["AAA"]["edge"], 2))
+lg = sorted(po.EAST)[:10] + sorted(po.WEST)[:10]
+flat = {t: 0.0 for t in lg}
+sched = [{"date": "2026-11-01", "home_team": a, "away_team": b} for a in lg for b in lg if a != b and (a in po.EAST) == (b in po.EAST)][:200]
+plain = po.simulate([], sched, flat, sims=3000, seed=7)
+same = po.simulate([], sched, flat, sims=3000, seed=7, playoff_bonus={})
+boosted = po.simulate([], sched, flat, sims=3000, seed=7, playoff_bonus={lg[0]: 3.0})
+title = lambda r, t: next(x for x in r["teams"] if x["team"] == t)["title"]
+check("no bonus, the same simulation", plain == same)
+check("a playoff bonus wins more titles", title(boosted, lg[0]) > title(plain, lg[0]))
+check("but not more regular-season games", next(x for x in boosted["teams"] if x["team"] == lg[0])["proj_w"]
+      == next(x for x in plain["teams"] if x["team"] == lg[0])["proj_w"])
 
 print("\nageing")
 check("young players improve", fv.aged_ovr(70, 21.0, 2) > 70)
