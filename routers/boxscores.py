@@ -921,6 +921,70 @@ def get_player_gamelog(slug: str):
     return results
 
 
+# (path, mtime_ns) -> {team: {name: [game rows, newest first]}}. One season's
+# regular-season file, read once per change rather than once per request.
+_TEAM_LINES_CACHE: dict = {}
+
+
+def _team_rows_by_player(path) -> dict:
+    key = (str(path), path.stat().st_mtime_ns if path.exists() else None)
+    hit = _TEAM_LINES_CACHE.get(key)
+    if hit is not None:
+        return hit
+    out: dict = {}
+    if path.exists():
+        _, rows = read_csv(path)
+        for r in rows:
+            team = r.get("TEAM", "").strip().upper()
+            name = r.get("PLAYER", "").strip().upper()
+            if team and name:
+                out.setdefault(team, {}).setdefault(name, []).append(r)
+        for players in out.values():
+            for games in players.values():
+                games.sort(key=lambda r: r.get("DATE", ""), reverse=True)
+    _TEAM_LINES_CACHE.clear()  # only the latest file state is worth keeping
+    _TEAM_LINES_CACHE[key] = out
+    return out
+
+
+def _season_line(games: list[dict]) -> dict:
+    def tot(k): return sum(int(r.get(k, 0) or 0) for r in games)
+    n = len(games)
+    fga = tot("FGA")
+    return {
+        "gp": n,
+        "min": round(tot("M") / n, 1),
+        "pts": round(tot("P") / n, 1),
+        "reb": round(tot("R") / n, 1),
+        "ast": round(tot("A") / n, 1),
+        "stl": round(tot("S") / n, 1),
+        "blk": round(tot("B") / n, 1),
+        "fg_pct": round(tot("FGM") / fga, 3) if fga else None,
+        # Newest first, as the rows are sorted.
+        "last5_pts": [int(r.get("P", 0) or 0) for r in games[:5]],
+    }
+
+
+@router.get("/api/teams/{team}/season-lines")
+def get_team_season_lines(team: str, season: str = Query(default=None)):
+    """Per-game regular-season line for everyone who has played for `team`
+    this season, keyed by slug: the homepage team card's Starting 5 in one
+    request, instead of a full-career gamelog per starter.
+
+    Games with this team only, so a player traded in mid-season shows his
+    line here, not his season. Rows whose name matches no bio are left out.
+    """
+    season = season or _current_league_year()
+    players = _team_rows_by_player(allstats_path(season, "REG")).get(team.upper(), {})
+    bios = _bios_by_name()
+    out = {}
+    for name, games in players.items():
+        slug = bios.get(name, ("", ""))[0]
+        if slug:
+            out[slug] = _season_line(games)
+    return {"team": team.upper(), "season": season, "players": out}
+
+
 @router.get("/api/build/status")
 def get_build_status():
     return _read_build_status()
