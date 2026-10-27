@@ -645,7 +645,7 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
             "pv_in": pv_in, "pv_out": pv_out, "pv_sale": round(pv_sale), "sale": round(sale),
             "expected_titles": round(exp_titles, 3), "book_value": book,
             "strength_injured": None if healthy_or_not[t][0] is None else round(healthy_or_not[t][0], 2),
-            "injuries": healthy_or_not[t][1],
+            "injuries": [{**i, "name": (bios.get(i["slug"]) or {}).get("name")} for i in healthy_or_not[t][1]],
             "w": r0["w"], "l": r0["l"], "season_left": round(f, 4), "years": years,
         })
 
