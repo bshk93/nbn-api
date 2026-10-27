@@ -970,6 +970,43 @@ session doing the box scores writes them.
 
 Pinned by `tests/test_tweets.py`.
 
+## Homepage team card (`routers/home.py`)
+
+`GET /api/home/team/{team}`, public: everything the signed-in homepage card
+shows, in one request. It used to take about a dozen, each quick on the server,
+and over HTTP/1.1 the card waited behind the rest of the page for a connection.
+It returns the team's games, this season's results, the standings rows, its
+cap-history row, its injuries, its starting five and per-game lines, and the
+same five and lines for its next opponent (the Matchup tab).
+
+- **No rule of its own.** Each part comes from its source's helper:
+  `_starting_five` (discord.py, the port of lineup.js), `team_season_lines`,
+  the game index, `build_rows(teams=[team])`, `load_injuries`. A change to one
+  of those reaches the card with nothing to update here.
+- **Private chips stay separate.** Coaching settings, waivers and FA offers need
+  the member's token; this endpoint has no auth.
+
+Pinned by `tests/test_home_team.py`.
+
+### Shared reads (`_load_json_shared`)
+
+`storage._load_json_shared` parses a JSON file once per change (keyed on mtime,
+size and inode, which every `_atomic_write` changes) and hands every caller the
+same object. `players.player_bios_shared()` and `ovr_shared()` are built on it,
+for player-bios.json (~620KB) and ovr-history.json.
+
+**Read-only by contract.** Mutating the shared object changes what the next
+request reads. Anything that loads, edits and saves keeps `load_player_bios()`
+/ `_load_json`, which hand out their own copy. Today it backs `_bios_by_name`
+(which also keeps its index until the bios change), `GET /api/players`, the
+gamelog, `_roster_augmented`, `cap_history.build_rows` and the homepage card;
+helpers that take `bios=` / `ovr_history=` let one request share one parse.
+Before widening it, check the new caller never writes into what it reads.
+Pinned by `tests/test_shared_json.py`.
+
+`_record_member_seen` (`/api/me`, every page load) writes member-seen.json only
+when a value is new (`tests/test_member_seen.py`).
+
 ## Docs discipline
 
 Keep `CLAUDE.md` and `docs/` in sync with every code change. If a change affects an endpoint, a data field, a transaction type, or any behavior described in the docs, update the relevant doc in the same commit.

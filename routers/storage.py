@@ -66,6 +66,33 @@ def _load_json(path: Path, default):
     return json.loads(path.read_text()) if path.exists() else default
 
 
+# path -> ((mtime_ns, size, inode), parsed). Every write goes through
+# _atomic_write's os.replace, which gives the file a new inode and mtime, so a
+# write always changes the key and the next read re-parses.
+_SHARED_JSON: dict = {}
+
+
+def _load_json_shared(path: Path, default):
+    """`_load_json`, parsed once per file change and shared between callers.
+
+    **Read-only by contract.** Every caller gets the same object, so mutating
+    it would change what the next request reads. Use it only on paths that
+    read; anything that loads, edits and saves keeps `_load_json`. Built for
+    the big files read on every page (player-bios.json is ~620KB).
+    """
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return default
+    key = (st.st_mtime_ns, st.st_size, st.st_ino)
+    hit = _SHARED_JSON.get(path)
+    if hit and hit[0] == key:
+        return hit[1]
+    data = json.loads(path.read_text())
+    _SHARED_JSON[path] = (key, data)
+    return data
+
+
 def _save_json(path: Path, data):
     _atomic_write(path, json.dumps(data, indent=2))
 

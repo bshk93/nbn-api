@@ -37,6 +37,7 @@ from .auth import load_members, save_members
 from .tips import perform_tip, TipError
 from .invest import compute_member_pnl  # per-stock P&L
 from .players import _display_name  # 'LAST, FIRST' bio name -> title-case 'First Last'
+from .players import player_bios_shared, ovr_shared
 
 logger = logging.getLogger("nbn-api.discord")
 
@@ -723,10 +724,13 @@ def _starting_five(team: str, players: list[dict]) -> tuple[list[dict | None], b
     return _compute_starting_five([p for p in players if p["type"] == "player"]), False
 
 
-def _roster_augmented(team: str) -> list[dict]:
+def _roster_augmented(team: str, bios: dict | None = None, ovr_history: dict | None = None) -> list[dict]:
+    """The roster, joined to bios and current OVR. Read-only, so by default it
+    reads the shared parses (`player_bios_shared` / `ovr_shared`); a caller
+    holding them already passes them in."""
     roster_path = DATA_DIR / f"{team.lower()}-roster.csv"
-    bios = _load_json(PLAYER_BIOS_FILE, {})
-    ovr_history = _load_json(OVR_FILE, {})
+    bios = player_bios_shared() if bios is None else bios
+    ovr_history = ovr_shared() if ovr_history is None else ovr_history
     current_ovr = {slug: entries[-1]["ovr"] for slug, entries in ovr_history.items() if entries}
     cur_season = _current_league_year()
 

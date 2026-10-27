@@ -41,7 +41,7 @@ path.write_text(HEADER + "".join(
     '"' + r.split(",", 2)[0] + "," + r.split(",", 2)[1] + '",' + r.split(",", 2)[2] + "\n" for r in ROWS))
 
 boxscores.allstats_path = lambda season, gt: path
-boxscores.load_player_bios = lambda: {
+boxscores.player_bios_shared = lambda: {
     "curry-stephen": {"name": "CURRY, STEPHEN"},
     "green-draymond": {"name": "GREEN, DRAYMOND"},
     "james-lebron": {"name": "JAMES, LEBRON"},

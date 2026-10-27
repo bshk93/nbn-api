@@ -24,7 +24,7 @@ def check(name, cond):
         FAILS.append(name)
 
 
-boxscores.load_player_bios = lambda: {
+boxscores.player_bios_shared = lambda: {
     "curry-stephen": {"name": "CURRY, STEPHEN", "photo_url": "https://x/curry.png"},
     "no-name": {"name": ""},
 }

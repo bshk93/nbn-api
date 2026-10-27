@@ -8,7 +8,7 @@ from .constants import (
     DATA_DIR, PLAYER_BIOS_FILE, OVR_FILE, ATTRIBUTES_FILE, VALID_TEAMS,
     _ovr_lock, _txn_lock, CURATOR_FIELDS, BIO_REWARD_FIELDS, BIO_REWARDS_FILE, _bio_rewards_lock, logger,
 )
-from .storage import _load_json, _save_json, read_csv, log_write
+from .storage import _load_json, _load_json_shared, _save_json, read_csv, log_write
 from .auth import get_token_info, has_role, require_any_role, require_admin
 from .bets import _award_bio_reward, NBY_BIO_REWARD
 
@@ -261,12 +261,25 @@ def load_player_bios() -> dict:
     return _load_json(PLAYER_BIOS_FILE, {})
 
 
+def player_bios_shared() -> dict:
+    """player-bios.json for read-only paths: parsed once per file change and
+    shared between requests (`_load_json_shared`). **Never mutate it** — a
+    path that edits bios uses `load_player_bios()`, which hands out its own
+    copy."""
+    return _load_json_shared(PLAYER_BIOS_FILE, {})
+
+
 def save_player_bios(data: dict):
     _save_json(PLAYER_BIOS_FILE, data)
 
 
 def load_ovr() -> dict:
     return _load_json(OVR_FILE, {})
+
+
+def ovr_shared() -> dict:
+    """ovr-history.json, shared and read-only like `player_bios_shared`."""
+    return _load_json_shared(OVR_FILE, {})
 
 
 def save_ovr(data: dict):
@@ -416,8 +429,9 @@ def _maybe_award_bio_reward(member: str, slug: str, old_bio: dict, new_bio: dict
 def get_players(slugs: Optional[str] = None):
     # `?slugs=a,b,c` returns only those bios. The whole file is ~85KB gzipped,
     # which a page naming a dozen players (the homepage feed) shouldn't pay.
-    # Unknown slugs are simply absent from the result.
-    bios = load_player_bios()
+    # Unknown slugs are simply absent from the result. Read-only, so it reads
+    # the shared parse rather than the 620KB file on every call.
+    bios = player_bios_shared()
     if slugs is None:
         return bios
     wanted = {s.strip() for s in slugs.split(",") if s.strip()}
