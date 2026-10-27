@@ -112,6 +112,12 @@ print("\ndiscounting")
 check("now is worth face value", fv.discount(0) == 1)
 check("a season out is worth less", abs(fv.discount(1) - 1 / 1.08) < 1e-12)
 
+print("\nthe seed")
+check("one seed for the whole season", fv.season_seed("26-27") == fv.season_seed("26-27"))
+check("a different seed each season", fv.season_seed("26-27") != fv.season_seed("27-28"))
+src = Path(fv.__file__).read_text()
+check("compute does not seed off the date", "today.replace" not in src)
+
 if FAILS:
     print(f"\n{len(FAILS)} FAILED")
     sys.exit(1)

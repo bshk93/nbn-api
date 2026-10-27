@@ -49,7 +49,10 @@ The model, in full:
 
 Run hourly by `snapshot_playoff_odds.py`, after the odds. One row per team per
 day is kept in `fair-value-history.jsonl` (a later run replaces the day's row),
-so the page can show what moved each day and why.
+so the page can show what moved each day and why. The simulation's seed is
+fixed for the season (`season_seed`), so a day's move is what changed and not
+sampling noise. After a model change, rebuild the season's rows so the change
+does not read as a move: `venv/bin/python rebuild_fair_value.py`.
 
     venv/bin/python -m tests.test_fair_value
 """
@@ -372,6 +375,16 @@ def floored_priors(priors: dict, margin: dict, played: dict) -> dict:
     return out
 
 
+def season_seed(season: str) -> int:
+    """One seed for the whole season, so a day's move is only what changed.
+
+    The simulation's error is ±0.2% of a price on average (up to 0.6%), a third
+    of a win's effect. A new seed each day put that error into every daily
+    move; with the same seed it is the same error each day and cancels out.
+    """
+    return 1000 * (season_index(season) + 1)
+
+
 def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
     """Every team's fair value. Pure apart from reading the data dir; writes nothing.
 
@@ -389,7 +402,7 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
     schedule = inputs.get("schedule") or po.load_schedule(season)
     ledger = inputs.get("ledger") if "ledger" in inputs else load_ledger()
     teams = sorted(VALID_TEAMS)
-    seed = int(today.replace("-", ""))
+    seed = season_seed(season)
 
     seasons = [season_after(season, k) for k in range(HORIZON)]
 
@@ -577,6 +590,50 @@ def save_run(run: dict) -> None:
     rows.append(_history_row(run))
     rows.sort(key=lambda r: (r["season"], r["date"]))
     _atomic_write(HISTORY_FILE, "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows))
+
+
+def committed_results(season: str, through: str) -> list[dict]:
+    """The season's results as the hourly run saw them at the end of `through`:
+    games committed by then (league time), whatever their game date."""
+    from datetime import datetime
+    from .league_time import LEAGUE_TZ
+    committed = {}
+    path = DATA_DIR / f"boxscore-provenance-{season}.jsonl"
+    for line in (path.read_text().splitlines() if path.exists() else []):
+        r = json.loads(line) if line.strip() else None
+        if r and r.get("game_type") == "REG":
+            day = datetime.fromisoformat(r["committed_at"]).astimezone(LEAGUE_TZ).date().isoformat()
+            committed[(r["date"], r["home_team"], r["away_team"])] = day
+    index, _ = gh.get_index()
+    return [g for g in po.season_results(index, season)
+            if committed.get((g["date"], g["home"], g["away"]), g["date"]) <= through]
+
+
+def rebuild_history(season: str, days: list[str]) -> list[dict]:
+    """Recompute the history rows for `days` with the current model and save them.
+
+    Each day gets the games committed by its end and the ledger's home games to
+    match. Rosters, OVRs and contracts are today's, so a row for a day before a
+    move shows the move early. A day with no row yet is marked `backfill`; a
+    day that already had one keeps its mark.
+    """
+    ledger = load_ledger()
+    old = {r["date"]: r for r in read_history(season)}
+    new = {}
+    for d in days:
+        results = committed_results(season, d)
+        home = {}
+        for g in results:
+            home[g["home"]] = home.get(g["home"], 0) + 1
+        led = [dict(r, HOME_GAMES=str(home.get(r["TEAM"], 0))) if r["SEASON"] == season else r for r in ledger]
+        row = _history_row(compute(season, d, {"results": results, "ledger": led}))
+        if old.get(d, {"backfill": True}).get("backfill"):
+            row["backfill"] = True
+        new[d] = row
+    rows = [r for r in read_history() if not (r["season"] == season and r["date"] in new)] + list(new.values())
+    rows.sort(key=lambda r: (r["season"], r["date"]))
+    _atomic_write(HISTORY_FILE, "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows))
+    return list(new.values())
 
 
 @router.get("/api/fair-value")
