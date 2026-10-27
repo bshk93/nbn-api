@@ -760,8 +760,130 @@ def team_games(season_rows: list[dict]) -> list[dict]:
     return games
 
 
+# Seeds 2K gave that the procedure below doesn't reproduce, as (season, team
+# that finished ahead, team it finished ahead of). Each is proven by the real
+# first-round bracket, the only record of 2K's seeds there is. Today's NBA
+# rules fit 47 of the 48 first-round series on file through 25-26; the 2014-15
+# rules (division winner first, a top-four seed for every division winner)
+# fit 35. Keep this list short and evidenced -- job.R carries the same list.
+SEED_OVERRIDES = (
+    # 53-29 each, NOP 2-1 head-to-head, yet UTA played 6th-seeded OKC and NOP
+    # played 5th-seeded PHX, so UTA was 3rd. The season the play-in file was
+    # bugged and patched by hand (lore, April 2025).
+    ("24-25", "UTA", "NOP"),
+)
+
+# How many seeds per conference count as "playoff-eligible" for tie-break
+# steps 5 and 6: the six playoff seeds and the four play-in seeds.
+PLAYOFF_ELIGIBLE = 10
+
+
+def nba_seed_order(table: list[dict], games: list[dict]) -> list[dict]:
+    """Every team, best first, ordered by win % with ties broken the NBA's way.
+
+    Two teams tied:
+      1. head-to-head win %          2. division winner
+      3. division win % (same division only)   4. conference win %
+      5. win % vs playoff-eligible teams, own conference
+      6. win % vs playoff-eligible teams, other conference
+      7. point differential (total, not per game)
+    Three or more: division winner, head-to-head (combined record against
+    the rest of the group), division % (all in one division only),
+    conference %, step 5, point differential.
+
+    The first step that separates the group splits it by value, and each
+    piece starts again from step 1, with the two-team list if two are left.
+    Four rules the NBA's text leaves open, settled here:
+
+      * A step can't separate teams if any of them has no games in it — a
+        team that hasn't played a division game is not 0% in its division.
+        (Until 2026-10-27 both engines scored that as 0% or as last.)
+      * "Playoff-eligible" is any team at or above the 10th-best win % in
+        its conference, ties at the line included, so it never depends on
+        the order being worked out.
+      * A division winner is the division's best win %; a tie for it is
+        broken by the same procedure without the division-winner step, and
+        that result is used for nothing else.
+      * A group tied on every step keeps alphabetical order. The NBA would
+        draw lots; a build has to give the same answer every run.
+    """
+    if not table:
+        return []
+    by_team = {r["TEAM"]: r for r in table}
+    played: dict[str, list[dict]] = defaultdict(list)
+    for g in games:
+        if g["WIN"] or g["LOSS"]:
+            played[g["TEAM"]].append(g)
+
+    def win_pct(team, keep):
+        w = l = 0
+        for g in played[team]:
+            if keep(g):
+                w += g["WIN"]
+                l += g["LOSS"]
+        return w / (w + l) if (w + l) else None
+
+    def pct_key(r):
+        return -1 if r["PCT"] is None else r["PCT"]
+
+    eligible = set()
+    for conf in {r["CONF"] for r in table}:
+        pcts = sorted((pct_key(r) for r in table if r["CONF"] == conf), reverse=True)
+        line = pcts[min(PLAYOFF_ELIGIBLE, len(pcts)) - 1]
+        eligible |= {r["TEAM"] for r in table if r["CONF"] == conf and pct_key(r) >= line}
+
+    net = {t: math.fsum(g["PTS"] - g["OPP_PTS"] for g in played[t]) for t in by_team}
+    winners: set[str] = set()
+
+    def steps(tied, with_winner):
+        names = {r["TEAM"] for r in tied}
+        two = len(tied) == 2
+        one_div = len({r["DIV"] for r in tied}) == 1
+        h2h = ("h2h", lambda t: win_pct(t, lambda g: g["OPP"] in names))
+        won = ("div_winner", lambda t: 1 if t in winners else 0)
+        div = ("div", lambda t: win_pct(t, lambda g: g["DIV"] == g["OPP_DIV"]))
+        conf = ("conf", lambda t: win_pct(t, lambda g: g["CONF"] == g["OPP_CONF"]))
+        po_own = ("po_own", lambda t: win_pct(
+            t, lambda g: g["OPP"] in eligible and g["CONF"] == g["OPP_CONF"]))
+        po_other = ("po_other", lambda t: win_pct(
+            t, lambda g: g["OPP"] in eligible and g["CONF"] != g["OPP_CONF"]))
+        diff = ("diff", lambda t: net[t])
+        chain = ([h2h, won] if two else [won, h2h]) + ([div] if one_div else []) \
+            + [conf, po_own] + ([po_other] if two else []) + [diff]
+        return [s for s in chain if with_winner or s[0] != "div_winner"]
+
+    def resolve(tied, with_winner=True):
+        tied = sorted(tied, key=lambda r: r["TEAM"])
+        if len(tied) < 2:
+            return tied
+        for _name, value in steps(tied, with_winner):
+            vals = {r["TEAM"]: value(r["TEAM"]) for r in tied}
+            if any(v is None for v in vals.values()) or len(set(vals.values())) == 1:
+                continue
+            out = []
+            for v in sorted(set(vals.values()), reverse=True):
+                out += resolve([r for r in tied if vals[r["TEAM"]] == v], with_winner)
+            return out
+        return tied
+
+    for div in sorted({r["DIV"] for r in table if r["DIV"]}):
+        rows = [r for r in table if r["DIV"] == div]
+        best = max(pct_key(r) for r in rows)
+        top = [r for r in rows if pct_key(r) == best]
+        winners.add(resolve(top, with_winner=False)[0]["TEAM"])
+    for row in table:
+        row["DIV_WINNER"] = row["TEAM"] in winners
+
+    order = []
+    for conf in sorted({r["CONF"] for r in table}, key=str):
+        rows = [r for r in table if r["CONF"] == conf]
+        for p in sorted({pct_key(r) for r in rows}, reverse=True):
+            order += resolve([r for r in rows if pct_key(r) == p])
+    return order
+
+
 def compute_standings(season_rows: list[dict]) -> list[dict]:
-    """One season's standings, seeded, with the § tie-break chain applied."""
+    """One season's standings, seeded with the NBA's tie-break procedure."""
     games = team_games(season_rows)
     by_team: dict[str, list[dict]] = defaultdict(list)
     for g in games:
@@ -788,71 +910,20 @@ def compute_standings(season_rows: list[dict]) -> list[dict]:
             "DIFF": ppg - oppg,
         })
 
-    # Head-to-head win rate, used only to break a tie.
-    h2h: dict[tuple[str, str], float] = {}
-    pairs: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
-    for g in games:
-        if g["WIN"]:
-            pairs[(g["TEAM"], g["OPP"])][0] += 1
-        elif g["LOSS"]:
-            pairs[(g["TEAM"], g["OPP"])][1] += 1
-    for key, (w, l) in pairs.items():
-        h2h[key] = w / (w + l) if (w + l) else None
-
-    # Division winner: best record in the division, on the same chain.
-    by_div: dict[str, list[dict]] = defaultdict(list)
-    for row in table:
-        by_div[row["DIV"]].append(row)
-    winners = set()
-    for div, rows in by_div.items():
-        best = sorted(rows, key=lambda r: (-(r["PCT"] or 0), -(r["CONF_PCT"] or 0), -r["DIFF"]))[0]
-        winners.add(best["TEAM"])
-    for row in table:
-        row["DIV_WINNER"] = row["TEAM"] in winners
-
-    def resolve(tied: list[dict]) -> list[dict]:
-        """R's `resolve_nba_ties`, recursion included.
-
-        Order by head-to-head record among the tied teams, then division
-        winner, division record, conference record, point differential. If
-        every team ties on all five, the whole group keeps its order; otherwise
-        the leader is fixed and the rest are re-resolved *without* it — because
-        head-to-head is computed among whoever is still tied, so removing a
-        team can change the order of the others.
-        """
-        if len(tied) == 1:
-            return tied
-        names = {r["TEAM"] for r in tied}
-        h2h_pct = {}
-        for row in tied:
-            vals = [v for (t, o), v in h2h.items()
-                    if t == row["TEAM"] and o in names and v is not None]
-            h2h_pct[row["TEAM"]] = r_mean(vals) if vals else 0
-        ordering = sorted(tied, key=lambda r: (
-            -h2h_pct[r["TEAM"]], not r["DIV_WINNER"], -(r["DIV_PCT"] or 0),
-            -(r["CONF_PCT"] or 0), -r["DIFF"]))
-        top = ordering[0]
-        same = [r for r in ordering
-                if h2h_pct[r["TEAM"]] == h2h_pct[top["TEAM"]]
-                and r["DIV_WINNER"] == top["DIV_WINNER"]
-                and r["DIV_PCT"] == top["DIV_PCT"]
-                and r["CONF_PCT"] == top["CONF_PCT"]
-                and r["DIFF"] == top["DIFF"]]
-        if len(same) == len(ordering):
-            return ordering
-        return [top] + resolve(ordering[1:])
-
-    resolved: list[dict] = []
-    for _key, group in sorted(
-            _group(table, lambda r: (r["CONF"], r["W"], r["L"])).items()):
-        resolved.extend(resolve(group))
+    order = nba_seed_order(table, games)
+    season = season_rows[0]["SEASON"] if season_rows else None
+    for s, ahead, behind in SEED_OVERRIDES:
+        teams = [r["TEAM"] for r in order]
+        if s == season and ahead in teams and behind in teams \
+                and teams.index(ahead) > teams.index(behind):
+            row = order.pop(teams.index(ahead))
+            order.insert(teams.index(behind), row)
 
     out = []
     for conf in ("East", "West"):
-        rows = [r for r in resolved if r["CONF"] == conf]
+        rows = [r for r in order if r["CONF"] == conf]
         if not rows:                              # a season with no games in one
             continue                              # conference: nothing to seed
-        rows.sort(key=lambda r: -r["W"])          # stable: keeps the tie order
         best = max(r["W"] - r["L"] for r in rows)
         for seed, row in enumerate(rows, 1):
             out.append({
