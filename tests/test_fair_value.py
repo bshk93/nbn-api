@@ -131,6 +131,34 @@ check("today is the hourly run's, not a late day", "2026-10-23" not in st)
 with mock.patch.object(fv, "read_history", lambda season=None: []):
     check("no history, nothing to redo", fv.stale_days("26-27", "2026-10-23", games) == [])
 
+print("\ninjuries")
+check("a range is its middle", fv.injury_days("6-8 weeks") == 49)
+check("day-to-day is short", fv.injury_days("Day-To-Day") == fv.INJURY_DAYS_SHORT)
+check("career never ends", fv.injury_days("Career") == float("inf"))
+check("unreadable is left out", fv.injury_days("soon") is None)
+log = [
+    {"date": "2026-10-20", "slug": "a", "kind": "new", "after": {"status": "Out", "duration": "2-4 weeks"}},
+    {"date": "2026-10-22", "slug": "a", "kind": "changed", "after": {"status": "Hurt", "duration": "1-2 weeks"}},
+    {"date": "2026-10-23", "slug": "a", "kind": "healed", "before": {}},
+]
+check("the list folds to a day", fv.injuries_as_of("2026-10-21", log)["a"]["status"] == "Out")
+check("a change dates the injury from its report", fv.injuries_as_of("2026-10-22", log)["a"]["date"] == "2026-10-22")
+check("healed is off the list", fv.injuries_as_of("2026-10-23", log) == {})
+sched = [{"date": f"2026-11-{d:02d}", "home_team": "AAA", "away_team": "BBB"} for d in range(1, 11)]
+check("a played game is not left", len(fv.unplayed_games(sched, [{"date": "2026-11-01", "home": "BBB", "away": "AAA"}])) == 9)
+ovrs = {f"p{i}": 90 - i for i in range(10)}
+full = fv._strength(list(ovrs.values()))
+out = {"p0": {"status": "Out", "duration": "5 days", "date": "2026-11-01"}}
+st, hurt = fv.injured_strength("AAA", ovrs, out, sched)
+check("out for half the games costs half his drop",
+      abs((full - st) - (full - fv._strength([v for k, v in ovrs.items() if k != "p0"])) * 0.5) < 1e-9)
+check("and says how many he misses", hurt[0]["games"] == 5 and hurt[0]["of"] == 10)
+hurt_only = {"p0": {"status": "Hurt", "duration": "5 days", "date": "2026-11-01", "ovr_delta": -4}}
+check("hurt costs less than out", full - fv.injured_strength("AAA", ovrs, hurt_only, sched)[0] < full - st)
+check("a bench player out costs nothing", fv.injured_strength("AAA", ovrs, {"p9": {**out["p0"]}}, sched)[0] == full)
+check("a healed-by-now injury costs nothing",
+      fv.injured_strength("AAA", ovrs, {"p0": {**out["p0"], "date": "2026-09-01"}}, sched)[0] == full)
+
 if FAILS:
     print(f"\n{len(FAILS)} FAILED")
     sys.exit(1)

@@ -21,6 +21,11 @@ The model, in full:
     seasons: the OVRs of who is under contract that season, aged by
     `AGE_CURVE`, with empty rotation spots filled at `replacement OVR`, then
     pulled toward the league average by `REVERT` per season.
+  * **Injuries.** This season's roster strength counts the injury report
+    (`injured_strength`): an Out player is missing until his expected return
+    (report date + the middle of 2K's duration), a Hurt one plays at his
+    injured OVR, each for the share of the remaining games he misses. A past
+    day uses the report as it stood that day (`injuries_as_of`).
   * **Who is under contract.** A season with a salary and no UFA/RFA tag. A
     player whose deal ends into a UFA/RFA hold the team holds can be re-signed
     at the hold amount: best OVR first, while payroll stays under the first
@@ -61,12 +66,14 @@ its own day by the next run (`stale_days`), not counted on the day it arrived.
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 
 from . import game_highs as gh
+from . import injuries as inj
 from . import playoff_odds as po
 from .cap_history import _cap_levels_for, _payroll
 from .constants import DATA_DIR, DERIVED_DIR, VALID_TEAMS
@@ -142,6 +149,95 @@ def _strength(ovrs: list[float]) -> Optional[float]:
         return None
     w = po.MINUTES[:len(top)]
     return sum(v * x for v, x in zip(top, w)) / sum(w)
+
+
+# ── Injuries: who misses how much of what is left ────────────────────────────
+
+INJURY_DAYS_SHORT = 2           # "Day-to-Day"
+_DUR = re.compile(r"^(\d+(?:\.\d+)?)(?:\s*[-–]\s*(\d+(?:\.\d+)?))?\s*(day|week|month)s?\b", re.I)
+
+
+def injury_days(duration: Optional[str]) -> Optional[float]:
+    """The middle of a 2K duration in days: "6-8 weeks" → 49, "Day-To-Day" → 2,
+    "Career" → inf. None when it can't be read, and such an injury is left out."""
+    d = (duration or "").strip()
+    if inj._OPEN_ENDED.search(d):
+        return float("inf")
+    if inj._SHORT.search(d):
+        return INJURY_DAYS_SHORT
+    m = _DUR.match(d)
+    if not m:
+        return None
+    lo = float(m.group(1))
+    hi = float(m.group(2) or lo)
+    return (lo + hi) / 2 * inj._UNIT_DAYS[m.group(3).lower()]
+
+
+def injuries_as_of(day: str, history: Optional[list[dict]] = None) -> dict[str, dict]:
+    """The injury list at the end of `day`, folded from the change log:
+    slug → {status, duration, ovr_delta, date (of the report that last changed it)}."""
+    events = inj.load_history() if history is None else history
+    out: dict[str, dict] = {}
+    for e in sorted((e for e in events if (e.get("date") or "") <= day), key=lambda e: e["date"]):
+        if e.get("kind") == "healed":
+            out.pop(e["slug"], None)
+        elif e.get("after"):
+            out[e["slug"]] = {**e["after"], "date": e["date"]}
+    return out
+
+
+def unplayed_games(schedule: list[dict], results: list[dict]) -> list[dict]:
+    """The schedule's games with no result yet, matched on date and the two teams."""
+    done: dict = {}
+    for g in results:
+        k = (g["date"], frozenset((g["home"], g["away"])))
+        done[k] = done.get(k, 0) + 1
+    left = []
+    for g in schedule:
+        k = (g.get("date"), frozenset((g["home_team"], g["away_team"])))
+        if done.get(k):
+            done[k] -= 1
+        else:
+            left.append(g)
+    return left
+
+
+def injured_strength(team: str, ovrs: dict[str, float], injuries: dict[str, dict],
+                     left: list[dict]) -> tuple[Optional[float], list[dict]]:
+    """A team's strength over the rest of the season, with its injuries in.
+
+    An Out player misses the team's games until his expected return (report
+    date + the middle of 2K's duration); a Hurt one plays them at his injured
+    OVR. Each costs the strength drop without him, times the share of what is
+    left that he misses. Returns (strength, [{slug, status, games, of}])."""
+    full = _strength(list(ovrs.values()))
+    games = sorted(g.get("date") or "" for g in left if team in (g["home_team"], g["away_team"]))
+    if full is None or not games:
+        return full, []
+    cost, hurt = 0.0, []
+    for slug, i in injuries.items():
+        if slug not in ovrs:
+            continue
+        days = injury_days(i.get("duration"))
+        if days is None:
+            continue
+        back = "9999-12-31" if days == float("inf") else \
+            (date.fromisoformat(i["date"]) + timedelta(days=round(days))).isoformat()
+        missed = sum(d < back for d in games)
+        if not missed:
+            continue
+        rest = dict(ovrs)
+        if (i.get("status") or "").lower() == "out":
+            del rest[slug]
+        else:
+            rest[slug] = ovrs[slug] + min(0, i.get("ovr_delta") or 0)
+        without = _strength(list(rest.values()))
+        if without is None or without >= full:
+            continue
+        cost += (full - without) * missed / len(games)
+        hurt.append({"slug": slug, "status": i.get("status"), "games": missed, "of": len(games),
+                     "cost": round((full - without) * missed / len(games), 2)})
+    return full - cost, sorted(hurt, key=lambda h: -h["cost"])
 
 
 # ── Who is on the books, season by season ────────────────────────────────────
@@ -409,9 +505,14 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
     seasons = [season_after(season, k) for k in range(HORIZON)]
 
     # This season: the odds model with the roster floored in.
-    strength0 = {t: _strength([ovr_now[s] for s in _roster(t) if s in ovr_now
-                               and (bios.get(s) or {}).get("type") not in ("draft-rights", "dead")]) for t in teams}
-    priors0 = po.roster_priors(strength0)
+    rostered = {t: {s: ovr_now[s] for s in _roster(t) if s in ovr_now
+                    and (bios.get(s) or {}).get("type") not in ("draft-rights", "dead")} for t in teams}
+    strength0 = {t: _strength(list(rostered[t].values())) for t in teams}
+    # This season's rating is the rest of it, so it counts who is hurt for how much of that.
+    injuries = inputs["injuries"] if "injuries" in inputs else injuries_as_of(today)
+    left = unplayed_games(schedule, results)
+    healthy_or_not = {t: injured_strength(t, rostered[t], injuries, left) for t in teams}
+    priors0 = po.roster_priors({t: v[0] for t, v in healthy_or_not.items()})
     margin, played = _rating_inputs(results)
     sims = [po.simulate(results, schedule, floored_priors(priors0, margin, played), sims=SIMS_NOW, seed=seed)]
 
@@ -543,6 +644,8 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
             "team": t, "price": round(value / SHARES, 4), "value": round(value),
             "pv_in": pv_in, "pv_out": pv_out, "pv_sale": round(pv_sale), "sale": round(sale),
             "expected_titles": round(exp_titles, 3), "book_value": book,
+            "strength_injured": None if healthy_or_not[t][0] is None else round(healthy_or_not[t][0], 2),
+            "injuries": healthy_or_not[t][1],
             "w": r0["w"], "l": r0["l"], "season_left": round(f, 4), "years": years,
         })
 
@@ -567,6 +670,7 @@ def _history_row(run: dict) -> dict:
     return {"date": run["date"], "season": run["season"], "model": run["model"],
             "teams": {x["team"]: {**{k: x[k] for k in HISTORY_KEYS},
                                   "strength": x["years"][0]["strength"],
+                                  "strength_injured": x["strength_injured"],
                                   "proj_w": x["years"][0]["proj_w"],
                                   "title": x["years"][0]["title"],
                                   "payroll": x["years"][0]["payroll"]}
