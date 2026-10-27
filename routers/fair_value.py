@@ -21,6 +21,12 @@ The model, in full:
     seasons: the OVRs of who is under contract that season, aged by
     `AGE_CURVE`, with empty rotation spots filled at `replacement OVR`, then
     pulled toward the league average by `REVERT` per season.
+  * **Draft picks.** A pick drafted before one of the projected seasons adds
+    its player to that season's top eight: OVR from the pick number
+    (`rookie_ovr`, fit on the last two classes), aged like everyone else, the
+    slot from where the pick's team finishes in the simulated season before.
+    Every team a contingent pick names gets an equal share. Only the next two
+    drafts land inside the horizon, so picks move a price a little.
   * **Injuries.** This season's roster strength counts the injury report
     (`injured_strength`): an Out player is missing until his expected return
     (report date + the middle of 2K's duration), a Hurt one plays at his
@@ -72,6 +78,7 @@ its own day by the next run (`stale_days`), not counted on the day it arrived.
 from __future__ import annotations
 
 import json
+import math
 import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
@@ -96,6 +103,11 @@ MODEL = "fv1"
 DISCOUNT_RATE = 0.08
 SHARES = 30_000_000             # so a ¥4.5B franchise prices at ¥150
 HORIZON = 3                     # this season and the next two, then the sale
+
+# What a pick turns into: OVR = a + b·ln(pick number), fit on the 2025 and 2026
+# classes' first ratings (n = 109, ±1.8), at the class's average age.
+ROOKIE_OVR = (80.74, -3.04)
+ROOKIE_AGE = {1: 20.2, 2: 22.4}
 
 PRIOR_FLOOR = 0.5               # the roster's least weight in this season's rating
 REVERT = 0.75                   # a later season keeps this much of its rating, per season out
@@ -244,6 +256,54 @@ def injured_strength(team: str, ovrs: dict[str, float], injuries: dict[str, dict
         hurt.append({"slug": slug, "status": i.get("status"), "games": missed, "of": len(games),
                      "cost": round((full - without) * missed / len(games), 2)})
     return full - cost, sorted(hurt, key=lambda h: -h["cost"])
+
+
+# ── Draft picks ──────────────────────────────────────────────────────────────
+
+def rookie_ovr(pick: float) -> float:
+    a, b = ROOKIE_OVR
+    return a + b * math.log(max(1.0, pick))
+
+
+def draft_after(year: int) -> str:
+    """The season a draft follows: the 2027 draft comes after 26-27."""
+    return f"{(year - 1) % 100:02d}-{year % 100:02d}"
+
+
+def load_picks() -> list[dict]:
+    """Every pick as GET /api/picks serves it from the conveyance model."""
+    try:
+        from picks_conveyance.serve import flat_rows
+        return flat_rows()
+    except Exception:
+        return []
+
+
+def pick_claims(picks: list[dict], season: str) -> dict[str, list[dict]]:
+    """Team -> its share of every pick in a draft still to come.
+
+    Every team a contingent pick names (a swap, a protection band, a ladder)
+    gets an equal share of it: the conveyance model says who has a claim, not
+    how likely each one is to land it."""
+    out: dict[str, list[dict]] = {}
+    for p in picks:
+        if season_index(draft_after(p["year"])) < season_index(season):
+            continue
+        parties = list(dict.fromkeys(l["team"] for l in (p.get("leaves") or []) if l.get("team")))
+        if not parties:
+            owner = p.get("owner") or "?"
+            parties = [p["orig"]] if owner == "?" else owner.split("|")
+        for t in parties:
+            out.setdefault(t, []).append({"year": p["year"], "round": p["round"], "orig": p["orig"],
+                                          "share": 1 / len(parties)})
+    return out
+
+
+def draft_slots(row: dict[str, dict]) -> dict[str, int]:
+    """Team -> where its own pick lands in a draft, from a simulated season:
+    fewest projected wins picks first. The lottery is left out."""
+    order = sorted(row, key=lambda t: (row[t]["proj_w"], t))
+    return {t: i + 1 for i, t in enumerate(order)}
 
 
 # ── Who is on the books, season by season ────────────────────────────────────
@@ -533,7 +593,9 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
     teams = sorted(VALID_TEAMS)
     seed = season_seed(season)
 
-    seasons = [season_after(season, k) for k in range(HORIZON)]
+    total = HORIZON
+    seasons = [season_after(season, k) for k in range(total)]
+    claims = pick_claims(inputs["picks"] if "picks" in inputs else load_picks(), season)
 
     # This season: the odds model with the roster floored in.
     rostered = {t: {s: ovr_now[s] for s in _roster(t) if s in ovr_now
@@ -551,7 +613,15 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
     rep_ovr, rep_pay = replacement(teams, bios, ovr_now, season)
     later_books, strengths = {}, [strength0]
     kept = {t: set() for t in teams}
-    for k in range(1, HORIZON):
+    slots: dict[int, dict[str, int]] = {}
+    drafted: dict[str, list[dict]] = {t: [] for t in teams}
+
+    def filled(ovrs: list[float]) -> Optional[float]:
+        return _strength(ovrs + [rep_ovr] * max(0, len(po.MINUTES) - len(ovrs)))
+
+    for k in range(1, total):
+        # The draft after season k-1, slotted by that season's simulation.
+        slots[k - 1] = draft_slots({t: r for t, r in ((x["team"], x) for x in sims[k - 1]["teams"])})
         s = seasons[k]
         a1 = aprons(s, season)[0]
         bk = {t: books(t, s, k, bios, ovr_now, _payroll(t, bios, s)[0], a1, kept[t]) for t in teams}
@@ -560,8 +630,23 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
         st = {}
         for t in teams:
             ovrs = [p["ovr"] for p in bk[t]["players"] if p["ovr"] is not None and not p["two_way"]]
-            ovrs += [rep_ovr] * max(0, len(po.MINUTES) - len(ovrs))
-            st[t] = _strength(ovrs)
+            base = filled(ovrs)
+            # Each pick already drafted by now adds its share of what its
+            # player does for the top eight, one at a time.
+            gain = 0.0
+            for c in claims.get(t, []):
+                kd = season_index(draft_after(c["year"])) - season_index(season)
+                if kd >= k or kd not in slots:
+                    continue
+                slot = slots[kd].get(c["orig"], 15) + (30 if c["round"] == 2 else 0)
+                ovr = aged_ovr(rookie_ovr(slot), ROOKIE_AGE[c["round"]], k - kd - 1)
+                with_him = filled(ovrs + [ovr])
+                if base is not None and with_him is not None:
+                    # A pick below replacement level is cut for one: never a loss.
+                    gain += c["share"] * max(0.0, with_him - base)
+                if k == kd + 1:
+                    drafted[t].append({**c, "slot": slot, "ovr": round(rookie_ovr(slot), 1)})
+            st[t] = None if base is None else base + gain
         strengths.append(st)
         pri = {t: v * REVERT ** k for t, v in po.roster_priors(st).items()}
         sims.append(po.simulate([], schedule, pri, sims=SIMS_LATER, seed=seed + k))
@@ -581,7 +666,7 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
         for _, t in pool[:STAR_COUNT]:
             out[t] += 1
         return out
-    stars = [star_counts(k) for k in range(HORIZON)]
+    stars = [star_counts(k) for k in range(total)]
     away = [sum(min(fin.STAR_CAP, v) for v in st.values()) / len(teams) for st in stars]
 
     # What has already happened, from the ledger.
@@ -603,18 +688,18 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
     # feeds the next one's market, as in the ledger.
     buzz_now = {t: _num((led.get((season, t)) or {}).get("BUZZ")) for t in teams}
     buzz_avg_so_far = {t: _num((led.get((season, t)) or {}).get("BUZZ_AVG")) for t in teams}
-    buzz = [{} for _ in range(HORIZON)]
+    buzz = [{} for _ in range(total)]
     for t in teams:
         r0 = rows[0][t]
         games0 = r0["games"] or 82
         played = r0["w"] + r0["l"]
         rest = rest_of_season_buzz(buzz_now[t], r0["rating"], games0 - played)
         buzz[0][t] = {"rest": rest, "season": (played * buzz_avg_so_far[t] + (games0 - played) * rest) / games0}
-        for k in range(1, HORIZON):
+        for k in range(1, total):
             b = rating_buzz(rows[k][t]["rating"])
             buzz[k][t] = {"rest": b, "season": b}
     mkt = [{t: _num((led.get((season, t)) or {}).get("MARKET")) or 1.0 for t in teams}]
-    for k in range(1, HORIZON):
+    for k in range(1, total):
         mkt.append(fin.recentre({t: fin.market_next(mkt[k - 1][t], all_finishes(rows[k - 1][t]),
                                                     rows[k - 1][t]["proj_w"] / (rows[k - 1][t]["games"] or 82),
                                                     buzz[k - 1][t]["season"])
@@ -630,7 +715,7 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
         # Bandwagon finishes: actual results before this season, simulated after.
         past = [{(led.get((season_after(season, -b), t)) or {}).get("PLAYOFF_RESULT", ""): 1.0}
                 for b in (1, 2, 3)]
-        expected_finish = [finish_probs(rows[k][t]) for k in range(HORIZON)]
+        expected_finish = [finish_probs(rows[k][t]) for k in range(total)]
 
         years = []
         for k, s in enumerate(seasons):
@@ -686,17 +771,22 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
             })
 
         # The sale: the ledger's valuation on the three projected seasons.
-        end = seasons[-1]
+        # Pricing it on the seasons after them was tried (2026-10-27) and
+        # rejected: the far projection pulls every team to .500, which cut the
+        # spread from 2.3x to 1.7-2.0x. So a pick counts only once its player
+        # is in one of these three seasons.
+        held = years
+        end = seasons[HORIZON - 1]
         titles_before = sum((led.get((season_after(season, -b), t)) or {}).get("PLAYOFF_RESULT") == "Champion"
                             for b in range(1, fin.BRAND_WINDOW - HORIZON + 1))
-        exp_titles = titles_before + sum(y["title"] for y in years)
-        trailing = sum(y["revenue"] for y in years) / len(years)
+        exp_titles = titles_before + sum(y["title"] for y in held)
+        trailing = sum(y["revenue"] for y in held) / len(held)
         multiple = (fin.START_VALUE / league0) * (1 + fin.VALUE_GROWTH) ** (season_index(end) + 1) if league0 else 0.0
         sale = multiple * trailing * (1 + fin.BRAND_PER_TITLE * exp_titles)
         pv_sale = sale * discount(f + HORIZON - 1)
 
-        pv_in = sum(y["pv_in"] for y in years)
-        pv_out = sum(y["pv_out"] for y in years)
+        pv_in = sum(y["pv_in"] for y in held)
+        pv_out = sum(y["pv_out"] for y in held)
         value = pv_in - pv_out + pv_sale
         book = _num((led.get((season, t)) or {}).get("VALUE")) or None
         out_teams.append({
@@ -707,6 +797,7 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
             "buzz": round(buzz_now[t], 4),
             "injuries": [{**i, "name": (bios.get(i["slug"]) or {}).get("name")} for i in healthy_or_not[t][1]],
             "w": r0["w"], "l": r0["l"], "season_left": round(f, 4), "years": years,
+            "picks": drafted[t],
         })
 
     mean_price = sum(x["price"] for x in out_teams) / len(out_teams)

@@ -167,6 +167,26 @@ check("the next ten games keep today's buzz", fv.rest_of_season_buzz(0.15, 0, 10
 check("then it runs to the rating's", abs(fv.rest_of_season_buzz(0.15, 0, 70) - 0.15 * 10 / 70) < 1e-12)
 check("no games left, today's", fv.rest_of_season_buzz(0.1, 5, 0) == 0.1)
 
+print("\ndraft picks")
+check("the top pick is the best", fv.rookie_ovr(1) > fv.rookie_ovr(10) > fv.rookie_ovr(45))
+check("a top pick is near 81", abs(fv.rookie_ovr(1) - 80.74) < 1e-9)
+check("the 2027 draft follows 26-27", fv.draft_after(2027) == "26-27")
+picks = [
+    {"year": 2026, "round": 1, "orig": "AAA", "owner": "AAA", "leaves": []},
+    {"year": 2027, "round": 1, "orig": "AAA", "owner": "BBB", "leaves": []},
+    {"year": 2027, "round": 1, "orig": "CCC", "owner": "AAA|CCC",
+     "leaves": [{"team": "AAA", "description": "swap priority (better pick)"},
+                {"team": "CCC", "description": "swap priority (worse pick)"}]},
+    {"year": 2028, "round": 2, "orig": "DDD", "owner": "?", "leaves": []},
+]
+cl = fv.pick_claims(picks, "26-27")
+check("a draft already held is left out", all(c["year"] > 2026 for v in cl.values() for c in v))
+check("a traded pick is its owner's", [c["orig"] for c in cl["BBB"]] == ["AAA"])
+check("a swap is shared by everyone it names", [c["share"] for c in cl["AAA"]] == [0.5] and cl["CCC"][0]["share"] == 0.5)
+check("an undetermined pick stays with its team", cl["DDD"][0]["round"] == 2)
+slots = fv.draft_slots({"AAA": {"proj_w": 60}, "BBB": {"proj_w": 20}, "CCC": {"proj_w": 41}})
+check("the fewest wins pick first", slots == {"BBB": 1, "CCC": 2, "AAA": 3})
+
 if FAILS:
     print(f"\n{len(FAILS)} FAILED")
     sys.exit(1)
