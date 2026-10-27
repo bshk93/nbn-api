@@ -7,7 +7,8 @@
 
 Run it after any change to the model (routers/fair_value.py or
 stats_build/finances.py), so the change does not show up as a day's move.
-Rosters and contracts are today's; see `fair_value.rebuild_history`.
+Each day counts the games played by its end (game date). Rosters and contracts
+are today's; see `fair_value.rebuild_history`.
 """
 import argparse
 import json

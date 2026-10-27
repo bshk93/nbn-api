@@ -118,6 +118,19 @@ check("a different seed each season", fv.season_seed("26-27") != fv.season_seed(
 src = Path(fv.__file__).read_text()
 check("compute does not seed off the date", "today.replace" not in src)
 
+print("\nlate box scores land on their own day")
+def _row(d, w):
+    return {"date": d, "season": "26-27", "teams": {"AAA": {"w": w}, "BBB": {"w": 0}}}
+games = [{"date": "2026-10-20"}, {"date": "2026-10-21"}, {"date": "2026-10-21"}]
+with mock.patch.object(fv, "read_history", lambda season=None: [_row("2026-10-20", 1), _row("2026-10-21", 1), _row("2026-10-23", 3)]):
+    st = fv.stale_days("26-27", "2026-10-23", games)
+check("a day short of its own games is redone", "2026-10-21" in st)
+check("a missing day is filled", "2026-10-22" in st)
+check("a complete day is left alone", "2026-10-20" not in st)
+check("today is the hourly run's, not a late day", "2026-10-23" not in st)
+with mock.patch.object(fv, "read_history", lambda season=None: []):
+    check("no history, nothing to redo", fv.stale_days("26-27", "2026-10-23", games) == [])
+
 if FAILS:
     print(f"\n{len(FAILS)} FAILED")
     sys.exit(1)

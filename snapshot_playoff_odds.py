@@ -9,8 +9,9 @@ playoff-odds-history.jsonl. The model is in routers/playoff_odds.py. Skips the
 offseason: nothing runs until the season's schedule file exists.
 
 Then the fair value (routers/fair_value.py), which simulates on the same
-inputs: fair-value.json and the day's row in fair-value-history.jsonl. A
-failure there is logged and does not fail the odds run.
+inputs: fair-value.json and the day's row in fair-value-history.jsonl, plus
+any earlier day whose box scores arrived late. A failure there is logged and
+does not fail the odds run.
 """
 import argparse
 import json
@@ -20,6 +21,7 @@ import time
 import traceback
 
 from routers import fair_value, playoff_odds
+from routers import game_highs as gh
 from routers.constants import DATA_DIR
 from routers.league_time import league_today_str
 from season_clock import current_season
@@ -49,7 +51,13 @@ def main() -> int:
         t0 = time.time()
         fv = fair_value.compute(season, run["date"])
         fair_value.save_run(fv)
-        print(json.dumps({"fair_value": fv["date"], "model": fv["model"], "seconds": round(time.time() - t0, 1)}))
+        index, _ = gh.get_index()
+        results = playoff_odds.season_results(index, season)
+        late = fair_value.stale_days(season, fv["date"], results)
+        if late:
+            fair_value.rebuild_history(season, late, results)
+        print(json.dumps({"fair_value": fv["date"], "model": fv["model"], "late_days": late,
+                          "seconds": round(time.time() - t0, 1)}))
     except Exception:
         traceback.print_exc()
         print(json.dumps({"fair_value": "failed"}))
