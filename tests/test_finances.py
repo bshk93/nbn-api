@@ -133,6 +133,27 @@ vals = sorted(r["VALUE"] for r in rows if r["SEASON"] == seasons[-1])
 spread = vals[-1] / vals[0]
 check(f"the spread stays plausible ({spread:.2f}x, want 1.8-3; the NBA's is about 3)", 1.8 <= spread <= 3.0)
 
+print("buzz follows form, against who it came against")
+def game(d, h, a, hp, ap, season="25-26"):
+    return {"season": season, "date": f"2026-01-{d:02d}", "home": h, "away": a, "pts": {h: hp, a: ap}, "wl": {}}
+check("one blowout can't max it", f.buzz_from([40.0]) < f.BUZZ_MAX / 2)
+check("ten big wins can", f.buzz_from([25.0] * 10) == f.BUZZ_MAX)
+check("only the last ten count", f.buzz_from([-30.0] * 10 + [10.0] * 10) == f.buzz_from([10.0] * 10))
+check("and it stays in its band", f.buzz_from([-50.0] * 10) == f.BUZZ_MIN)
+strong = [game(1, "GGG", "XXX", 130, 100), game(2, "GGG", "YYY", 130, 100)]
+weak = [game(1, "BBB", "XXX", 100, 130), game(2, "BBB", "YYY", 100, 130)]
+_, _, last_s = f.buzz_series(strong + [game(3, "AAA", "GGG", 110, 100)])
+_, _, last_w = f.buzz_series(weak + [game(3, "AAA", "BBB", 110, 100)])
+check("beating a good team by 10 beats beating a bad one by 10",
+      last_s[("25-26", "AAA")] > last_w[("25-26", "AAA")])
+before, _, _ = f.buzz_series([game(1, "AAA", "BBB", 120, 100), game(2, "AAA", "CCC", 100, 90)])
+check("a game is priced on the buzz going into it",
+      before[("25-26", "2026-01-01", "AAA")] == 0 and before[("25-26", "2026-01-02", "AAA")] > 0)
+check("a missing score moves nothing",
+      all(v == 0 for v in f.buzz_series([{**game(1, "AAA", "BBB", 0, 0), "pts": {}}])[2].values()))
+check("buzz feeds the market", f.market_next(1.0, {"First Round": 1.0}, 0.5, 0.1)
+      > f.market_next(1.0, {"First Round": 1.0}, 0.5, 0.0))
+
 print("market follows success")
 check("a title grows it", f.market_next(1.0, {"Champion": 1.0}, 0.7) > 1.15)
 check("missing the playoffs shrinks it", f.market_next(1.0, {"Missed": 1.0}, 0.35) < 1.0)

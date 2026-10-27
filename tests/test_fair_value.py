@@ -16,6 +16,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from routers import fair_value as fv  # noqa: E402
 from routers import playoff_odds as po  # noqa: E402
+from stats_build import finances as fin_mod  # noqa: E402
 
 FAILS = []
 
@@ -158,6 +159,13 @@ check("hurt costs less than out", full - fv.injured_strength("AAA", ovrs, hurt_o
 check("a bench player out costs nothing", fv.injured_strength("AAA", ovrs, {"p9": {**out["p0"]}}, sched)[0] == full)
 check("a healed-by-now injury costs nothing",
       fv.injured_strength("AAA", ovrs, {"p0": {**out["p0"], "date": "2026-09-01"}}, sched)[0] == full)
+
+print("\nbuzz")
+check("an average team settles at no buzz", fv.rating_buzz(0) == 0)
+check("a good one above it, inside the band", 0 < fv.rating_buzz(8) <= fin_mod.BUZZ_MAX)
+check("the next ten games keep today's buzz", fv.rest_of_season_buzz(0.15, 0, 10) == 0.15)
+check("then it runs to the rating's", abs(fv.rest_of_season_buzz(0.15, 0, 70) - 0.15 * 10 / 70) < 1e-12)
+check("no games left, today's", fv.rest_of_season_buzz(0.1, 5, 0) == 0.1)
 
 if FAILS:
     print(f"\n{len(FAILS)} FAILED")

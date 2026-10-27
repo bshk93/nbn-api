@@ -40,7 +40,10 @@ The model, in full:
     games a series; concessions on both crowds; merch, media, title bonus.
     Ticket price, base merch and local media scale with the team's market:
     the ledger's this season, then grown from each simulated finish
-    (`finances.market_next`, re-centred like the ledger).
+    (`finances.market_next`, re-centred like the ledger). Ticket price and
+    base merch also scale with buzz: today's for the next ten games, then what
+    the team's rating sustains (`rest_of_season_buzz`), and a later season's
+    rating's.
     NBNTV is left out, as in the ledger's valuation, and so is the tax share,
     which would need every other team's payroll projected too.
   * **Costs.** Payroll is money, not cap (`cap_history._payroll`: contracts and
@@ -409,11 +412,11 @@ def playoff_gate(row: dict, market: float = 1.0) -> float:
     return sum(p * HOME_PER_SERIES * fin.SEATS * fin.TICKET * market * fin.PLAYOFF_MULT[r] for r, p in reach.items())
 
 
-def season_revenue(gate: float, row: dict, stars: int, market: float = 1.0) -> dict:
-    merch = fin.MERCH_BASE * market + fin.MERCH_STAR * stars + fin.MERCH_TITLE * row["title"]
+def season_revenue(gate: float, row: dict, stars: int, market: float = 1.0, buzz: float = 0.0) -> dict:
+    merch = fin.MERCH_BASE * market * (1 + buzz) + fin.MERCH_STAR * stars + fin.MERCH_TITLE * row["title"]
     title = fin.TITLE_BONUS * row["title"]
     pog = playoff_gate(row, market)
-    conc = concessions(gate, row, market)
+    conc = concessions(gate, row, market * (1 + buzz))
     media = fin.MEDIA_SHARE + fin.LOCAL_MEDIA * market
     return {"gate": gate, "playoff_gate": pog, "concessions": conc, "merch": merch,
             "media": media, "title_bonus": title,
@@ -425,10 +428,27 @@ def playoff_crowd(row: dict) -> float:
     return sum(p * HOME_PER_SERIES * fin.SEATS for p in reach)
 
 
-def concessions(gate: float, row: dict, market: float = 1.0) -> float:
+def concessions(gate: float, row: dict, price: float = 1.0) -> float:
     """Spend per head, on the regular-season crowd the gate implies plus a
-    sold-out playoff crowd, as the ledger counts it."""
-    return fin.CONCESSIONS_PER_FAN * (gate / (fin.TICKET * market) + playoff_crowd(row))
+    sold-out playoff crowd, as the ledger counts it. `price` is the ticket's
+    multiplier (market × buzz), to turn the gate back into a crowd."""
+    return fin.CONCESSIONS_PER_FAN * (gate / (fin.TICKET * price) + playoff_crowd(row))
+
+
+def rating_buzz(rating: float) -> float:
+    """The buzz a team settles at when it plays to its rating: the ledger's
+    buzz is BUZZ_PER_POINT × its average opponent-adjusted margin, and the
+    rating is the expected margin against an average team."""
+    return min(fin.BUZZ_MAX, max(fin.BUZZ_MIN, fin.BUZZ_PER_POINT * rating))
+
+
+def rest_of_season_buzz(now: float, rating: float, left: int) -> float:
+    """Average buzz over the games left: today's for the next BUZZ_WINDOW,
+    then whatever the rating sustains."""
+    if left <= 0:
+        return now
+    near = min(fin.BUZZ_WINDOW, left)
+    return (near * now + (left - near) * rating_buzz(rating)) / left
 
 
 def discount(t: float) -> float:
@@ -578,10 +598,26 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
 
     # Market: this season's is the ledger's; each later one grows from the
     # season before's simulated finish and win %, re-centred as the ledger does.
+    # Buzz: this season's runs from today's (the ledger's) toward what the
+    # rating sustains; a later season's is its rating's. Each season's average
+    # feeds the next one's market, as in the ledger.
+    buzz_now = {t: _num((led.get((season, t)) or {}).get("BUZZ")) for t in teams}
+    buzz_avg_so_far = {t: _num((led.get((season, t)) or {}).get("BUZZ_AVG")) for t in teams}
+    buzz = [{} for _ in range(HORIZON)]
+    for t in teams:
+        r0 = rows[0][t]
+        games0 = r0["games"] or 82
+        played = r0["w"] + r0["l"]
+        rest = rest_of_season_buzz(buzz_now[t], r0["rating"], games0 - played)
+        buzz[0][t] = {"rest": rest, "season": (played * buzz_avg_so_far[t] + (games0 - played) * rest) / games0}
+        for k in range(1, HORIZON):
+            b = rating_buzz(rows[k][t]["rating"])
+            buzz[k][t] = {"rest": b, "season": b}
     mkt = [{t: _num((led.get((season, t)) or {}).get("MARKET")) or 1.0 for t in teams}]
     for k in range(1, HORIZON):
         mkt.append(fin.recentre({t: fin.market_next(mkt[k - 1][t], all_finishes(rows[k - 1][t]),
-                                                    rows[k - 1][t]["proj_w"] / (rows[k - 1][t]["games"] or 82))
+                                                    rows[k - 1][t]["proj_w"] / (rows[k - 1][t]["games"] or 82),
+                                                    buzz[k - 1][t]["season"])
                                  for t in teams}))
 
     out_teams = []
@@ -607,12 +643,13 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
                 gate_so_far = (_num(ledger_row.get("GATE")) * _num(ledger_row.get("HOME_GAMES")) / fin.REG_HOME_GAMES
                                if ledger_row else 0.0)
                 home_left = max(0, sched_home[t] - played_home[t])
-                gate_left = home_left * gate_per_game(rest_wp, stars[0][t], away[0], bw, mkt[0][t])
+                gate_left = home_left * gate_per_game(rest_wp, stars[0][t], away[0], bw,
+                                                      mkt[0][t] * (1 + buzz[0][t]["rest"]))
                 gate = gate_so_far + gate_left
             else:
                 gate = fin.REG_HOME_GAMES * gate_per_game(r["proj_w"] / (r["games"] or 82), stars[k][t], away[k], bw,
-                                                          mkt[k][t])
-            rev = season_revenue(gate, r, stars[k][t], mkt[k][t])
+                                                          mkt[k][t] * (1 + buzz[k][t]["rest"]))
+            rev = season_revenue(gate, r, stars[k][t], mkt[k][t], buzz[k][t]["season"])
 
             contracted, dead = _payroll(t, bios, s)
             payroll = float(contracted)
@@ -625,7 +662,8 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
 
             if k == 0:
                 cash_rev = (gate_left + rev["playoff_gate"] + rev["title_bonus"]
-                            + fin.CONCESSIONS_PER_FAN * (gate_left / (fin.TICKET * mkt[0][t]) + playoff_crowd(r))
+                            + fin.CONCESSIONS_PER_FAN * (gate_left / (fin.TICKET * mkt[0][t] * (1 + buzz[0][t]["rest"]))
+                                                         + playoff_crowd(r))
                             + (rev["merch"] + rev["media"]) * f)
                 cash_cost = costs * f
                 when = f / 2
@@ -638,6 +676,7 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
                 "proj_w": r["proj_w"], "games": r["games"],
                 **{key: r[key] for key in ("playoffs", "second_round", "conf_finals", "finals", "title")},
                 "stars": stars[k][t], "bandwagon": round(bw, 4), "market": round(mkt[k][t], 3),
+                "buzz": round(buzz[k][t]["season"], 4),
                 **{key: round(v) for key, v in rev.items()},
                 "payroll": round(payroll), "dead_money": dead, "tax": round(tax), "ops": round(ops),
                 "costs": round(costs), "profit": round(rev["revenue"] - costs),
@@ -665,6 +704,7 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
             "pv_in": pv_in, "pv_out": pv_out, "pv_sale": round(pv_sale), "sale": round(sale),
             "expected_titles": round(exp_titles, 3), "book_value": book,
             "strength_injured": None if healthy_or_not[t][0] is None else round(healthy_or_not[t][0], 2),
+            "buzz": round(buzz_now[t], 4),
             "injuries": [{**i, "name": (bios.get(i["slug"]) or {}).get("name")} for i in healthy_or_not[t][1]],
             "w": r0["w"], "l": r0["l"], "season_left": round(f, 4), "years": years,
         })
@@ -721,7 +761,8 @@ def save_run(run: dict) -> None:
 def rebuild_history(season: str, days: list[str], results: Optional[list[dict]] = None) -> list[dict]:
     """Recompute the history rows for `days` with the current model and save them.
 
-    A day's row holds the games played by the end of that day (game date, not
+    A day's row holds the games played by the end of that day, with buzz
+    recounted from them (game date, not
     when the box score was committed), and the ledger's home games to match.
     Rosters, OVRs and contracts are today's, so a row for a day before a move
     shows the move early. A day with no row yet is marked `backfill`; a day
@@ -738,7 +779,14 @@ def rebuild_history(season: str, days: list[str], results: Optional[list[dict]] 
         home = {}
         for g in played:
             home[g["home"]] = home.get(g["home"], 0) + 1
-        led = [dict(r, HOME_GAMES=str(home.get(r["TEAM"], 0))) if r["SEASON"] == season else r for r in ledger]
+        # Buzz as it stood that day, from the same games, as the ledger counts it.
+        _, b_avg, b_last = fin.buzz_series(sorted(
+            ({"season": season, "date": g["date"], "home": g["home"], "away": g["away"],
+              "pts": {g["home"]: g["home_pts"], g["away"]: g["away_pts"]}, "wl": {}} for g in played),
+            key=lambda g: (g["date"], g["home"], g["away"])))
+        led = [dict(r, HOME_GAMES=str(home.get(r["TEAM"], 0)),
+                    BUZZ=b_last.get((season, r["TEAM"]), 0.0), BUZZ_AVG=b_avg.get((season, r["TEAM"]), 0.0))
+               if r["SEASON"] == season else r for r in ledger]
         row = _history_row(compute(season, d, {"results": played, "ledger": led}))
         if old.get(d, {"backfill": True}).get("backfill"):
             row["backfill"] = True
