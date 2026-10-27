@@ -2,7 +2,8 @@
 
 Pins: the floored prior lands the simulator on the floored rating; who counts
 as under contract or re-signed in a later season; re-signing stops at the
-ceiling, best OVR first, and a kept player stays; ageing; the bandwagon and
+ceiling, best OVR first, a kept player stays and a bargain is kept past it;
+who walks and who signs them in free agency; ageing; the bandwagon and
 playoff gate on expected finishes; discounting. Nothing reads the data dir.
 
     venv/bin/python -m tests.test_fair_value
@@ -85,6 +86,44 @@ with mock.patch.object(fv, "_roster", return_value=list(bios)):
     kept = fv.books("AAA", "27-28", 1, bios, ovr, contracted=200_000_000, ceiling=210_000_000, kept={"role"})
     check("a player kept last season stays, ceiling or not", "role" in {p["slug"] for p in kept["players"]})
     check("the young player is aged up", next(p for p in bk["players"] if p["slug"] == "kid")["ovr"] > 70.0)
+
+    check("a player who walks is in the pool, with his team",
+          [(p["slug"], p["from"]) for p in bk["walked"]] == [("role", "AAA")])
+    check("one signed elsewhere is gone",
+          "star" not in {p["slug"] for p in fv.books("AAA", "27-28", 1, bios, ovr, 150_000_000, 210_000_000,
+                                                      set(), frozenset({"star"}))["players"]})
+    over = fv.books("AAA", "27-28", 1, bios, ovr, contracted=200_000_000, ceiling=210_000_000, kept=set(),
+                    cap=170_000_000)
+    check("a bargain is kept past the ceiling", "star" in {p["slug"] for p in over["players"]})
+    check("one worth less than his hold still walks", "role" not in {p["slug"] for p in over["players"]})
+
+print("\nfree agency")
+cap = 170_000_000
+check("a better player asks more", fv.fa_ask(85, cap) > fv.fa_ask(80, cap))
+check("an 84 asks about ¥18M", 16e6 < fv.fa_ask(84, cap) < 20e6)
+check("never past the max", fv.fa_ask(99, cap) == cap * fv.FA_MAX_SHARE)
+exc = {"ntmle_amount": 15e6, "tmle_amount": 6e6}
+check("room is the budget", fv.fa_budget(130e6, cap, 210e6, 220e6, exc) == 40e6)
+check("a little room still has the MLE", fv.fa_budget(165e6, cap, 210e6, 220e6, exc) == 15e6)
+check("over the cap, the MLE", fv.fa_budget(200e6, cap, 210e6, 220e6, exc) == 15e6)
+check("over the first apron, the taxpayer MLE", fv.fa_budget(215e6, cap, 210e6, 220e6, exc) == 6e6)
+check("over the second, nothing", fv.fa_budget(225e6, cap, 210e6, 220e6, exc) == 0)
+pool = [{"slug": "a", "ovr": 88.0, "from": "AAA"}, {"slug": "b", "ovr": 80.0, "from": "BBB"},
+        {"slug": "c", "ovr": 70.0, "from": "BBB"}]
+got = fv.free_agency(pool, {"AAA": 60e6, "BBB": 25e6, "CCC": 15e6}, {"AAA": 2, "BBB": 2, "CCC": 2},
+                     cap, 77, 5e6, {"BBB": 5.0, "CCC": -3.0})
+check("nobody signs back with the team that let him walk", not any(p["slug"] == "a" for p in got["AAA"]))
+check("the star goes where the money is", [p["slug"] for p in got["BBB"]] == ["a"])
+check("taking less than his price", got["BBB"][0]["money"] == 25e6 < fv.fa_ask(88, cap))
+check("an equal offer goes to the better team, not the alphabet",
+      [p["slug"] for p in fv.free_agency(pool[1:2], {"BBB": 0, "CCC": 15e6, "DDD": 15e6},
+                                         {"BBB": 1, "CCC": 1, "DDD": 1}, cap, 77, 5e6,
+                                         {"CCC": 4.0, "DDD": -4.0})["CCC"]] == ["b"])
+check("a replacement-level player is left to the roster fill", not any(p["slug"] == "c" for v in got.values() for p in v))
+check("no roster spot, no signing",
+      fv.free_agency(pool[1:2], {"AAA": 60e6}, {"AAA": 0}, cap, 77, 5e6) == {"AAA": []})
+check("an offer far under his price is turned down",
+      fv.free_agency(pool[:1], {"BBB": 10e6}, {"BBB": 1}, cap, 77, 5e6) == {"BBB": []})
 
 print("\nageing")
 check("young players improve", fv.aged_ovr(70, 21.0, 2) > 70)
