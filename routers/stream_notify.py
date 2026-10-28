@@ -9,7 +9,7 @@ starting instead, and the post goes out on the shared Discord queue.
 The post is a link to nbn.today (the homepage carries the player while live).
 A day with a game flagged as a stream (`stream` on the schedule game, set by a
 streamer or a bought stream) reads "NBN is live", then one line per stream
-game, away @ home, each team's role tag followed by its record (from the
+game, away at home, each team's role tag followed by its record (from the
 standings the stats build writes, so going into the game); a day of box
 scores reads "Box Scores live" and pings no one. Under each matchup goes one
 line naming a random player from each roster ("Come watch Garland visit
