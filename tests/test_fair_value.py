@@ -4,15 +4,13 @@ Pins: the floored prior lands the simulator on the floored rating; who counts
 as under contract or re-signed in a later season; re-signing stops at the
 ceiling, best OVR first, a kept player stays and a bargain is kept past it;
 who walks and who signs them in free agency; the staff playoff edge; ageing;
-draft pick odds through the conveyance resolver; the crowd's mood from title
-futures; the bandwagon and playoff gate on expected finishes; discounting.
-Nothing reads the data dir.
+draft pick odds through the conveyance resolver; the bandwagon and playoff
+gate on expected finishes; discounting. Nothing reads the data dir.
 
     venv/bin/python -m tests.test_fair_value
 """
 from __future__ import annotations
 
-import math
 import sys
 from pathlib import Path
 from unittest import mock
@@ -294,22 +292,6 @@ check("and given back", m[1] > m[10] > m[-1] > 110.0)
 a1 = fv.market_series(days([100.0, 101.0, 99.0, 102.0]))
 a2 = fv.market_series(days([100.0, 101.0, 99.0, 102.0]))
 check("a rebuild gives the same series", [r["teams"]["AAA"]["market"] for r in a1] == [r["teams"]["AAA"]["market"] for r in a2])
-
-print("\nthe crowd")
-check("points, not a ratio", abs(fv.crowd_mood(4) - 0.04) < 1e-12)
-check("capped either way", fv.crowd_mood(50) == fv.CROWD_CAP and fv.crowd_mood(-50) == -fv.CROWD_CAP)
-fut = {"outcomes": [{"team": "AAA"}, {"team": "BBB"}],
-       "history": [{"ts": "2026-10-01T16:00:00+00:00", "p": [50.0, 50.0]},
-                   {"ts": "2026-11-02T03:00:00+00:00", "p": [60.0, 40.0]},     # Nov 1, 11pm in New York
-                   {"ts": "2026-11-03T16:00:00+00:00", "p": [45.0, 55.0]}]}
-at = fv.crowd_lookup("26-27", fut)
-check("a trade counts on its league day", at("26-27", "2026-11-01", "AAA") == 10.0)
-check("before any trade, nothing", at("26-27", "2026-09-01", "AAA") == 0.0)
-check("the last move of the day holds", at("26-27", "2026-11-05", "BBB") == 5.0)
-check("another season's rows are untouched", at("27-28", "2026-11-05", "AAA") == 0.0)
-flat = fv.market_series(days([100.0] * 3), shock=lambda *a: 0.0, crowd=lambda s, d, t: 5.0)
-check("the crowd's move is on the price, as a level",
-      all(abs(r["teams"]["AAA"]["market"] - 100 * math.exp(0.05)) < 1e-3 for r in flat))
 
 if FAILS:
     print(f"\n{len(FAILS)} FAILED")

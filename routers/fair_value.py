@@ -98,9 +98,7 @@ The model, in full:
   * **Market price** (`market_series`) is what it would trade at: fair value
     × exp(beta·league mood + team mood). Moods are mean-reverting walks with
     seeded fat-tailed shocks and GARCH volatility; news is overdone by
-    `OVERREACT` and given back. On top of that is the crowd: how far members
-    have moved the team's title futures from the opening line
-    (`CROWD_PER_POINT`). Recomputed over the season's history on every write,
+    `OVERREACT` and given back. Recomputed over the season's history on every write,
     so a rebuilt day carries forward.
 
 Run hourly by `snapshot_playoff_odds.py`, after the odds. One row per team per
@@ -1144,15 +1142,6 @@ TAIL_P, TAIL_X = 0.03, 3.0      # about one day in 33 is a shock this many times
 # in returns, market vs fair value ±6.5% typical.
 BETA_RANGE = (0.7, 1.3)
 
-# The crowd. Members trade the season's title futures (routers/markets.py) with
-# real NB¥, and how far they have moved a team's title odds from the bookie's
-# opening line is the one mood here that isn't drawn at random: CROWD_PER_POINT
-# of the price per percentage point, up to CROWD_CAP either way. Points rather
-# than a ratio, so a ¥60 bet that takes a long shot from 1% to 5% is a small
-# move and not a 400% one.
-CROWD_PER_POINT = 0.01
-CROWD_CAP = 0.10
-
 
 def _shock(*parts) -> float:
     """A standard shock seeded on `parts`: normal, with fat tails, unit variance."""
@@ -1173,61 +1162,13 @@ def team_beta(season: str, team: str) -> float:
     return lo + (hi - lo) * int.from_bytes(d[:8], "big") / 2**64
 
 
-def title_futures(season: str) -> Optional[dict]:
-    """The season's title futures market, if one was opened: one outcome a team."""
-    from .markets import MARKETS_FILE
-    for m in _load_json(MARKETS_FILE, []) or []:
-        teams = [o.get("team") for o in m.get("outcomes") or []]
-        if (m.get("title") or "").startswith(season) and "champion" in (m.get("title") or "").lower() \
-                and all(teams) and m.get("history") and m.get("status") != "void":
-            return m
-    return None
-
-
-def crowd_lookup(season: str, market: Optional[dict] = None):
-    """(season, day, team) -> the crowd's move on that team's title odds by the
-    end of `day` (league time), in percentage points from the opening line."""
-    from .league_time import LEAGUE_TZ
-    m = market if market is not None else title_futures(season)
-    if not m:
-        return lambda *_: 0.0
-    teams = [o["team"] for o in m["outcomes"]]
-    opening = m["history"][0]["p"]
-    steps = []
-    for h in m["history"]:
-        try:
-            day = datetime.fromisoformat(h["ts"]).astimezone(LEAGUE_TZ).date().isoformat()
-        except (KeyError, TypeError, ValueError):
-            continue
-        steps.append((day, h["p"]))
-
-    def at(s: str, day: str, team: str) -> float:
-        if s != season or team not in teams:
-            return 0.0
-        now = None
-        for d, p in steps:
-            if d > day:
-                break
-            now = p
-        i = teams.index(team)
-        return 0.0 if now is None else now[i] - opening[i]
-    return at
-
-
-def crowd_mood(points: float) -> float:
-    return max(-CROWD_CAP, min(CROWD_CAP, CROWD_PER_POINT * points))
-
-
-def market_series(rows: list[dict], shock=None, crowd=None) -> list[dict]:
+def market_series(rows: list[dict], shock=None) -> list[dict]:
     """Set every row's `market` price per team, oldest first, in place.
 
     One season's rows, a day apart. Each team's mood carries over day to day:
     it keeps SENT_KEEP of itself, adds OVERREACT of the day's fair-value move,
-    and takes a shock whose size follows the last few days' (VOL_MEMORY).
-    `crowd` (season, day, team) -> points is the title futures' move, and adds
-    its `crowd_mood` on top, as a level that holds while the crowd does."""
+    and takes a shock whose size follows the last few days' (VOL_MEMORY)."""
     shock = shock or _shock
-    crowd = crowd or (lambda *_: 0.0)
     mood, sent, var, last = 0.0, {}, {}, {}
     for row in rows:
         mood = MOOD_KEEP * mood + MOOD_VOL * shock(row["season"], row["date"], "league")
@@ -1243,10 +1184,8 @@ def market_series(rows: list[dict], shock=None, crowd=None) -> list[dict]:
             news = min(NEWS_CAP, (move / SENT_VOL) ** 2)
             var[t] = (1 - VOL_MEMORY - VOL_REACT) + VOL_REACT * (e * e + NEWS_VOL * news) + VOL_MEMORY * v
             last[t] = fv_now
-            c = crowd_mood(crowd(row["season"], row["date"], t))
-            x["market"] = round(fv_now * math.exp(team_beta(row["season"], t) * mood + sent[t] + c), 4)
+            x["market"] = round(fv_now * math.exp(team_beta(row["season"], t) * mood + sent[t]), 4)
             x["mood"] = round(sent[t], 5)
-            x["crowd"] = round(c, 5)
         row["league_mood"] = round(mood, 5)
     return rows
 
@@ -1255,7 +1194,7 @@ def write_history(rows: list[dict]) -> None:
     """Save the history, every season's market price recomputed first."""
     rows.sort(key=lambda r: (r["season"], r["date"]))
     for season in {r["season"] for r in rows}:
-        market_series([r for r in rows if r["season"] == season], crowd=crowd_lookup(season))
+        market_series([r for r in rows if r["season"] == season])
     _atomic_write(HISTORY_FILE, "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows))
 
 
@@ -1302,7 +1241,7 @@ def _attach_market(run: dict, rows: list[dict]) -> None:
     if day:
         for x in run["teams"]:
             m = day["teams"].get(x["team"]) or {}
-            x["market"], x["mood"], x["crowd"] = m.get("market"), m.get("mood"), m.get("crowd")
+            x["market"], x["mood"] = m.get("market"), m.get("mood")
         run["league_mood"] = day.get("league_mood")
 
 
