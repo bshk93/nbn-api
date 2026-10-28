@@ -192,12 +192,22 @@ def check_build(tmp: Path):
 
     real_loop = globals()["REAL_LOOP"]
     bs._run_build_once = fake_once
+    odds = []
+    bs._refresh_odds = lambda: odds.append(1)
     status_file.write_text(json.dumps({"status": "running", "started_at": now.isoformat()}))
     real_loop(now.isoformat())
     check("the build runs a second pass for the mid-build commit", len(runs) == 2, runs)
     final = json.loads(status_file.read_text())
     check("and ends done, with no rerun left over",
           final.get("status") == "done" and not final.get("rerun"), final)
+    check("then refreshes the odds once, after the last pass", len(odds) == 1, odds)
+
+    print("no odds refresh after a failed build")
+    odds.clear()
+    bs._run_build_once = lambda s: {"status": "error", "started_at": s, "error": "x"}
+    status_file.write_text(json.dumps({"status": "running", "started_at": now.isoformat()}))
+    real_loop(now.isoformat())
+    check("a failed build leaves the odds alone", odds == [], odds)
 
 
 REAL_LOOP = bs._build_loop
@@ -209,7 +219,7 @@ def main():
         saved = {k: getattr(bs, k) for k in (
             "DATA_DIR", "PLAYER_BIOS_FILE", "record_commit", "_remove_from_manual_queue",
             "_current_league_year", "_game_in_manual_queue", "BUILD_STATUS_FILE",
-            "_build_loop", "_run_build_once")}
+            "_build_loop", "_run_build_once", "_refresh_odds")}
         saved_archive = bs.shots.archive_for_game
         # The starters hook writes game-starters.jsonl next to the live data;
         # point it at the temp dir too, so a commit here never writes live.
