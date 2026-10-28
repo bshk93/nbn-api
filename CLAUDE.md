@@ -621,6 +621,10 @@ date in the last week with a game not yet played (`game_day_notify`'s rule,
 since the league runs behind). An unreadable schedule posts "NBN is live" with
 no pings.
 
+- **The post opens with the server's `:minionannouncement:`**, hardcoded as
+  `<:minionannouncement:1564839468823744572>` (`LIVE_EMOJI`): a bot's bare
+  `:name:` stays text. `DISCORD_LIVE_EMOJI` overrides it in the same `<:name:id>`
+  form (send `\:name:` in Discord to get one).
 - **Every request is HMAC-verified** against `TWITCH_EVENTSUB_SECRET` and
   refused when over 10 minutes old. Unset, the endpoint 403s everything.
   `DISCORD_LEAGUETALK_CHANNEL` unset, nothing posts.

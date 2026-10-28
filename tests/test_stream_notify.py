@@ -47,6 +47,7 @@ SECRET = "s3cret-for-tests"
 os.environ["TWITCH_EVENTSUB_SECRET"] = SECRET
 sn.STATE_FILE = Path(tempfile.mkdtemp()) / "stream-announce.json"
 sn.DISCORD_LEAGUETALK_CHANNEL = "111"
+saved_emoji, sn.LIVE_EMOJI = sn.LIVE_EMOJI, "🔴"   # the checks below read 🔴
 transport.DISCORD_BOT_TOKEN = "bot"
 SENT = []
 transport._enqueue = lambda msg: SENT.append(msg)
@@ -261,6 +262,14 @@ picked = {real_front_office("NYK") for _ in range(100)}
 check("current front office only, names escaped for Discord", picked == {"Kim", "jo\\_bo"}, picked)
 check("a team with nobody is None", real_front_office("BOS") is None)
 auth.load_members = real_members
+
+print("the server's own emoji")
+check("defaults to :minionannouncement:, as a bot has to send it",
+      saved_emoji == "<:minionannouncement:1564839468823744572>", saved_emoji)
+sn.LIVE_EMOJI = "<:other:1234567890>"
+check("an override opens the post",
+      sn.build_payload("box", [])["content"] == "<:other:1234567890> Box Scores [live](<https://nbn.today>)")
+sn.LIVE_EMOJI = "🔴"
 
 print("team_records off the standings file")
 tmp = Path(tempfile.mkdtemp()) / "standings-history.csv"
