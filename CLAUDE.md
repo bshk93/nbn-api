@@ -596,6 +596,28 @@ Helix call a minute.
 
 Pinned by `tests/test_stream_live.py` (no network).
 
+### Go-live post to #leaguetalk (`routers/stream_notify.py`)
+
+Twitch EventSub pushes `stream.online` to `POST /api/twitch/eventsub` within
+seconds of the stream starting; the banner above only learns of it when someone
+loads the site. The post is `🔴 NBN is live: https://nbn.today`, plus a ping for
+both teams of each game flagged `stream` on the day being streamed: the earliest
+date in the last week with a game not yet played (`game_day_notify`'s rule,
+since the league runs behind). A day of box scores pings no one.
+
+- **Every request is HMAC-verified** against `TWITCH_EVENTSUB_SECRET` and
+  refused when over 10 minutes old. Unset, the endpoint 403s everything.
+  `DISCORD_LEAGUETALK_CHANNEL` unset, nothing posts.
+- **One post per stream, never a restart.** No post within `RESTART_GAP_HOURS`
+  (12) of the last, stamped in `stream-announce.json` so an API restart doesn't
+  reset it; a redelivered message id is dropped; a stream that began over 15
+  minutes before we hear of it, or a rerun, isn't announced.
+- **Subscribing is a one-off**, after deploying with the secret set:
+  `set -a && source .env && set +a && venv/bin/python subscribe_twitch_eventsub.py create`,
+  then `list` should show it `enabled`. A revocation is logged at WARNING.
+
+Pinned by `tests/test_stream_notify.py` (no network).
+
 ## Link previews (`routers/og.py`)
 
 Six pages on the site are one shell serving many items, with the item fetched
