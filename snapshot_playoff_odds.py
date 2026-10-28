@@ -4,6 +4,10 @@
     venv/bin/python snapshot_playoff_odds.py             # compute and save
     venv/bin/python snapshot_playoff_odds.py --dry-run   # print, write nothing
 
+Also run by the API after each clean stats build (`_refresh_odds` in
+routers/boxscores.py), so a night's box scores reach the odds and fair value
+within a minute instead of within the hour.
+
 Saves playoff-odds.json (what GET /api/playoff-odds serves) and the day's row in
 playoff-odds-history.jsonl. The model is in routers/playoff_odds.py. Skips the
 offseason: nothing runs until the season's schedule file exists.
@@ -14,6 +18,7 @@ any earlier day whose box scores arrived late. A failure there is logged and
 does not fail the odds run.
 """
 import argparse
+import fcntl
 import json
 import sys
 import time
@@ -32,6 +37,11 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="print the odds, write nothing")
     args = ap.parse_args()
 
+    if not args.dry_run:
+        # The hourly timer and the API's post-build refresh both run this
+        # script; one waits for the other rather than both writing at once.
+        lock = open(DATA_DIR / ".playoff-odds.lock", "w")
+        fcntl.flock(lock, fcntl.LOCK_EX)
     season = current_season()
     if not (DATA_DIR / f"schedule-{season}.json").exists():
         print(json.dumps({"skipped": f"no schedule for {season}"}))

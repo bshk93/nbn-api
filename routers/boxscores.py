@@ -3,9 +3,11 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
@@ -271,9 +273,25 @@ def _build_loop(started: str) -> None:
         with _build_trigger_lock:
             if not _load_build_status().get("rerun"):
                 _save_build_status(result)
-                return
+                break
             started = datetime.now(timezone.utc).isoformat()
             _save_build_status({"status": "running", "started_at": started})
+    if result.get("status") == "done":
+        _refresh_odds()
+
+
+# Playoff odds and fair value (Wall Street 2) read the build's standings, so
+# they are refreshed after a clean build instead of waiting for the hourly
+# timer. The script takes its own lock, so this and the timer never overlap.
+ODDS_SCRIPT = Path(__file__).resolve().parent.parent / "snapshot_playoff_odds.py"
+
+
+def _refresh_odds() -> None:
+    try:
+        subprocess.run([sys.executable, str(ODDS_SCRIPT)], cwd=str(ODDS_SCRIPT.parent),
+                       capture_output=True, text=True, timeout=600)
+    except Exception as e:
+        print(f"playoff odds refresh after build failed: {e}", file=sys.stderr)
 
 
 def _trigger_build() -> bool:
