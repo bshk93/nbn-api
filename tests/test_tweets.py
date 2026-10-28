@@ -10,6 +10,10 @@ What's worth pinning:
   * **A tweet number is permanent**, and the list is newest first.
   * **?team= finds a team's tweets** whether it played in the game or owns
     the fan account.
+  * **Members post as themselves or a made-up identity**, and who really
+    posted is kept but never shown publicly, except to admin.
+  * **A handle belongs to whoever used it first**: nobody else can post as
+    the cast, as another member, or as someone's saved scoop account.
   * **Each stored tweet goes to Discord once**, as an embed, and the batch
     is saved even when Discord fails.
 
@@ -91,12 +95,12 @@ second = tw.post_tweets(batch("2026-10-23",
                               {"handle": "c", "name": "C", "text": "three", "team": "MIL"}), STATS)
 check("numbering carries on", second[0]["id"] == 3)
 
-listed = tw.list_tweets(limit=20, before=None, team=None)
+listed = tw.list_tweets(limit=20, before=None, team=None, authorization=None)
 check("newest first", [t["id"] for t in listed] == [3, 2, 1])
-check("?limit= caps the list", [t["id"] for t in tw.list_tweets(limit=1, before=None, team=None)] == [3])
-check("?before= pages back", [t["id"] for t in tw.list_tweets(limit=20, before=3, team=None)] == [2, 1])
-check("?team= finds a team in the game", [t["id"] for t in tw.list_tweets(limit=20, before=None, team="ind")] == [1])
-check("?team= finds a fan account's team", [t["id"] for t in tw.list_tweets(limit=20, before=None, team="MIL")] == [3])
+check("?limit= caps the list", [t["id"] for t in tw.list_tweets(limit=1, before=None, team=None, authorization=None)] == [3])
+check("?before= pages back", [t["id"] for t in tw.list_tweets(limit=20, before=3, team=None, authorization=None)] == [2, 1])
+check("?team= finds a team in the game", [t["id"] for t in tw.list_tweets(limit=20, before=None, team="ind", authorization=None)] == [1])
+check("?team= finds a fan account's team", [t["id"] for t in tw.list_tweets(limit=20, before=None, team="MIL", authorization=None)] == [3])
 
 print("delete")
 tw.delete_tweet(3, STATS)
@@ -129,6 +133,75 @@ tw.transport.send = lambda *a, **kw: SENT.append("x")
 before = len(SENT)
 tw.post_tweets(batch("2026-10-24", {"handle": "f", "name": "F", "text": "six"}), STATS)
 check("no channel, no post", len(SENT) == before)
+
+print("member tweets")
+tw.DISCORD_TWEETS_CHANNEL = "123"
+tw.transport.send = lambda ch, payload, **kw: SENT.append(payload() if callable(payload) else payload)
+PROFILES = {"seq": 0, "items": []}
+tw._load_profiles = lambda: PROFILES
+tw._save_profiles = lambda store: None
+tw.load_members = lambda: {"bryn": {}, "Mo Money": {}}
+tw._member_team = lambda name: "MIL" if name == "bryn" else None
+tw.league_today_str = lambda: "2026-10-28"
+BRYN = {"name": "bryn", "roles": []}
+MO = {"name": "Mo Money", "roles": []}
+ADMIN = {"name": "boss", "roles": ["admin"]}
+
+
+def refused(name, status, fn, *a):
+    try:
+        fn(*a)
+    except HTTPException as e:
+        check(name, e.status_code == status)
+        return
+    check(name, False)
+
+
+mine = tw.post_member_tweet(tw.MemberTweet(text="hello"), BRYN)
+check("as yourself: your name, handle and team", (mine["name"], mine["handle"], mine["team"]) == ("bryn", "bryn", "MIL"))
+check("the poster never comes back", "poster" not in mine and "author" not in mine)
+check("it went to Discord", SENT[-1]["embeds"][0]["description"] == "hello")
+check("a member's handle drops what Twitter won't allow", tw._self_handle("Mo Money") == "MoMoney")
+
+scoop = tw.post_member_tweet(tw.MemberTweet(text="sources: big trade", identity="anon",
+                                            handle="ShamsOfNBN", name="Shams", save=True), MO)
+check("a made-up identity posts under its own name", scoop["handle"] == "ShamsOfNBN" and scoop["team"] is None)
+check("save keeps it as a profile", [p["handle"] for p in tw.my_profiles(MO)["profiles"]] == ["ShamsOfNBN"])
+pid = tw.my_profiles(MO)["profiles"][0]["id"]
+again = tw.post_member_tweet(tw.MemberTweet(text="more", identity="profile", profile_id=pid), MO)
+check("a saved profile loads", again["handle"] == "ShamsOfNBN")
+refused("someone else's profile is refused", 404, tw.post_member_tweet,
+        tw.MemberTweet(text="x", identity="profile", profile_id=pid), BRYN)
+refused("someone else's scoop handle is taken", 409, tw.post_member_tweet,
+        tw.MemberTweet(text="x", identity="anon", handle="shamsofnbn", name="Fake"), BRYN)
+refused("the cast's handles are taken", 409, tw.post_member_tweet,
+        tw.MemberTweet(text="x", identity="anon", handle="a", name="Fake"), BRYN)
+refused("another member's own handle is taken", 409, tw.post_member_tweet,
+        tw.MemberTweet(text="x", identity="anon", handle="MoMoney", name="Mo"), BRYN)
+refused("a made-up identity needs a handle", 422, tw.post_member_tweet,
+        tw.MemberTweet(text="x", identity="anon", name="Nobody"), BRYN)
+refused("a bad handle is refused", 422, tw.post_member_tweet,
+        tw.MemberTweet(text="x", identity="anon", handle="has space", name="N"), BRYN)
+
+listed = tw.list_tweets(limit=100, before=None, team=None, authorization=None)
+check("the public list carries no poster", not any("poster" in t or "author" in t for t in listed))
+check("admin can see who posted", tw.tweet_poster(scoop["id"], ADMIN)["poster"] == "Mo Money")
+check("an official tweet names its account", tw.tweet_poster(1, ADMIN)["identity"] == "official")
+tw._resolve_token = lambda h: MO if h == "Bearer mo" else None
+marked = [t["id"] for t in tw.list_tweets(limit=100, before=None, team=None, authorization="Bearer mo") if t.get("mine")]
+check("signed in, your own tweets are marked mine", marked == sorted([scoop["id"], again["id"]], reverse=True))
+
+refused("deleting someone else's tweet is refused", 403, tw.delete_tweet, scoop["id"], BRYN)
+tw.delete_tweet(again["id"], MO)
+check("you can delete your own", all(t["id"] != again["id"] for t in STORE["items"]))
+tw.delete_profile(pid, MO)
+check("deleting a profile forgets it", tw.my_profiles(MO)["profiles"] == [])
+refused("its handle stays taken by its tweets", 409, tw.post_member_tweet,
+        tw.MemberTweet(text="x", identity="anon", handle="ShamsOfNBN", name="Fake"), BRYN)
+
+for i in range(tw.MEMBER_DAILY_LIMIT - 1):
+    tw.post_member_tweet(tw.MemberTweet(text=f"spam {i}"), BRYN)
+refused(f"{tw.MEMBER_DAILY_LIMIT} a day, then 429", 429, tw.post_member_tweet, tw.MemberTweet(text="one more"), BRYN)
 
 if FAILS:
     print(f"\n{len(FAILS)} failed")

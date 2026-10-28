@@ -999,7 +999,10 @@ session doing the box scores writes them.
 |---|---|---|
 | `GET /api/tweets` | Public | newest first; `?limit=` (≤100), `?before=<n>` to page, `?team=` |
 | `POST /api/tweets` | `stats` or `rosters` | `{date, tweets: [{handle, name, text, teams?, slug?, team?, likes?, retweets?}]}`, up to 20 |
-| `DELETE /api/tweets/{n}` | `stats` or `rosters` | |
+| `DELETE /api/tweets/{n}` | `stats` or `rosters`, or the member who posted it | |
+| `POST /api/tweets/member` | any member | one tweet, `{text, identity: self\|profile\|anon, profile_id?, handle?, name?, team?, save?}`; 10 a day |
+| `GET`/`POST /api/tweets/profiles`, `DELETE /api/tweets/profiles/{n}` | member (delete: owner or admin) | your own handle and saved identities |
+| `GET /api/tweets/{n}/poster` | admin | who really posted |
 
 - **The text is fiction; the numbers are not.** The skill checks every stat in
   a tweet against the committed box score. The server can't, so it only checks
@@ -1009,6 +1012,14 @@ session doing the box scores writes them.
   `team` is a fan account's team.
 - Stored in `tweets.json` with a monotonic `seq`, like quadrants. It is
   written league content, so it is backed up with the data dir.
+- **Members post as themselves or a made-up identity** (a scoop account),
+  saved as a profile in `tweet-profiles.json` if they like. Who really posted
+  is stored as `poster` and dropped from the public list, along with `author`;
+  only `GET /api/tweets/{n}/poster` (admin) shows it. Signed in, your own
+  member tweets come back with `mine: true`.
+- **A handle belongs to whoever used it first** (`_handle_owner`): a member's
+  own handle, a saved profile, the cast, or a past tweet. Others get a 409.
+  Official batches (`POST /api/tweets`) aren't checked against it.
 - **Every stored tweet is also posted to `#twitter`** (`DISCORD_TWEETS_CHANNEL`),
   one embed per tweet, including the arena tweets from `post_one`. Deleting a
   tweet here leaves its Discord post up; the transport keeps no message ids.
