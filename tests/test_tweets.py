@@ -10,6 +10,8 @@ What's worth pinning:
   * **A tweet number is permanent**, and the list is newest first.
   * **?team= finds a team's tweets** whether it played in the game or owns
     the fan account.
+  * **Each stored tweet goes to Discord once**, as an embed, and the batch
+    is saved even when Discord fails.
 
 The store is patched into memory, and endpoints are called directly, so
 nothing touches tweets.json in NBS_DATA_DIR.
@@ -50,6 +52,10 @@ tw._load_store = lambda: STORE
 tw._save_store = lambda store: None
 tw.log_write = lambda info, msg: None
 STATS = {"name": "bryn", "roles": ["stats"]}
+SENT = []
+tw.DISCORD_TWEETS_CHANNEL = "123"
+tw.transport.configured = lambda ch: bool(ch)
+tw.transport.send = lambda ch, payload, **kw: SENT.append(payload() if callable(payload) else payload)
 
 
 def batch(date, *tweets):
@@ -101,6 +107,28 @@ try:
     check("deleting a missing tweet → 404", False)
 except HTTPException as e:
     check("deleting a missing tweet → 404", e.status_code == 404)
+
+print("discord")
+check("every posted tweet went to Discord once", len(SENT) == 4)
+e = SENT[0]["embeds"][0]
+check("the embed carries the text", e["description"] == "one" and e["author"]["name"] == "A (@a)")
+check("a tweet can't ping anyone", SENT[0]["allowed_mentions"] == {"parse": []})
+from routers.discord import TEAM_COLORS  # noqa: E402
+check("a fan account takes its team's colour", SENT[2]["embeds"][0]["color"] == TEAM_COLORS["MIL"])
+player = tw._embed({"name": "Giannis", "handle": "Giannis_An34", "text": "w", "slug": "antetokounmpo-giannis",
+                    "teams": ["IND", "MIL"], "team": None, "likes": 1200, "retweets": 3,
+                    "created_at": "2026-10-23T00:00:00+00:00"})
+check("a player's account shows his face", player["author"]["icon_url"].endswith("/api/players/antetokounmpo-giannis/headshot"))
+check("the footer names the game", "IND @ MIL" in player["footer"]["text"] and "1,200" in player["footer"]["text"])
+tw.transport.send = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("down"))
+n = len(STORE["items"])
+tw.post_tweets(batch("2026-10-24", {"handle": "e", "name": "E", "text": "five"}), STATS)
+check("Discord failing doesn't lose the tweet", len(STORE["items"]) == n + 1)
+tw.DISCORD_TWEETS_CHANNEL = ""
+tw.transport.send = lambda *a, **kw: SENT.append("x")
+before = len(SENT)
+tw.post_tweets(batch("2026-10-24", {"handle": "f", "name": "F", "text": "six"}), STATS)
+check("no channel, no post", len(SENT) == before)
 
 if FAILS:
     print(f"\n{len(FAILS)} failed")

@@ -24,10 +24,17 @@ score: arena naming rights (routers/arenas.py) post one when a bid lands. Those
 carry a `ref` naming the event, so `delete_by_ref` can take the tweet down if
 the event is undone.
 
+Every stored tweet is also posted to `DISCORD_TWEETS_CHANNEL`, one message
+each, as an embed that reads like the card (`_embed`). Inert without the
+channel. Deleting a tweet here does not take its Discord post down: the shared
+transport doesn't keep message ids.
+
 Pinned by tests/test_tweets.py.
 """
 from __future__ import annotations
 
+import logging
+import os
 import re
 import threading
 from datetime import datetime, timezone
@@ -36,11 +43,19 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 
+from . import discord_transport as transport
 from .auth import require_any_role
 from .constants import TWEETS_FILE
 from .storage import _load_json, _save_json, log_write
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+DISCORD_TWEETS_CHANNEL = os.environ.get("DISCORD_TWEETS_CHANNEL", "").strip()
+SITE = "https://nbn.today"
+# A game day is at most one batch of MAX_BATCH, plus the odd arena tweet.
+MAX_BURST = 30
+BURST_WINDOW = 900   # seconds
 
 _lock = threading.Lock()
 
@@ -117,6 +132,41 @@ def _save_store(store: dict):
     _save_json(TWEETS_FILE, store)
 
 
+def _embed(item: dict) -> dict:
+    """One tweet as a Discord embed: the account as the author line, the text
+    as the body, likes and retweets in the footer, the team's colour."""
+    from .discord import TEAM_COLORS, NBN_BLUE   # lazy: discord.py is a heavy import
+    teams = item.get("teams") or []
+    colour_team = item.get("team") or (teams[1] if teams else None)
+    author = {"name": f"{item['name']} (@{item['handle']})"}
+    if item.get("slug"):
+        author["icon_url"] = f"{SITE}/api/players/{item['slug']}/headshot"
+    embed = {
+        "author": author,
+        "description": item["text"],
+        "color": TEAM_COLORS.get(colour_team, NBN_BLUE),
+        "footer": {"text": f"\u2764 {item['likes']:,}   \U0001F501 {item['retweets']:,}   \u00b7 NBN Twitter"},
+        "timestamp": item["created_at"],
+    }
+    if len(teams) == 2:
+        embed["footer"]["text"] += f" \u00b7 {teams[0]} @ {teams[1]}"
+    return embed
+
+
+def _notify(items: list[dict]) -> None:
+    """Post each tweet to Discord. Never raises; the tweets are already saved."""
+    try:
+        if not transport.configured(DISCORD_TWEETS_CHANNEL):
+            return
+        for item in items:
+            transport.send(DISCORD_TWEETS_CHANNEL,
+                           lambda item=item: {"embeds": [_embed(item)],
+                                              "allowed_mentions": {"parse": []}},
+                           max_burst=MAX_BURST, burst_window=BURST_WINDOW)
+    except Exception as exc:
+        logger.warning("Tweet notify failed: %s", exc)
+
+
 def post_one(tweet: TweetIn, date: str, author: str, ref: str) -> dict:
     """Store one tweet written by the API itself, tagged with the event it is about."""
     now = datetime.now(timezone.utc).isoformat()
@@ -127,6 +177,7 @@ def post_one(tweet: TweetIn, date: str, author: str, ref: str) -> dict:
                 "author": author, "ref": ref, **tweet.model_dump()}
         store["items"].append(item)
         _save_store(store)
+    _notify([item])
     return item
 
 
@@ -168,6 +219,7 @@ def post_tweets(body: TweetBatch, info: dict = Depends(require_any_role("stats",
                         "author": info["name"], **t.model_dump()})
         store["items"].extend(out)
         _save_store(store)
+    _notify(out)
     log_write(info, f"POST tweets — {len(out)} for {body.date}")
     return out
 

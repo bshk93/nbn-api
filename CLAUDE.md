@@ -1009,6 +1009,9 @@ session doing the box scores writes them.
   `team` is a fan account's team.
 - Stored in `tweets.json` with a monotonic `seq`, like quadrants. It is
   written league content, so it is backed up with the data dir.
+- **Every stored tweet is also posted to `#twitter`** (`DISCORD_TWEETS_CHANNEL`),
+  one embed per tweet, including the arena tweets from `post_one`. Deleting a
+  tweet here leaves its Discord post up; the transport keeps no message ids.
 
 Pinned by `tests/test_tweets.py`.
 
