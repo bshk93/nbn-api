@@ -276,22 +276,39 @@ check("and keeps as many as asked, every team once",
       len(drafty["draft_orders"]) == 50 and all(sorted(o) == ["AAA", "BBB", "CCC"] for o in drafty["draft_orders"]))
 
 print("\nthe market price")
-zs = [fv._shock("t", i) for i in range(4000)]
-check("a shock is seeded", fv._shock("a", 1) == fv._shock("a", 1) and fv._shock("a", 1) != fv._shock("a", 2))
-check("shocks are unit variance", abs(sum(z * z for z in zs) / len(zs) - 1) < 0.1)
-check("a beta is fixed for the season and in its band",
-      fv.team_beta("26-27", "AAA") == fv.team_beta("26-27", "AAA") and fv.BETA_RANGE[0] <= fv.team_beta("26-27", "AAA") <= fv.BETA_RANGE[1])
-def days(prices):
-    return [{"season": "26-27", "date": f"2026-11-{i + 1:02d}", "teams": {"AAA": {"price": p}}} for i, p in enumerate(prices)]
-calm = fv.market_series(days([100.0] * 5), shock=lambda *a: 0.0)
-check("no news, no shocks: the market sits at fair value", all(r["teams"]["AAA"]["market"] == 100.0 for r in calm))
-jump = fv.market_series(days([100.0, 110.0] + [110.0] * 40), shock=lambda *a: 0.0)
-m = [r["teams"]["AAA"]["market"] for r in jump]
+def days(prices, wl=None, proj=41.0):
+    wl = wl or [(0, 0)] * len(prices)
+    return [{"season": "26-27", "date": f"2026-11-{i + 1:02d}",
+             "teams": {"AAA": {"price": p, "w": w, "l": l, "proj_w": proj}}}
+            for i, (p, (w, l)) in enumerate(zip(prices, wl))]
+mkt = lambda rows: [r["teams"]["AAA"]["market"] for r in rows]
+calm = fv.market_series(days([100.0] * 5))
+check("no news, no games: the market sits at fair value", all(m == 100.0 for m in mkt(calm)))
+m = mkt(fv.market_series(days([100.0, 110.0] + [110.0] * 40)))
 check("news is overdone", m[1] > 110.0)
 check("and given back", m[1] > m[10] > m[-1] > 110.0)
-a1 = fv.market_series(days([100.0, 101.0, 99.0, 102.0]))
-a2 = fv.market_series(days([100.0, 101.0, 99.0, 102.0]))
-check("a rebuild gives the same series", [r["teams"]["AAA"]["market"] for r in a1] == [r["teams"]["AAA"]["market"] for r in a2])
+check("a quiet day after it moves less than the news day", abs(m[2] / m[1] - 1) < 0.01)
+# Ten straight wins for a .500 team: form is +5 wins over expected, the streak is 7 past 3.
+hot = fv.market_series(days([100.0] * 11, [(i, 0) for i in range(11)]))
+parts = hot[-1]["teams"]["AAA"]["mood_parts"]
+check("form counts wins over what was expected", abs(parts["form"] - 0.05) < 1e-9)
+check("a long streak is capped", parts["streak"] == fv.STREAK_CAP)
+check("the whole mood is capped", hot[-1]["teams"]["AAA"]["mood"] <= fv.MOOD_CAP)
+cold = fv.market_series(days([100.0] * 6, [(0, i) for i in range(6)]))
+check("a losing streak prices below fair", cold[-1]["teams"]["AAA"]["market"] < 100.0)
+check("a three-game streak is nothing yet", cold[3]["teams"]["AAA"]["mood_parts"]["streak"] == 0)
+good = fv.market_series(days([100.0] * 11, [(i, 0) for i in range(11)], proj=74.0))
+check("winning is less of a surprise for a team expected to",
+      good[-1]["teams"]["AAA"]["mood_parts"]["form"] < parts["form"])
+lit = fv.market_series(days([100.0] * 2, [(0, 0), (1, 0)]), {"AAA": 0.05})
+check("last season's champion starts with its glow", abs(lit[0]["teams"]["AAA"]["mood_parts"]["glow"] - 0.05) < 1e-9)
+check("and it fades with games played", lit[1]["teams"]["AAA"]["mood_parts"]["glow"] < 0.05)
+br = [{"SEASON": "25-26", "ROUND": "4", "T1": "AAA", "T2": "BBB", "WINNER": "BBB"},
+      {"SEASON": "25-26", "ROUND": "3", "T1": "BBB", "T2": "CCC", "WINNER": "BBB"}]
+check("the glow goes to last season's finalists",
+      fv.title_glow("26-27", br) == {"BBB": fv.GLOW["Champion"], "AAA": fv.GLOW["Runner-Up"]})
+check("nothing random: the same history gives the same series",
+      mkt(fv.market_series(days([100.0, 101.0, 99.0]))) == mkt(fv.market_series(days([100.0, 101.0, 99.0]))))
 
 if FAILS:
     print(f"\n{len(FAILS)} FAILED")
