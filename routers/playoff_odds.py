@@ -137,7 +137,10 @@ def _phi(x: float) -> float:
 
 
 def simulate(results: list[dict], schedule: list[dict], priors: dict[str, float],
-             sims: int = SIMS, seed: int = 0) -> dict:
+             sims: int = SIMS, seed: int = 0,
+             playoff_bonus: Optional[dict[str, float]] = None) -> dict:
+    """`playoff_bonus` adds points a game to a team in playoff series only
+    (fair value's playoff edge). The odds published here never pass it."""
     teams = sorted(priors)
     rng = random.Random(seed)
 
@@ -189,11 +192,16 @@ def simulate(results: list[dict], schedule: list[dict], priors: dict[str, float]
         def p_home(h, a):
             return _phi((true[h] - true[a] + HOME_EDGE) / GAME_SD)
 
+        bonus = playoff_bonus or {}
+
+        def p_series(h, a):
+            return _phi((true[h] + bonus.get(h, 0.0) - true[a] - bonus.get(a, 0.0) + HOME_EDGE) / GAME_SD)
+
         def series(hi, lo):
             # 2-2-1-1-1. Playing all seven decides the same winner as stopping at four.
             won = 0
             for at_hi in (1, 1, 0, 0, 1, 0, 1):
-                p = p_home(hi, lo) if at_hi else 1.0 - p_home(lo, hi)
+                p = p_series(hi, lo) if at_hi else 1.0 - p_series(lo, hi)
                 won += rand() < p
             return hi if won >= 4 else lo
 

@@ -49,6 +49,13 @@ The model, in full:
   * **Wins and playoffs.** Each season is simulated with the playoff odds
     model (`playoff_odds.simulate`), on this season's schedule. Revenue takes
     the expected value over every finish.
+  * **Playoff edge.** Some staffs' teams beat their regular season in the
+    playoffs, and keep doing it (`playoff_edges`). Each person on a team's
+    staff (owner, GM or coach, from members.json tenures) carries the series
+    they were on staff for: won minus what the two teams' point differentials
+    predicted, summed and shrunk by `PLAYOFF_EDGE_SHRINK`. A team's edge is
+    its current staff's average, worth `PLAYOFF_EDGE_POINTS` a game in
+    playoff series only, this season and every projected one.
   * **Revenue.** The ledger's formulas on expected inputs: gate from projected
     win %, stars (players in the league's top `STAR_COUNT` OVRs) and the
     bandwagon from expected finishes; playoff gate at `HOME_PER_SERIES` home
@@ -116,7 +123,7 @@ from stats_build import finances as fin
 
 router = APIRouter()
 
-MODEL = "fv3"
+MODEL = "fv4"
 
 # ── The model's constants. Every figure is NB¥. ──────────────────────────────
 
@@ -154,6 +161,19 @@ STAR_COUNT = 15                 # All-NBN is 15 players a season
 ROSTER_FILL = 14                # later seasons fill the standard roster to this
 HOME_PER_SERIES = 2.6           # measured: 467 playoff games over 90 series, 21 to 26
 CAP_GROWTH = 0.05               # aprons for seasons not on file yet, per season
+
+# The playoff edge. Fit on the 90 series 20-21 to 25-26, each scored only on
+# the series before it. A person's record is shrunk by n/(n + 8): the fit can't
+# tell 3 from 8 (log-likelihood +1.93 against +1.66 over differential alone),
+# and 8 keeps one title run from counting as much as five seasons of them. At
+# 8, a unit of staff edge moves the series logit 3.96 ± 2.26; it rests mostly
+# on PHX, so half is used. The sim's series logit moves 0.194 a point a game,
+# so that is 10.2 points a unit: PHX's +0.22 is about +2.2 a game.
+PLAYOFF_EDGE_SHRINK = 8
+SERIES_LOGIT_PER_DIFF = 0.0575  # what a point of season differential is worth in a series
+PLAYOFF_EDGE_POINTS = 10.2
+STANDINGS_CSV = DERIVED_DIR / "standings" / "standings-history.csv"
+BRACKETS_CSV = DERIVED_DIR / "standings" / "playoff-brackets.csv"
 
 HOLD_TAGS = {"UFA", "RFA"}
 
@@ -537,6 +557,63 @@ def free_agency(pool: list[dict], budgets: dict[str, float], open_spots: dict[st
     return out
 
 
+# ── Playoff edge: staffs whose teams beat their season in the playoffs ───────
+
+def playoff_day(season: str) -> str:
+    """The day a season's playoff staff is read on: May 1 of its second year."""
+    return f"20{int(season[3:5]):02d}-05-01"
+
+
+def staff_on(members: dict, team: str, day: str) -> list[str]:
+    """Everyone on a team's staff on `day`: owner, GM or coach, all equal."""
+    return sorted(name for name, m in members.items() for t in (m.get("tenures") or [])
+                  if (t.get("team") or "").upper() == team and (t.get("start") or "9999") <= day
+                  <= (t.get("end") or "9999"))
+
+
+def playoff_records(members: dict, brackets: list[dict], standings: list[dict],
+                    before: str) -> dict[str, list[float]]:
+    """Person -> each series before `before` he was on staff for: 1 for a win,
+    0 for a loss, less the chance the two point differentials gave his team."""
+    diff = {(r["SEASON"], r["TEAM"]): _num(r.get("DIFF")) for r in standings}
+    out: dict[str, list[float]] = {}
+    for b in brackets:
+        s = b.get("SEASON") or ""
+        if s >= before or (s, b["T1"]) not in diff or (s, b["T2"]) not in diff:
+            continue
+        p1 = 1 / (1 + math.exp(-SERIES_LOGIT_PER_DIFF * (diff[(s, b["T1"])] - diff[(s, b["T2"])])))
+        day = playoff_day(s)
+        for team, won, p in ((b["T1"], b["WINNER"] == b["T1"], p1), (b["T2"], b["WINNER"] == b["T2"], 1 - p1)):
+            for name in staff_on(members, team, day):
+                out.setdefault(name, []).append(float(won) - p)
+    return out
+
+
+def person_edge(record: list[float]) -> float:
+    return sum(record) / (len(record) + PLAYOFF_EDGE_SHRINK)
+
+
+def playoff_edges(season: str, today: str, teams: list[str], members: Optional[dict] = None,
+                  brackets: Optional[list[dict]] = None, standings: Optional[list[dict]] = None) -> dict:
+    """Team -> {points, edge, staff}: its current staff's average edge, and the
+    points a playoff game that is worth. Someone with no playoff series is 0."""
+    if members is None:
+        from .auth import load_members
+        members = load_members()
+    if brackets is None:
+        brackets = read_csv(BRACKETS_CSV)[1] if BRACKETS_CSV.exists() else []
+    if standings is None:
+        standings = read_csv(STANDINGS_CSV)[1] if STANDINGS_CSV.exists() else []
+    records = playoff_records(members, brackets, standings, season)
+    out = {}
+    for t in teams:
+        staff = [{"name": n, "series": len(records.get(n, [])), "edge": round(person_edge(records.get(n, [])), 4)}
+                 for n in staff_on(members, t, today)]
+        edge = sum(x["edge"] for x in staff) / len(staff) if staff else 0.0
+        out[t] = {"edge": round(edge, 4), "points": round(PLAYOFF_EDGE_POINTS * edge, 2), "staff": staff}
+    return out
+
+
 # ── Revenue on expected inputs ───────────────────────────────────────────────
 
 def finish_probs(row: dict) -> dict[str, float]:
@@ -694,6 +771,8 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
     ledger = inputs.get("ledger") if "ledger" in inputs else load_ledger()
     teams = sorted(VALID_TEAMS)
     seed = season_seed(season)
+    edges = inputs["playoff_edges"] if "playoff_edges" in inputs else playoff_edges(season, today, teams)
+    bonus = {t: e["points"] for t, e in edges.items()}
 
     total = HORIZON
     seasons = [season_after(season, k) for k in range(total)]
@@ -709,7 +788,8 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
     healthy_or_not = {t: injured_strength(t, rostered[t], injuries, left) for t in teams}
     priors0 = po.roster_priors({t: v[0] for t, v in healthy_or_not.items()})
     margin, played = _rating_inputs(results)
-    sims = [po.simulate(results, schedule, floored_priors(priors0, margin, played), sims=SIMS_NOW, seed=seed)]
+    sims = [po.simulate(results, schedule, floored_priors(priors0, margin, played), sims=SIMS_NOW, seed=seed,
+                        playoff_bonus=bonus)]
 
     # Later seasons: who is on the books, aged, filled and pulled to the middle.
     rep_ovr, rep_pay = replacement(teams, bios, ovr_now, season)
@@ -784,7 +864,7 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
             st[t] = None if base is None else base + gain
         strengths.append(st)
         pri = {t: v * REVERT ** k for t, v in po.roster_priors(st).items()}
-        sims.append(po.simulate([], schedule, pri, sims=SIMS_LATER, seed=seed + k))
+        sims.append(po.simulate([], schedule, pri, sims=SIMS_LATER, seed=seed + k, playoff_bonus=bonus))
     # The outlook season (see OUTLOOK_YEARS).
     slots[total - 1] = draft_slots({x["team"]: x for x in sims[total - 1]["teams"]})
     k_out = total - 1 + OUTLOOK_YEARS
@@ -809,7 +889,7 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
                 gain += c["share"] * max(0.0, with_him - base)
         outlook_strength[t] = None if base is None else base + gain
     pri = {t: v * REVERT ** (total - 1) for t, v in po.roster_priors(outlook_strength).items()}
-    outlook_sim = po.simulate([], schedule, pri, sims=SIMS_LATER, seed=seed + k_out)
+    outlook_sim = po.simulate([], schedule, pri, sims=SIMS_LATER, seed=seed + k_out, playoff_bonus=bonus)
     outlook_rows = {r["team"]: r for r in outlook_sim["teams"]}
     rows = [{r["team"]: r for r in run["teams"]} for run in sims]
 
@@ -974,6 +1054,7 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
             "injuries": [{**i, "name": (bios.get(i["slug"]) or {}).get("name")} for i in healthy_or_not[t][1]],
             "w": r0["w"], "l": r0["l"], "season_left": round(f, 4), "years": years,
             "picks": drafted[t],
+            "playoff_edge": edges.get(t),
             "outlook": {"season": season_after(season, k_out),
                         "strength": None if outlook_strength[t] is None else round(outlook_strength[t], 2),
                         "proj_w": ro["proj_w"], "revenue": round(rev_out)},
