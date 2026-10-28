@@ -39,9 +39,9 @@ Requires (in .env):
   TWITCH_EVENTSUB_SECRET       (10-100 chars; the same value given to
                                 subscribe_twitch_eventsub.py)
   DISCORD_LEAGUETALK_CHANNEL   (unset, nothing posts)
-  DISCORD_LIVE_EMOJI           (optional; the server's own emoji opens the post,
-                                in the form a bot has to send it:
-                                <:minionannouncement:123…>. Unset, 🔴)
+  DISCORD_LIVE_EMOJI           (optional; overrides the emoji that opens the
+                                post, in the form a bot has to send it:
+                                <:name:id>. Unset, the server's :minionannouncement:)
 
 Subscribe once with `subscribe_twitch_eventsub.py`.
 
@@ -76,7 +76,7 @@ log = logging.getLogger(__name__)
 
 DISCORD_LEAGUETALK_CHANNEL = os.environ.get("DISCORD_LEAGUETALK_CHANNEL", "").strip()
 # A bot can't send a custom emoji as `:name:`; it has to be `<:name:id>`.
-LIVE_EMOJI = os.environ.get("DISCORD_LIVE_EMOJI", "").strip() or "🔴"
+LIVE_EMOJI = os.environ.get("DISCORD_LIVE_EMOJI", "").strip() or "<:minionannouncement:1564839468823744572>"
 SITE_URL = "https://nbn.today"
 STATE_FILE = DATA_DIR / "stream-announce.json"
 
