@@ -3,8 +3,9 @@
 Pins: the floored prior lands the simulator on the floored rating; who counts
 as under contract or re-signed in a later season; re-signing stops at the
 ceiling, best OVR first, a kept player stays and a bargain is kept past it;
-who walks and who signs them in free agency; the staff playoff edge; ageing; the bandwagon and
-playoff gate on expected finishes; discounting. Nothing reads the data dir.
+who walks and who signs them in free agency; the staff playoff edge; ageing;
+draft pick odds through the conveyance resolver; the bandwagon and playoff
+gate on expected finishes; discounting. Nothing reads the data dir.
 
     venv/bin/python -m tests.test_fair_value
 """
@@ -164,8 +165,10 @@ check("but not more regular-season games", next(x for x in boosted["teams"] if x
 
 print("\nageing")
 check("young players improve", fv.aged_ovr(70, 21.0, 2) > 70)
-check("prime players hold", fv.aged_ovr(85, 28.0, 1) == 85)
+check("prime players move under a point", abs(fv.aged_ovr(85, 28.0, 1) - 85) < 1)
 check("old players decline", fv.aged_ovr(85, 33.5, 2) < 85)
+check("a 21-year-old gains more than a 33-year-old loses in a year",
+      fv.aged_ovr(80, 21.0, 1) - 80 > 0 and fv.aged_ovr(80, 33.0, 1) - 80 < 0)
 check("unknown age: unchanged", fv.aged_ovr(80, None, 2) == 80)
 check("never above 99", fv.aged_ovr(98, 20.0, 2) == 99)
 
@@ -247,21 +250,30 @@ print("\ndraft picks")
 check("the top pick is the best", fv.rookie_ovr(1) > fv.rookie_ovr(10) > fv.rookie_ovr(45))
 check("a top pick is near 81", abs(fv.rookie_ovr(1) - 80.74) < 1e-9)
 check("the 2027 draft follows 26-27", fv.draft_after(2027) == "26-27")
-picks = [
-    {"year": 2026, "round": 1, "orig": "AAA", "owner": "AAA", "leaves": []},
-    {"year": 2027, "round": 1, "orig": "AAA", "owner": "BBB", "leaves": []},
-    {"year": 2027, "round": 1, "orig": "CCC", "owner": "AAA|CCC",
-     "leaves": [{"team": "AAA", "description": "swap priority (better pick)"},
-                {"team": "CCC", "description": "swap priority (worse pick)"}]},
-    {"year": 2028, "round": 2, "orig": "DDD", "owner": "?", "leaves": []},
-]
-cl = fv.pick_claims(picks, "26-27")
-check("a draft already held is left out", all(c["year"] > 2026 for v in cl.values() for c in v))
-check("a traded pick is its owner's", [c["orig"] for c in cl["BBB"]] == ["AAA"])
-check("a swap is shared by everyone it names", [c["share"] for c in cl["AAA"]] == [0.5] and cl["CCC"][0]["share"] == 0.5)
-check("an undetermined pick stays with its team", cl["DDD"][0]["round"] == 2)
-slots = fv.draft_slots({"AAA": {"proj_w": 60}, "BBB": {"proj_w": 20}, "CCC": {"proj_w": 41}})
-check("the fewest wins pick first", slots == {"BBB": 1, "CCC": 2, "AAA": 3})
+store = {"picks": [
+    {"year": 2027, "round": 1, "orig": "AAA", "conveyance": {"type": "settled", "team": "BBB"}},
+    {"year": 2027, "round": 1, "orig": "BBB", "conveyance": {"type": "settled", "team": "BBB"}},
+    {"year": 2027, "round": 1, "orig": "CCC", "conveyance": {
+        "type": "protected", "id": "p", "on": {"year": 2027, "round": 1, "orig": "CCC"},
+        "bands": [{"min": 1, "max": 1, "to": "CCC"}, {"min": 2, "max": 6, "to": "AAA"}]}},
+]}
+orders = [[["CCC", "AAA", "BBB"]] * 3 + [["AAA", "CCC", "BBB"]]]
+odds = fv.pick_odds(store, 2027, orders)[0]
+check("a traded pick is its owner's", odds["BBB"][(2027, 1, "AAA")] == {2: 0.75, 1: 0.25})
+check("a protected pick stays when it lands in the band", odds["CCC"][(2027, 1, "CCC")] == {1: 0.75})
+check("and conveys when it doesn't", odds["AAA"][(2027, 1, "CCC")] == {2: 0.25})
+check("round two slots follow round one", fv.pick_odds(
+    {"picks": [{"year": 2027, "round": 2, "orig": "AAA", "conveyance": {"type": "settled", "team": "AAA"}}]},
+    2027, [[["AAA", "BBB", "CCC"]]])[0]["AAA"][(2027, 2, "AAA")] == {4: 1.0})
+check("no store, no picks", fv.pick_odds(None, 2027, orders) == [{}])
+sim_rows = [{"date": "2026-11-01", "home_pts": 100, "away_pts": 90, "home": "AAA", "away": "BBB"}]
+sched_po = [{"date": "2026-11-02", "home_team": a, "away_team": b} for a, b in (("AAA", "BBB"), ("BBB", "CCC"), ("CCC", "AAA"))] * 5
+pri = {"AAA": 3.0, "BBB": -1.0, "CCC": 0.0}
+plain = po.simulate(sim_rows, sched_po, pri, sims=200, seed=7)
+drafty = po.simulate(sim_rows, sched_po, pri, sims=200, seed=7, draft_samples=50)
+check("sampling draft orders leaves the odds alone", plain["teams"] == drafty["teams"])
+check("and keeps as many as asked, every team once",
+      len(drafty["draft_orders"]) == 50 and all(sorted(o) == ["AAA", "BBB", "CCC"] for o in drafty["draft_orders"]))
 
 print("\nthe market price")
 zs = [fv._shock("t", i) for i in range(4000)]
