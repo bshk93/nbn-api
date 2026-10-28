@@ -596,6 +596,44 @@ Helix call a minute.
 
 Pinned by `tests/test_stream_live.py` (no network).
 
+### Go-live post to #leaguetalk (`routers/stream_notify.py`)
+
+Twitch EventSub pushes `stream.online` to `POST /api/twitch/eventsub` within
+seconds of the stream starting; the banner above only learns of it when someone
+loads the site. A day with a game flagged `stream` posts "🔴 NBN is live",
+then for each stream game (tip-off order) a line `@AWAY (W-L) at @HOME (W-L)` —
+role tags, records off `standings-history.csv`, so going into the game — and
+under it a line from `BLURBS` naming a random player from each roster ("Come
+watch Bench Guy visit Star"). Anyone under contract can be picked, end of the
+bench included; draft rights, dead cap and UFA/RFA holds can't. A post never
+reuses a line within itself, nor opens with the previous post's first. Only
+the tagged roles can ping. A day of box scores posts "🔴 Box Scores live", one
+of the night's games at random in the same `@AWAY (W-L) at @HOME (W-L)` form —
+tags render but `allowed_mentions` pings no one — and a line from `BOX_BLURBS`
+naming a current front-office member of each team (open tenure, position not
+`none`; names markdown-escaped; the lines use no pronouns, since these are real
+members). Each kind remembers its own last opener (`blurb` / `box_blurb` in
+`stream-announce.json`). Unreadable standings drop the records; an unreadable
+roster or a team with no front office drops that game's line; neither stops
+the post. "live" links to nbn.today, as `[live](<https://nbn.today>)`:
+the angle brackets stop Discord adding the site's generic preview card. The day is the earliest
+date in the last week with a game not yet played (`game_day_notify`'s rule,
+since the league runs behind). An unreadable schedule posts "NBN is live" with
+no pings.
+
+- **Every request is HMAC-verified** against `TWITCH_EVENTSUB_SECRET` and
+  refused when over 10 minutes old. Unset, the endpoint 403s everything.
+  `DISCORD_LEAGUETALK_CHANNEL` unset, nothing posts.
+- **One post per stream, never a restart.** No post within `RESTART_GAP_HOURS`
+  (12) of the last, stamped in `stream-announce.json` so an API restart doesn't
+  reset it; a redelivered message id is dropped; a stream that began over 15
+  minutes before we hear of it, or a rerun, isn't announced.
+- **Subscribing is a one-off**, after deploying with the secret set:
+  `set -a && source .env && set +a && venv/bin/python subscribe_twitch_eventsub.py create`,
+  then `list` should show it `enabled`. A revocation is logged at WARNING.
+
+Pinned by `tests/test_stream_notify.py` (no network).
+
 ## Link previews (`routers/og.py`)
 
 Six pages on the site are one shell serving many items, with the item fetched

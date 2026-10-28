@@ -7,7 +7,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 
 from routers import audit as audit_ctx
-from routers import auth, players, roster_picks, transactions, boxscores, game_highs, player_insights, playoff_odds, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, og, discord, trade_finder, picks_preview, suggestions, google_sheets, free_agency, roster_log_relay, waivers, inbox, poext, themes, cap_history, poopoo, schedule, coaching_settings, streaming_days, donations, nbnfl, irl, trade_requests, nbyen, markets, lore, game_starters, on_this_day, fair_value, stream_live, pickem, youtube_vods, injuries, tetris, headshots, quadrants, tweets, arenas, bird_rights, home
+from routers import auth, players, roster_picks, transactions, boxscores, game_highs, player_insights, playoff_odds, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, og, discord, trade_finder, picks_preview, suggestions, google_sheets, free_agency, roster_log_relay, waivers, inbox, poext, themes, cap_history, poopoo, schedule, coaching_settings, streaming_days, donations, nbnfl, irl, trade_requests, nbyen, markets, lore, game_starters, on_this_day, fair_value, stream_live, stream_notify, pickem, youtube_vods, injuries, tetris, headshots, quadrants, tweets, arenas, bird_rights, home
 from routers.picks_scheduler import start_picks_horizon_scheduler
 from routers.roster_log_relay import start_roster_log_relay
 from routers.youtube_vods import start_youtube_vods
@@ -120,6 +120,7 @@ app.include_router(lore.router)            # league lore for NBN Today writers â
 app.include_router(game_starters.router)   # who started each game, from the entered coaching settings
 app.include_router(on_this_day.router)     # homepage On This Day: past seasons' games, clinches, trades
 app.include_router(stream_live.router)     # homepage live banner: is twitch.tv/nothingbutnet live
+app.include_router(stream_notify.router)   # Twitch EventSub: post to #leaguetalk when the stream goes live
 app.include_router(pickem.router)           # /pickem: daily six-man fantasy lineups on NBN box scores
 app.include_router(injuries.router)         # the 2K injury report: upload, parse, /injuries, #injury-report
 app.include_router(tetris.router)           # homepage Tetris card's leaderboard: members' best scores
