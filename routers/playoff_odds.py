@@ -138,9 +138,13 @@ def _phi(x: float) -> float:
 
 def simulate(results: list[dict], schedule: list[dict], priors: dict[str, float],
              sims: int = SIMS, seed: int = 0,
-             playoff_bonus: Optional[dict[str, float]] = None) -> dict:
+             playoff_bonus: Optional[dict[str, float]] = None, draft_samples: int = 0) -> dict:
     """`playoff_bonus` adds points a game to a team in playoff series only
-    (fair value's playoff edge). The odds published here never pass it."""
+    (fair value's playoff edge). The odds published here never pass it.
+
+    `draft_samples` keeps the first that many sims' draft orders, fewest wins
+    first (ties to the weaker team), as `draft_orders`. It draws nothing from
+    the generator, so the odds are the same with or without it."""
     teams = sorted(priors)
     rng = random.Random(seed)
 
@@ -176,6 +180,7 @@ def simulate(results: list[dict], schedule: list[dict], priors: dict[str, float]
     count = {t: dict.fromkeys(keys, 0) for t in teams}
     wins_total = defaultdict(float)
     seed_count = {t: defaultdict(int) for t in teams}
+    draft_orders: list[list[str]] = []
     gauss, rand = rng.gauss, rng.random
 
     for _ in range(sims):
@@ -188,6 +193,8 @@ def simulate(results: list[dict], schedule: list[dict], priors: dict[str, float]
                 wins[a] = wins.get(a, 0) + 1
         for t in teams:
             wins_total[t] += wins.get(t, 0)
+        if len(draft_orders) < draft_samples:
+            draft_orders.append(sorted(teams, key=lambda t: (wins.get(t, 0), true[t], t)))
 
         def p_home(h, a):
             return _phi((true[h] - true[a] + HOME_EDGE) / GAME_SD)
@@ -256,7 +263,10 @@ def simulate(results: list[dict], schedule: list[dict], priors: dict[str, float]
             **{k: round(count[t][k] / sims, 4) for k in keys},
             "seeds": {str(k): round(v / sims, 4) for k, v in sorted(seed_count[t].items())},
         })
-    return {"sims": sims, "games_played": len(results), "games_left": len(remaining), "teams": rows}
+    out = {"sims": sims, "games_played": len(results), "games_left": len(remaining), "teams": rows}
+    if draft_samples:
+        out["draft_orders"] = draft_orders
+    return out
 
 
 # ── Runs and history ─────────────────────────────────────────────────────────
