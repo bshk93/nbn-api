@@ -994,8 +994,9 @@ Pinned by `tests/test_home_team.py`.
 hands every caller the same object. It still reads the file on every call and
 keys on a hash of the bytes, not on mtime/inode (timestamps are coarse, inodes
 are reused), and decodes as `read_text()` does, so it returns exactly what
-`_load_json` would; only the parse is saved. `players.player_bios_shared()` and `ovr_shared()` are built on it,
-for player-bios.json (~620KB) and ovr-history.json.
+`_load_json` would; only the parse is saved. `players.player_bios_shared()` and
+`ovr_shared()` are built on it, for player-bios.json (~620KB) and
+ovr-history.json.
 
 **Read-only by contract.** Mutating the shared object changes what the next
 request reads. Anything that loads, edits and saves keeps `load_player_bios()`
