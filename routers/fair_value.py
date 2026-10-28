@@ -96,10 +96,15 @@ The model, in full:
     projected season does, not two seasons further: with the fitted age curve
     that choice moves no team more than 0.6% against the league (2026-10-28).
   * **Market price** (`market_series`) is what it would trade at: fair value
-    × exp(beta·league mood + team mood). Moods are mean-reverting walks with
-    seeded fat-tailed shocks and GARCH volatility; news is overdone by
-    `OVERREACT` and given back. Recomputed over the season's history on every write,
-    so a rebuilt day carries forward.
+    × exp(mood). The mood is the market chasing what is recent, all of it from
+    real results: news (a fair-value move overdone by `OVERREACT`, then given
+    back), recent form against what the model expected, a win or loss
+    streak, and last season's finalists' glow, capped at `MOOD_CAP`. Nothing
+    is random, so a day with no game and no news barely moves a price.
+    Recomputed over the season's history on every write, so a rebuilt day
+    carries forward. (Until 2026-10-28 the mood was seeded random walks with
+    fat tails and GARCH volatility, tuned to look like real stocks; it put
+    MEM 8% up on a day with no game and no news, and was replaced.)
 
 Run hourly by `snapshot_playoff_odds.py`, after the odds. One row per team per
 day is kept in `fair-value-history.jsonl` (a later run replaces the day's row),
@@ -114,7 +119,6 @@ its own day by the next run (`stale_days`), not counted on the day it arrived.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import re
@@ -1121,72 +1125,92 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
 # ── The market price ─────────────────────────────────────────────────────────
 #
 # Fair value is what a franchise is worth; the market price is what it would
-# trade at. A real stock wanders around its value: the whole market has moods,
-# each name has its own, news is overdone and then given back, and wild days
-# come in bunches. The market price is fair value times exp(beta·league mood +
-# team mood), every mood a mean-reverting walk with shocks seeded on the
-# season, date and team, so a rebuild gives the same series.
+# trade at. The difference is the mood: the market paying more than it should
+# for what is recent and exciting. Every part of it comes from something that
+# happened, so a day with no game and no news leaves a price where it was
+# (apart from old news fading). Nothing is drawn at random.
 
-MOOD_KEEP = 0.98                # the league's mood keeps this much a day
-MOOD_VOL = 0.009                # its daily shock
-SENT_KEEP = 0.97                # a team's own mood (half-life ~3 weeks)
-SENT_VOL = 0.011                # its daily shock, before clustering
+NEWS_KEEP = 0.97                # a fair-value move's overreaction keeps this much a day (half-life ~3 weeks)
 OVERREACT = 0.6                 # a fair-value move is overdone by this much, then fades
-VOL_MEMORY = 0.75               # clustering (GARCH): how much of yesterday's variance stays
-VOL_REACT = 0.20                # and how much the last shock adds
-NEWS_VOL, NEWS_CAP = 0.5, 9.0   # a big fair-value move counts as a shock too, capped
-TAIL_P, TAIL_X = 0.03, 3.0      # about one day in 33 is a shock this many times bigger
-# Tuned 2026-10-27 on a synthetic 180-day season against real single stocks:
-# daily sd 1.8% (real 1.5-2%), kurtosis 5.4 (5-10), |return| autocorrelation
-# +0.07 (+0.1-0.3), pairwise correlation +0.22 (+0.2-0.4), no autocorrelation
-# in returns, market vs fair value ±6.5% typical.
-BETA_RANGE = (0.7, 1.3)
+FORM_GAMES = 10                 # recent form: the last this many games
+FORM_PER_WIN = 0.01             # per win above what the model expected going into them
+FORM_CAP = 0.06
+STREAK_FROM = 3                 # a streak counts past this many games
+STREAK_PER_GAME = 0.0075
+STREAK_CAP = 0.03
+GLOW = {"Champion": 0.05, "Runner-Up": 0.02}   # last season's finalists
+GLOW_GAMES = 41                 # the glow is gone by this many games played
+MOOD_CAP = 0.10                 # the whole mood, either way
+SEASON_GAMES = 82
 
 
-def _shock(*parts) -> float:
-    """A standard shock seeded on `parts`: normal, with fat tails, unit variance."""
-    d = hashlib.sha256("|".join(map(str, parts)).encode()).digest()
-    u1 = (int.from_bytes(d[:8], "big") + 1) / (2**64 + 1)
-    u2 = int.from_bytes(d[8:16], "big") / 2**64
-    u3 = int.from_bytes(d[16:24], "big") / 2**64
-    z = math.sqrt(-2 * math.log(u1)) * math.cos(2 * math.pi * u2)
-    if u3 < TAIL_P:
-        z *= TAIL_X
-    return z / math.sqrt(1 - TAIL_P + TAIL_P * TAIL_X ** 2)
+def title_glow(season: str, brackets: Optional[list[dict]] = None) -> dict[str, float]:
+    """Last season's finalists: team -> the glow it starts this season with."""
+    if brackets is None:
+        brackets = read_csv(BRACKETS_CSV)[1] if BRACKETS_CSV.exists() else []
+    last = season_after(season, -1)
+    for b in brackets:
+        if b.get("SEASON") == last and str(b.get("ROUND")) == "4" and b.get("WINNER"):
+            loser = b["T2"] if b["WINNER"] == b["T1"] else b["T1"]
+            return {b["WINNER"]: GLOW["Champion"], loser: GLOW["Runner-Up"]}
+    return {}
 
 
-def team_beta(season: str, team: str) -> float:
-    """How hard a team swings with the league's mood, fixed for a season."""
-    d = hashlib.sha256(f"beta|{season}|{team}".encode()).digest()
-    lo, hi = BETA_RANGE
-    return lo + (hi - lo) * int.from_bytes(d[:8], "big") / 2**64
+def _cap(x: float, cap: float) -> float:
+    return max(-cap, min(cap, x))
 
 
-def market_series(rows: list[dict], shock=None) -> list[dict]:
+def market_series(rows: list[dict], glow: Optional[dict[str, float]] = None) -> list[dict]:
     """Set every row's `market` price per team, oldest first, in place.
 
-    One season's rows, a day apart. Each team's mood carries over day to day:
-    it keeps SENT_KEEP of itself, adds OVERREACT of the day's fair-value move,
-    and takes a shock whose size follows the last few days' (VOL_MEMORY)."""
-    shock = shock or _shock
-    mood, sent, var, last = 0.0, {}, {}, {}
+    One season's rows, a day apart. A team's games are read off its record
+    from one row to the next. The mood is the sum of, capped at MOOD_CAP:
+
+      news    OVERREACT of each day's fair-value move, fading by NEWS_KEEP a day
+      form    FORM_PER_WIN per win in the last FORM_GAMES above what the model
+              expected going into them (its projected win % on the day before
+              the first of them), up to FORM_CAP
+      streak  STREAK_PER_GAME per game of a win or loss streak past STREAK_FROM,
+              up to STREAK_CAP
+      glow    last season's finalists (`title_glow`), fading to nothing by
+              GLOW_GAMES games played
+    """
+    glow = glow or {}
+    news: dict[str, float] = {}
+    last: dict[str, float] = {}
+    record: dict[str, tuple[int, int]] = {}
+    games: dict[str, list[tuple[bool, float]]] = {}   # (won, expected win % going in)
+    expect: dict[str, float] = {}
     for row in rows:
-        mood = MOOD_KEEP * mood + MOOD_VOL * shock(row["season"], row["date"], "league")
         for t, x in row["teams"].items():
             fv_now = x["price"]
             move = math.log(fv_now / last[t]) if last.get(t) else 0.0
-            z = shock(row["season"], row["date"], t)
-            v = var.get(t, 1.0)
-            e = math.sqrt(v) * z
-            sent[t] = SENT_KEEP * sent.get(t, 0.0) + OVERREACT * move + SENT_VOL * e
-            # GARCH(1,1) on the team's shock, in units of SENT_VOL: a wild day,
-            # or big news, makes the next days wilder; it fades by VOL_MEMORY.
-            news = min(NEWS_CAP, (move / SENT_VOL) ** 2)
-            var[t] = (1 - VOL_MEMORY - VOL_REACT) + VOL_REACT * (e * e + NEWS_VOL * news) + VOL_MEMORY * v
+            news[t] = NEWS_KEEP * news.get(t, 0.0) + OVERREACT * move
             last[t] = fv_now
-            x["market"] = round(fv_now * math.exp(team_beta(row["season"], t) * mood + sent[t]), 4)
-            x["mood"] = round(sent[t], 5)
-        row["league_mood"] = round(mood, 5)
+
+            w0, l0 = record.get(t, (0, 0))
+            w, l = x.get("w", w0), x.get("l", l0)
+            p_in = expect.get(t, 0.5)
+            log = games.setdefault(t, [])
+            log += [(True, p_in)] * max(0, w - w0) + [(False, p_in)] * max(0, l - l0)
+            record[t] = (w, l)
+            if x.get("proj_w") is not None:
+                expect[t] = min(1.0, max(0.0, x["proj_w"] / SEASON_GAMES))
+
+            recent = log[-FORM_GAMES:]
+            form = _cap(FORM_PER_WIN * (sum(won for won, _ in recent) - sum(p for _, p in recent)), FORM_CAP)
+            run = 0
+            for won, _ in reversed(log):
+                if run and (won != (run > 0)):
+                    break
+                run += 1 if won else -1
+            streak = math.copysign(min(STREAK_CAP, STREAK_PER_GAME * max(0, abs(run) - STREAK_FROM)), run) if run else 0.0
+            shine = glow.get(t, 0.0) * max(0.0, 1 - (w + l) / GLOW_GAMES)
+            mood = _cap(news[t] + form + streak + shine, MOOD_CAP)
+            x["market"] = round(fv_now * math.exp(mood), 4)
+            x["mood"] = round(mood, 5)
+            x["mood_parts"] = {"news": round(news[t], 5), "form": round(form, 5),
+                               "streak": round(streak, 5), "glow": round(shine, 5)}
     return rows
 
 
@@ -1194,7 +1218,7 @@ def write_history(rows: list[dict]) -> None:
     """Save the history, every season's market price recomputed first."""
     rows.sort(key=lambda r: (r["season"], r["date"]))
     for season in {r["season"] for r in rows}:
-        market_series([r for r in rows if r["season"] == season])
+        market_series([r for r in rows if r["season"] == season], title_glow(season))
     _atomic_write(HISTORY_FILE, "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows))
 
 
@@ -1241,8 +1265,7 @@ def _attach_market(run: dict, rows: list[dict]) -> None:
     if day:
         for x in run["teams"]:
             m = day["teams"].get(x["team"]) or {}
-            x["market"], x["mood"] = m.get("market"), m.get("mood")
-        run["league_mood"] = day.get("league_mood")
+            x["market"], x["mood"], x["mood_parts"] = m.get("market"), m.get("mood"), m.get("mood_parts")
 
 
 def _refresh_current_market() -> None:
