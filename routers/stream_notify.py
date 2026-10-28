@@ -92,6 +92,16 @@ BLURBS = [
     "All eyes on {away} and {home}",
     "{away} walks into {home}'s building",
     "Who blinks first, {away} or {home}?",
+    "{away} told reporters he's not scared of {home}. Sources say he is.",
+    "{home} has been studying {away}'s film all week. All four minutes of it.",
+    "{away} is reportedly bringing his own snacks to {home}'s arena",
+    "Breaking: {home} has blocked {away} on Instagram",
+    "{away} says this one's personal. {home} has no idea who he is.",
+    "{home} vs {away}: the matchup nobody asked for, everybody's watching",
+    "{away} just asked {home} for a jersey swap. Before the game.",
+    "Vegas has {away} vs {home} as a pick'em. Vegas has never heard of either.",
+    "{home} left {away} two tickets at will call. Both in the nosebleeds.",
+    "{away} has been talking trash about {home} in the group chat all week",
 ]
 
 _lock = threading.Lock()
