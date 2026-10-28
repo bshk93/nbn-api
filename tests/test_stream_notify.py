@@ -61,6 +61,12 @@ sd.load_streaming_days = lambda: DONE
 BOXED = set()
 gdn._boxed_games = lambda season: BOXED
 bx._game_in_pending_screenshots = lambda d, h, a: False
+RECORDS = {"CLE": "5-2", "SAC": "3-4", "LAL": "6-1"}
+real_records = sn.team_records
+sn.team_records = lambda: RECORDS
+# No player line unless a section asks for one, so the matchup checks stay exact.
+real_player = sn.random_player
+sn.random_player = lambda team: None
 
 app = FastAPI()
 app.include_router(sn.router)
@@ -95,8 +101,8 @@ def reset():
     transport._recent_sends.clear()
 
 
-def game(d, away, home, stream=False):
-    g = {"id": f"{d}-{away}-{home}", "date": d, "away_team": away, "home_team": home}
+def game(d, away, home, stream=False, time_et=""):
+    g = {"id": f"{d}-{away}-{home}", "date": d, "away_team": away, "home_team": home, "time_et": time_et}
     if stream:
         g["stream"] = True
     return g
@@ -138,6 +144,88 @@ check("reads NBN is live, linking nbn.today",
 check("pings both teams of the stream game",
       sorted(p.get("allowed_mentions", {}).get("roles", [])) == sorted([TEAM_ROLE_IDS["CLE"], TEAM_ROLE_IDS["SAC"]]), p)
 check("no @everyone", p.get("allowed_mentions", {}).get("parse") == [])
+check("the matchup line is away @ home, each tag with its record",
+      p.get("content", "").split("\n")[1:] ==
+      [f"<@&{TEAM_ROLE_IDS['CLE']}> (5-2) @ <@&{TEAM_ROLE_IDS['SAC']}> (3-4)"], p)
+
+print("two stream games, records missing")
+reset()
+GAMES[:] = [game("2026-10-24", "BOS", "MIA", stream=True, time_et="10:00p"),
+            game("2026-10-24", "CLE", "SAC", stream=True, time_et="7:30p")]
+post("notification", online())
+lines = SENT[0]["payload"]["content"].split("\n") if SENT else []
+check("one line per stream game, in tip-off order",
+      lines[1:] == [f"<@&{TEAM_ROLE_IDS['CLE']}> (5-2) @ <@&{TEAM_ROLE_IDS['SAC']}> (3-4)",
+                    f"<@&{TEAM_ROLE_IDS['BOS']}> (0-0) @ <@&{TEAM_ROLE_IDS['MIA']}> (0-0)"], lines)
+check("all four teams pinged", len(SENT[0]["payload"]["allowed_mentions"]["roles"]) == 4 if SENT else False)
+
+reset()
+sn.team_records = lambda: (_ for _ in ()).throw(FileNotFoundError("standings"))
+post("notification", online())
+lines = SENT[0]["payload"]["content"].split("\n") if SENT else []
+check("unreadable standings: the matchup posts without records",
+      lines[1:] == [f"<@&{TEAM_ROLE_IDS['CLE']}> @ <@&{TEAM_ROLE_IDS['SAC']}>",
+                    f"<@&{TEAM_ROLE_IDS['BOS']}> @ <@&{TEAM_ROLE_IDS['MIA']}>"], lines)
+sn.team_records = lambda: RECORDS
+GAMES[:] = [game("2026-10-24", "CLE", "SAC", stream=True), game("2026-10-24", "BOS", "MIA"),
+            game("2026-10-25", "LAL", "GSW", stream=True)]
+
+print("a random-player line under each matchup")
+STARS = {"CLE": "Darius Garland", "SAC": "Domantas Sabonis", "BOS": "Jayson Tatum", "MIA": "Bam Adebayo"}
+sn.random_player = lambda team: STARS.get(team)
+reset()
+GAMES[:] = [game("2026-10-24", "CLE", "SAC", stream=True, time_et="7:30p"),
+            game("2026-10-24", "BOS", "MIA", stream=True, time_et="10:00p")]
+post("notification", online())
+lines = SENT[0]["payload"]["content"].split("\n") if SENT else []
+first = next((b for b in sn.BLURBS if b.format(away="Darius Garland", home="Domantas Sabonis") == lines[2]), None) \
+    if len(lines) > 2 else None
+second = next((b for b in sn.BLURBS if b.format(away="Jayson Tatum", home="Bam Adebayo") == lines[4]), None) \
+    if len(lines) > 4 else None
+check("each matchup gets a line naming a player from each roster, away then home",
+      first is not None and second is not None, lines)
+check("two games on one post never share a line", first != second)
+check("the first line's template is remembered", json.loads(sn.STATE_FILE.read_text()).get("blurb") == first)
+
+repeats = 0
+for _ in range(40):
+    lines_out, template = sn.pick_blurbs([("CLE", "SAC")], last=sn.BLURBS[0])
+    repeats += template == sn.BLURBS[0]
+check("never the same line as the last post", repeats == 0)
+
+sn.random_player = lambda team: None if team == "MIA" else STARS.get(team)
+lines_out, _ = sn.pick_blurbs([("CLE", "SAC"), ("BOS", "MIA")], last=None)
+check("a side with no players drops only its game's line", lines_out[0] and lines_out[1] is None, lines_out)
+sn.random_player = lambda team: (_ for _ in ()).throw(RuntimeError("roster gone"))
+lines_out, _ = sn.pick_blurbs([("CLE", "SAC")], last=None)
+check("a roster that won't read drops the line, not the post", lines_out == [None])
+sn.random_player = lambda team: None
+
+print("random_player off the whole roster")
+import routers.discord as discord  # noqa: E402
+real_aug = discord._roster_augmented
+discord._roster_augmented = lambda team: [
+    {"name_raw": "Garland, Darius", "type": "player", "hold_type": None},
+    {"name_raw": "Deep, Bench", "type": "player", "hold_type": "NON_GTD"},
+    {"name_raw": "Way, Two", "type": "two-way", "hold_type": None},
+    {"name_raw": "Rights, Draft", "type": "draft-rights", "hold_type": None},
+    {"name_raw": "Gone, Dead", "type": "dead", "hold_type": None},
+    {"name_raw": "Hold, Unsigned", "type": "player", "hold_type": "UFA"},
+]
+picked = {real_player("CLE") for _ in range(200)}
+check("anyone under contract, bench and two-way included, by display name",
+      picked == {"Darius Garland", "Bench Deep", "Two Way"}, picked)
+discord._roster_augmented = lambda team: []
+check("an empty roster is None", real_player("CLE") is None)
+discord._roster_augmented = real_aug
+
+print("team_records off the standings file")
+tmp = Path(tempfile.mkdtemp()) / "standings-history.csv"
+tmp.write_text("SEASON,TEAM,W,L\n25-26,CLE,50,32\n26-27,CLE,5,2\n26-27,SAC,3,4\n")
+import routers.home as home  # noqa: E402
+real_csv, home.STANDINGS_CSV = home.STANDINGS_CSV, tmp
+check("this season's W-L only", real_records() == {"CLE": "5-2", "SAC": "3-4"}, real_records())
+home.STANDINGS_CSV = real_csv
 
 print("redelivery and restarts")
 SENT.clear()

@@ -8,8 +8,12 @@ starting instead, and the post goes out on the shared Discord queue.
 
 The post is a link to nbn.today (the homepage carries the player while live).
 A day with a game flagged as a stream (`stream` on the schedule game, set by a
-streamer or a bought stream) reads "NBN is live" and pings both teams of each
-one; a day of box scores reads "Box Scores live" and pings no one. "live" is
+streamer or a bought stream) reads "NBN is live", then one line per stream
+game, away @ home, each team's role tag followed by its record (from the
+standings the stats build writes, so going into the game); a day of box
+scores reads "Box Scores live" and pings no one. Under each matchup goes one
+line naming a random player from each roster ("Come watch Garland visit
+Sabonis"), from `BLURBS`, never the same line twice in a row. "live" is
 the link, and the angle brackets keep Discord from adding the site's generic
 preview card under it. Which day is being streamed is the earliest
 date in the last week with a game not yet played, since the league can run
@@ -43,6 +47,7 @@ import hmac
 import json
 import logging
 import os
+import random
 import re
 import threading
 import time
@@ -55,7 +60,7 @@ from fastapi.responses import PlainTextResponse
 
 from . import discord_transport as transport
 from .constants import DATA_DIR
-from .discord_notify import with_team_pings
+from .discord_notify import TEAM_ROLE_IDS
 from .league_time import league_today
 from .storage import _current_league_year, _load_json, _save_json
 
@@ -74,6 +79,20 @@ SEEN_IDS_KEEP     = 3600  # seconds a message id is remembered for
 # One post a game day. Three an hour still stops a loop dead.
 MAX_BURST    = 3
 BURST_WINDOW = 3600
+
+# One under each matchup. {away} and {home} are a random player from each roster.
+BLURBS = [
+    "Come watch {away} visit {home}",
+    "{home} hosts {away}",
+    "{away} brings the road show to {home}",
+    "Can {away} steal one on {home}'s floor?",
+    "{home} defends home court against {away}",
+    "{away} vs {home}. Pull up.",
+    "{home} has {away} over tonight",
+    "All eyes on {away} and {home}",
+    "{away} walks into {home}'s building",
+    "Who blinks first, {away} or {home}?",
+]
 
 _lock = threading.Lock()
 _seen_ids: dict[str, float] = {}
@@ -110,11 +129,12 @@ def _first_sighting(msg_id: str) -> bool:
         return True
 
 
-def streamed_teams() -> list[str]:
-    """Both teams of every stream game on the day being streamed; empty for a
-    day of box scores. Imported at call time, like `game_day_notify` does."""
+def streamed_games() -> list[tuple[str, str]]:
+    """(away, home) for every stream game on the day being streamed, in
+    tip-off order; empty for a day of box scores. Imported at call time, like
+    `game_day_notify` does."""
     from .game_day_notify import LOOKBACK_DAYS, _boxed_games, _played
-    from .schedule import _load
+    from .schedule import _load, _time_key
     from .streaming_days import load_streaming_days
     today = league_today()
     since = (today - timedelta(days=LOOKBACK_DAYS)).isoformat()
@@ -126,18 +146,76 @@ def streamed_teams() -> list[str]:
     if not unplayed:
         return []
     day = min(g["date"] for g in unplayed)
-    teams: list[str] = []
-    for g in unplayed:
-        if g["date"] == day and g.get("stream"):
-            teams += [g["away_team"], g["home_team"]]
-    return list(dict.fromkeys(teams))
+    games = sorted((g for g in unplayed if g["date"] == day and g.get("stream")),
+                   key=lambda g: _time_key(g.get("time_et", "")))
+    return [(g["away_team"], g["home_team"]) for g in games]
 
 
-def build_payload(teams: Optional[list[str]]) -> dict:
-    """`teams` empty is a box-score day; None is a day we couldn't work out."""
-    if teams == []:
-        return with_team_pings(f"🔴 Box Scores [live](<{SITE_URL}>)", [])
-    return with_team_pings(f"🔴 NBN is [live](<{SITE_URL}>)", teams or [])
+def team_records() -> dict[str, str]:
+    """{team: "W-L"} for the current season, off standings-history.csv. A team
+    with no row yet (no games played) is left out and shows 0-0."""
+    from .home import STANDINGS_CSV
+    from .storage import read_csv
+    season = _current_league_year()
+    _, rows = read_csv(STANDINGS_CSV)
+    return {(r.get("TEAM") or "").upper(): f"{r.get('W') or 0}-{r.get('L') or 0}"
+            for r in rows if r.get("SEASON") == season}
+
+
+def random_player(team: str) -> Optional[str]:
+    """Anyone under contract, by display name: the end of the bench is as
+    likely as a starter, which is half the fun. Draft rights, dead cap and
+    unsigned UFA/RFA holds aren't players on the team."""
+    from .discord import _roster_augmented
+    from .names import player_name
+    names = [player_name(p["name_raw"]) for p in _roster_augmented(team)
+             if p["type"] in ("player", "two-way") and p.get("hold_type") not in ("UFA", "RFA")]
+    return random.choice(names) if names else None
+
+
+def pick_blurbs(games: list, last: Optional[str]) -> tuple[list[Optional[str]], Optional[str]]:
+    """(lines, first template): one line per game, or None for a game we
+    couldn't name players for. Each post draws its templates without repeats,
+    and its first is never `last`, the previous post's first."""
+    pool = [b for b in BLURBS if b != last] or BLURBS
+    picks = random.sample(pool, min(len(games), len(pool)))
+    out: list[Optional[str]] = []
+    for i, (away, home) in enumerate(games):
+        try:
+            a, h = random_player(away), random_player(home)
+        except Exception as e:  # noqa: BLE001 — the matchup posts without its line
+            log.warning("stream_notify: couldn't pick players for %s @ %s: %s", away, home, e)
+            a = h = None
+        out.append(picks[i % len(picks)].format(away=a, home=h) if a and h else None)
+    return out, picks[0] if picks else None
+
+
+def _tag(team: str) -> str:
+    """The team's role mention, or its abbreviation in bold if it has none."""
+    rid = TEAM_ROLE_IDS.get(team)
+    return f"<@&{rid}>" if rid else f"**{team}**"
+
+
+def build_payload(games: Optional[list], records: Optional[dict] = None,
+                  blurbs: Optional[list] = None) -> dict:
+    """`games` empty is a box-score day; None is a day we couldn't work out.
+    `records` None leaves the records off rather than showing 0-0 for all;
+    `blurbs` lines up with `games`, a None entry (or none at all) skipped.
+    `allowed_mentions` names exactly the roles tagged, so nothing else pings."""
+    if games == []:
+        return {"content": f"🔴 Box Scores [live](<{SITE_URL}>)", "allowed_mentions": {"parse": []}}
+
+    def side(team: str) -> str:
+        return _tag(team) + (f" ({records.get(team, '0-0')})" if records is not None else "")
+
+    lines = [f"🔴 NBN is [live](<{SITE_URL}>)"]
+    for i, (away, home) in enumerate(games or []):
+        lines.append(f"{side(away)} @ {side(home)}")
+        if blurbs and i < len(blurbs) and blurbs[i]:
+            lines.append(blurbs[i])
+    roles = list(dict.fromkeys(TEAM_ROLE_IDS[t] for g in games or [] for t in g if t in TEAM_ROLE_IDS))
+    mentions = {"parse": [], "roles": roles} if roles else {"parse": []}
+    return {"content": "\n".join(lines), "allowed_mentions": mentions}
 
 
 def announce(event: dict, now: Optional[datetime] = None) -> bool:
@@ -159,15 +237,24 @@ def announce(event: dict, now: Optional[datetime] = None) -> bool:
                 log.info("stream_notify: posted at %s already; treating this as a restart", state["posted_at"])
                 return False
             try:
-                teams = streamed_teams()
+                games = streamed_games()
             except Exception as e:  # noqa: BLE001 — a missing schedule still gets the link out
                 log.warning("stream_notify: couldn't work out the stream game: %s", e)
-                teams = None
-            sent = transport.send(DISCORD_LEAGUETALK_CHANNEL, lambda: build_payload(teams),
+                games = None
+            records, blurbs, template = None, None, None
+            if games:
+                blurbs, template = pick_blurbs(games, state.get("blurb"))
+                try:
+                    records = team_records()
+                except Exception as e:  # noqa: BLE001 — the matchup still posts, without records
+                    log.warning("stream_notify: couldn't read the standings: %s", e)
+            sent = transport.send(DISCORD_LEAGUETALK_CHANNEL, lambda: build_payload(games, records, blurbs),
                                   max_burst=MAX_BURST, burst_window=BURST_WINDOW)
             if sent:
                 _save_json(STATE_FILE, {"posted_at": now.isoformat(timespec="seconds"),
-                                        "started_at": event.get("started_at"), "teams": teams})
+                                        "started_at": event.get("started_at"),
+                                        "games": [list(g) for g in games] if games is not None else None,
+                                        "blurb": template})
             return sent
     except Exception as e:  # noqa: BLE001
         log.warning("stream_notify: announce failed: %s", e)

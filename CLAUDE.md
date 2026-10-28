@@ -600,9 +600,16 @@ Pinned by `tests/test_stream_live.py` (no network).
 
 Twitch EventSub pushes `stream.online` to `POST /api/twitch/eventsub` within
 seconds of the stream starting; the banner above only learns of it when someone
-loads the site. A day with a game flagged `stream` posts "🔴 NBN is live" and
-pings both teams of each one; a day of box scores posts "🔴 Box Scores live"
-and pings no one. "live" links to nbn.today, as `[live](<https://nbn.today>)`:
+loads the site. A day with a game flagged `stream` posts "🔴 NBN is live",
+then for each stream game (tip-off order) a line `@AWAY (W-L) @ @HOME (W-L)` —
+role tags, records off `standings-history.csv`, so going into the game — and
+under it a line from `BLURBS` naming a random player from each roster ("Come
+watch Bench Guy visit Star"). Anyone under contract can be picked, end of the
+bench included; draft rights, dead cap and UFA/RFA holds can't. A post never
+reuses a line within itself, nor opens with the previous post's first. Only
+the tagged roles can ping. A day of box scores posts "🔴 Box Scores live" and
+pings no one. Unreadable standings drop the records; an unreadable roster
+drops that game's line; neither stops the post. "live" links to nbn.today, as `[live](<https://nbn.today>)`:
 the angle brackets stop Discord adding the site's generic preview card. The day is the earliest
 date in the last week with a game not yet played (`game_day_notify`'s rule,
 since the league runs behind). An unreadable schedule posts "NBN is live" with
