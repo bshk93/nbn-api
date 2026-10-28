@@ -144,9 +144,9 @@ check("reads NBN is live, linking nbn.today",
 check("pings both teams of the stream game",
       sorted(p.get("allowed_mentions", {}).get("roles", [])) == sorted([TEAM_ROLE_IDS["CLE"], TEAM_ROLE_IDS["SAC"]]), p)
 check("no @everyone", p.get("allowed_mentions", {}).get("parse") == [])
-check("the matchup line is away @ home, each tag with its record",
+check("the matchup line is away at home, each tag with its record",
       p.get("content", "").split("\n")[1:] ==
-      [f"<@&{TEAM_ROLE_IDS['CLE']}> (5-2) @ <@&{TEAM_ROLE_IDS['SAC']}> (3-4)"], p)
+      [f"<@&{TEAM_ROLE_IDS['CLE']}> (5-2) at <@&{TEAM_ROLE_IDS['SAC']}> (3-4)"], p)
 
 print("two stream games, records missing")
 reset()
@@ -155,8 +155,8 @@ GAMES[:] = [game("2026-10-24", "BOS", "MIA", stream=True, time_et="10:00p"),
 post("notification", online())
 lines = SENT[0]["payload"]["content"].split("\n") if SENT else []
 check("one line per stream game, in tip-off order",
-      lines[1:] == [f"<@&{TEAM_ROLE_IDS['CLE']}> (5-2) @ <@&{TEAM_ROLE_IDS['SAC']}> (3-4)",
-                    f"<@&{TEAM_ROLE_IDS['BOS']}> (0-0) @ <@&{TEAM_ROLE_IDS['MIA']}> (0-0)"], lines)
+      lines[1:] == [f"<@&{TEAM_ROLE_IDS['CLE']}> (5-2) at <@&{TEAM_ROLE_IDS['SAC']}> (3-4)",
+                    f"<@&{TEAM_ROLE_IDS['BOS']}> (0-0) at <@&{TEAM_ROLE_IDS['MIA']}> (0-0)"], lines)
 check("all four teams pinged", len(SENT[0]["payload"]["allowed_mentions"]["roles"]) == 4 if SENT else False)
 
 reset()
@@ -164,8 +164,8 @@ sn.team_records = lambda: (_ for _ in ()).throw(FileNotFoundError("standings"))
 post("notification", online())
 lines = SENT[0]["payload"]["content"].split("\n") if SENT else []
 check("unreadable standings: the matchup posts without records",
-      lines[1:] == [f"<@&{TEAM_ROLE_IDS['CLE']}> @ <@&{TEAM_ROLE_IDS['SAC']}>",
-                    f"<@&{TEAM_ROLE_IDS['BOS']}> @ <@&{TEAM_ROLE_IDS['MIA']}>"], lines)
+      lines[1:] == [f"<@&{TEAM_ROLE_IDS['CLE']}> at <@&{TEAM_ROLE_IDS['SAC']}>",
+                    f"<@&{TEAM_ROLE_IDS['BOS']}> at <@&{TEAM_ROLE_IDS['MIA']}>"], lines)
 sn.team_records = lambda: RECORDS
 GAMES[:] = [game("2026-10-24", "CLE", "SAC", stream=True), game("2026-10-24", "BOS", "MIA"),
             game("2026-10-25", "LAL", "GSW", stream=True)]

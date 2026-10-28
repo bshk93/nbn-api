@@ -601,7 +601,7 @@ Pinned by `tests/test_stream_live.py` (no network).
 Twitch EventSub pushes `stream.online` to `POST /api/twitch/eventsub` within
 seconds of the stream starting; the banner above only learns of it when someone
 loads the site. A day with a game flagged `stream` posts "🔴 NBN is live",
-then for each stream game (tip-off order) a line `@AWAY (W-L) @ @HOME (W-L)` —
+then for each stream game (tip-off order) a line `@AWAY (W-L) at @HOME (W-L)` —
 role tags, records off `standings-history.csv`, so going into the game — and
 under it a line from `BLURBS` naming a random player from each roster ("Come
 watch Bench Guy visit Star"). Anyone under contract can be picked, end of the

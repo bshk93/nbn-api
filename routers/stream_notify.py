@@ -220,7 +220,7 @@ def build_payload(games: Optional[list], records: Optional[dict] = None,
 
     lines = [f"🔴 NBN is [live](<{SITE_URL}>)"]
     for i, (away, home) in enumerate(games or []):
-        lines.append(f"{side(away)} @ {side(home)}")
+        lines.append(f"{side(away)} at {side(home)}")
         if blurbs and i < len(blurbs) and blurbs[i]:
             lines.append(blurbs[i])
     roles = list(dict.fromkeys(TEAM_ROLE_IDS[t] for g in games or [] for t in g if t in TEAM_ROLE_IDS))
