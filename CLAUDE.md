@@ -600,9 +600,10 @@ Pinned by `tests/test_stream_live.py` (no network).
 
 Twitch EventSub pushes `stream.online` to `POST /api/twitch/eventsub` within
 seconds of the stream starting; the banner above only learns of it when someone
-loads the site. A day with a game flagged `stream` posts `🔴 NBN is live:
-https://nbn.today` and pings both teams of each one; a day of box scores posts
-`🔴 Box Scores Live: https://nbn.today` and pings no one. The day is the earliest
+loads the site. A day with a game flagged `stream` posts "🔴 NBN is live" and
+pings both teams of each one; a day of box scores posts "🔴 Box Scores live"
+and pings no one. "live" links to nbn.today, as `[live](<https://nbn.today>)`:
+the angle brackets stop Discord adding the site's generic preview card. The day is the earliest
 date in the last week with a game not yet played (`game_day_notify`'s rule,
 since the league runs behind). An unreadable schedule posts "NBN is live" with
 no pings.

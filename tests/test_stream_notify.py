@@ -134,7 +134,7 @@ check("one post", len(SENT) == 1)
 p = SENT[0]["payload"] if SENT else {}
 check("to #leaguetalk", SENT and SENT[0]["channel"] == "111")
 check("reads NBN is live, linking nbn.today",
-      p.get("content", "").startswith("🔴 NBN is live: https://nbn.today"), p)
+      p.get("content", "").startswith("🔴 NBN is [live](<https://nbn.today>)"), p)
 check("pings both teams of the stream game",
       sorted(p.get("allowed_mentions", {}).get("roles", [])) == sorted([TEAM_ROLE_IDS["CLE"], TEAM_ROLE_IDS["SAC"]]), p)
 check("no @everyone", p.get("allowed_mentions", {}).get("parse") == [])
@@ -166,8 +166,8 @@ post("notification", online())
 p = SENT[0]["payload"] if SENT else {}
 check("the oldest unplayed day has no stream game: pings no one",
       "roles" not in p.get("allowed_mentions", {}) and "<@&" not in p.get("content", ""), p)
-check("reads Box Scores Live, linking nbn.today",
-      p.get("content") == "🔴 Box Scores Live: https://nbn.today", p)
+check("reads Box Scores live, linking nbn.today",
+      p.get("content") == "🔴 Box Scores [live](<https://nbn.today>)", p)
 
 reset()
 DONE["2026-10-22"] = {"done": True}
@@ -181,14 +181,14 @@ reset()
 GAMES[:] = []
 post("notification", online())
 check("an empty schedule is a box-score day",
-      len(SENT) == 1 and SENT[0]["payload"]["content"].startswith("🔴 Box Scores Live"))
+      len(SENT) == 1 and SENT[0]["payload"]["content"].startswith("🔴 Box Scores [live]"))
 
 reset()
 real_load = schedule._load
 schedule._load = lambda season: (_ for _ in ()).throw(FileNotFoundError(season))
 post("notification", online())
 check("an unreadable schedule still posts, as NBN is live with no pings",
-      len(SENT) == 1 and SENT[0]["payload"]["content"] == "🔴 NBN is live: https://nbn.today", SENT)
+      len(SENT) == 1 and SENT[0]["payload"]["content"] == "🔴 NBN is [live](<https://nbn.today>)", SENT)
 schedule._load = real_load
 
 print("not worth announcing")

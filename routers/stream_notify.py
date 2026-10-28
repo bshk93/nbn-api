@@ -9,7 +9,9 @@ starting instead, and the post goes out on the shared Discord queue.
 The post is a link to nbn.today (the homepage carries the player while live).
 A day with a game flagged as a stream (`stream` on the schedule game, set by a
 streamer or a bought stream) reads "NBN is live" and pings both teams of each
-one; a day of box scores reads "Box Scores Live" and pings no one. Which day is being streamed is the earliest
+one; a day of box scores reads "Box Scores live" and pings no one. "live" is
+the link, and the angle brackets keep Discord from adding the site's generic
+preview card under it. Which day is being streamed is the earliest
 date in the last week with a game not yet played, since the league can run
 behind — the same rule `game_day_notify` uses for a team's next game.
 
@@ -134,8 +136,8 @@ def streamed_teams() -> list[str]:
 def build_payload(teams: Optional[list[str]]) -> dict:
     """`teams` empty is a box-score day; None is a day we couldn't work out."""
     if teams == []:
-        return with_team_pings(f"🔴 Box Scores Live: {SITE_URL}", [])
-    return with_team_pings(f"🔴 NBN is live: {SITE_URL}", teams or [])
+        return with_team_pings(f"🔴 Box Scores [live](<{SITE_URL}>)", [])
+    return with_team_pings(f"🔴 NBN is [live](<{SITE_URL}>)", teams or [])
 
 
 def announce(event: dict, now: Optional[datetime] = None) -> bool:
