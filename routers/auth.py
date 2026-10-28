@@ -24,8 +24,14 @@ _SEEN_MAX = 20  # max unique values stored per member per field
 def _record_member_seen(name: str, ip: Optional[str], user_agent: Optional[str],
                          timezone: Optional[str] = None, screen: Optional[str] = None,
                          language: Optional[str] = None):
+    # Called on every page load (/api/me), almost always with nothing new, so
+    # the file is rewritten only when a value is appended: an unchanged write
+    # cost a full rewrite under the lock, and every page load queued on it.
     with _seen_lock:
         seen = _load_json(MEMBER_SEEN_FILE, {})
+        # A member's first sighting is always written, even with nothing to
+        # record, exactly as before: the file holds an entry for everyone seen.
+        changed = name not in seen
         entry = seen.setdefault(name, {})
         for field, value in [
             ("ips", ip), ("user_agents", user_agent),
@@ -36,9 +42,11 @@ def _record_member_seen(name: str, ip: Optional[str], user_agent: Optional[str],
             lst = entry.setdefault(field, [])
             if value not in lst:
                 lst.append(value)
+                changed = True
                 if len(lst) > _SEEN_MAX:
                     lst.pop(0)
-        _save_json(MEMBER_SEEN_FILE, seen)
+        if changed:
+            _save_json(MEMBER_SEEN_FILE, seen)
 
 router = APIRouter()
 

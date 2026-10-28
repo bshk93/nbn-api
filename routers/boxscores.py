@@ -28,7 +28,7 @@ from . import game_starters
 from . import boxscore_shots as shots
 from . import game_day_notify
 from .auth import require_any_role, require_role
-from .players import load_player_bios
+from .players import load_player_bios, player_bios_shared
 from .bets import _award_submission_reward, _award_amount, NBY_BOXSCORE_REWARD
 
 router = APIRouter()
@@ -696,18 +696,29 @@ def get_boxscore_games(season: str = Query(default=None), team: str = Query(defa
     return games
 
 
-def _bios_by_name() -> dict[str, tuple[str, str]]:
+# (bios object, index): the index built from the shared bios parse, rebuilt
+# only when that parse is (a new object after any write to the file). Holding
+# the object keeps the `is` comparison below sound.
+_NAME_INDEX: list = [None, None]
+
+
+def _bios_by_name(bios: dict | None = None) -> dict[str, tuple[str, str]]:
     """Upper-cased bio name -> (slug, photo_url).
 
     The raw box score rows carry a name and no slug, so this is how a line is
     tied back to its player. Same match `get_player_gamelog` makes, in the
-    other direction.
+    other direction. Reads the shared bios unless given some, and keeps the
+    index until they change. Read-only: never mutate the result.
     """
+    bios = player_bios_shared() if bios is None else bios
+    if _NAME_INDEX[0] is bios:
+        return _NAME_INDEX[1]
     out = {}
-    for slug, bio in load_player_bios().items():
+    for slug, bio in bios.items():
         name = (bio.get("name") or "").strip().upper()
         if name:
             out.setdefault(name, (slug, bio.get("photo_url") or ""))
+    _NAME_INDEX[:] = [bios, out]
     return out
 
 
@@ -891,7 +902,7 @@ def _gamelog_row(r: dict, season: str) -> dict:
 
 @router.get("/api/players/{slug}/gamelog")
 def get_player_gamelog(slug: str):
-    bios = load_player_bios()
+    bios = player_bios_shared()
     bio = bios.get(slug)
     if not bio:
         raise HTTPException(status_code=404, detail="Player not found")
@@ -965,6 +976,20 @@ def _season_line(games: list[dict]) -> dict:
     }
 
 
+def team_season_lines(team: str, season: str | None = None, bios: dict | None = None) -> dict:
+    """slug -> per-game line for `team` this season. The endpoint below and
+    the homepage bundle (`routers/home.py`) both read it."""
+    season = season or _current_league_year()
+    players = _team_rows_by_player(allstats_path(season, "REG")).get(team.upper(), {})
+    names = _bios_by_name(bios)
+    out = {}
+    for name, games in players.items():
+        slug = names.get(name, ("", ""))[0]
+        if slug:
+            out[slug] = _season_line(games)
+    return out
+
+
 @router.get("/api/teams/{team}/season-lines")
 def get_team_season_lines(team: str, season: str = Query(default=None)):
     """Per-game regular-season line for everyone who has played for `team`
@@ -975,14 +1000,7 @@ def get_team_season_lines(team: str, season: str = Query(default=None)):
     line here, not his season. Rows whose name matches no bio are left out.
     """
     season = season or _current_league_year()
-    players = _team_rows_by_player(allstats_path(season, "REG")).get(team.upper(), {})
-    bios = _bios_by_name()
-    out = {}
-    for name, games in players.items():
-        slug = bios.get(name, ("", ""))[0]
-        if slug:
-            out[slug] = _season_line(games)
-    return {"team": team.upper(), "season": season, "players": out}
+    return {"team": team.upper(), "season": season, "players": team_season_lines(team, season)}
 
 
 @router.get("/api/build/status")

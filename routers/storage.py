@@ -1,6 +1,8 @@
 import csv
+import hashlib
 import io
 import json
+import locale
 import os
 import re
 from pathlib import Path
@@ -64,6 +66,38 @@ def log_write(info: dict, action: str):
 
 def _load_json(path: Path, default):
     return json.loads(path.read_text()) if path.exists() else default
+
+
+# path -> (digest of the file's bytes, parsed). Keyed on content, not on
+# mtime/inode: timestamps are coarse and inodes are reused, so only the bytes
+# say for certain that nothing changed. Reading and hashing the file is ~1ms
+# for player-bios.json; parsing it is what this saves.
+_SHARED_JSON: dict = {}
+
+
+def _load_json_shared(path: Path, default):
+    """`_load_json`, parsed once per distinct file content and shared between
+    callers. Returns exactly what `_load_json` would: the same file is read
+    on every call, and a change of even one byte is a fresh parse.
+
+    **Read-only by contract.** Every caller gets the same object, so mutating
+    it would change what the next request reads. Use it only on paths that
+    read; anything that loads, edits and saves keeps `_load_json`. Built for
+    the big files read on every page (player-bios.json is ~620KB).
+    """
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return default
+    key = hashlib.blake2b(raw, digest_size=16).digest()
+    hit = _SHARED_JSON.get(path)
+    if hit and hit[0] == key:
+        return hit[1]
+    # Decoded the way `path.read_text()` decodes, so this parses exactly what
+    # `_load_json` would on any locale.
+    data = json.loads(raw.decode(locale.getpreferredencoding(False)))
+    _SHARED_JSON[path] = (key, data)
+    return data
 
 
 def _save_json(path: Path, data):

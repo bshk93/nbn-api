@@ -38,7 +38,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from .auth import require_role
-from .players import _display_name
+from .players import _display_name, player_bios_shared
 from .constants import CAP_LEVELS_FILE, DATA_DIR, VALID_TEAMS, logger
 from .roster_picks import get_season_state, load_team_state
 from .storage import _current_league_year, _load_json, _parse_dollar, read_csv
@@ -159,11 +159,17 @@ def _payroll(team: str, bios: dict, season: str) -> tuple[int, int]:
     return payroll + dead, dead
 
 
-def build_rows(on_date: Optional[str] = None, season: Optional[str] = None) -> list[dict]:
-    """One row per team for `on_date`. Pure — computes, writes nothing."""
+def build_rows(on_date: Optional[str] = None, season: Optional[str] = None,
+               teams: Optional[list[str]] = None, bios: Optional[dict] = None) -> list[dict]:
+    """One row per team for `on_date`. Pure — computes, writes nothing.
+
+    `teams` narrows it to those teams (the homepage asks for one, not 30);
+    `bios` lets a caller already holding the shared parse pass it in. It is
+    read and never changed here.
+    """
     on_date = on_date or league_today_str()
     season = season or _current_league_year()
-    bios = _load_json(DATA_DIR / "player-bios.json", {})
+    bios = player_bios_shared() if bios is None else bios
     state = load_team_state()
     levels = _cap_levels_for(season)
     # The full record, not the three thresholds `_cap_levels_for` narrows to —
@@ -172,7 +178,7 @@ def build_rows(on_date: Optional[str] = None, season: Optional[str] = None) -> l
     in_season = season_calendar.is_regular_season(on_date)
 
     rows = []
-    for team in sorted(VALID_TEAMS):
+    for team in sorted(VALID_TEAMS if teams is None else {t.upper() for t in teams} & VALID_TEAMS):
         raw = _compute_team_salary(team, bios, season)
         raw_ex_holds = _compute_team_salary_ex_holds(team, bios, season)
         ts = get_season_state(state, team, season)

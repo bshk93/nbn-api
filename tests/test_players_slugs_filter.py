@@ -11,7 +11,7 @@ BIOS = {
 
 
 def _get(slugs):
-    with patch.object(players, "load_player_bios", return_value=dict(BIOS)):
+    with patch.object(players, "player_bios_shared", return_value=dict(BIOS)):
         return players.get_players(slugs=slugs)
 
 
