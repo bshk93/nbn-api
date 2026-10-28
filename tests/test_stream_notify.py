@@ -67,6 +67,8 @@ sn.team_records = lambda: RECORDS
 # No player line unless a section asks for one, so the matchup checks stay exact.
 real_player = sn.random_player
 sn.random_player = lambda team: None
+real_front_office = sn.random_front_office
+sn.random_front_office = lambda team: None
 
 app = FastAPI()
 app.include_router(sn.router)
@@ -219,6 +221,47 @@ discord._roster_augmented = lambda team: []
 check("an empty roster is None", real_player("CLE") is None)
 discord._roster_augmented = real_aug
 
+print("box scores: one game, a front-office line")
+FRONT = {"NYK": "Kim", "PHI": "Darth Awn", "DEN": "jo_bo", "UTA": "Tee"}
+sn.random_front_office = lambda team: FRONT.get(team)
+reset()
+GAMES[:] = [game("2026-10-24", "NYK", "PHI"), game("2026-10-24", "DEN", "UTA"),
+            game("2026-10-25", "CLE", "SAC", stream=True)]
+seen_games = set()
+for _ in range(30):
+    reset()
+    post("notification", online())
+    p = SENT[0]["payload"]
+    lines = p["content"].split("\n")
+    seen_games.add(lines[1])
+check("only ever one game, picked from that night", len(lines) == 3 and len(seen_games) == 2, seen_games)
+fills = {f"<@&{TEAM_ROLE_IDS['NYK']}> (0-0) at <@&{TEAM_ROLE_IDS['PHI']}> (0-0)": ("Kim", "Darth Awn"),
+         f"<@&{TEAM_ROLE_IDS['DEN']}> (0-0) at <@&{TEAM_ROLE_IDS['UTA']}> (0-0)": ("jo_bo", "Tee")}
+away, home = fills[lines[1]]
+box = next((b for b in sn.BOX_BLURBS if b.format(away=away, home=home) == lines[2]), None)
+check("the line is a box-score one, naming each side's front office", box is not None, lines)
+check("still pings no one", p["allowed_mentions"] == {"parse": []})
+state = json.loads(sn.STATE_FILE.read_text())
+check("remembered as the box-score opener", state.get("box_blurb") == box and state.get("kind") == "box", state)
+check("no front office on a side drops only the line",
+      sn.pick_blurbs([("NYK", "BOS")], None, "box")[0] == [None])
+sn.random_front_office = lambda team: None
+
+print("random_front_office off members.json")
+import routers.auth as auth  # noqa: E402
+real_members = auth.load_members
+auth.load_members = lambda: {
+    "Kim":     {"tenures": [{"team": "nyk", "position": "gm", "start": "2024-01-01", "end": None}]},
+    "Old GM":  {"tenures": [{"team": "NYK", "position": "gm", "start": "2020-01-01", "end": "2023-01-01"}]},
+    "Fan":     {"tenures": [{"team": "NYK", "position": "none", "start": "2024-01-01"}]},
+    "jo_bo":   {"tenures": [{"team": "NYK", "position": "co-owner", "start": "2025-01-01"}]},
+    "Elsewhere": {"tenures": [{"team": "PHI", "position": "gm", "start": "2025-01-01"}]},
+}
+picked = {real_front_office("NYK") for _ in range(100)}
+check("current front office only, names escaped for Discord", picked == {"Kim", "jo\\_bo"}, picked)
+check("a team with nobody is None", real_front_office("BOS") is None)
+auth.load_members = real_members
+
 print("team_records off the standings file")
 tmp = Path(tempfile.mkdtemp()) / "standings-history.csv"
 tmp.write_text("SEASON,TEAM,W,L\n25-26,CLE,50,32\n26-27,CLE,5,2\n26-27,SAC,3,4\n")
@@ -253,9 +296,12 @@ GAMES[:] = [game("2026-10-22", "NYK", "PHI"), game("2026-10-22", "DEN", "UTA"),
 post("notification", online())
 p = SENT[0]["payload"] if SENT else {}
 check("the oldest unplayed day has no stream game: pings no one",
-      "roles" not in p.get("allowed_mentions", {}) and "<@&" not in p.get("content", ""), p)
-check("reads Box Scores live, linking nbn.today",
-      p.get("content") == "🔴 Box Scores [live](<https://nbn.today>)", p)
+      p.get("allowed_mentions") == {"parse": []}, p)
+lines = p.get("content", "").split("\n")
+check("reads Box Scores live, linking nbn.today", lines[0] == "🔴 Box Scores [live](<https://nbn.today>)", lines)
+check("one of that night's games, tags shown, with records",
+      lines[1:] in ([f"<@&{TEAM_ROLE_IDS['NYK']}> (0-0) at <@&{TEAM_ROLE_IDS['PHI']}> (0-0)"],
+                    [f"<@&{TEAM_ROLE_IDS['DEN']}> (0-0) at <@&{TEAM_ROLE_IDS['UTA']}> (0-0)"]), lines)
 
 reset()
 DONE["2026-10-22"] = {"done": True}

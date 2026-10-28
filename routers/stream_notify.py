@@ -10,10 +10,14 @@ The post is a link to nbn.today (the homepage carries the player while live).
 A day with a game flagged as a stream (`stream` on the schedule game, set by a
 streamer or a bought stream) reads "NBN is live", then one line per stream
 game, away at home, each team's role tag followed by its record (from the
-standings the stats build writes, so going into the game); a day of box
-scores reads "Box Scores live" and pings no one. Under each matchup goes one
-line naming a random player from each roster ("Come watch Garland visit
-Sabonis"), from `BLURBS`, never the same line twice in a row. "live" is
+standings the stats build writes, so going into the game), and under each a
+line from `BLURBS` naming a random player from each roster ("Come watch
+Garland visit Sabonis"). Only those roles ping.
+
+A day of box scores reads "Box Scores live", then one game picked at random
+from the night, its tags shown but pinging no one, and a line from
+`BOX_BLURBS` naming a current front-office member of each team. Neither kind
+reuses a line within a post or opens with its own kind's last opener. "live" is
 the link, and the angle brackets keep Discord from adding the site's generic
 preview card under it. Which day is being streamed is the earliest
 date in the last week with a game not yet played, since the league can run
@@ -104,6 +108,23 @@ BLURBS = [
     "{away} has been talking trash about {home} in the group chat all week",
 ]
 
+# Box-score days. {away} and {home} are a front-office member of each team:
+# real league members, so no pronouns.
+BOX_BLURBS = [
+    "{home} is watching from the luxury box. {away} is watching on a cracked phone.",
+    "{away} has the trade proposal drafted for whichever way this goes",
+    "{home} swears the sim is rigged. Box scores pending.",
+    "{away} is refreshing the box scores like a stock ticker",
+    "{home} and {away} both say they don't even care about this one",
+    "{away} has the excuse ready. {home} has the screenshot ready.",
+    "{home} told the coach to play the starters 48 minutes. Again.",
+    "{away} vs {home}: two front offices, zero accountability",
+    "Somewhere, {home} is already typing 'rigged' in #leaguetalk",
+    "{away}'s trading block is about to get a lot longer",
+    "{home} is one bad loss from blowing it all up. Again.",
+    "{away} and {home} have both already simmed this in their heads. Both won.",
+]
+
 _lock = threading.Lock()
 _seen_ids: dict[str, float] = {}
 
@@ -139,9 +160,9 @@ def _first_sighting(msg_id: str) -> bool:
         return True
 
 
-def streamed_games() -> list[tuple[str, str]]:
-    """(away, home) for every stream game on the day being streamed, in
-    tip-off order; empty for a day of box scores. Imported at call time, like
+def night_games() -> list[dict]:
+    """Every unplayed game on the day being streamed, in tip-off order: the
+    earliest date in the last week with one. Imported at call time, like
     `game_day_notify` does."""
     from .game_day_notify import LOOKBACK_DAYS, _boxed_games, _played
     from .schedule import _load, _time_key
@@ -156,9 +177,19 @@ def streamed_games() -> list[tuple[str, str]]:
     if not unplayed:
         return []
     day = min(g["date"] for g in unplayed)
-    games = sorted((g for g in unplayed if g["date"] == day and g.get("stream")),
-                   key=lambda g: _time_key(g.get("time_et", "")))
-    return [(g["away_team"], g["home_team"]) for g in games]
+    return sorted((g for g in unplayed if g["date"] == day),
+                  key=lambda g: _time_key(g.get("time_et", "")))
+
+
+def plan_post() -> tuple[str, list[tuple[str, str]]]:
+    """("stream", every stream game) when the night has one, else ("box", one
+    of its games at random, or none)."""
+    games = night_games()
+    stream = [(g["away_team"], g["home_team"]) for g in games if g.get("stream")]
+    if stream:
+        return "stream", stream
+    g = random.choice(games) if games else None
+    return "box", [(g["away_team"], g["home_team"])] if g else []
 
 
 def team_records() -> dict[str, str]:
@@ -183,18 +214,36 @@ def random_player(team: str) -> Optional[str]:
     return random.choice(names) if names else None
 
 
-def pick_blurbs(games: list, last: Optional[str]) -> tuple[list[Optional[str]], Optional[str]]:
+def _md_escape(text: str) -> str:
+    """A member name is typed by a person; keep `_` and `*` from formatting."""
+    return re.sub(r"([\\*_~`|>])", r"\\\1", text)
+
+
+def random_front_office(team: str) -> Optional[str]:
+    """Anyone in a current front-office position on the team (an open tenure
+    whose position isn't `none`, as `proposals._member_current_team` reads it)."""
+    from .auth import load_members
+    names = [name for name, m in load_members().items()
+             if any(not t.get("end") and t.get("position") not in (None, "", "none")
+                    and (t.get("team") or "").upper() == team for t in m.get("tenures") or [])]
+    return _md_escape(random.choice(names)) if names else None
+
+
+def pick_blurbs(games: list, last: Optional[str], kind: str = "stream"
+                ) -> tuple[list[Optional[str]], Optional[str]]:
     """(lines, first template): one line per game, or None for a game we
-    couldn't name players for. Each post draws its templates without repeats,
-    and its first is never `last`, the previous post's first."""
-    pool = [b for b in BLURBS if b != last] or BLURBS
+    couldn't name both sides for. Each post draws its templates without
+    repeats, and its first is never `last`, the previous post's first. A
+    stream names players; a box-score day names front offices."""
+    templates, pick = (BLURBS, random_player) if kind == "stream" else (BOX_BLURBS, random_front_office)
+    pool = [b for b in templates if b != last] or templates
     picks = random.sample(pool, min(len(games), len(pool)))
     out: list[Optional[str]] = []
     for i, (away, home) in enumerate(games):
         try:
-            a, h = random_player(away), random_player(home)
+            a, h = pick(away), pick(home)
         except Exception as e:  # noqa: BLE001 — the matchup posts without its line
-            log.warning("stream_notify: couldn't pick players for %s @ %s: %s", away, home, e)
+            log.warning("stream_notify: couldn't pick names for %s @ %s: %s", away, home, e)
             a = h = None
         out.append(picks[i % len(picks)].format(away=a, home=h) if a and h else None)
     return out, picks[0] if picks else None
@@ -206,24 +255,24 @@ def _tag(team: str) -> str:
     return f"<@&{rid}>" if rid else f"**{team}**"
 
 
-def build_payload(games: Optional[list], records: Optional[dict] = None,
+def build_payload(kind: Optional[str], games: list, records: Optional[dict] = None,
                   blurbs: Optional[list] = None) -> dict:
-    """`games` empty is a box-score day; None is a day we couldn't work out.
+    """`kind` is "stream", "box", or None for a day we couldn't work out.
     `records` None leaves the records off rather than showing 0-0 for all;
     `blurbs` lines up with `games`, a None entry (or none at all) skipped.
-    `allowed_mentions` names exactly the roles tagged, so nothing else pings."""
-    if games == []:
-        return {"content": f"🔴 Box Scores [live](<{SITE_URL}>)", "allowed_mentions": {"parse": []}}
-
+    `allowed_mentions` names exactly the roles that should ping: a stream's
+    teams, and no one on a box-score day, whose tags still render."""
     def side(team: str) -> str:
         return _tag(team) + (f" ({records.get(team, '0-0')})" if records is not None else "")
 
-    lines = [f"🔴 NBN is [live](<{SITE_URL}>)"]
+    head = "Box Scores" if kind == "box" else "NBN is"
+    lines = [f"🔴 {head} [live](<{SITE_URL}>)"]
     for i, (away, home) in enumerate(games or []):
         lines.append(f"{side(away)} at {side(home)}")
         if blurbs and i < len(blurbs) and blurbs[i]:
             lines.append(blurbs[i])
-    roles = list(dict.fromkeys(TEAM_ROLE_IDS[t] for g in games or [] for t in g if t in TEAM_ROLE_IDS))
+    roles = [] if kind != "stream" else \
+        list(dict.fromkeys(TEAM_ROLE_IDS[t] for g in games for t in g if t in TEAM_ROLE_IDS))
     mentions = {"parse": [], "roles": roles} if roles else {"parse": []}
     return {"content": "\n".join(lines), "allowed_mentions": mentions}
 
@@ -247,24 +296,27 @@ def announce(event: dict, now: Optional[datetime] = None) -> bool:
                 log.info("stream_notify: posted at %s already; treating this as a restart", state["posted_at"])
                 return False
             try:
-                games = streamed_games()
+                kind, games = plan_post()
             except Exception as e:  # noqa: BLE001 — a missing schedule still gets the link out
-                log.warning("stream_notify: couldn't work out the stream game: %s", e)
-                games = None
-            records, blurbs, template = None, None, None
+                log.warning("stream_notify: couldn't work out the night's games: %s", e)
+                kind, games = None, []
+            last_key = "box_blurb" if kind == "box" else "blurb"
+            records, blurbs, template = None, None, state.get(last_key)
             if games:
-                blurbs, template = pick_blurbs(games, state.get("blurb"))
+                blurbs, template = pick_blurbs(games, state.get(last_key), kind)
                 try:
                     records = team_records()
                 except Exception as e:  # noqa: BLE001 — the matchup still posts, without records
                     log.warning("stream_notify: couldn't read the standings: %s", e)
-            sent = transport.send(DISCORD_LEAGUETALK_CHANNEL, lambda: build_payload(games, records, blurbs),
+            sent = transport.send(DISCORD_LEAGUETALK_CHANNEL, lambda: build_payload(kind, games, records, blurbs),
                                   max_burst=MAX_BURST, burst_window=BURST_WINDOW)
             if sent:
-                _save_json(STATE_FILE, {"posted_at": now.isoformat(timespec="seconds"),
-                                        "started_at": event.get("started_at"),
-                                        "games": [list(g) for g in games] if games is not None else None,
-                                        "blurb": template})
+                state.update(posted_at=now.isoformat(timespec="seconds"),
+                             started_at=event.get("started_at"), kind=kind,
+                             games=[list(g) for g in games])
+                if kind:
+                    state[last_key] = template
+                _save_json(STATE_FILE, state)
             return sent
     except Exception as e:  # noqa: BLE001
         log.warning("stream_notify: announce failed: %s", e)

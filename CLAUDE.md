@@ -607,9 +607,15 @@ under it a line from `BLURBS` naming a random player from each roster ("Come
 watch Bench Guy visit Star"). Anyone under contract can be picked, end of the
 bench included; draft rights, dead cap and UFA/RFA holds can't. A post never
 reuses a line within itself, nor opens with the previous post's first. Only
-the tagged roles can ping. A day of box scores posts "🔴 Box Scores live" and
-pings no one. Unreadable standings drop the records; an unreadable roster
-drops that game's line; neither stops the post. "live" links to nbn.today, as `[live](<https://nbn.today>)`:
+the tagged roles can ping. A day of box scores posts "🔴 Box Scores live", one
+of the night's games at random in the same `@AWAY (W-L) at @HOME (W-L)` form —
+tags render but `allowed_mentions` pings no one — and a line from `BOX_BLURBS`
+naming a current front-office member of each team (open tenure, position not
+`none`; names markdown-escaped; the lines use no pronouns, since these are real
+members). Each kind remembers its own last opener (`blurb` / `box_blurb` in
+`stream-announce.json`). Unreadable standings drop the records; an unreadable
+roster or a team with no front office drops that game's line; neither stops
+the post. "live" links to nbn.today, as `[live](<https://nbn.today>)`:
 the angle brackets stop Discord adding the site's generic preview card. The day is the earliest
 date in the last week with a game not yet played (`game_day_notify`'s rule,
 since the league runs behind). An unreadable schedule posts "NBN is live" with
