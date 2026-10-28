@@ -600,10 +600,12 @@ Pinned by `tests/test_stream_live.py` (no network).
 
 Twitch EventSub pushes `stream.online` to `POST /api/twitch/eventsub` within
 seconds of the stream starting; the banner above only learns of it when someone
-loads the site. The post is `🔴 NBN is live: https://nbn.today`, plus a ping for
-both teams of each game flagged `stream` on the day being streamed: the earliest
+loads the site. A day with a game flagged `stream` posts `🔴 NBN is live:
+https://nbn.today` and pings both teams of each one; a day of box scores posts
+`🔴 Box Scores Live: https://nbn.today` and pings no one. The day is the earliest
 date in the last week with a game not yet played (`game_day_notify`'s rule,
-since the league runs behind). A day of box scores pings no one.
+since the league runs behind). An unreadable schedule posts "NBN is live" with
+no pings.
 
 - **Every request is HMAC-verified** against `TWITCH_EVENTSUB_SECRET` and
   refused when over 10 minutes old. Unset, the endpoint 403s everything.

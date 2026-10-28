@@ -6,10 +6,10 @@ site, and Helix's `/streams` itself runs a minute or two behind. Twitch
 EventSub pushes `stream.online` to this endpoint within seconds of the stream
 starting instead, and the post goes out on the shared Discord queue.
 
-The post is a link to nbn.today (the homepage carries the player while live),
-plus a ping for each team in a game flagged as a stream (`stream` on the
-schedule game, set by a streamer or a bought stream). A day of box scores
-with no stream game pings no one. Which day is being streamed is the earliest
+The post is a link to nbn.today (the homepage carries the player while live).
+A day with a game flagged as a stream (`stream` on the schedule game, set by a
+streamer or a bought stream) reads "NBN is live" and pings both teams of each
+one; a day of box scores reads "Box Scores Live" and pings no one. Which day is being streamed is the earliest
 date in the last week with a game not yet played, since the league can run
 behind — the same rule `game_day_notify` uses for a team's next game.
 
@@ -131,8 +131,11 @@ def streamed_teams() -> list[str]:
     return list(dict.fromkeys(teams))
 
 
-def build_payload(teams: list[str]) -> dict:
-    return with_team_pings(f"🔴 NBN is live: {SITE_URL}", teams)
+def build_payload(teams: Optional[list[str]]) -> dict:
+    """`teams` empty is a box-score day; None is a day we couldn't work out."""
+    if teams == []:
+        return with_team_pings(f"🔴 Box Scores Live: {SITE_URL}", [])
+    return with_team_pings(f"🔴 NBN is live: {SITE_URL}", teams or [])
 
 
 def announce(event: dict, now: Optional[datetime] = None) -> bool:
@@ -157,7 +160,7 @@ def announce(event: dict, now: Optional[datetime] = None) -> bool:
                 teams = streamed_teams()
             except Exception as e:  # noqa: BLE001 — a missing schedule still gets the link out
                 log.warning("stream_notify: couldn't work out the stream game: %s", e)
-                teams = []
+                teams = None
             sent = transport.send(DISCORD_LEAGUETALK_CHANNEL, lambda: build_payload(teams),
                                   max_burst=MAX_BURST, burst_window=BURST_WINDOW)
             if sent:
