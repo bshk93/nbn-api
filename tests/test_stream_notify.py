@@ -262,6 +262,12 @@ check("current front office only, names escaped for Discord", picked == {"Kim", 
 check("a team with nobody is None", real_front_office("BOS") is None)
 auth.load_members = real_members
 
+print("the server's own emoji")
+sn.LIVE_EMOJI = "<:minionannouncement:1234567890>"
+check("opens the post when set",
+      sn.build_payload("box", [])["content"] == "<:minionannouncement:1234567890> Box Scores [live](<https://nbn.today>)")
+sn.LIVE_EMOJI = "🔴"
+
 print("team_records off the standings file")
 tmp = Path(tempfile.mkdtemp()) / "standings-history.csv"
 tmp.write_text("SEASON,TEAM,W,L\n25-26,CLE,50,32\n26-27,CLE,5,2\n26-27,SAC,3,4\n")
