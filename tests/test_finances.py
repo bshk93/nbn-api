@@ -76,6 +76,26 @@ check("past the listed rates each bracket adds a step",
 check("an unknown apron or cap charges nothing",
       f.luxury_tax(400, None, 100) == 0 and f.luxury_tax(400, 209, None) == 0)
 
+print("prices grow with the cap after PRICE_BASE")
+caps = {"25-26": 150.0, "26-27": 160.0, "28-29": 180.0}
+check("a cap on file is used", f.season_cap("26-27", caps) == 160.0)
+check("an unset cap is the last one grown by CAP_GROWTH",
+      abs(f.season_cap("27-28", caps) - 160 * (1 + f.CAP_GROWTH)) < 1e-9
+      and abs(f.season_cap("30-31", caps) - 180 * (1 + f.CAP_GROWTH) ** 2) < 1e-9)
+check("no cap before the first on file", f.season_cap("24-25", caps) is None)
+check("1.0 up to PRICE_BASE", f.price_level("26-27", 160, 160) == 1.0 and f.price_level("22-23", 100, 160) == 1.0)
+check("the cap's ratio after it", abs(f.price_level("28-29", 180, 160) - 1.125) < 1e-9)
+check("1.0 when a cap is unknown", f.price_level("28-29", None, 160) == 1.0)
+m = [f.value_multiple(s_, 100.0) for s_ in ("25-26", "26-27", "27-28", "30-31")]
+check("the multiple grows to PRICE_BASE, then holds",
+      abs(m[1] / m[0] - 1 - f.VALUE_GROWTH) < 1e-9 and m[1] == m[2] == m[3])
+
+check("national TV moves local after PRICE_BASE, the same at an average market",
+      f.media_revenue("26-27", 1.0) == f.media_revenue("27-28", 1.0)
+      and f.media_revenue("26-27", 0.5) == f.MEDIA_SHARE + f.LOCAL_MEDIA * 0.5
+      and f.media_revenue("27-28", 2.0) - f.media_revenue("27-28", 0.5)
+      > f.media_revenue("26-27", 2.0) - f.media_revenue("26-27", 0.5))
+
 print("jersey patches")
 teams30 = [f"T{i:02d}" for i in range(30)]
 seas = [f"{y}-{y + 1}" for y in range(20, 30)]
