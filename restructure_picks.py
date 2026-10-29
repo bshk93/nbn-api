@@ -42,13 +42,21 @@ conveyance modules load, so nothing reads or writes the live directory).
 from __future__ import annotations
 
 import argparse
-import copy
 import csv
-import itertools
 import json
 import os
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+
+def __getattr__(name):
+    # The checks live in picks_conveyance.restructure, shared with the API's
+    # /api/picks/structure endpoints. Imported lazily so --data-dir is set
+    # before the conveyance modules read NBS_DATA_DIR.
+    from picks_conveyance import restructure
+    return getattr(restructure, name)
 
 
 def main() -> int:
@@ -62,6 +70,7 @@ def main() -> int:
     os.environ["NBS_DATA_DIR"] = str(args.data_dir)
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from picks_conveyance import registry, seed_store, resync, resolver, projection, parity
+    from picks_conveyance.restructure import candidate, prove, store_for, members_of, slot_range, factorial
     from routers import audit
 
     spec = json.loads(args.spec.read_text())
@@ -141,122 +150,6 @@ def main() -> int:
         return 1
     print(f"applied. {spec.get('ruling', '')}")
     return 0
-
-
-def members_of(spec: dict) -> list[dict]:
-    kind = spec.get("kind", "chain")
-    if kind == "protected":
-        return [spec["pick"]]
-    return spec["members"]
-
-
-def slot_range(rnd: int) -> tuple[int, int]:
-    """The draft slots a pick of this round can land in. A 1st's last band is
-    often written "4-60", so the bands may run past 30; only 1-30 is checked."""
-    return (1, 30) if rnd == 1 else (31, 60)
-
-
-def candidate(old_reg: dict, spec: dict, registry) -> dict:
-    new = copy.deepcopy(old_reg)
-    kind = spec.get("kind", "chain")
-    if kind == "protected":
-        p = spec["pick"]
-        new["protected"][registry._kstr((p["year"], p["round"], p["orig"]))] = {
-            "on": p, "bands": spec["bands"]}
-        return new
-    if kind == "swap_group":
-        group = {"members": spec["members"], "priority": spec["priority"]}
-        if spec.get("txn_ids"):
-            group["txn_ids"] = spec["txn_ids"]
-        new["swap_groups"][spec["group_id"]] = group
-        return new
-    cid = spec["chain_id"]
-    for gid in spec.get("remove_swap_groups", []):
-        new["swap_groups"].pop(gid, None)
-    new["binary_chains"][cid] = spec["nodes"]
-    new["chain_members"][cid] = [registry._kstr((m["year"], m["round"], m["orig"]))
-                                 for m in spec["members"]]
-    return new
-
-
-def store_for(reg: dict, registry, seed_store, csv_file: Path) -> dict:
-    """The store `resync` would write, built from `reg` without touching disk."""
-    orig = registry.load_registry
-    registry.load_registry = lambda: copy.deepcopy(reg)
-    try:
-        return registry.apply_registry(seed_store.build_store(csv_file))
-    finally:
-        registry.load_registry = orig
-
-
-def prove(reg: dict, spec: dict, registry, seed_store, resolver, csv_file: Path) -> list[str]:
-    problems = []
-    try:
-        registry._validate_registry(reg)
-    except Exception as exc:
-        return [f"registry validation: {exc}"]
-    store = store_for(reg, registry, seed_store, csv_file)
-    kind = spec.get("kind", "chain")
-    if kind == "protected":
-        return prove_protected(store, spec, resolver)
-    keys = [resolver.key(m) for m in members_of(spec)]
-    if kind == "swap_group" and any(isinstance(slot, dict) for slot in spec["priority"]):
-        # A protected slot makes who ends up with a pick depend on where it
-        # lands, so no fixed team list holds. The worked examples carry the
-        # proof instead, and must cover each band of every nested slot.
-        bands = [b for slot in spec["priority"] if isinstance(slot, dict) for b in slot["bands"]]
-        covered = {b["to"] for ex in spec.get("examples", []) for b in bands
-                   if b["to"] in ex["owners"]}
-        missing = sorted({b["to"] for b in bands} - covered)
-        problems = [f"no worked example gives the pick to {t}" for t in missing]
-        return problems + prove_examples(store, spec, keys, resolver)
-    teams = sorted(spec["teams"])
-    for order in itertools.permutations(range(1, len(keys) + 1)):
-        positions = dict(zip(keys, order))
-        owners = resolver.resolve_all(store, positions)
-        got = sorted(owners.get(k) or "?" for k in keys)
-        if got != teams:
-            problems.append(f"draft order {dict(zip([k[2] for k in keys], order))} resolves to {got}")
-            if len(problems) > 5:
-                break
-    return problems + prove_examples(store, spec, keys, resolver)
-
-
-def prove_protected(store: dict, spec: dict, resolver) -> list[str]:
-    problems = []
-    k = resolver.key(spec["pick"])
-    teams = {b["to"] for b in spec["bands"]}
-    lo, hi = slot_range(spec["pick"]["round"])
-    seen = set()
-    for slot in range(lo, hi + 1):
-        owner = resolver.resolve_all(store, {k: slot}).get(k)
-        holders = [b["to"] for b in spec["bands"] if b["min"] <= slot <= b["max"]]
-        if len(holders) != 1 or owner != holders[0]:
-            problems.append(f"slot {slot}: bands give {holders or 'nobody'}, resolver gives {owner}")
-        seen.add(owner)
-    if teams - seen:
-        problems.append(f"band team(s) {sorted(teams - seen)} never get the pick in {lo}-{hi}")
-    for i, ex in enumerate(spec.get("examples", []), 1):
-        got = resolver.resolve_all(store, {k: ex["position"]}).get(k)
-        if got != ex["owner"]:
-            problems.append(f"example {i}: slot {ex['position']} expected {ex['owner']}, got {got}")
-    return problems
-
-
-def prove_examples(store: dict, spec: dict, keys: list, resolver) -> list[str]:
-    problems = []
-    by_orig = {k[2]: k for k in keys}
-    for i, ex in enumerate(spec.get("examples", []), 1):
-        positions = {by_orig[o]: n for o, n in ex["positions"].items()}
-        owners = resolver.resolve_all(store, positions)
-        got = {owners.get(by_orig[o]): n for o, n in ex["positions"].items()}
-        if got != ex["owners"]:
-            problems.append(f"example {i}: expected {ex['owners']}, got {got}")
-    return problems
-
-
-def factorial(n: int) -> int:
-    return 1 if n <= 1 else n * factorial(n - 1)
 
 
 if __name__ == "__main__":

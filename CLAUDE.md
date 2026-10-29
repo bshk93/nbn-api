@@ -711,6 +711,32 @@ live tally is privileged (`live_results` in `_proposal_view` is BOD-only), so
 the proposal card stops at the state — `Voting open`, or the outcome once
 decided.
 
+## Correcting a pick's structure (`routers/picks_structure.py`)
+
+A pick's bands and swaps live in `draft-conveyance-registry.json`, which
+overrides the flat `draft-picks.csv` for any structured pick. Trades add to it
+(`picks_conveyance.from_trade`); corrections go through one checked path,
+`picks_conveyance/restructure.py`, used by both the rosters committee
+(`POST /api/picks/structure/preview` / `apply`, `rosters` role, the "Set bands"
+editor on `/committees/rosters` → Draft Picks) and the CLI
+(`restructure_picks.py pick_rulings/<file>.json [--apply]`). Never hand-edit
+the registry, and don't reach for `PUT /api/picks` for this: it writes only
+the flat CSV.
+
+Apply refuses a slot no band covers, a draft order that leaves a team without
+a pick, a worked example that doesn't hold, a new parity finding, or a
+registry that changed since the preview. Each applied change goes to
+`edits.jsonl` and, with its reason and spec, to `pick-rulings.jsonl`.
+
+A swap whose worse pick is protected (the 2029 MIA/MIN 1sts) is a swap group
+whose priority slot is a `protected` node on `"__slot1__"`; since 2026-10-29
+the validator accepts it and the owner field lists the slot's teams.
+
+The registry was seeded once from `curated.py` on 2026-07-19, from the sheet.
+Two of its entries were wrong (2027 LAC 2nd, 2029 DET 1st): the seed predated
+or misread a trade the flat CSV had right. A band no trade ever gives a team
+is the sign of that; the Picks tab's per-pick history shows it.
+
 ## The edit log (`routers/audit.py`)
 
 `POST /api/transactions` is audited to the dollar. The side doors that change
