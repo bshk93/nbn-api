@@ -32,6 +32,7 @@ from .transactions import (
     _trade_leg_ownership_problems, _build_team_map, load_picks,
     _load_conveyance_store_for_shadow_check, apply_trade, _trade_fact_sheet,
 )
+from .league_time import league_today_str
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -433,7 +434,7 @@ def finalize_trade_request(request_id: str, body: FinalizeBody = FinalizeBody(),
         # Not relayed into #roster-log from here: the #transactions post below
         # is, and relaying both would put the trade in #roster-log twice.
         txn = apply_trade(
-            trade_in, datetime.now(timezone.utc).strftime("%Y-%m-%d"), info,
+            trade_in, league_today_str(), info,
             description=description, force=body.force,
             # Same rule as _live_check's `legal`: only an error blocks. The
             # committee voted with the warnings in front of it.

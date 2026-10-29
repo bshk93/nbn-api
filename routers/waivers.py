@@ -63,6 +63,7 @@ from .transactions import (
     _roster_size_check, _count_standard_roster, _buyout_salary_above_ntmle,
     _two_way_slot_check, _count_two_way_roster,
 )
+from .league_time import league_today_str
 
 router = APIRouter()
 
@@ -413,7 +414,7 @@ def _log_waiver_clear(release_txn: dict, outcome: str, info: dict, *,
     txn = {
         "id": secrets.token_hex(8),
         "type": "waiver_clear",
-        "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "date": league_today_str(),
         "created_by": info.get("name", "system"),
         "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "description": "",
@@ -436,7 +437,7 @@ def _log_waiver_flagged(release_txn: dict, priority: dict, info: dict) -> dict:
     txn = {
         "id": secrets.token_hex(8),
         "type": "waiver_flagged",
-        "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "date": league_today_str(),
         "created_by": info.get("name", "system"),
         "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "description": "",
@@ -498,7 +499,7 @@ def _resolve_one_waiver(release_txn: dict, txns: list[dict]) -> Optional[tuple]:
         )
         return ("closed", player, False, release_txn["id"], None, None)
 
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = league_today_str()
     _apply_waiver_transfer(release_txn, winner, today, _SYSTEM_INFO)
     clear = _log_waiver_clear(release_txn, "claimed", _SYSTEM_INFO,
                               claimed_by=winner["team"], signing_method=winner.get("signing_method"))
@@ -729,7 +730,7 @@ def resolve_waiver(txn_id: str, body: WaiverResolveDetails,
                 raise HTTPException(status_code=422, detail={
                     "validation": True, "checks": [c.model_dump() for c in checks],
                 })
-            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            today = league_today_str()
             _apply_waiver_transfer(release_txn, claim, today, info)
             txn = _log_waiver_clear(release_txn, "claimed", info, claimed_by=team,
                                     signing_method=claim.get("signing_method"), resolution="manual")

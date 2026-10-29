@@ -697,7 +697,7 @@ def save_trade_exceptions(data: dict):
 
 
 def _tpe_response(e: dict) -> dict:
-    expired = e["expires_date"] < datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    expired = e["expires_date"] < league_today_str()
     return {**e, "expired": expired}
 
 
@@ -740,7 +740,7 @@ def create_trade_exception(
         raise HTTPException(status_code=404, detail="Unknown team")
     if body.amount <= 0:
         raise HTTPException(status_code=422, detail="amount must be positive")
-    acquired = body.acquired_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    acquired = body.acquired_date or league_today_str()
     try:
         acquired_dt = datetime.strptime(acquired, "%Y-%m-%d")
     except ValueError:

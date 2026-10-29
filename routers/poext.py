@@ -1023,7 +1023,7 @@ def finalize_player(slug: str, body: FinalizeBody = FinalizeBody(),
                 details.eaps_assumption = body.eaps_assumption
             txn = apply_with_warning_confirm(
                 apply_extension, details,
-                datetime.now(timezone.utc).strftime("%Y-%m-%d"), info,
+                league_today_str(), info,
                 description=f"POEXT — {_player_display_name(slug)} extension agreed",
                 confirm_warnings=body.confirm_warnings,
                 # The #roster-log mirror skips a #transactions post unless

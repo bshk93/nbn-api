@@ -515,7 +515,7 @@ def post_trivia_score(body: TriviaScoreSubmit, info: dict = Depends(get_token_in
     scores.append({
         "name": info["name"],
         "score": body.score,
-        "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "date": league_today_str(),
     })
     save_trivia_scores(scores)
     log_write(info, f"POST trivia/scores — score={body.score}")

@@ -5,7 +5,7 @@
 import subprocess
 import sys
 
-MODULES = ["test_route_bindings",
+MODULES = ["test_route_bindings", "test_league_time_dates",
            "test_stepien_rule", "test_pick_advance_limit", "test_picks_matching", "test_tpe_and_hardcap",
            "test_cap_room_contagion",
            "test_signing_method_funding", "test_two_way_slots", "test_two_way_terms",

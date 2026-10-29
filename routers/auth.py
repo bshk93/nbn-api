@@ -16,6 +16,7 @@ from .constants import (
 )
 from . import audit
 from .storage import _load_json, _save_json, log_write
+from .league_time import league_today_str
 
 _seen_lock = threading.Lock()
 _SEEN_MAX = 20  # max unique values stored per member per field
@@ -261,7 +262,7 @@ def is_team_owner(info: dict, team: str, today: Optional[str] = None) -> bool:
     if has_role(info, "admin"):
         return True
     team = team.upper()
-    today = today or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = today or league_today_str()
     member = load_members().get(info.get("name", "")) or {}
     for t in member.get("tenures", []):
         if (t.get("team") or "").upper() != team or t.get("position") != "owner":

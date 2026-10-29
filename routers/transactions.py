@@ -4678,7 +4678,7 @@ def _check_tpe_absorption(
             check=check_name, passed=False, level="error",
             message=f"{team}: no Trade Exception with id {tpe_id!r} on file.",
         )
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = league_today_str()
     if record.get("expires_date", "") < today:
         return CheckResult(
             check=check_name, passed=False, level="error",
@@ -6491,7 +6491,7 @@ def _check_extension_trade_restriction(details: TradeIn, ctx: dict) -> list[Chec
     already superseded.
     """
     checks: list[CheckResult] = []
-    txn_date_str = ctx.get("txn_date") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    txn_date_str = ctx.get("txn_date") or league_today_str()
     try:
         trade_date = datetime.strptime(txn_date_str, "%Y-%m-%d")
     except ValueError:
@@ -9946,7 +9946,7 @@ def list_open_offer_sheets(team: Optional[str] = None):
 
 
 def _current_league_year_today() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return league_today_str()
 
 
 @router.post("/api/validate/offer_sheet_decision")
@@ -10112,7 +10112,7 @@ def self_renounce(body: SelfRenounceIn, info: dict = Depends(get_token_info)):
             detail=f"Only {team}'s owner can renounce {team} players.",
         )
 
-    txn_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    txn_date = league_today_str()
     details = RenounceDetails(player=player)
     ctx = {
         "bios":       bios,
@@ -10212,7 +10212,7 @@ def self_option(body: SelfOptionIn, info: dict = Depends(get_token_info)):
         raise HTTPException(status_code=422, detail=f"{player!r} has no team option on file.")
     year = team_opt_years[0]
 
-    txn_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    txn_date = league_today_str()
     details = OptionDetails(player=player, decision=body.decision, option_type="TEAM_OPT",
                             year=year, cap_hold_type=body.cap_hold_type)
     ctx = {
@@ -10298,7 +10298,7 @@ def self_release(body: SelfReleaseIn, info: dict = Depends(get_token_info)):
             detail=f"Only {team}'s owner can release {team} players.",
         )
 
-    txn_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    txn_date = league_today_str()
     details = ReleaseDetails(player=player, stretch_years=body.stretch_years)
     ctx = {
         "bios":       bios,
@@ -10494,7 +10494,7 @@ def preview_self_convert_twoway(slug: str, year2: str = "guaranteed"):
         "team_state": load_team_state(),
         "cap_levels": cap_levels,
         "cur_season": cur_season,
-        "txn_date":   datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "txn_date":   league_today_str(),
         "trade_exceptions": load_trade_exceptions(),
     }
     checks = _validate_convert_twoway(details, ctx)
@@ -10550,7 +10550,7 @@ def self_convert_twoway(body: SelfConvertTwoWayIn, info: dict = Depends(get_toke
         )
 
     bio = bios[player]
-    txn_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    txn_date = league_today_str()
     cap_levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
     cur_season = _season_for_date(txn_date)
     salaries = _self_convert_twoway_contract(bio, player, cap_levels, cur_season)
@@ -10647,7 +10647,7 @@ def preview_self_sign_pick(slug: str):
         "team_state": load_team_state(),
         "cap_levels": json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {},
         "cur_season": _current_league_year(),
-        "txn_date":   datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "txn_date":   league_today_str(),
         "trade_exceptions": load_trade_exceptions(),
     }
     checks = _validate_sign_pick(details, ctx)
@@ -10695,7 +10695,7 @@ def self_sign_pick(body: SelfSignPickIn, info: dict = Depends(get_token_info)):
     bio = bios[player]
     scale = _self_sign_pick_contract(bio, player)
 
-    txn_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    txn_date = league_today_str()
     details = SignPickDetails(player=player, contract=ContractIn(
         type="player", salaries=scale["salaries"], cap_holds=scale["cap_holds"]))
     ctx = {
@@ -10772,7 +10772,7 @@ def self_stash(body: SelfStashIn, info: dict = Depends(get_token_info)):
             detail=f"Only {team}'s owner can act on {team} players.",
         )
 
-    txn_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    txn_date = league_today_str()
     details = StashDetails(player=player, basis=body.basis, note=body.note)
     ctx = {
         "bios":       bios,

@@ -51,6 +51,7 @@ from .news import _load_article, _md_excerpt, _article_teaser, _credited, _bylin
 from .proposals import load_proposals
 from .discord import TEAM_NAMES
 from .names import player_name
+from .league_time import league_today
 
 router = APIRouter()
 
@@ -186,7 +187,7 @@ def _age(dob: Optional[str]) -> Optional[int]:
         born = date.fromisoformat(dob)
     except (TypeError, ValueError):
         return None
-    today = date.today()
+    today = league_today()
     return today.year - born.year - ((today.month, today.day) < (born.month, born.day))
 
 

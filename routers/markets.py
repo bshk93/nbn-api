@@ -62,6 +62,7 @@ from .auth import get_token_info, require_role, load_members
 from . import wallet
 from .bets import _discord_post_bet
 from .news import load_articles
+from .league_time import league_today_str
 
 router = APIRouter()
 
@@ -276,7 +277,7 @@ def _member_teams(info: dict) -> set[str]:
     """Teams a member works for: a team role, or a current tenure in any
     position. Admin's implied roles don't count — admin isn't every team."""
     teams = {r.upper() for r in info.get("roles", []) if r.upper() in VALID_TEAMS}
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = league_today_str()
     for t in (load_members().get(info.get("name", "")) or {}).get("tenures", []):
         if (t.get("start") or "") <= today and (not t.get("end") or t["end"] >= today) and t.get("team"):
             teams.add(t["team"].upper())

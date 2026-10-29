@@ -29,6 +29,7 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from routers.league_time import league_today_str
 
 DATA_DIR = Path(os.environ.get("NBS_DATA_DIR", "/var/lib/nothing-but-stats"))
 LEAGUE_STATE_FILE = DATA_DIR / "league-state.json"
@@ -75,5 +76,5 @@ def season_for_date(date_str: str, rollovers: dict | None = None) -> str:
 
 
 def current_season() -> str:
-    """Today's season (UTC), honoring rollover overrides."""
-    return season_for_date(datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+    """Today's season (league time), honoring rollover overrides."""
+    return season_for_date(league_today_str())
