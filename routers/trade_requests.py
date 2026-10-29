@@ -158,7 +158,7 @@ class FinalizeBody(BaseModel):
 def _can_see(info: dict, item: dict) -> bool:
     """A request is the committee's business and its parties' — nobody
     else's. A party is anyone in the team's front office (the team role), not
-    just its owner, so a GM can follow a trade the owner has to consent to."""
+    just its owner."""
     if has_role(info, "admin") or has_role(info, "trc") or has_role(info, "trc_head"):
         return True
     return any(has_role(info, p.lower()) or is_team_owner(info, p) for p in item["parties"])
@@ -223,8 +223,8 @@ def create_trade_request(body: TradeValidateInput, info: dict = Depends(get_toke
             "parties": parties,
             # Every party, including the proposer's own team — one rule, no
             # auto-consent for whoever happened to click submit (decided
-            # 2026-09-20: a GM who isn't the owner shouldn't be able to lock
-            # in their own team's consent just by proposing).
+            # 2026-09-20). Since 2026-10-29 any front-office member can give
+            # it, but it is still its own step.
             "consents": {p: {"consented": False, "by": None, "at": None} for p in parties},
             "ballots": {},
             "rejected": None,
@@ -239,13 +239,12 @@ def create_trade_request(body: TradeValidateInput, info: dict = Depends(get_toke
     # Fired outside the lock, same as notify_transaction — a Discord/inbox
     # problem must never delay or fail the write it's reporting on. Every
     # party is notified, the proposer's own team included: consent is needed
-    # from every party (decision 7), and the proposer's owner is often not the
-    # member who clicked Submit. Skipping that team once left the first request with
+    # from every party (decision 7), and proposing doesn't give it. Skipping that team once left the first request with
     # nobody on the proposing side told it was waiting on them.
     for p in parties:
         if has_role(info, p.lower()):
             text = (f"{info['name']} proposed a trade involving {', '.join(parties)}. "
-                    f"It still needs your team's consent — only the owner can give it.")
+                    f"It still needs your team's consent on the TRC page.")
         else:
             text = (f"A trade involving {', '.join(parties)} has been proposed "
                     f"— your team's consent is needed.")
@@ -263,9 +262,11 @@ def consent_trade_request(request_id: str, info: dict = Depends(get_token_info))
         idx = _find(store, request_id)
         item = store["items"][idx]
         _refuse_if_terminal(item)
-        owned = [p for p in item["parties"] if is_team_owner(info, p)]
+        # Any front-office member (owner, GM, coach) consents for their team:
+        # the team role, not owner tenure (changed 2026-10-29).
+        owned = [p for p in item["parties"] if has_role(info, p.lower())]
         if not owned:
-            raise HTTPException(status_code=403, detail="Must be the owner of a party team to consent")
+            raise HTTPException(status_code=403, detail="Must hold a role for a party team to consent")
         for p in owned:
             item["consents"][p] = {"consented": True, "by": info["name"], "at": now}
             item["history"].append({"at": now, "by": info["name"], "action": "consented", "team": p})
@@ -303,9 +304,9 @@ def withdraw_trade_request(request_id: str, body: WithdrawBody, info: dict = Dep
         item = store["items"][idx]
         _refuse_if_terminal(item)
         allowed = has_role(info, "trc_head") or has_role(info, "admin") or \
-            any(is_team_owner(info, p) for p in item["parties"])
+            any(has_role(info, p.lower()) for p in item["parties"])
         if not allowed:
-            raise HTTPException(status_code=403, detail="Must own a party team, or be trc_head, to withdraw")
+            raise HTTPException(status_code=403, detail="Must hold a role for a party team, or be trc_head, to withdraw")
         item["status"] = "withdrawn"
         item["withdrawn"] = {"at": now, "by": info["name"], "reason": body.reason}
         item["history"].append({"at": now, "by": info["name"], "action": "withdrawn", "reason": body.reason})

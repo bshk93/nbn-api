@@ -3,9 +3,9 @@ routers.trade_requests. Spec: nbn-today/docs/trc-trade-pipeline.md.
 
 What's worth pinning here is the set of decisions, not the CRUD around them:
 
-  * **Proposing needs a party-team role**, consenting needs actual owner
-    tenure for that team — a front-office member of the team can draft a
-    proposal, but only the owner can lock the team into it.
+  * **Proposing, consenting and withdrawing all need a party-team role** —
+    any front-office member (owner, GM, coach) can lock the team into a
+    trade, not just the owner (changed 2026-10-29).
   * **Every party consents through the same endpoint**, including the
     proposer's own team — no auto-consent for whoever clicked submit.
   * **Exactly 3 approvals** (a fixed count, not a majority of the committee's
@@ -202,11 +202,11 @@ check("3-team request has all 3 parties", req3["parties"] == ["BOS", "GSW", "PHX
 
 # ══ consent ════════════════════════════════════════════════════════════════════
 
-print("\nconsent (owner tenure, not just the team role)")
+print("\nconsent (any front-office member of the team)")
 rid = req["id"]
-raises("a team-role holder who isn't the owner can't consent", 403,
-       lambda: tr.consent_trade_request(rid, gm("phxFrontOffice", "phx")))
-r = tr.consent_trade_request(rid, PHX_OWNER)
+raises("a member with no role for a party team can't consent", 403,
+       lambda: tr.consent_trade_request(rid, gm("gswFrontOffice", "gsw")))
+r = tr.consent_trade_request(rid, gm("phxFrontOffice", "phx"))
 check("PHX consented", r["consents"]["PHX"]["consented"] is True)
 check("still awaiting BOS", r["status"] == "awaiting_consent")
 before_notify = len(NOTIFICATIONS)
@@ -317,9 +317,9 @@ w, withdraw_alerts = alerts_during(lambda: tr.create_trade_request(body_2team(),
 raises("an uninvolved member can't withdraw", 403,
        lambda: tr.withdraw_trade_request(w["id"], tr.WithdrawBody(), OUTSIDER))
 r, more = alerts_during(
-    lambda: tr.withdraw_trade_request(w["id"], tr.WithdrawBody(reason="changed our minds"), PHX_OWNER))
+    lambda: tr.withdraw_trade_request(w["id"], tr.WithdrawBody(reason="changed our minds"), PHX_GM))
 withdraw_alerts += more
-check("a party owner can withdraw", r["status"] == "withdrawn")
+check("a party's GM can withdraw", r["status"] == "withdrawn")
 raises("can't withdraw an already-terminal request", 409,
        lambda: tr.withdraw_trade_request(w["id"], tr.WithdrawBody(), PHX_OWNER))
 
