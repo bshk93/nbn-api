@@ -76,6 +76,13 @@ MERCH_TITLE = 30_000_000
 
 MEDIA_SHARE = 150_000_000      # national TV, the same for everyone
 LOCAL_MEDIA = 80_000_000       # local TV and sponsors at a market of 1.0
+# From 27-28 (after PRICE_BASE), ¥100M of the national deal goes local, where
+# it scales with market. The same at an average market; it widens the spread
+# between big and small markets, which the flat national share had squeezed
+# (2026-10-29, asked for by the user). Seasons through 26-27 keep the old
+# split, so no history changes.
+MEDIA_SHARE_LATER = 50_000_000
+LOCAL_MEDIA_LATER = 180_000_000
 
 # Market: how much a city spends on its team. Everyone starts at 1.0 in 20-21;
 # each finished season moves it by how far the team went and how often it won,
@@ -518,6 +525,14 @@ def price_level(season: str, cap: float | None, base_cap: float | None) -> float
     return cap / base_cap
 
 
+def media_revenue(season: str, market: float) -> float:
+    """National TV plus local media, in PRICE_BASE money: the split moves
+    toward local after PRICE_BASE (MEDIA_SHARE_LATER)."""
+    if season_index(season) <= season_index(PRICE_BASE):
+        return MEDIA_SHARE + LOCAL_MEDIA * market
+    return MEDIA_SHARE_LATER + LOCAL_MEDIA_LATER * market
+
+
 def value_multiple(season: str, league0: float) -> float:
     """The league-wide valuation multiple: seeded so 20-21 opens level at
     START_VALUE, growing VALUE_GROWTH a season up to PRICE_BASE and flat after."""
@@ -675,7 +690,7 @@ def ledger(data_dir: Path, season: str):
             aw = awards.get((s, t), {})
             champ = results.get((s, t)) == "Champion"
             mk = market[(s, t)]
-            media = MEDIA_SHARE + LOCAL_MEDIA * mk
+            media = media_revenue(s, mk)
             merch = (MERCH_BASE * mk * (1 + buzz_avg.get((s, t), 0.0)) + MERCH_STAR * aw.get("star", 0)
                      + MERCH_MVP * aw.get("mvp", 0) + MERCH_ROTY * aw.get("roty", 0)
                      + MERCH_TITLE * champ)

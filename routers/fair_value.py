@@ -72,7 +72,8 @@ The model, in full:
     NBNTV is left out, as in the ledger's valuation, and so is the tax share,
     which would need every other team's payroll projected too. Every figure
     grows with the cap past 26-27 (`fin.price_level`), as the ledger's does,
-    so revenue keeps pace with the payroll it pays.
+    so revenue keeps pace with the payroll it pays, and from 27-28 most of
+    the national TV deal is local media, scaled by market (`fin.media_revenue`).
   * **Costs.** Payroll is money, not cap (`cap_history._payroll`: contracts and
     dead cap, no holds), plus re-signings and replacement salaries for empty
     roster spots in later seasons; the ledger's tax on it; arena ops.
@@ -168,7 +169,8 @@ DRAFT_SAMPLES = 400             # simulated draft orders each contingent pick is
 # is a multiple of the projected profit instead, scaled so the league's average
 # team sells for the same either way. Without it the sale, ~94% of the value,
 # never saw payroll: a team deep in the tax sold like one under the cap.
-SALE_PROFIT_WEIGHT = 0.25
+# 0.25 in fv5; raised to 0.35 in fv6 to widen the spread (the user asked).
+SALE_PROFIT_WEIGHT = 0.35
 # The profit share's multiple, as a multiple of revenue's: the league's mean
 # revenue over its mean profit, measured 2026-10-29 (fv6). Fixed, not measured
 # each run: as the league's profit thins, a measured ratio blows up and prices
@@ -698,12 +700,13 @@ def playoff_gate(row: dict, market: float = 1.0) -> float:
     return sum(p * HOME_PER_SERIES * fin.SEATS * fin.TICKET * market * fin.PLAYOFF_MULT[r] for r, p in reach.items())
 
 
-def season_revenue(gate: float, row: dict, stars: int, market: float = 1.0, buzz: float = 0.0) -> dict:
+def season_revenue(gate: float, row: dict, stars: int, market: float = 1.0, buzz: float = 0.0,
+                   season: str = fin.PRICE_BASE) -> dict:
     merch = fin.MERCH_BASE * market * (1 + buzz) + fin.MERCH_STAR * stars + fin.MERCH_TITLE * row["title"]
     title = fin.TITLE_BONUS * row["title"]
     pog = playoff_gate(row, market)
     conc = concessions(gate, row, market * (1 + buzz))
-    media = fin.MEDIA_SHARE + fin.LOCAL_MEDIA * market
+    media = fin.media_revenue(season, market)
     return {"gate": gate, "playoff_gate": pog, "concessions": conc, "merch": merch,
             "media": media, "title_bonus": title,
             "revenue": gate + pog + conc + merch + media + title}
@@ -1051,7 +1054,7 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
                 gate = fin.REG_HOME_GAMES * gate_per_game(r["proj_w"] / (r["games"] or 82), stars[k][t], away[k], bw,
                                                           mkt[k][t] * (1 + buzz[k][t]["rest"]))
             rev = {key: v * p for key, v in season_revenue(gate, r, stars[k][t], mkt[k][t],
-                                                            buzz[k][t]["season"]).items()}
+                                                            buzz[k][t]["season"], s).items()}
 
             contracted, dead = _payroll(t, bios, s)
             payroll = float(contracted)
@@ -1102,7 +1105,7 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
         gate_out = fin.REG_HOME_GAMES * gate_per_game(ro["proj_w"] / (ro["games"] or 82), stars[-1][t], away[-1],
                                                       bw_out, mkt_out[t] * (1 + b_out))
         rev_out = level(season_after(season, k_out)) * season_revenue(gate_out, ro, stars[-1][t], mkt_out[t],
-                                                                      b_out)["revenue"]
+                                                                      b_out, season_after(season, k_out))["revenue"]
         trailing = (sum(y["revenue"] for y in held) + rev_out) / (len(held) + 1)
         multiple = fin.value_multiple(end, league0) if league0 else 0.0
         book = _num((led.get((season, t)) or {}).get("VALUE")) or None

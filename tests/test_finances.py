@@ -90,6 +90,12 @@ m = [f.value_multiple(s_, 100.0) for s_ in ("25-26", "26-27", "27-28", "30-31")]
 check("the multiple grows to PRICE_BASE, then holds",
       abs(m[1] / m[0] - 1 - f.VALUE_GROWTH) < 1e-9 and m[1] == m[2] == m[3])
 
+check("national TV moves local after PRICE_BASE, the same at an average market",
+      f.media_revenue("26-27", 1.0) == f.media_revenue("27-28", 1.0)
+      and f.media_revenue("26-27", 0.5) == f.MEDIA_SHARE + f.LOCAL_MEDIA * 0.5
+      and f.media_revenue("27-28", 2.0) - f.media_revenue("27-28", 0.5)
+      > f.media_revenue("26-27", 2.0) - f.media_revenue("26-27", 0.5))
+
 print("jersey patches")
 teams30 = [f"T{i:02d}" for i in range(30)]
 seas = [f"{y}-{y + 1}" for y in range(20, 30)]
