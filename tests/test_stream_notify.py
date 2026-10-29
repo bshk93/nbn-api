@@ -70,6 +70,10 @@ real_player = sn.random_player
 sn.random_player = lambda team: None
 real_front_office = sn.random_front_office
 sn.random_front_office = lambda team: None
+# Twitch is never asked: the title is whatever a section sets.
+TITLE = ["NBN Game Night"]
+real_fetch_title = sn.fetch_title
+sn.fetch_title = lambda broadcaster_id: TITLE[0]
 
 app = FastAPI()
 app.include_router(sn.router)
@@ -323,10 +327,11 @@ post("notification", online())
 check("back within the grace: a restart, silent", SENT == [])
 
 offline_ago(sn.RESTART_GRACE_MINUTES + 10)
+TITLE[0] = "Box Scores!"
 post("notification", online())
 p = SENT[0]["payload"] if SENT else {}
 lines = p.get("content", "").split("\n")
-check("a new stream later that night posts, as the box scores", lines[0].endswith("Box Scores [live](<https://nbn.today>)"), lines)
+check("a box-score title later that night posts, as the box scores", lines[0].endswith("Box Scores [live](<https://nbn.today>)"), lines)
 check("its game is one of the night's non-stream games",
       len(lines) > 1 and f"<@&{TEAM_ROLE_IDS['CLE']}>" not in lines[1], lines)
 check("and pings no one", p.get("allowed_mentions") == {"parse": []}, p)
@@ -336,6 +341,33 @@ offline_ago(sn.RESTART_GRACE_MINUTES + 10)
 post("notification", online())
 check("a third stream that night is box scores again, not the stream games",
       SENT and "Box Scores" in SENT[0]["payload"]["content"].split("\n")[0])
+
+print("box scores right after the game stream")
+reset()
+TITLE[0] = "NBN Game Night"
+post("notification", online())
+check("the game stream posts", len(SENT) == 1)
+offline_ago(2)
+TITLE[0] = "NBN box scores"
+SENT.clear()
+post("notification", online())
+check("two minutes later with a box-score title: posts at once, not a restart",
+      SENT and "Box Scores" in SENT[0]["payload"]["content"].split("\n")[0], SENT)
+offline_ago(3)
+SENT.clear()
+post("notification", online())
+check("the box-score stream dropping and coming back is a restart", SENT == [])
+
+print("no title from Twitch: the night's second stream is box scores")
+reset()
+TITLE[0] = None
+post("notification", online())
+check("first stream of the night: the stream games", SENT and "NBN is" in SENT[0]["payload"]["content"])
+offline_ago(5)
+SENT.clear()
+post("notification", online())
+check("next stream that night: box scores", SENT and "Box Scores" in SENT[0]["payload"]["content"].split("\n")[0])
+TITLE[0] = "NBN Game Night"
 
 print("box scores first, then the game stream")
 reset()
@@ -351,11 +383,52 @@ check("the stream games still get their post",
 print("plan_post")
 GAMES[:] = [game("2026-10-24", "CLE", "SAC", stream=True)]
 kind, games, day = sn.plan_post({"stream_day": "2026-10-24"})
-check("a night of only stream games, already posted: box scores of those", kind == "box" and games == [("CLE", "SAC")])
+check("no title, a night of only stream games already posted: box scores of those",
+      kind == "box" and games == [("CLE", "SAC")])
 kind, _, _ = sn.plan_post({"stream_day": "2026-10-23"})
 check("a stream post from another night doesn't count", kind == "stream")
+check("a box-score title wins, even on a night with no stream post yet",
+      sn.plan_post({}, "Box Score Night")[0] == "box")
+check("any other title is the stream, even after the night's stream post",
+      sn.plan_post({"stream_day": "2026-10-24"}, "NBN Game Night")[0] == "stream")
+check("'boxscores' and 'BOX-SCORES' both count",
+      all(sn.BOX_TITLE_RE.search(t) for t in ("boxscores", "BOX-SCORES", "box score")))
 GAMES[:] = [game("2026-10-24", "CLE", "SAC", stream=True), game("2026-10-24", "BOS", "MIA"),
             game("2026-10-25", "LAL", "GSW", stream=True)]
+
+print("fetch_title against a mocked Twitch")
+import httpx  # noqa: E402
+import routers.stream_live as sl  # noqa: E402
+saved_env = {k: os.environ.get(k) for k in ("TWITCH_CLIENT_ID", "TWITCH_CLIENT_SECRET")}
+os.environ["TWITCH_CLIENT_ID"], os.environ["TWITCH_CLIENT_SECRET"] = "cid", "secret"
+sl._token.update(value=None, expires=0.0)
+RealClient = httpx.Client
+
+
+def twitch(handler):
+    sn.httpx.Client = lambda **kw: RealClient(transport=httpx.MockTransport(handler), **kw)
+
+
+def ok(req):
+    if req.url.host == "id.twitch.tv":
+        return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+    check("asks /channels for the broadcaster", req.url.path == "/helix/channels"
+          and req.url.params.get("broadcaster_id") == "156572449")
+    return httpx.Response(200, json={"data": [{"title": "Box Scores 10/24"}]})
+
+
+twitch(ok)
+check("reads the title", real_fetch_title("156572449") == "Box Scores 10/24")
+twitch(lambda req: httpx.Response(500))
+sl._token.update(value=None, expires=0.0)
+check("a Twitch error is None", real_fetch_title("156572449") is None)
+check("no broadcaster id is None", real_fetch_title("") is None)
+sn.httpx.Client = RealClient
+for k, v in saved_env.items():
+    if v is None:
+        os.environ.pop(k, None)
+    else:
+        os.environ[k] = v
 
 print("is_restart without an offline notice")
 now = datetime.now(timezone.utc)
@@ -363,6 +436,8 @@ check("no post yet is never a restart", not sn.is_restart({}, now))
 check("an offline from before the last post is ignored; the 12h fallback rules",
       sn.is_restart({"posted_at": (now - timedelta(hours=3)).isoformat(),
                      "offline_at": (now - timedelta(hours=5)).isoformat()}, now))
+check("a different kind than the last post is never a restart",
+      not sn.is_restart({"posted_at": (now - timedelta(minutes=5)).isoformat(), "kind": "stream"}, now, "box"))
 check("past the fallback, a new stream",
       not sn.is_restart({"posted_at": (now - timedelta(hours=13)).isoformat()}, now))
 

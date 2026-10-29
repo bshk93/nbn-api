@@ -32,8 +32,10 @@ Three gates, so a restart or a redelivery never posts twice:
    message id already seen is acknowledged and dropped.
 3. **Restart.** `stream.offline` is subscribed too, and stamped in
    `stream-announce.json`; a stream back within `RESTART_GRACE_MINUTES` of
-   going offline is the same stream coming back and is silent, and anything
-   later is a new stream that posts. Should the offline notice never arrive,
+   going offline, as the same kind of post as the last, is the same stream
+   coming back and is silent. A switch of kind posts however soon it comes
+   (the box scores go live minutes after the game stream ends), and anything
+   past the grace is a new stream. Should the offline notice never arrive,
    the fallback is the old rule: nothing within `RESTART_GAP_HOURS` of the
    last post. Stamped on disk, so an API restart in between changes nothing. A stream that began more than
    `MAX_STREAM_AGE` ago isn't announced at all.
@@ -64,6 +66,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import PlainTextResponse
@@ -85,7 +88,7 @@ STATE_FILE = DATA_DIR / "stream-announce.json"
 
 MAX_MESSAGE_AGE   = 600   # seconds; Twitch says to drop anything older
 MAX_STREAM_AGE    = 900   # seconds; a stream this old when we hear of it isn't news
-RESTART_GRACE_MINUTES = 30  # back within this of going offline: the same stream
+RESTART_GRACE_MINUTES = 30  # back within this of going offline, as the same kind: the same stream
 RESTART_GAP_HOURS = 12    # fallback when no offline notice came after the last post
 SEEN_IDS_KEEP     = 3600  # seconds a message id is remembered for
 
@@ -133,6 +136,10 @@ BOX_BLURBS = [
     "{home} is one bad loss from blowing it all up. Again.",
     "{away} and {home} have both already simmed this in their heads. Both won.",
 ]
+
+# The streamer retitles the box-score stream; that's what says which one this is.
+BOX_TITLE_RE = re.compile(r"box\s*-?\s*scores?", re.I)
+CHANNELS_URL = "https://api.twitch.tv/helix/channels"
 
 _lock = threading.Lock()
 _seen_ids: dict[str, float] = {}
@@ -190,29 +197,60 @@ def night_games() -> list[dict]:
                   key=lambda g: _time_key(g.get("time_et", "")))
 
 
-def plan_post(state: Optional[dict] = None) -> tuple[str, list[tuple[str, str]], Optional[str]]:
+def fetch_title(broadcaster_id: str) -> Optional[str]:
+    """The channel's current title, from Helix `/channels`, which is current
+    the moment it's set (unlike `/streams`). None on any failure."""
+    from .stream_live import _app_token
+    client_id = os.environ.get("TWITCH_CLIENT_ID")
+    secret = os.environ.get("TWITCH_CLIENT_SECRET")
+    if not (client_id and secret and broadcaster_id):
+        return None
+    try:
+        with httpx.Client(timeout=5) as client:
+            token = _app_token(client, client_id, secret)
+            r = client.get(CHANNELS_URL, params={"broadcaster_id": broadcaster_id},
+                           headers={"Client-ID": client_id, "Authorization": f"Bearer {token}"})
+            r.raise_for_status()
+            data = r.json().get("data") or []
+        return data[0].get("title") if data else None
+    except Exception as e:  # noqa: BLE001 — the post goes out on the schedule's word instead
+        log.warning("stream_notify: couldn't read the stream title: %s", e)
+        return None
+
+
+def plan_post(state: Optional[dict] = None, title: Optional[str] = None
+              ) -> tuple[str, list[tuple[str, str]], Optional[str]]:
     """(kind, games, day). ("stream", every stream game) when the night has
     one, else ("box", one of its games at random, or none).
 
-    Any later stream on a night that already had its stream post
-    (`stream_day`) is the box scores: the stream games have no box score yet, so they'd still read as
-    unplayed and the night would announce them twice. Its game comes from the
-    night's other games when there are any."""
+    The title decides first: one saying "box scores" is the box-score post.
+    With a title that doesn't, it's the stream post if the night has stream
+    games. With no title (Twitch couldn't be asked), any later stream on a
+    night that already had its stream post (`stream_day`) is the box scores:
+    the stream games have no box score yet, so they'd still read as unplayed
+    and the night would announce them twice. A box-score post's game comes
+    from the night's other games when there are any."""
     games = night_games()
     day = games[0]["date"] if games else None
     stream = [(g["away_team"], g["home_team"]) for g in games if g.get("stream")]
-    already = bool(day) and (state or {}).get("stream_day") == day
-    if stream and not already:
+    if title is not None:
+        box = bool(BOX_TITLE_RE.search(title))
+    else:
+        box = bool(day) and (state or {}).get("stream_day") == day
+    if stream and not box:
         return "stream", stream, day
     pool = [g for g in games if not g.get("stream")] or games
     g = random.choice(pool) if pool else None
     return "box", [(g["away_team"], g["home_team"])] if g else [], day
 
 
-def is_restart(state: dict, now: datetime) -> bool:
-    """The same stream coming back, rather than a new one."""
+def is_restart(state: dict, now: datetime, kind: Optional[str] = None) -> bool:
+    """The same stream coming back, rather than a new one. A different kind of
+    post than the last never is: game stream to box scores is a switch."""
     posted = _parse_ts(state.get("posted_at"))
     if not posted:
+        return False
+    if kind is not None and state.get("kind") is not None and kind != state.get("kind"):
         return False
     offline = _parse_ts(state.get("offline_at"))
     if offline and offline >= posted:
@@ -331,15 +369,16 @@ def announce(event: dict, now: Optional[datetime] = None) -> bool:
             return False
         with _lock:
             state = _load_json(STATE_FILE, {})
-            if is_restart(state, now):
-                log.info("stream_notify: posted at %s, offline at %s; treating this as a restart",
-                         state.get("posted_at"), state.get("offline_at"))
-                return False
+            title = fetch_title(event.get("broadcaster_user_id") or os.environ.get("TWITCH_BROADCASTER_ID", ""))
             try:
-                kind, games, day = plan_post(state)
+                kind, games, day = plan_post(state, title)
             except Exception as e:  # noqa: BLE001 — a missing schedule still gets the link out
                 log.warning("stream_notify: couldn't work out the night's games: %s", e)
                 kind, games, day = None, [], None
+            if is_restart(state, now, kind):
+                log.info("stream_notify: %s post at %s, offline at %s; treating this as a restart",
+                         state.get("kind"), state.get("posted_at"), state.get("offline_at"))
+                return False
             last_key = "box_blurb" if kind == "box" else "blurb"
             records, blurbs, template = None, None, state.get(last_key)
             if games:

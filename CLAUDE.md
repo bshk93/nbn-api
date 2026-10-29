@@ -630,16 +630,23 @@ no pings.
   `DISCORD_LEAGUETALK_CHANNEL` unset, nothing posts.
 - **One post per stream, never a restart.** `stream.offline` is subscribed
   too and stamped in `stream-announce.json`: a stream back within
-  `RESTART_GRACE_MINUTES` (30) of going offline is a restart and posts
-  nothing; later is a new stream. With no offline notice after the last post,
+  `RESTART_GRACE_MINUTES` (30) of going offline, as the same kind of post as
+  the last, is a restart and posts nothing; later is a new stream. A change of
+  kind is never a restart, since the box scores go live minutes after the game
+  stream ends. With no offline notice after the last post,
   the fallback is nothing within `RESTART_GAP_HOURS` (12). A redelivered
   message id is dropped; a stream that began over 15 minutes before we hear of
   it, or a rerun, isn't announced.
-- **A night's second stream is its box scores.** The stream games have no box
-  score yet, so they'd still read as unplayed; once a night has had its stream
-  post (`stream_day`), any later stream that night posts as box scores, its
-  game drawn from the night's non-stream games. A box-score stream *before*
-  the game stream doesn't count, so the stream games still get theirs.
+- **The title says which stream it is.** On each go-live the channel's title
+  is read from Helix `/channels` (current as soon as it's set, unlike
+  `/streams`; `fetch_title`, app token as above). A title matching
+  `BOX_TITLE_RE` ("box score(s)", any case) is the box-score post, its game
+  drawn from the night's non-stream games; any other title is the stream post
+  when the night has stream games. If the title can't be read, the fallback is
+  the night: once it has had its stream post (`stream_day`), any later stream
+  that night is box scores, since the stream games have no box score yet and
+  would still read as unplayed. Under that fallback only, a game stream that
+  drops and comes back reads as the box scores.
 - **Subscribing is a one-off**, after deploying with the secret set:
   `set -a && source .env && set +a && venv/bin/python subscribe_twitch_eventsub.py create`,
   then `list` should show `stream.online` and `stream.offline` both `enabled`.
