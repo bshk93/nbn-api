@@ -44,6 +44,18 @@ def _protected_flat(node: dict, orig: str) -> dict:
     return {"owner": "|".join(teams), "protected": None}
 
 
+def _slot_teams(slot) -> list[str]:
+    """The teams a swap-group priority slot can hand the pick to."""
+    if isinstance(slot, str):
+        return [slot]
+    if model.is_node(slot):
+        if slot.get("type") == "settled":
+            return [slot["team"]]
+        if slot.get("type") == "protected":
+            return [t for b in slot.get("bands", []) for t in _slot_teams(b["to"])]
+    return []
+
+
 def _swap_candidates(node: dict, store: dict, pick: dict | None = None) -> list[str]:
     """Named priority teams, plus — only when `pick` is itself one of the
     group's plain (non-dynamic) members and could rank beyond the named
@@ -59,7 +71,9 @@ def _swap_candidates(node: dict, store: dict, pick: dict | None = None) -> list[
     *different* member of the same group)."""
     group = (store or {}).get("swap_groups", {}).get(node["group"], {})
     priority = group.get("priority", [])
-    named = _distinct(t for t in priority if isinstance(t, str))
+    # A slot can be a nested node (a swap whose worse pick is protected), and
+    # every team in it is a candidate too, or the owner field would drop them.
+    named = _distinct(t for slot in priority for t in _slot_teams(slot))
     members = group.get("members", [])
     if pick is not None and len(members) > len(priority):
         this_member = next((m for m in members if model.is_pick_ref(m)

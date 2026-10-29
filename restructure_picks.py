@@ -15,10 +15,10 @@ This is the tool for that. A ruling is written as a spec file in
   one pick each, and the worked examples from the ruling.
 - `protected`: one pick and its bands (`{min, max, to}`). Proved by resolving
   every slot in the round: each must land with exactly one band's team.
-- `swap_group`: two picks and the priority list (best pick first). Not for a
-  swap whose worse pick is itself protected: the registry refuses a nested
-  node in a swap group, and the resolver can't yet settle one in a binary
-  chain (it serves the right leaves but resolves the pick to "?").
+- `swap_group`: two picks and the priority list (best pick first). A slot can
+  be a protected node on `"__slot1__"` (the pick that lands there), for a swap
+  whose worse pick is itself protected; the worked examples are then the
+  proof, and must give the pick to every band's team at least once.
 
 Then:
 
@@ -120,6 +120,8 @@ def main() -> int:
         lo, hi = slot_range(spec["pick"]["round"])
         print(f"\nevery slot {lo}-{hi} lands with exactly one band's team; "
               f"{len(spec.get('examples', []))} worked example(s) match.")
+    elif spec.get("kind") == "swap_group" and any(isinstance(x, dict) for x in spec["priority"]):
+        print(f"\n{len(spec.get('examples', []))} worked example(s) match, covering every band's team.")
     else:
         print(f"\nall {factorial(len(members_of(spec)))} draft orders resolve to one pick per team; "
               f"{len(spec.get('examples', []))} worked example(s) match.")
@@ -198,6 +200,16 @@ def prove(reg: dict, spec: dict, registry, seed_store, resolver, csv_file: Path)
     if kind == "protected":
         return prove_protected(store, spec, resolver)
     keys = [resolver.key(m) for m in members_of(spec)]
+    if kind == "swap_group" and any(isinstance(slot, dict) for slot in spec["priority"]):
+        # A protected slot makes who ends up with a pick depend on where it
+        # lands, so no fixed team list holds. The worked examples carry the
+        # proof instead, and must cover each band of every nested slot.
+        bands = [b for slot in spec["priority"] if isinstance(slot, dict) for b in slot["bands"]]
+        covered = {b["to"] for ex in spec.get("examples", []) for b in bands
+                   if b["to"] in ex["owners"]}
+        missing = sorted({b["to"] for b in bands} - covered)
+        problems = [f"no worked example gives the pick to {t}" for t in missing]
+        return problems + prove_examples(store, spec, keys, resolver)
     teams = sorted(spec["teams"])
     for order in itertools.permutations(range(1, len(keys) + 1)):
         positions = dict(zip(keys, order))

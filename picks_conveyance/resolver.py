@@ -213,9 +213,18 @@ def _resolve_binary_chains(binary_swaps: dict, positions: dict) -> tuple[dict, d
         memo[sid] = {"better": better, "worse": worse}
         for out_name, recipient in (("better", s["better_to"]),
                                     ("worse", s["worse_to"])):
+            pick_key = memo[sid][out_name]
             if isinstance(recipient, str):
-                owners[memo[sid][out_name]] = recipient
-            # input-ref / node recipients are consumed downstream
+                owners[pick_key] = recipient
+            elif model.is_node(recipient):
+                # A node bound to whichever pick lands in this output (the
+                # __slot1__ binding, §7.5), as a swap group's priority slot
+                # already allows: "DAL gets the better; the worse goes to DET
+                # unless it lands 1-3, then MIN keeps it" (2029 MIA/MIN 1sts).
+                team = _resolve_leaf_for_pick(recipient, pick_key, positions)
+                if team is not None:
+                    owners[pick_key] = team
+            # input-ref recipients are consumed downstream
 
     for sid in binary_swaps:
         _eval(sid)

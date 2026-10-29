@@ -180,10 +180,50 @@ def test_ranked_group_dynamic_member():
     check("PHX worst (#30) -> stays PHX", r2.get((2028, 1, "PHX")), "PHX")
 
 
+# 8. the same swap written as a one-node binary chain: a node recipient bound
+# to the pick that lands in that output, resolved like a swap-group slot.
+def test_binary_swap_nested_protection():
+    lower = model.protected("n_low_b", "__slot1__",
+                            [{"min": 1, "max": 3, "to": "MIN"},
+                             {"min": 4, "max": 60, "to": "DET"}])
+    s = {"type": "binary_swap", "id": "b1", "a": pref(2029, 1, "MIA"), "b": pref(2029, 1, "MIN"),
+         "better_to": "DAL", "worse_to": lower}
+    model.validate(s)
+    store = {"binary_swaps": {"b1": s}}
+    r = resolver.resolve_all(store, {(2029, 1, "MIA"): 5, (2029, 1, "MIN"): 8})
+    check("binary: higher->DAL, lower(#8)->DET",
+          (r.get((2029, 1, "MIA")), r.get((2029, 1, "MIN"))), ("DAL", "DET"))
+    r2 = resolver.resolve_all(store, {(2029, 1, "MIA"): 3, (2029, 1, "MIN"): 1})
+    check("binary: lower (MIA #3) is top-3 -> MIN gets it",
+          (r2.get((2029, 1, "MIA")), r2.get((2029, 1, "MIN"))), ("MIN", "DAL"))
+
+
+def test_swap_group_nested_slot_validates():
+    lower = model.protected("n_low_v", "__slot1__",
+                            [{"min": 1, "max": 3, "to": "MIN"},
+                             {"min": 4, "max": 60, "to": "DET"}])
+    group = {"members": [pref(2029, 1, "MIA"), pref(2029, 1, "MIN")], "priority": ["DAL", lower]}
+    try:
+        model.validate_swap_group(group)
+        ok = True
+    except model.ConveyanceError as exc:
+        print("        ", exc)
+        ok = False
+    check("a swap group with a protected priority slot validates", ok, True)
+    top = model.protected("n_top", "__slot1__", [{"min": 1, "max": 60, "to": "MIN"}])
+    try:
+        model.validate(top)
+        refused = False
+    except model.ConveyanceError:
+        refused = True
+    check("a top-level __slot1__ protection is still refused", refused, True)
+
+
 if __name__ == "__main__":
     for t in (test_protected, test_range_split, test_swap_group,
               test_nested_swap_protection, test_binary_chain,
-              test_ranked_group_fallback_to_own, test_ranked_group_dynamic_member):
+              test_ranked_group_fallback_to_own, test_ranked_group_dynamic_member,
+              test_binary_swap_nested_protection, test_swap_group_nested_slot_validates):
         print(t.__name__)
         t()
     print()

@@ -232,7 +232,11 @@ def validate_swap_group(group: dict) -> None:
         if not (isinstance(slot, str) or is_node(slot)):
             raise ConveyanceError(f"priority slot must be a team or a node, got {slot!r}")
         if is_node(slot):
-            validate(slot)
+            # A priority slot sits inside the group, so it is nested (depth 1)
+            # and may bind to the pick that lands there ("__slot1__"). At
+            # depth 0 that binding was refused, so the resolver's own tested
+            # case (a swap whose worse pick is protected) could never be saved.
+            validate(slot, _depth=1)
 
 
 def validate_ladder(ladder: dict) -> None:
