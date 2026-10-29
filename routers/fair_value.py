@@ -70,16 +70,20 @@ The model, in full:
     the team's rating sustains (`rest_of_season_buzz`), and a later season's
     rating's.
     NBNTV is left out, as in the ledger's valuation, and so is the tax share,
-    which would need every other team's payroll projected too.
+    which would need every other team's payroll projected too. Every figure
+    grows with the cap past 26-27 (`fin.price_level`), as the ledger's does,
+    so revenue keeps pace with the payroll it pays.
   * **Costs.** Payroll is money, not cap (`cap_history._payroll`: contracts and
     dead cap, no holds), plus re-signings and replacement salaries for empty
     roster spots in later seasons; the ledger's tax on it; arena ops.
   * **Sale price.** The ledger's valuation, run on the three projected
     seasons and the outlook: league multiple for that season × their mean
     revenue × brand (titles in the last six seasons, expected ones counted by
-    probability). `SALE_PROFIT_WEIGHT` of it is priced on the three seasons'
-    mean profit instead, at the multiple that sells the average team for the
-    same, so payroll reaches the sale and not only the three seasons' profit.
+    probability). The multiple stops growing at 26-27; from there revenue
+    carries the growth. `SALE_PROFIT_WEIGHT` of it is priced on the three
+    seasons' mean profit instead, at `SALE_PROFIT_MULTIPLE` times the revenue
+    multiple (set so the average team sells for about the same), so payroll
+    reaches the sale and not only the three seasons' profit.
   * **Discounting** at `DISCOUNT_RATE` per season, mid-season convention, to
     opening night: this season counts whole (what is played at what the
     ledger booked, the rest projected), and the sale is three seasons out.
@@ -138,7 +142,7 @@ from stats_build import finances as fin
 
 router = APIRouter()
 
-MODEL = "fv5"
+MODEL = "fv6"
 
 # ── The model's constants. Every figure is NB¥. ──────────────────────────────
 
@@ -165,6 +169,11 @@ DRAFT_SAMPLES = 400             # simulated draft orders each contingent pick is
 # team sells for the same either way. Without it the sale, ~94% of the value,
 # never saw payroll: a team deep in the tax sold like one under the cap.
 SALE_PROFIT_WEIGHT = 0.25
+# The profit share's multiple, as a multiple of revenue's: the league's mean
+# revenue over its mean profit, measured 2026-10-29 (fv6). Fixed, not measured
+# each run: as the league's profit thins, a measured ratio blows up and prices
+# the teams that still earn at many times the rest.
+SALE_PROFIT_MULTIPLE = 3.04
 
 PRIOR_FLOOR = 0.5               # the roster's least weight in this season's rating
 REVERT = 0.75                   # a later season keeps this much of its rating, per season out
@@ -190,7 +199,7 @@ FA_EXCEPTIONS = ("ntmle_amount", "tmle_amount")
 STAR_COUNT = 15                 # All-NBN is 15 players a season
 ROSTER_FILL = 14                # later seasons fill the standard roster to this
 HOME_PER_SERIES = 2.6           # measured: 467 playoff games over 90 series, 21 to 26
-CAP_GROWTH = 0.05               # aprons for seasons not on file yet, per season
+CAP_GROWTH = fin.CAP_GROWTH     # aprons for seasons not on file yet, per season
 
 # The playoff edge. Fit on the 90 series 20-21 to 25-26, each scored only on
 # the series before it. A person's record is shrunk by n/(n + 8): the fit can't
@@ -832,6 +841,18 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
 
     # Later seasons: who is on the books, aged, filled and pulled to the middle.
     rep_ovr, rep_pay = replacement(teams, bios, ovr_now, season)
+    cap_now = cap_level(season, season)
+
+    def rep_pay_in(s: str) -> float:
+        """Replacement salary, grown with the cap like every other salary."""
+        cap_s = cap_level(s, season)
+        return rep_pay * (cap_s / cap_now) if cap_s and cap_now else rep_pay
+
+    # Every NB¥ the ledger's formulas give is PRICE_BASE money (fin.price_level).
+    base_cap = _cap_levels_for(fin.PRICE_BASE)["cap"]
+
+    def level(s: str) -> float:
+        return fin.price_level(s, cap_level(s, season), base_cap)
     later_books, strengths = {}, [strength0]
     kept = {t: set() for t in teams}
     signed: dict[str, list[dict]] = {t: [] for t in teams}   # free agents signed so far, with their base OVR
@@ -894,7 +915,7 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
             spots = {t: max(0, ROSTER_FILL - bk[t]["standard"]) for t in teams}
             pool = [p for t in teams for p in bk[t]["walked"] if p["slug"] not in gone]
             standing = {x["team"]: x["rating"] for x in sims[k - 1]["teams"]}
-            for t, got in free_agency(pool, budgets, spots, cap_s, rep_ovr, rep_pay, standing).items():
+            for t, got in free_agency(pool, budgets, spots, cap_s, rep_ovr, rep_pay_in(s), standing).items():
                 for p in got:
                     base = ovr_now.get(p["slug"])
                     signed[t].append({"slug": p["slug"], "kind": "fa", "two_way": False, "base": base,
@@ -1013,12 +1034,14 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
         years = []
         for k, s in enumerate(seasons):
             r = rows[k][t]
+            p = level(s)
             finishes = (expected_finish[:k][::-1] + past)[:3]
             bw = expected_bandwagon(finishes)
             if k == 0:
                 rest_wp = (r["proj_w"] - r["w"]) / left if left else 0.5
                 ledger_row = led.get((s, t)) or {}
-                gate_so_far = (_num(ledger_row.get("GATE")) * _num(ledger_row.get("HOME_GAMES")) / fin.REG_HOME_GAMES
+                # The ledger's gate is in this season's money; the formulas below aren't.
+                gate_so_far = (_num(ledger_row.get("GATE")) * _num(ledger_row.get("HOME_GAMES")) / fin.REG_HOME_GAMES / p
                                if ledger_row else 0.0)
                 home_left = max(0, sched_home[t] - played_home[t])
                 gate_left = home_left * gate_per_game(rest_wp, stars[0][t], away[0], bw,
@@ -1027,15 +1050,16 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
             else:
                 gate = fin.REG_HOME_GAMES * gate_per_game(r["proj_w"] / (r["games"] or 82), stars[k][t], away[k], bw,
                                                           mkt[k][t] * (1 + buzz[k][t]["rest"]))
-            rev = season_revenue(gate, r, stars[k][t], mkt[k][t], buzz[k][t]["season"])
+            rev = {key: v * p for key, v in season_revenue(gate, r, stars[k][t], mkt[k][t],
+                                                            buzz[k][t]["season"]).items()}
 
             contracted, dead = _payroll(t, bios, s)
             payroll = float(contracted)
             if k:
                 bk = later_books[s][t]
-                payroll += bk["resign_money"] + bk["fa_money"] + max(0, ROSTER_FILL - bk["standard"]) * rep_pay
+                payroll += bk["resign_money"] + bk["fa_money"] + max(0, ROSTER_FILL - bk["standard"]) * rep_pay_in(s)
             tax = fin.luxury_tax(payroll, aprons(s, season)[0], cap_level(s, season))
-            ops = fin.ARENA_OPS_PER_GAME * fin.REG_HOME_GAMES
+            ops = p * fin.ARENA_OPS_PER_GAME * fin.REG_HOME_GAMES
             costs = payroll + tax + ops
 
             # Valued as of opening night (the docstring's Discounting): this season counts
@@ -1077,9 +1101,10 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
         bw_out = expected_bandwagon((expected_finish[::-1] + past)[:3])
         gate_out = fin.REG_HOME_GAMES * gate_per_game(ro["proj_w"] / (ro["games"] or 82), stars[-1][t], away[-1],
                                                       bw_out, mkt_out[t] * (1 + b_out))
-        rev_out = season_revenue(gate_out, ro, stars[-1][t], mkt_out[t], b_out)["revenue"]
+        rev_out = level(season_after(season, k_out)) * season_revenue(gate_out, ro, stars[-1][t], mkt_out[t],
+                                                                      b_out)["revenue"]
         trailing = (sum(y["revenue"] for y in held) + rev_out) / (len(held) + 1)
-        multiple = (fin.START_VALUE / league0) * (1 + fin.VALUE_GROWTH) ** (season_index(end) + 1) if league0 else 0.0
+        multiple = fin.value_multiple(end, league0) if league0 else 0.0
         book = _num((led.get((season, t)) or {}).get("VALUE")) or None
         out_teams.append({
             "team": t, "pv_in": sum(y["pv_in"] for y in held), "pv_out": sum(y["pv_out"] for y in held),
@@ -1098,12 +1123,13 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
         })
 
     # The sale (SALE_PROFIT_WEIGHT): part revenue multiple, part profit
-    # multiple, the profit multiple scaled so the average team is the same on both.
+    # multiple (SALE_PROFIT_MULTIPLE times revenue's). A loss sells for nothing
+    # extra, never for less.
     lg_rev = sum(x["trailing_revenue"] for x in out_teams) / len(out_teams)
     lg_profit = sum(x["trailing_profit"] for x in out_teams) / len(out_teams)
-    w = SALE_PROFIT_WEIGHT if lg_profit > 0 else 0.0
+    w = SALE_PROFIT_WEIGHT
     for x in out_teams:
-        earns = max(0.0, x["trailing_profit"] * lg_rev / lg_profit) if w else 0.0
+        earns = max(0.0, x["trailing_profit"] * SALE_PROFIT_MULTIPLE)
         sale = x.pop("_multiple") * x.pop("_brand") * ((1 - w) * x["trailing_revenue"] + w * earns)
         pv_sale = sale * discount(HORIZON)
         value = x["pv_in"] - x["pv_out"] + pv_sale
@@ -1117,7 +1143,8 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
         "computed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "league": {"mean_price": round(mean_price, 4), "replacement_ovr": round(rep_ovr, 1),
                    "replacement_salary": rep_pay, "discount_rate": DISCOUNT_RATE, "shares": SHARES,
-                   "sale_profit_weight": w, "trailing_revenue": round(lg_rev), "trailing_profit": round(lg_profit)},
+                   "sale_profit_weight": w, "sale_profit_multiple": SALE_PROFIT_MULTIPLE,
+                   "trailing_revenue": round(lg_rev), "trailing_profit": round(lg_profit)},
         "teams": out_teams,
     }
 

@@ -115,7 +115,17 @@ TAX_RATES = (1.5, 1.75, 2.5, 3.25)
 TAX_STEP = 0.5
 
 START_VALUE = 3_000_000_000    # every franchise, opening night 20-21
-VALUE_GROWTH = 0.06            # the league-wide multiple, per season
+VALUE_GROWTH = 0.06            # the league-wide multiple, per season, up to PRICE_BASE
+
+# Prices grow with the cap after PRICE_BASE. Every NB¥ figure above is in
+# PRICE_BASE money; a later season's revenue and arena costs are scaled by its
+# cap over PRICE_BASE's (`price_level`), and the multiple stops growing, since
+# revenue now carries the league's growth. Before this, revenue was flat while
+# payroll grew with the cap, so the league's profit ran out about ten seasons
+# on (2026-10-29). A cap that isn't set yet is the last one on file grown by
+# CAP_GROWTH a season, the same guess fair value makes for payroll.
+PRICE_BASE = "26-27"
+CAP_GROWTH = 0.05
 TRAILING = 3                   # seasons of revenue the valuation averages
 BRAND_PER_TITLE = 0.04
 BRAND_WINDOW = 6
@@ -474,6 +484,46 @@ def load_books(data_dir: Path) -> dict[tuple[str, str], dict]:
     return out
 
 
+def season_index(season: str) -> int:
+    """20-21 is 0."""
+    return int(season[:2]) - 20
+
+
+def load_caps(data_dir: Path) -> dict[str, float]:
+    """Each season's cap from cap-levels.json, where it is set (a 0 is unset)."""
+    path = data_dir / "cap-levels.json"
+    try:
+        levels = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return {s: float(v["cap"]) for s, v in levels.items() if isinstance(v, dict) and v.get("cap")}
+
+
+def season_cap(season: str, caps: dict[str, float]) -> float | None:
+    """The season's cap, or the last one before it grown by CAP_GROWTH a season."""
+    if caps.get(season):
+        return caps[season]
+    earlier = [s for s in caps if season_index(s) < season_index(season)]
+    if not earlier:
+        return None
+    last = max(earlier, key=season_index)
+    return caps[last] * (1 + CAP_GROWTH) ** (season_index(season) - season_index(last))
+
+
+def price_level(season: str, cap: float | None, base_cap: float | None) -> float:
+    """What a NB¥ of PRICE_BASE money is in `season`: 1.0 up to PRICE_BASE,
+    then the season's cap over PRICE_BASE's."""
+    if season_index(season) <= season_index(PRICE_BASE) or not cap or not base_cap:
+        return 1.0
+    return cap / base_cap
+
+
+def value_multiple(season: str, league0: float) -> float:
+    """The league-wide valuation multiple: seeded so 20-21 opens level at
+    START_VALUE, growing VALUE_GROWTH a season up to PRICE_BASE and flat after."""
+    return START_VALUE / league0 * (1 + VALUE_GROWTH) ** (min(season_index(season), season_index(PRICE_BASE)) + 1)
+
+
 def luxury_tax(payroll: float, apron1: float | None, cap: float | None) -> float:
     """The bill on payroll over the first apron, bracket by bracket."""
     if not apron1 or not cap:
@@ -601,9 +651,13 @@ def ledger(data_dir: Path, season: str):
 
     # Revenue per team-season. The season in progress is projected to a full
     # 41 home games, so its valuation isn't dragged down by the calendar.
+    caps = load_caps(data_dir)
+    base_cap = season_cap(PRICE_BASE, caps)
+    level = {s: price_level(s, season_cap(s, caps), base_cap) for s in seasons}
     revenue_ex_tv: dict[tuple[str, str], float] = {}
     lines: dict[tuple[str, str], dict] = {}
     for s in seasons:
+        p = level[s]
         in_progress = s == current and any(
             tally[(s, t)]["w"] + tally[(s, t)]["l"] < 82 for t in teams)
         league_gate_per_game = (
@@ -627,10 +681,12 @@ def ledger(data_dir: Path, season: str):
                      + MERCH_TITLE * champ)
             title = TITLE_BONUS if champ else 0
             nbntv = NBNTV_PER_GAME * tt["streamed"]
-            rev = gate + tt["po_gate"] + concessions + merch + media + title
+            gate, po_gate, concessions, merch, media, title, nbntv = (
+                p * x for x in (gate, tt["po_gate"], concessions, merch, media, title, nbntv))
+            rev = gate + po_gate + concessions + merch + media + title
             revenue_ex_tv[(s, t)] = rev
-            lines[(s, t)] = {"in_progress": in_progress, "gate": gate, "merch": merch, "media": media,
-                             "concessions": concessions,
+            lines[(s, t)] = {"in_progress": in_progress, "gate": gate, "po_gate": po_gate, "merch": merch,
+                             "media": media, "concessions": concessions,
                              "title": title, "nbntv": nbntv, "revenue": rev + nbntv,
                              "champ": champ}
         if in_progress and s != seasons[0]:
@@ -643,15 +699,14 @@ def ledger(data_dir: Path, season: str):
                              + (TITLE_BONUS + MERCH_TITLE) * (results.get((done, t)) == "Champion")
                              for t in teams) / len(teams)
             for t in teams:
-                revenue_ex_tv[(s, t)] += postseason
+                revenue_ex_tv[(s, t)] += postseason * p / level[done]
 
     # Valuation: a league-wide multiple on trailing revenue, times a brand
     # premium for recent titles. Seeded so 20-21 opens level at START_VALUE.
     league0 = sum(revenue_ex_tv[(seasons[0], t)] for t in teams) / len(teams)
-    multiple0 = START_VALUE / league0
     values: dict[tuple[str, str], float] = {}
     for i, s in enumerate(seasons):
-        multiple = multiple0 * (1 + VALUE_GROWTH) ** (i + 1)
+        multiple = value_multiple(s, league0)
         for t in teams:
             window = [revenue_ex_tv[(seasons[j], t)] if j >= 0 else league0
                       for j in range(i - TRAILING + 1, i + 1)]
@@ -687,7 +742,7 @@ def ledger(data_dir: Path, season: str):
                 payroll = book["payroll"]
                 dead = book["dead"]
                 tax = taxes[(s, t)]
-                ops = ARENA_OPS_PER_GAME * (REG_HOME_GAMES if ln["in_progress"] else tt["home_games"])
+                ops = level[s] * ARENA_OPS_PER_GAME * (REG_HOME_GAMES if ln["in_progress"] else tt["home_games"])
                 expenses = payroll + tax + ops
                 profit = revenue - expenses
             prev = values[(seasons[i - 1], t)] if i else START_VALUE
@@ -699,8 +754,8 @@ def ledger(data_dir: Path, season: str):
                 _int(tt["home_games"]),
                 round(tt["crowd"] / tt["home_games"]) if tt["home_games"] else None,
                 _int(tt["sellouts"]), _int(ln["gate"]),
-                _int(tt["po_home"]), _int(tt["po_gate"]), _int(ln["concessions"]),
-                _int(ln["merch"]), _int(ln["media"]), _int(ln["nbntv"]), ln["title"], _int(share),
+                _int(tt["po_home"]), _int(ln["po_gate"]), _int(ln["concessions"]),
+                _int(ln["merch"]), _int(ln["media"]), _int(ln["nbntv"]), _int(ln["title"]), _int(share),
                 _int(revenue),
                 _int(payroll), _int(dead), _int(tax), _int(ops), _int(expenses), _int(profit),
                 ln["titles"], _int(values[(s, t)]), _int(values[(s, t)] - prev),
