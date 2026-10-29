@@ -298,6 +298,74 @@ expire_gap()
 post("notification", online(), msg_id="dup")
 check("a redelivered message id posts nothing, even past the gap", len(SENT) == 1)
 
+print("offline, then back: restart or the box-score stream")
+OFFLINE = {"subscription": {"type": "stream.offline"}, "event": {"broadcaster_user_login": "nothingbutnet"}}
+
+
+def offline_ago(minutes):
+    """The last post went out an hour before the stream went offline, `minutes` ago."""
+    state = json.loads(sn.STATE_FILE.read_text())
+    state["offline_at"] = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    state["posted_at"] = (datetime.now(timezone.utc) - timedelta(minutes=minutes + 60)).isoformat()
+    sn.STATE_FILE.write_text(json.dumps(state))
+
+
+reset()
+GAMES[:] = [game("2026-10-24", "CLE", "SAC", stream=True), game("2026-10-24", "BOS", "MIA"),
+            game("2026-10-24", "NYK", "PHI")]
+post("notification", online())
+check("the game stream posts", len(SENT) == 1 and "NBN is" in SENT[0]["payload"]["content"])
+r = post("notification", OFFLINE)
+check("stream.offline is acknowledged and stamped",
+      r.status_code == 204 and json.loads(sn.STATE_FILE.read_text()).get("offline_at"))
+SENT.clear()
+post("notification", online())
+check("back within the grace: a restart, silent", SENT == [])
+
+offline_ago(sn.RESTART_GRACE_MINUTES + 10)
+post("notification", online())
+p = SENT[0]["payload"] if SENT else {}
+lines = p.get("content", "").split("\n")
+check("a new stream later that night posts, as the box scores", lines[0].endswith("Box Scores [live](<https://nbn.today>)"), lines)
+check("its game is one of the night's non-stream games",
+      len(lines) > 1 and f"<@&{TEAM_ROLE_IDS['CLE']}>" not in lines[1], lines)
+check("and pings no one", p.get("allowed_mentions") == {"parse": []}, p)
+
+SENT.clear()
+offline_ago(sn.RESTART_GRACE_MINUTES + 10)
+post("notification", online())
+check("a third stream that night is box scores again, not the stream games",
+      SENT and "Box Scores" in SENT[0]["payload"]["content"].split("\n")[0])
+
+print("box scores first, then the game stream")
+reset()
+DONE.clear()
+state = {"posted_at": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+         "offline_at": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+         "kind": "box", "day": "2026-10-24"}
+sn.STATE_FILE.write_text(json.dumps(state))
+post("notification", online())
+check("the stream games still get their post",
+      SENT and SENT[0]["payload"]["content"].split("\n")[0].endswith("NBN is [live](<https://nbn.today>)"), SENT)
+
+print("plan_post")
+GAMES[:] = [game("2026-10-24", "CLE", "SAC", stream=True)]
+kind, games, day = sn.plan_post({"stream_day": "2026-10-24"})
+check("a night of only stream games, already posted: box scores of those", kind == "box" and games == [("CLE", "SAC")])
+kind, _, _ = sn.plan_post({"stream_day": "2026-10-23"})
+check("a stream post from another night doesn't count", kind == "stream")
+GAMES[:] = [game("2026-10-24", "CLE", "SAC", stream=True), game("2026-10-24", "BOS", "MIA"),
+            game("2026-10-25", "LAL", "GSW", stream=True)]
+
+print("is_restart without an offline notice")
+now = datetime.now(timezone.utc)
+check("no post yet is never a restart", not sn.is_restart({}, now))
+check("an offline from before the last post is ignored; the 12h fallback rules",
+      sn.is_restart({"posted_at": (now - timedelta(hours=3)).isoformat(),
+                     "offline_at": (now - timedelta(hours=5)).isoformat()}, now))
+check("past the fallback, a new stream",
+      not sn.is_restart({"posted_at": (now - timedelta(hours=13)).isoformat()}, now))
+
 print("box scores, behind schedule")
 reset()
 GAMES[:] = [game("2026-10-22", "NYK", "PHI"), game("2026-10-22", "DEN", "UTA"),

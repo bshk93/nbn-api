@@ -628,13 +628,23 @@ no pings.
 - **Every request is HMAC-verified** against `TWITCH_EVENTSUB_SECRET` and
   refused when over 10 minutes old. Unset, the endpoint 403s everything.
   `DISCORD_LEAGUETALK_CHANNEL` unset, nothing posts.
-- **One post per stream, never a restart.** No post within `RESTART_GAP_HOURS`
-  (12) of the last, stamped in `stream-announce.json` so an API restart doesn't
-  reset it; a redelivered message id is dropped; a stream that began over 15
-  minutes before we hear of it, or a rerun, isn't announced.
+- **One post per stream, never a restart.** `stream.offline` is subscribed
+  too and stamped in `stream-announce.json`: a stream back within
+  `RESTART_GRACE_MINUTES` (30) of going offline is a restart and posts
+  nothing; later is a new stream. With no offline notice after the last post,
+  the fallback is nothing within `RESTART_GAP_HOURS` (12). A redelivered
+  message id is dropped; a stream that began over 15 minutes before we hear of
+  it, or a rerun, isn't announced.
+- **A night's second stream is its box scores.** The stream games have no box
+  score yet, so they'd still read as unplayed; once a night has had its stream
+  post (`stream_day`), any later stream that night posts as box scores, its
+  game drawn from the night's non-stream games. A box-score stream *before*
+  the game stream doesn't count, so the stream games still get theirs.
 - **Subscribing is a one-off**, after deploying with the secret set:
   `set -a && source .env && set +a && venv/bin/python subscribe_twitch_eventsub.py create`,
-  then `list` should show it `enabled`. A revocation is logged at WARNING.
+  then `list` should show `stream.online` and `stream.offline` both `enabled`.
+  Re-running `create` is safe (an existing type is a 409, left alone). A
+  revocation is logged at WARNING.
 
 Pinned by `tests/test_stream_notify.py` (no network).
 

@@ -30,9 +30,12 @@ Three gates, so a restart or a redelivery never posts twice:
    old (Twitch's own replay rule). Until the secret is set, everything 403s.
 2. **Message id.** Twitch redelivers a notification it isn't sure arrived; a
    message id already seen is acknowledged and dropped.
-3. **Restart gap.** No post within `RESTART_GAP_HOURS` of the last one, stamped
-   in `stream-announce.json`, so a dropped stream that comes back is silent and
-   so is an API restart in between. A stream that began more than
+3. **Restart.** `stream.offline` is subscribed too, and stamped in
+   `stream-announce.json`; a stream back within `RESTART_GRACE_MINUTES` of
+   going offline is the same stream coming back and is silent, and anything
+   later is a new stream that posts. Should the offline notice never arrive,
+   the fallback is the old rule: nothing within `RESTART_GAP_HOURS` of the
+   last post. Stamped on disk, so an API restart in between changes nothing. A stream that began more than
    `MAX_STREAM_AGE` ago isn't announced at all.
 
 Requires (in .env):
@@ -82,7 +85,8 @@ STATE_FILE = DATA_DIR / "stream-announce.json"
 
 MAX_MESSAGE_AGE   = 600   # seconds; Twitch says to drop anything older
 MAX_STREAM_AGE    = 900   # seconds; a stream this old when we hear of it isn't news
-RESTART_GAP_HOURS = 12    # a game day is one stream; anything inside this is it coming back
+RESTART_GRACE_MINUTES = 30  # back within this of going offline: the same stream
+RESTART_GAP_HOURS = 12    # fallback when no offline notice came after the last post
 SEEN_IDS_KEEP     = 3600  # seconds a message id is remembered for
 
 # One post a game day. Three an hour still stops a loop dead.
@@ -186,15 +190,46 @@ def night_games() -> list[dict]:
                   key=lambda g: _time_key(g.get("time_et", "")))
 
 
-def plan_post() -> tuple[str, list[tuple[str, str]]]:
-    """("stream", every stream game) when the night has one, else ("box", one
-    of its games at random, or none)."""
+def plan_post(state: Optional[dict] = None) -> tuple[str, list[tuple[str, str]], Optional[str]]:
+    """(kind, games, day). ("stream", every stream game) when the night has
+    one, else ("box", one of its games at random, or none).
+
+    Any later stream on a night that already had its stream post
+    (`stream_day`) is the box scores: the stream games have no box score yet, so they'd still read as
+    unplayed and the night would announce them twice. Its game comes from the
+    night's other games when there are any."""
     games = night_games()
+    day = games[0]["date"] if games else None
     stream = [(g["away_team"], g["home_team"]) for g in games if g.get("stream")]
-    if stream:
-        return "stream", stream
-    g = random.choice(games) if games else None
-    return "box", [(g["away_team"], g["home_team"])] if g else []
+    already = bool(day) and (state or {}).get("stream_day") == day
+    if stream and not already:
+        return "stream", stream, day
+    pool = [g for g in games if not g.get("stream")] or games
+    g = random.choice(pool) if pool else None
+    return "box", [(g["away_team"], g["home_team"])] if g else [], day
+
+
+def is_restart(state: dict, now: datetime) -> bool:
+    """The same stream coming back, rather than a new one."""
+    posted = _parse_ts(state.get("posted_at"))
+    if not posted:
+        return False
+    offline = _parse_ts(state.get("offline_at"))
+    if offline and offline >= posted:
+        return now - offline < timedelta(minutes=RESTART_GRACE_MINUTES)
+    return now - posted < timedelta(hours=RESTART_GAP_HOURS)
+
+
+def note_offline(now: Optional[datetime] = None) -> None:
+    """Stamp `stream.offline`, which is what tells a restart from a new stream."""
+    try:
+        now = now or datetime.now(timezone.utc)
+        with _lock:
+            state = _load_json(STATE_FILE, {})
+            state["offline_at"] = now.isoformat(timespec="seconds")
+            _save_json(STATE_FILE, state)
+    except Exception as e:  # noqa: BLE001
+        log.warning("stream_notify: couldn't record the stream going offline: %s", e)
 
 
 def team_records() -> dict[str, str]:
@@ -296,15 +331,15 @@ def announce(event: dict, now: Optional[datetime] = None) -> bool:
             return False
         with _lock:
             state = _load_json(STATE_FILE, {})
-            last = _parse_ts(state.get("posted_at"))
-            if last and now - last < timedelta(hours=RESTART_GAP_HOURS):
-                log.info("stream_notify: posted at %s already; treating this as a restart", state["posted_at"])
+            if is_restart(state, now):
+                log.info("stream_notify: posted at %s, offline at %s; treating this as a restart",
+                         state.get("posted_at"), state.get("offline_at"))
                 return False
             try:
-                kind, games = plan_post()
+                kind, games, day = plan_post(state)
             except Exception as e:  # noqa: BLE001 — a missing schedule still gets the link out
                 log.warning("stream_notify: couldn't work out the night's games: %s", e)
-                kind, games = None, []
+                kind, games, day = None, [], None
             last_key = "box_blurb" if kind == "box" else "blurb"
             records, blurbs, template = None, None, state.get(last_key)
             if games:
@@ -317,10 +352,12 @@ def announce(event: dict, now: Optional[datetime] = None) -> bool:
                                   max_burst=MAX_BURST, burst_window=BURST_WINDOW)
             if sent:
                 state.update(posted_at=now.isoformat(timespec="seconds"),
-                             started_at=event.get("started_at"), kind=kind,
+                             started_at=event.get("started_at"), kind=kind, day=day,
                              games=[list(g) for g in games])
                 if kind:
                     state[last_key] = template
+                if kind == "stream":
+                    state["stream_day"] = day
                 _save_json(STATE_FILE, state)
             return sent
     except Exception as e:  # noqa: BLE001
@@ -354,6 +391,9 @@ async def eventsub(request: Request):
                     sub.get("type"), sub.get("status"))
         return Response(status_code=204)
     if kind == "notification" and _first_sighting(msg_id):
-        if (data.get("subscription") or {}).get("type") == "stream.online":
+        sub_type = (data.get("subscription") or {}).get("type")
+        if sub_type == "stream.online":
             await run_in_threadpool(announce, data.get("event") or {})
+        elif sub_type == "stream.offline":
+            await run_in_threadpool(note_offline)
     return Response(status_code=204)
