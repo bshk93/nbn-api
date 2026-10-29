@@ -101,10 +101,42 @@ def test_registry_edits_are_logged():
           audit.should_audit(TMP / "draft-conveyance-registry.json"))
 
 
+def test_protected_and_swap_group():
+    print("\n-- a protected pick's bands, and a two-team swap group --")
+    csv_text = CSV.read_text()
+    OLD = {"protected": {}, "swap_groups": {}, "binary_chains": {}, "chain_members": {},
+           "ladders": [], "legacy": {}}
+    CSV.write_text(csv_text + "2027,2,MIN,CHI,,,,,,,\n2029,1,MIA,DAL,,,,,,,\n2029,1,MIN,DET,,,,,,,\n")
+    try:
+        prot = {"kind": "protected", "pick": {"year": 2027, "round": 2, "orig": "MIN"},
+                "bands": [{"min": 31, "max": 55, "to": "BOS"}, {"min": 56, "max": 60, "to": "CHI"}],
+                "examples": [{"position": 40, "owner": "BOS"}, {"position": 58, "owner": "CHI"}]}
+        check("good bands prove", R.prove(R.candidate(OLD, prot, registry), prot, registry,
+                                          seed_store, resolver, CSV) == [])
+        gap = json.loads(json.dumps(prot))
+        gap["bands"][1]["min"] = 57          # slot 56 belongs to nobody
+        problems = R.prove(R.candidate(OLD, gap, registry), gap, registry, seed_store, resolver, CSV)
+        check("a slot no band covers is refused", any("contiguous" in p or p.startswith("slot 56") for p in problems))
+        wrong = json.loads(json.dumps(prot))
+        wrong["examples"][0]["owner"] = "CHI"
+        problems = R.prove(R.candidate(OLD, wrong, registry), wrong, registry, seed_store, resolver, CSV)
+        check("a wrong worked example is refused", any(p.startswith("example 1") for p in problems))
+
+        swap = {"kind": "swap_group", "group_id": "sg_test_29_1", "teams": ["DAL", "DET"],
+                "members": [{"year": 2029, "round": 1, "orig": "MIA"}, {"year": 2029, "round": 1, "orig": "MIN"}],
+                "priority": ["DAL", "DET"],
+                "examples": [{"positions": {"MIA": 5, "MIN": 10}, "owners": {"DAL": 5, "DET": 10}}]}
+        check("a two-team swap group proves",
+              R.prove(R.candidate(OLD, swap, registry), swap, registry, seed_store, resolver, CSV) == [])
+    finally:
+        CSV.write_text(csv_text)
+
+
 if __name__ == "__main__":
     test_ruling()
     test_refuses_a_wrong_spec()
     test_registry_edits_are_logged()
+    test_protected_and_swap_group()
     if FAILS:
         print(f"\n{len(FAILS)} FAILED: {FAILS}")
         sys.exit(1)

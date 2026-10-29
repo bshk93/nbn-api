@@ -1,0 +1,51 @@
+{
+  "kind": "protected",
+  "ruling": "Committee tasks traced 2026-10-29; the league sheet and the trade records agree, the site was missing the split. Trade 37 (2024-12-15) sent it protected 1-4; MIA, then CHA, took the conveying share.",
+  "pick": {
+    "year": 2027,
+    "round": 1,
+    "orig": "MIN"
+  },
+  "bands": [
+    {
+      "min": 1,
+      "max": 4,
+      "to": "MIN",
+      "txn_ids": [
+        {
+          "id": "6e8b1080c06a257f",
+          "date": "2024-12-15"
+        }
+      ]
+    },
+    {
+      "min": 5,
+      "max": 60,
+      "to": "CHA",
+      "txn_ids": [
+        {
+          "id": "6e8b1080c06a257f",
+          "date": "2024-12-15"
+        },
+        {
+          "id": "24259ff3a53b6e4f",
+          "date": "2025-08-15"
+        },
+        {
+          "id": "b93c3465ec79851d",
+          "date": "2026-06-20"
+        }
+      ]
+    }
+  ],
+  "examples": [
+    {
+      "position": 3,
+      "owner": "MIN"
+    },
+    {
+      "position": 10,
+      "owner": "CHA"
+    }
+  ]
+}

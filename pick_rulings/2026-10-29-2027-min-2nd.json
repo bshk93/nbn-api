@@ -1,0 +1,47 @@
+{
+  "kind": "protected",
+  "ruling": "Committee tasks traced 2026-10-29; the league sheet and the trade records agree, the site was missing the split. Trade 26 (2025-07-19): BOS sent it to CHI protected 31-55.",
+  "pick": {
+    "year": 2027,
+    "round": 2,
+    "orig": "MIN"
+  },
+  "bands": [
+    {
+      "min": 31,
+      "max": 55,
+      "to": "BOS",
+      "txn_ids": [
+        {
+          "id": "ff5307655758ff39",
+          "date": "2025-01-25"
+        },
+        {
+          "id": "d17191f81d32d5e6",
+          "date": "2025-07-19"
+        }
+      ]
+    },
+    {
+      "min": 56,
+      "max": 60,
+      "to": "CHI",
+      "txn_ids": [
+        {
+          "id": "d17191f81d32d5e6",
+          "date": "2025-07-19"
+        }
+      ]
+    }
+  ],
+  "examples": [
+    {
+      "position": 40,
+      "owner": "BOS"
+    },
+    {
+      "position": 58,
+      "owner": "CHI"
+    }
+  ]
+}

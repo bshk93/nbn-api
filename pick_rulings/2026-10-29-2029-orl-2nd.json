@@ -1,0 +1,47 @@
+{
+  "kind": "protected",
+  "ruling": "Committee tasks traced 2026-10-29; the league sheet and the trade records agree, the site was missing the split. Trade 29 (2023-06-27) sent it protected 31-55; MIN -> BOS in Trade 60.",
+  "pick": {
+    "year": 2029,
+    "round": 2,
+    "orig": "ORL"
+  },
+  "bands": [
+    {
+      "min": 31,
+      "max": 55,
+      "to": "ORL",
+      "txn_ids": [
+        {
+          "id": "f1d31c17e642aded",
+          "date": "2023-06-27"
+        }
+      ]
+    },
+    {
+      "min": 56,
+      "max": 60,
+      "to": "BOS",
+      "txn_ids": [
+        {
+          "id": "f1d31c17e642aded",
+          "date": "2023-06-27"
+        },
+        {
+          "id": "6909d9f58942b67f",
+          "date": "2025-02-05"
+        }
+      ]
+    }
+  ],
+  "examples": [
+    {
+      "position": 40,
+      "owner": "ORL"
+    },
+    {
+      "position": 58,
+      "owner": "BOS"
+    }
+  ]
+}

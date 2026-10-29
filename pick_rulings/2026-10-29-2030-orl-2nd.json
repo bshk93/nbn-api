@@ -1,0 +1,43 @@
+{
+  "kind": "protected",
+  "ruling": "Committee tasks traced 2026-10-29; the league sheet and the trade records agree, the site was missing the split. Trade 46 (2025-01-05): OKC received ORL's 2030 2nd top-55 protected; ORL's 31-55 -> MIA in Trade 22.",
+  "pick": {
+    "year": 2030,
+    "round": 2,
+    "orig": "ORL"
+  },
+  "bands": [
+    {
+      "min": 31,
+      "max": 55,
+      "to": "MIA",
+      "txn_ids": [
+        {
+          "id": "0a4f1a87a202f511",
+          "date": "2025-07-07"
+        }
+      ]
+    },
+    {
+      "min": 56,
+      "max": 60,
+      "to": "OKC",
+      "txn_ids": [
+        {
+          "id": "3c875eaf1fafa551",
+          "date": "2025-01-05"
+        }
+      ]
+    }
+  ],
+  "examples": [
+    {
+      "position": 40,
+      "owner": "MIA"
+    },
+    {
+      "position": 58,
+      "owner": "OKC"
+    }
+  ]
+}

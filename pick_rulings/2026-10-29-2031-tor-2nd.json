@@ -1,0 +1,47 @@
+{
+  "kind": "protected",
+  "ruling": "Committee tasks traced 2026-10-29; the league sheet and the trade records agree, the site was missing the split. Trade 23 (2024-07-20) sent it protected 31-55; NOP -> NYK in Trade 38.",
+  "pick": {
+    "year": 2031,
+    "round": 2,
+    "orig": "TOR"
+  },
+  "bands": [
+    {
+      "min": 31,
+      "max": 55,
+      "to": "TOR",
+      "txn_ids": [
+        {
+          "id": "5b93881bc842e8a7",
+          "date": "2024-07-20"
+        }
+      ]
+    },
+    {
+      "min": 56,
+      "max": 60,
+      "to": "NYK",
+      "txn_ids": [
+        {
+          "id": "5b93881bc842e8a7",
+          "date": "2024-07-20"
+        },
+        {
+          "id": "d3fc7da04a23271d",
+          "date": "2024-12-15"
+        }
+      ]
+    }
+  ],
+  "examples": [
+    {
+      "position": 40,
+      "owner": "TOR"
+    },
+    {
+      "position": 58,
+      "owner": "NYK"
+    }
+  ]
+}

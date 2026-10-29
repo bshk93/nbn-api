@@ -1,0 +1,47 @@
+{
+  "kind": "protected",
+  "ruling": "Committee tasks traced 2026-10-29; the league sheet and the trade records agree, the site was missing the split. Trade 44 (2026-01-10): HOU sent OKC the 56-60 share; HOU's 31-55 -> SAS on 2026-07-10.",
+  "pick": {
+    "year": 2031,
+    "round": 2,
+    "orig": "GSW"
+  },
+  "bands": [
+    {
+      "min": 31,
+      "max": 55,
+      "to": "SAS",
+      "txn_ids": [
+        {
+          "id": "814ed68db985caca",
+          "date": "2025-02-06"
+        },
+        {
+          "id": "db0663754110af9a",
+          "date": "2026-07-10"
+        }
+      ]
+    },
+    {
+      "min": 56,
+      "max": 60,
+      "to": "OKC",
+      "txn_ids": [
+        {
+          "id": "5d654cd141796a35",
+          "date": "2026-01-10"
+        }
+      ]
+    }
+  ],
+  "examples": [
+    {
+      "position": 40,
+      "owner": "SAS"
+    },
+    {
+      "position": 58,
+      "owner": "OKC"
+    }
+  ]
+}

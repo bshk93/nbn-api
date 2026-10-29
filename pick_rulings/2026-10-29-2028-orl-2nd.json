@@ -1,0 +1,51 @@
+{
+  "kind": "protected",
+  "ruling": "Committee tasks traced 2026-10-29; the league sheet and the trade records agree, the site was missing the split. Trade 28 (2023-06-27) sent 51-60 to NOP (ORL kept 31-50); NOP -> TOR; ORL's 31-50 -> CHI in Trade 70.",
+  "pick": {
+    "year": 2028,
+    "round": 2,
+    "orig": "ORL"
+  },
+  "bands": [
+    {
+      "min": 31,
+      "max": 50,
+      "to": "CHI",
+      "txn_ids": [
+        {
+          "id": "8d69fc3eb2cd65b6",
+          "date": "2023-06-27"
+        },
+        {
+          "id": "1908e1da08e3302b",
+          "date": "2026-02-06"
+        }
+      ]
+    },
+    {
+      "min": 51,
+      "max": 60,
+      "to": "TOR",
+      "txn_ids": [
+        {
+          "id": "8d69fc3eb2cd65b6",
+          "date": "2023-06-27"
+        },
+        {
+          "id": "5b93881bc842e8a7",
+          "date": "2024-07-20"
+        }
+      ]
+    }
+  ],
+  "examples": [
+    {
+      "position": 40,
+      "owner": "CHI"
+    },
+    {
+      "position": 55,
+      "owner": "TOR"
+    }
+  ]
+}

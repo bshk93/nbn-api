@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Replace one binary chain in the pick conveyance registry with a ruled structure.
+"""Write a ruled structure into the pick conveyance registry: a binary chain, a
+protected pick's bands, or a two-team swap group.
 
 The registry (`draft-conveyance-registry.json`) is what `/api/picks` serves for
 every pick inside a swap or protection structure. Trades add to it through
@@ -8,8 +9,18 @@ league ruling. The one time that was needed before, the file was edited by hand,
 with no check that the result still resolved and no record of what changed.
 
 This is the tool for that. A ruling is written as a spec file in
-`pick_rulings/`: the chain's nodes, the picks in it, the teams that must end up
-with one pick each, and the worked examples from the ruling. Then:
+`pick_rulings/`, one of three kinds (`"kind"`, default `"chain"`):
+
+- `chain`: the chain's nodes, the picks in it, the teams that must end up with
+  one pick each, and the worked examples from the ruling.
+- `protected`: one pick and its bands (`{min, max, to}`). Proved by resolving
+  every slot in the round: each must land with exactly one band's team.
+- `swap_group`: two picks and the priority list (best pick first). Not for a
+  swap whose worse pick is itself protected: the registry refuses a nested
+  node in a swap group, and the resolver can't yet settle one in a binary
+  chain (it serves the right leaves but resolves the pick to "?").
+
+Then:
 
 1. **Dry run by default.** It prints the chain before and after and what the
    site will serve for each pick, and stops. `--apply` is a separate act.
@@ -70,19 +81,27 @@ def main() -> int:
     after_store = store_for(new_reg, registry, seed_store, csv_file)
     after = parity.owner_mismatches(csv_rows, after_store)
 
-    cid = spec["chain_id"]
-    print(f"chain {cid}: {len(old_reg['binary_chains'].get(cid, []))} node(s) -> {len(spec['nodes'])}")
-    for gid in spec.get("remove_swap_groups", []):
-        print(f"  removes swap group {gid}" + ("" if gid in old_reg["swap_groups"] else " (not present)"))
-    print(f"  members: {', '.join(m['orig'] for m in spec['members'])}")
-    print("\nwhat the site will serve:")
-    members = {resolver.key(m) for m in spec["members"]}
-    for pick in after_store["picks"]:
-        if resolver.key(pick) in members:
-            flat = projection.project_to_flat(pick, after_store)
-            print(f"  {flat['year']} R{flat['round']} {flat['orig']}: owner {flat['owner']}")
-            for leaf in flat.get("leaves") or []:
-                print(f"      {leaf['team']}: {leaf['description']}")
+    kind = spec.get("kind", "chain")
+    if kind == "chain":
+        cid = spec["chain_id"]
+        print(f"chain {cid}: {len(old_reg['binary_chains'].get(cid, []))} node(s) -> {len(spec['nodes'])}")
+        for gid in spec.get("remove_swap_groups", []):
+            print(f"  removes swap group {gid}" + ("" if gid in old_reg["swap_groups"] else " (not present)"))
+    elif kind == "protected":
+        k = registry._kstr(resolver.key(spec["pick"]))
+        print(f"protected {k}: " + ("replaces the existing bands" if k in old_reg["protected"] else "new"))
+    else:
+        print(f"swap group {spec['group_id']}: " + ("replaces it" if spec["group_id"] in old_reg["swap_groups"] else "new"))
+    print(f"  members: {', '.join(m['orig'] for m in members_of(spec))}")
+    members = {resolver.key(m) for m in members_of(spec)}
+    for label, store_ in (("now", store_for(old_reg, registry, seed_store, csv_file)), ("after", after_store)):
+        print(f"\nwhat the site serves {label}:")
+        for pick in store_["picks"]:
+            if resolver.key(pick) in members:
+                flat = projection.project_to_flat(pick, store_)
+                print(f"  {flat['year']} R{flat['round']} {flat['orig']}: owner {flat['owner']}")
+                for leaf in flat.get("leaves") or []:
+                    print(f"      {leaf['team']}: {leaf['description']}")
     print(f"\nparity findings: {len(before)} before, {len(after)} after")
     for line in sorted(set(after) - set(before)):
         print(f"  NEW  {line}")
@@ -97,8 +116,13 @@ def main() -> int:
     if set(after) - set(before):
         print("\nREFUSED: the change adds parity findings.")
         return 1
-    print(f"\nall {factorial(len(spec['members']))} draft orders resolve to one pick per team; "
-          f"{len(spec.get('examples', []))} worked example(s) match.")
+    if spec.get("kind", "chain") == "protected":
+        lo, hi = slot_range(spec["pick"]["round"])
+        print(f"\nevery slot {lo}-{hi} lands with exactly one band's team; "
+              f"{len(spec.get('examples', []))} worked example(s) match.")
+    else:
+        print(f"\nall {factorial(len(members_of(spec)))} draft orders resolve to one pick per team; "
+              f"{len(spec.get('examples', []))} worked example(s) match.")
 
     if not args.apply:
         print("dry run — nothing written. Re-run with --apply.")
@@ -117,8 +141,33 @@ def main() -> int:
     return 0
 
 
+def members_of(spec: dict) -> list[dict]:
+    kind = spec.get("kind", "chain")
+    if kind == "protected":
+        return [spec["pick"]]
+    return spec["members"]
+
+
+def slot_range(rnd: int) -> tuple[int, int]:
+    """The draft slots a pick of this round can land in. A 1st's last band is
+    often written "4-60", so the bands may run past 30; only 1-30 is checked."""
+    return (1, 30) if rnd == 1 else (31, 60)
+
+
 def candidate(old_reg: dict, spec: dict, registry) -> dict:
     new = copy.deepcopy(old_reg)
+    kind = spec.get("kind", "chain")
+    if kind == "protected":
+        p = spec["pick"]
+        new["protected"][registry._kstr((p["year"], p["round"], p["orig"]))] = {
+            "on": p, "bands": spec["bands"]}
+        return new
+    if kind == "swap_group":
+        group = {"members": spec["members"], "priority": spec["priority"]}
+        if spec.get("txn_ids"):
+            group["txn_ids"] = spec["txn_ids"]
+        new["swap_groups"][spec["group_id"]] = group
+        return new
     cid = spec["chain_id"]
     for gid in spec.get("remove_swap_groups", []):
         new["swap_groups"].pop(gid, None)
@@ -145,7 +194,10 @@ def prove(reg: dict, spec: dict, registry, seed_store, resolver, csv_file: Path)
     except Exception as exc:
         return [f"registry validation: {exc}"]
     store = store_for(reg, registry, seed_store, csv_file)
-    keys = [resolver.key(m) for m in spec["members"]]
+    kind = spec.get("kind", "chain")
+    if kind == "protected":
+        return prove_protected(store, spec, resolver)
+    keys = [resolver.key(m) for m in members_of(spec)]
     teams = sorted(spec["teams"])
     for order in itertools.permutations(range(1, len(keys) + 1)):
         positions = dict(zip(keys, order))
@@ -155,6 +207,32 @@ def prove(reg: dict, spec: dict, registry, seed_store, resolver, csv_file: Path)
             problems.append(f"draft order {dict(zip([k[2] for k in keys], order))} resolves to {got}")
             if len(problems) > 5:
                 break
+    return problems + prove_examples(store, spec, keys, resolver)
+
+
+def prove_protected(store: dict, spec: dict, resolver) -> list[str]:
+    problems = []
+    k = resolver.key(spec["pick"])
+    teams = {b["to"] for b in spec["bands"]}
+    lo, hi = slot_range(spec["pick"]["round"])
+    seen = set()
+    for slot in range(lo, hi + 1):
+        owner = resolver.resolve_all(store, {k: slot}).get(k)
+        holders = [b["to"] for b in spec["bands"] if b["min"] <= slot <= b["max"]]
+        if len(holders) != 1 or owner != holders[0]:
+            problems.append(f"slot {slot}: bands give {holders or 'nobody'}, resolver gives {owner}")
+        seen.add(owner)
+    if teams - seen:
+        problems.append(f"band team(s) {sorted(teams - seen)} never get the pick in {lo}-{hi}")
+    for i, ex in enumerate(spec.get("examples", []), 1):
+        got = resolver.resolve_all(store, {k: ex["position"]}).get(k)
+        if got != ex["owner"]:
+            problems.append(f"example {i}: slot {ex['position']} expected {ex['owner']}, got {got}")
+    return problems
+
+
+def prove_examples(store: dict, spec: dict, keys: list, resolver) -> list[str]:
+    problems = []
     by_orig = {k[2]: k for k in keys}
     for i, ex in enumerate(spec.get("examples", []), 1):
         positions = {by_orig[o]: n for o, n in ex["positions"].items()}

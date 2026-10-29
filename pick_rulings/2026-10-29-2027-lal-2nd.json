@@ -1,0 +1,55 @@
+{
+  "kind": "protected",
+  "ruling": "Committee tasks traced 2026-10-29; the league sheet and the trade records agree, the site was missing the split. Trade 68 (2025-02-07) conveyed 31-50 to WAS; LAC kept 51-60. WAS -> NOP -> NYK.",
+  "pick": {
+    "year": 2027,
+    "round": 2,
+    "orig": "LAL"
+  },
+  "bands": [
+    {
+      "min": 31,
+      "max": 50,
+      "to": "NYK",
+      "txn_ids": [
+        {
+          "id": "6bea319411407916",
+          "date": "2025-02-07"
+        },
+        {
+          "id": "8c65c66f59e1160d",
+          "date": "2026-06-21"
+        },
+        {
+          "id": "84678c33c4f837d6",
+          "date": "2026-08-19"
+        }
+      ]
+    },
+    {
+      "min": 51,
+      "max": 60,
+      "to": "LAC",
+      "txn_ids": [
+        {
+          "id": "956976cd842043bc",
+          "date": "2023-02-09"
+        },
+        {
+          "id": "6bea319411407916",
+          "date": "2025-02-07"
+        }
+      ]
+    }
+  ],
+  "examples": [
+    {
+      "position": 40,
+      "owner": "NYK"
+    },
+    {
+      "position": 55,
+      "owner": "LAC"
+    }
+  ]
+}

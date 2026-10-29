@@ -1,0 +1,47 @@
+{
+  "kind": "protected",
+  "ruling": "Committee tasks traced 2026-10-29; the league sheet and the trade records agree, the site was missing the split. Trade 9 (2024-06-22): ORL sent NYK the 56-60 share; ORL's 31-55 -> ATL on 2026-06-26.",
+  "pick": {
+    "year": 2029,
+    "round": 2,
+    "orig": "SAC"
+  },
+  "bands": [
+    {
+      "min": 31,
+      "max": 55,
+      "to": "ATL",
+      "txn_ids": [
+        {
+          "id": "2d797713dbd013e0",
+          "date": "2023-12-17"
+        },
+        {
+          "id": "5a33d4ee8f77228f",
+          "date": "2026-06-26"
+        }
+      ]
+    },
+    {
+      "min": 56,
+      "max": 60,
+      "to": "NYK",
+      "txn_ids": [
+        {
+          "id": "a62ac3543580558b",
+          "date": "2024-06-22"
+        }
+      ]
+    }
+  ],
+  "examples": [
+    {
+      "position": 40,
+      "owner": "ATL"
+    },
+    {
+      "position": 58,
+      "owner": "NYK"
+    }
+  ]
+}

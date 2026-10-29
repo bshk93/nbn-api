@@ -1,0 +1,38 @@
+{
+  "kind": "protected",
+  "ruling": "Committee tasks traced 2026-10-29; the league sheet and the trade records agree, the site was missing the split. 2023-06-25 Trade 27 (Discord): MEM sent GSW the 2027 DEN 2nd protected 31-55.",
+  "pick": {
+    "year": 2027,
+    "round": 2,
+    "orig": "DEN"
+  },
+  "bands": [
+    {
+      "min": 31,
+      "max": 55,
+      "to": "MEM",
+      "txn_ids": [
+        {
+          "id": "38ca5aa2003d6814",
+          "date": "2021-10-18"
+        }
+      ]
+    },
+    {
+      "min": 56,
+      "max": 60,
+      "to": "GSW",
+      "txn_ids": []
+    }
+  ],
+  "examples": [
+    {
+      "position": 40,
+      "owner": "MEM"
+    },
+    {
+      "position": 58,
+      "owner": "GSW"
+    }
+  ]
+}
