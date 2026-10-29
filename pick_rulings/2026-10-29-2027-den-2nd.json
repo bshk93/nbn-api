@@ -1,6 +1,6 @@
 {
   "kind": "protected",
-  "ruling": "Committee tasks traced 2026-10-29; the league sheet and the trade records agree, the site was missing the split. 2023-06-25 Trade 27 (Discord): MEM sent GSW the 2027 DEN 2nd protected 31-55.",
+  "ruling": "Committee tasks traced 2026-10-29; the league sheet and the trade records agree, the site was missing the split. 2023-06-25 Trade 27 (from Discord, logged as historical ffb0f337dcf0282e): MEM sent GSW the 2027 DEN 2nd protected 31-55.",
   "pick": {
     "year": 2027,
     "round": 2,
@@ -22,7 +22,12 @@
       "min": 56,
       "max": 60,
       "to": "GSW",
-      "txn_ids": []
+      "txn_ids": [
+        {
+          "id": "ffb0f337dcf0282e",
+          "date": "2023-06-25"
+        }
+      ]
     }
   ],
   "examples": [
