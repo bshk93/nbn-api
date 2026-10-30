@@ -202,6 +202,58 @@ check("one notice", len(NOTES) == 1 and NOTES[0][0] == ["stats"])
 check("status route lists it",
       c.get("/api/youtube-vods", headers=STATS).json()["videos"][0]["status"] == "unmatched")
 
+print("\nfeed down: the Live tab instead")
+
+
+def lockup(vid, title, age):
+    rows = [{"metadataParts": [{"text": {"content": "8"}}, {"text": {"content": f"Streamed {age}"}}]}] if age else []
+    return {"richItemRenderer": {"content": {"lockupViewModel": {
+        "contentId": vid, "metadata": {"lockupMetadataViewModel": {
+            "title": {"content": title},
+            "metadata": {"contentMetadataViewModel": {"metadataRows": rows}}}}}}}}
+
+
+def streams_page(*items):
+    data = {"contents": {"tabs": [{"tabRenderer": {"content": {"richGridRenderer": {"contents": list(items)}}}}]}}
+    return f"<html><script>var ytInitialData = {json.dumps(data)};</script></html>"
+
+
+NOW = datetime.fromisoformat("2026-10-30T02:00:00+00:00")
+vids = yv.parse_streams_page(streams_page(
+    lockup("Live0000001", "NBN 10/30: MEM @ POR", None),
+    lockup("Page0000001", "NBN 10/21: MIN @ MIA", "2 hours ago"),
+    lockup("Page0000002", "NBN 12/31: Box Scores", "1 day ago")), NOW)
+check("reads every video, newest first", [v["id"] for v in vids] == ["Live0000001", "Page0000001", "Page0000002"])
+check("no age is now", vids[0]["published"] == NOW.isoformat())
+check("'2 hours ago' is the latest it can be", vids[1]["published"] == "2026-10-30T00:00:00+00:00")
+try:
+    yv.parse_streams_page("<html>consent wall</html>")
+    check("a page with no video data raises", False)
+except ValueError:
+    check("a page with no video data raises", True)
+
+asked = []
+
+
+def feed_down(url):
+    asked.append(url)
+    if "feeds/videos.xml" in url:
+        return None
+    return streams_page(lockup("PageLink001", "NBN 10/21: MIN @ MIAA", "3 hours ago"))
+
+
+yv._get = feed_down
+yv.YOUTUBE_VODS_FILE.write_text(json.dumps({"channel_id": "UC" + "x" * 22, "videos": {}}))
+res = yv.poll_once()
+check("falls back to the streams page",
+      res.get("ok") is True and res.get("source") == "streams page" and any("/streams" in u for u in asked))
+check("its videos are matched like the feed's",
+      json.loads(yv.YOUTUBE_VODS_FILE.read_text())["videos"]["PageLink001"]["status"] == "unmatched")
+yv._get = lambda url: None
+check("both down is a failed poll", yv.poll_once() == {"ok": False, "error": "feed and streams page unavailable"})
+yv._get = lambda url: None if "feeds/" in url else "<html>consent wall</html>"
+check("an unreadable page is a failed poll, not a crash", yv.poll_once()["ok"] is False)
+
 print()
 if FAILS:
     print(f"{len(FAILS)} FAILED")

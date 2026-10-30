@@ -20,6 +20,13 @@ The source is the channel's public Atom feed, which lists the newest 15 uploads
 and live streams with no API key or quota. A thread polls it every
 POLL_INTERVAL, like routers/roster_log_relay.py polls Discord.
 
+The feed goes down for hours at a time (404s all day on 2026-10-29, while the
+channel itself was fine), so when it fails the poll reads the channel's
+Live tab instead (`parse_streams_page`). That page says only "Streamed 2 hours
+ago", so its upload time is the latest the video could have gone up: a title's
+date is only ever checked against it as a ceiling, which that keeps loose
+rather than wrong.
+
 Two rules keep it from fighting people:
 - **A manual link is never overwritten.** A link set through
   PUT /api/schedule/{id}/youtube or /api/streaming-days/{date}/youtube wins.
@@ -28,6 +35,7 @@ Two rules keep it from fighting people:
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -55,6 +63,7 @@ router = APIRouter()
 
 CHANNEL_HANDLE = "nothingbutnetNBN"
 FEED_URL = "https://www.youtube.com/feeds/videos.xml?channel_id={cid}"
+STREAMS_URL = "https://www.youtube.com/channel/{cid}/streams"
 POLL_INTERVAL = 15 * 60     # one small request; YouTube posts a VOD once a night
 STATS_LINK = "/committees/stats/"
 
@@ -68,6 +77,11 @@ NBN_RE   = re.compile(r"^\s*NBN\b", re.I)
 DATES_RE = re.compile(r"(?<![\d/])(\d{1,2})/(\d{1,2})(?:\s*(?:-|–|—|to|thru|through)\s*(?:(\d{1,2})/)?(\d{1,2}))?(?![\d/])", re.I)
 ANY_GAME_RE = re.compile(r"\b[A-Z]{2,4}\s*@\s*[A-Z]{2,4}\b", re.I)
 ANY_BOX_RE  = re.compile(r"box\s*scores?", re.I)
+INITIAL_DATA_RE = re.compile(r"var ytInitialData\s*=\s*(\{.*?\});\s*</script>", re.S)
+AGO_RE = re.compile(r"(\d+)\s*(second|minute|hour|day|week|month|year)s?\s+ago", re.I)
+AGO_UNIT = {"second": timedelta(seconds=1), "minute": timedelta(minutes=1), "hour": timedelta(hours=1),
+            "day": timedelta(days=1), "week": timedelta(weeks=1), "month": timedelta(days=30),
+            "year": timedelta(days=365)}
 MAX_RANGE_DAYS = 7
 
 _state_lock = threading.Lock()
@@ -146,10 +160,47 @@ def parse_feed(xml_text: str) -> list[dict]:
     return out
 
 
+def _lockups(node, out: list) -> list:
+    if isinstance(node, dict):
+        if "lockupViewModel" in node:
+            out.append(node["lockupViewModel"])
+        for v in node.values():
+            _lockups(v, out)
+    elif isinstance(node, list):
+        for v in node:
+            _lockups(v, out)
+    return out
+
+
+def parse_streams_page(html: str, now: Optional[datetime] = None) -> list[dict]:
+    """[{id, title, published}] from the channel's Live tab, newest first: the
+    same shape as `parse_feed`. `published` is `now` less the page's "N units
+    ago", the latest the video can be from; "Streaming now" or no age at all
+    is `now`. Raises ValueError when the page has no video data."""
+    now = now or datetime.now(timezone.utc)
+    m = INITIAL_DATA_RE.search(html or "")
+    if not m:
+        raise ValueError("no ytInitialData on the page")
+    out, seen = [], set()
+    for lv in _lockups(json.loads(m.group(1)), []):
+        vid = lv.get("contentId")
+        md = (lv.get("metadata") or {}).get("lockupMetadataViewModel") or {}
+        title = (md.get("title") or {}).get("content")
+        if not vid or not title or vid in seen:
+            continue
+        seen.add(vid)
+        age = timedelta(0)
+        for a in AGO_RE.finditer(json.dumps(md.get("metadata") or {})):
+            age = int(a.group(1)) * AGO_UNIT[a.group(2).lower()]
+            break
+        out.append({"id": vid, "title": title, "published": (now - age).isoformat()})
+    return out
+
+
 def _get(url: str) -> Optional[str]:
     try:
         r = httpx.get(url, timeout=15, follow_redirects=True,
-                      headers={"User-Agent": "nbn-api (nbn.today)"})
+                      headers={"User-Agent": "nbn-api (nbn.today)", "Accept-Language": "en-US"})
     except Exception as exc:
         logger.warning("youtube vods: GET %s errored: %s", url, exc)
         return None
@@ -315,15 +366,23 @@ def poll_once() -> dict:
         cid = _channel_id(state)
         if not cid:
             return {"ok": False, "error": "no channel id"}
+        videos, source = None, "feed"
         xml_text = _get(FEED_URL.format(cid=cid))
-        if xml_text is None:
+        if xml_text is not None:
+            try:
+                videos = parse_feed(xml_text)
+            except ET.ParseError as exc:
+                logger.warning("youtube vods: feed didn't parse: %s", exc)
+        if videos is None:
+            source = "streams page"
+            page = _get(STREAMS_URL.format(cid=cid))
+            try:
+                videos = parse_streams_page(page) if page is not None else None
+            except (ValueError, KeyError, TypeError) as exc:
+                logger.warning("youtube vods: streams page didn't parse: %s", exc)
+        if videos is None:
             _save_state(state)
-            return {"ok": False, "error": "feed unavailable"}
-        try:
-            videos = parse_feed(xml_text)
-        except ET.ParseError as exc:
-            logger.warning("youtube vods: feed didn't parse: %s", exc)
-            return {"ok": False, "error": "feed didn't parse"}
+            return {"ok": False, "error": "feed and streams page unavailable"}
         changed = process(videos, state)
         state["last_poll"] = datetime.now(timezone.utc).isoformat()
         _save_state(state)
@@ -333,7 +392,7 @@ def poll_once() -> dict:
         elif c["status"] == "unmatched":
             inbox.notify_roles(["stats"], f"Couldn't place the YouTube video \"{c['title']}\" "
                                           f"({c['note']}). Link it by hand.", STATS_LINK)
-    return {"ok": True, "feed": len(videos), "changed": changed}
+    return {"ok": True, "source": source, "feed": len(videos), "changed": changed}
 
 
 def _loop() -> None:
