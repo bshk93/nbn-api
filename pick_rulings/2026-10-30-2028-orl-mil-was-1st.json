@@ -1,0 +1,33 @@
+{
+  "kind": "chain",
+  "ruling": "Traced 2026-10-30 after a committee report that the sheet and site disagree. ASSUMPTION: the two swaps execute in the order they were traded, as League office memo 2026-01 ruled for the c28 chain. Trade 23 (2021-08-02) gave ORL the better of ORL/WAS, so WAS keeps the worse of ORL/WAS. Trade 43 (2022-07-30) gave ORL the 'More Favorable of 28 ORL/MIL 1st'; by then ORL held only the better of ORL/WAS, so that is what was swapped against MIL, and MIL keeps the worse of MIL and ORL's post-swap pick. The sheet's WAS tab agrees with this; its MIL tab ('less favorable of MIL and ORL') reads ORL's own pick literally and is taken to mean ORL's pick after its WAS swap. The earlier seed (curated.py, 2026-07-19) ran the MIL swap first and cited no trade for it. The two readings differ only when ORL's own pick is the worst of the three: it now goes to WAS, not MIL.",
+  "chain_id": "omw",
+  "teams": ["ORL", "WAS", "MIL"],
+  "members": [
+    {"year": 2028, "round": 1, "orig": "ORL"},
+    {"year": 2028, "round": 1, "orig": "WAS"},
+    {"year": 2028, "round": 1, "orig": "MIL"}
+  ],
+  "nodes": [
+    {"type": "binary_swap", "id": "omw_s1",
+     "a": {"year": 2028, "round": 1, "orig": "ORL"},
+     "b": {"year": 2028, "round": 1, "orig": "WAS"},
+     "better_to": {"ref": "omw_s2", "as": "a"},
+     "worse_to": "WAS",
+     "txn_ids": [{"id": "c92f582f69144473", "date": "2021-08-02"}]},
+    {"type": "binary_swap", "id": "omw_s2",
+     "a": {"ref": "omw_s1", "output": "better"},
+     "b": {"year": 2028, "round": 1, "orig": "MIL"},
+     "better_to": "ORL",
+     "worse_to": "MIL",
+     "txn_ids": [{"id": "607baecb86b4e2b8", "date": "2022-07-30"}]}
+  ],
+  "examples": [
+    {"positions": {"MIL": 3, "WAS": 10, "ORL": 20},
+     "owners":    {"ORL": 3, "MIL": 10, "WAS": 20}},
+    {"positions": {"WAS": 2, "MIL": 8, "ORL": 25},
+     "owners":    {"ORL": 2, "MIL": 8, "WAS": 25}},
+    {"positions": {"ORL": 4, "WAS": 12, "MIL": 18},
+     "owners":    {"ORL": 4, "WAS": 12, "MIL": 18}}
+  ]
+}

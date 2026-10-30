@@ -186,13 +186,15 @@ BINARY_CHAINS = {
         _bs("nmpdh_s4", {"ref": "nmpdh_s3", "output": "worse"}, pk(2030, 1, "HOU"),
             "NOP", "HOU"),  # no transactions.json record found for the NOP/HOU leg
     ],
-    # 2028 ORL/MIL/WAS 3-way (spec 7.5c)
+    # 2028 ORL/MIL/WAS 3-way (spec 7.5c). Swaps in trade order; corrected
+    # 2026-10-30, see pick_rulings/2026-10-30-2028-orl-mil-was-1st.json
     "omw": [
-        _bs("omw_s1", pk(2028, 1, "MIL"), pk(2028, 1, "ORL"),
-            {"ref": "omw_s2", "as": "a"}, "MIL"),  # no transactions.json record found for the MIL/ORL leg
-        _bs("omw_s2", {"ref": "omw_s1", "output": "better"}, pk(2028, 1, "WAS"),
-            "ORL", "WAS",
+        _bs("omw_s1", pk(2028, 1, "ORL"), pk(2028, 1, "WAS"),
+            {"ref": "omw_s2", "as": "a"}, "WAS",
             txn_ids=[{"id": "c92f582f69144473", "date": "2021-08-02"}]),  # Trade 23
+        _bs("omw_s2", {"ref": "omw_s1", "output": "better"}, pk(2028, 1, "MIL"),
+            "ORL", "MIL",
+            txn_ids=[{"id": "607baecb86b4e2b8", "date": "2022-07-30"}]),  # Trade 43
     ],
     # 2028 SAS/NOP then DET tail (block A compound)
     "snd": [
