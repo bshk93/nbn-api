@@ -5,16 +5,22 @@
 
 One output, under `derived/`:
 
-- `data/team-advanced.csv`: one row per team per regular season, plus a
-  league row per season (`TEAM` is `LG`) for context.
+- `data/team-advanced.csv`: one row per team per season, regular season and
+  playoffs separately (`TYPE` is `REG` or `PLAYOFF`), plus a league row per
+  season and type (`TEAM` is `LG`) for context.
 
-**Regular season only, for now.** The playoff box scores don't look like the
-regular season's, and not consistently: offensive rebounds are 22-24% of all
-rebounds in every regular season, but 8-18% in the playoffs, varying by year
-(8% in 26, where 69% of 20+ minute lines have none). Turnovers swing the same
-way. Whether that is how playoff games play or a parse that credits offensive
-rebounds as defensive is not knowable from the rows, so playoff Four Factors
-are left out rather than published wrong. `TYPE` is kept so they can be added.
+**Playoffs play differently, and that is real.** About 90% of regular-season
+games are quick-simmed; every playoff game is streamed, played out in full.
+Streamed games score less and turn it over less: in 26-27's first weeks,
+streamed regular-season games ran 0.138 turnovers per FGA against 0.176 for
+quick sims, and 98 points a team against 110. Compare playoff rows with
+playoff rows, and with the league row of the same `TYPE`.
+
+The one exception is the 26 playoffs' rebound split: a median of 3 offensive
+rebounds a team-game (7-8 in every other postseason) and 9 team-games with none
+(6 in all of 25-26's 2,460). That looks like box scores misread before the
+TOTALS cross-check existed (2026-08-26), not the game, so ORB%/DRB% for that
+postseason is suspect until those games are checked against the VODs.
 
 **Possessions are an estimate.** The raw box scores are player rows only, so
 team turnovers (shot-clock and 8-second violations) and team rebounds are not
@@ -144,7 +150,7 @@ def _summarize(team: str, season: str, kind: str, games: list[dict]) -> list:
 def _labelled_rows(data_dir: Path) -> list[tuple[str, list[dict]]]:
     """(REG | PLAYOFF, rows with SEASON set to the bare "YY-YY")."""
     out = []
-    for playoffs, kind in ((False, "REG"),):
+    for playoffs, kind in ((False, "REG"), (True, "PLAYOFF")):
         for label, rows in pipeline.load_allstats(data_dir, playoffs=playoffs):
             season = label.replace(" Playoffs", "")
             for r in rows:

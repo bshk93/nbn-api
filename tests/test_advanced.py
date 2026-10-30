@@ -7,7 +7,7 @@ What would make it lie is pinned:
   and a game with no opponent rows is dropped rather than half-counted.
 - **The league row averages, it doesn't add.** Its game count is games
   played, and its ratings are each team's possessions counted once.
-- **Live data is plausible**: pace 90-110, ratings 95-125 over 20+ games, and points per
+- **Live data is plausible**: pace 90-110 and ratings 95-125 over 20+ games, and points per
   possession across the league equal total points over total possessions.
 
 Reads live data; writes nothing.
@@ -78,17 +78,25 @@ col = {c: i for i, c in enumerate(a.HEADER)}
 teams = [r for r in out if r[col["TEAM"]] != a.LEAGUE]
 league = [r for r in out if r[col["TEAM"]] == a.LEAGUE]
 seasons = sorted({r[col["SEASON"]] for r in out})
-check(f"one league row per season ({len(seasons)})", len(league) == len(seasons))
-check("30 teams in every season", all(
-    sum(1 for r in teams if r[col["SEASON"]] == s) == 30 for s in seasons))
-check("pace between 90 and 110", all(90 <= r[col["PACE"]] <= 110 for r in out))
-# Four games into a season a 127 DRtg is real; the range is for a real sample.
+kinds = sorted({(r[col["SEASON"]], r[col["TYPE"]]) for r in out})
+check(f"one league row per season and type ({len(kinds)})", len(league) == len(kinds))
+check("30 teams in every regular season", all(
+    sum(1 for r in teams if r[col["SEASON"]] == s and r[col["TYPE"]] == "REG") == 30
+    for s in seasons))
+check("16 teams in every finished postseason", all(
+    sum(1 for r in teams if r[col["SEASON"]] == s and r[col["TYPE"]] == "PLAYOFF") == 16
+    for s, k in kinds if k == "PLAYOFF"))
+# A four-game sweep, or four games into a season, can sit outside these for
+# real; the ranges are for a real sample.
+check("pace between 90 and 110 (20+ games)", all(
+    90 <= r[col["PACE"]] <= 110 for r in out if r[col["G"]] >= 20))
 check("ratings between 95 and 125 (20+ games)", all(
     95 <= r[col["ORTG"]] <= 125 and 95 <= r[col["DRTG"]] <= 125
     for r in teams if r[col["G"]] >= 20))
 for lg in league:
-    s = lg[col["SEASON"]]
-    rs = [r for r in teams if r[col["SEASON"]] == s]
+    s, k = lg[col["SEASON"]], lg[col["TYPE"]]
+    rs = [r for r in teams if r[col["SEASON"]] == s and r[col["TYPE"]] == k]
+    s = f"{s} {k}"
     check(f"{s}: league plays half the team-games ({lg[col['G']]})",
           lg[col["G"]] * 2 == sum(r[col["G"]] for r in rs))
     check(f"{s}: league ORtg equals league DRtg", lg[col["ORTG"]] == lg[col["DRTG"]])
