@@ -227,6 +227,7 @@ check("an empty roster is None", real_player("CLE") is None)
 discord._roster_augmented = real_aug
 
 print("box scores: one game, a front-office line")
+TITLE[0] = "Box Scores"
 FRONT = {"NYK": "Kim", "PHI": "Darth Awn", "DEN": "jo_bo", "UTA": "Tee"}
 sn.random_front_office = lambda team: FRONT.get(team)
 reset()
@@ -245,12 +246,15 @@ fills = {f"<@&{TEAM_ROLE_IDS['NYK']}> (0-0) at <@&{TEAM_ROLE_IDS['PHI']}> (0-0)"
 away, home = fills[lines[1]]
 box = next((b for b in sn.BOX_BLURBS if b.format(away=away, home=home) == lines[2]), None)
 check("the line is a box-score one, naming each side's front office", box is not None, lines)
-check("still pings no one", p["allowed_mentions"] == {"parse": []})
+check("@here, and no team role pings", lines[0].endswith(" @here") and p["allowed_mentions"] == {"parse": ["everyone"]}
+      and "roles" not in p["allowed_mentions"], p)
 state = json.loads(sn.STATE_FILE.read_text())
 check("remembered as the box-score opener", state.get("box_blurb") == box and state.get("kind") == "box", state)
 check("no front office on a side drops only the line",
       sn.pick_blurbs([("NYK", "BOS")], None, "box")[0] == [None])
 sn.random_front_office = lambda team: None
+
+TITLE[0] = "NBN Game Night"
 
 print("random_front_office off members.json")
 import routers.auth as auth  # noqa: E402
@@ -272,7 +276,7 @@ check("defaults to :minionannouncement:, as a bot has to send it",
       saved_emoji == "<:minionannouncement:1564839468823744572>", saved_emoji)
 sn.LIVE_EMOJI = "<:other:1234567890>"
 check("an override opens the post",
-      sn.build_payload("box", [])["content"] == "<:other:1234567890> Box Scores [live](<https://nbn.today>)")
+      sn.build_payload("box", [])["content"] == "<:other:1234567890> Box Scores [live](<https://nbn.today>) @here")
 sn.LIVE_EMOJI = "🔴"
 
 print("team_records off the standings file")
@@ -284,6 +288,9 @@ check("this season's W-L only", real_records() == {"CLE": "5-2", "SAC": "3-4"}, 
 home.STANDINGS_CSV = real_csv
 
 print("redelivery and restarts")
+reset()
+post("notification", online())
+check("first stream posts", len(SENT) == 1)
 SENT.clear()
 post("notification", online())
 check("a restart inside the gap posts nothing", SENT == [])
@@ -331,10 +338,10 @@ TITLE[0] = "Box Scores!"
 post("notification", online())
 p = SENT[0]["payload"] if SENT else {}
 lines = p.get("content", "").split("\n")
-check("a box-score title later that night posts, as the box scores", lines[0].endswith("Box Scores [live](<https://nbn.today>)"), lines)
+check("a box-score title later that night posts, as the box scores", lines[0].endswith("Box Scores [live](<https://nbn.today>) @here"), lines)
 check("its game is one of the night's non-stream games",
       len(lines) > 1 and f"<@&{TEAM_ROLE_IDS['CLE']}>" not in lines[1], lines)
-check("and pings no one", p.get("allowed_mentions") == {"parse": []}, p)
+check("and pings @here only, no team", p.get("allowed_mentions") == {"parse": ["everyone"]}, p)
 
 SENT.clear()
 offline_ago(sn.RESTART_GRACE_MINUTES + 10)
@@ -430,6 +437,106 @@ for k, v in saved_env.items():
     else:
         os.environ[k] = v
 
+print("the night is the date the stream started (10-28 / 10-29, as it happened)")
+check("7 PM EDT is that night", sn.night_of(datetime(2026, 10, 29, 23, 0, tzinfo=timezone.utc)) == "2026-10-29")
+check("12:40 AM is still the night before",
+      sn.night_of(datetime(2026, 10, 30, 4, 40, tzinfo=timezone.utc)) == "2026-10-29")
+check("7 AM is the new day", sn.night_of(datetime(2026, 10, 29, 11, 0, tzinfo=timezone.utc)) == "2026-10-29")
+
+# 10-28 was never marked done and still had games without box scores, and
+# 10-29 was marked done before its stream. The old earliest-unplayed rule
+# called the 10-29 stream 10-28's box scores.
+sn.league_today = lambda: date(2026, 10, 29)
+real_night_of = sn.night_of
+sn.night_of = lambda started: "2026-10-29"
+GAMES[:] = [game("2026-10-28", "CHA", "DET", stream=True), game("2026-10-28", "MIA", "ATL"),
+            game("2026-10-29", "CLE", "ATL", time_et="7:00p"), game("2026-10-29", "MEM", "POR", stream=True, time_et="10:00p"),
+            game("2026-10-29", "SAC", "NOP", time_et="8:00p")]
+BOXED.add(("2026-10-28", bx._game_teams("DET", "CHA")))
+DONE["2026-10-29"] = {"done": True}
+reset()
+TITLE[0] = "NBN Game Night"
+post("notification", online())
+p = SENT[0]["payload"] if SENT else {}
+check("the 10-29 stream is that night's stream game, not 10-28's box scores",
+      p.get("content", "").split("\n")[:2] ==
+      [f"{sn.LIVE_EMOJI} NBN is [live](<https://nbn.today>)",
+       f"<@&{TEAM_ROLE_IDS['MEM']}> (0-0) at <@&{TEAM_ROLE_IDS['POR']}> (0-0)"], p)
+check("a stream post never carries @here", "@here" not in p.get("content", "")
+      and "everyone" not in p.get("allowed_mentions", {}).get("parse", []), p)
+check("and pings MEM and POR", sorted(p.get("allowed_mentions", {}).get("roles", [])) ==
+      sorted([TEAM_ROLE_IDS["MEM"], TEAM_ROLE_IDS["POR"]]), p)
+offline_ago(2)
+TITLE[0] = "Box Scores"
+SENT.clear()
+post("notification", online())
+lines = SENT[0]["payload"]["content"].split("\n") if SENT else []
+import re  # noqa: E402
+matchup = re.sub(r" \(\d+-\d+\)", "", lines[1]) if len(lines) > 1 else ""
+check("the box scores right after are 10-29's, from a non-stream game",
+      matchup in (f"<@&{TEAM_ROLE_IDS['CLE']}> at <@&{TEAM_ROLE_IDS['ATL']}>",
+                  f"<@&{TEAM_ROLE_IDS['SAC']}> at <@&{TEAM_ROLE_IDS['NOP']}>"), lines)
+
+print("a night with no games falls back to the earliest unplayed day")
+sn.night_of = lambda started: "2026-10-30"
+kind, games, day = sn.plan_post({}, "Box Scores", "2026-10-30")
+check("catch-up box scores: 10-28's unplayed game", kind == "box" and day == "2026-10-28"
+      and games == [("MIA", "ATL")], (kind, games, day))
+kind, games, _ = sn.plan_post({}, "NBN Game Night", "2026-10-30")
+check("catch-up under a game-night title: NBN is live, no stream game to name", kind == "stream" and games == [])
+sn.night_of = real_night_of
+sn.league_today = lambda: TODAY
+BOXED.clear()
+DONE.clear()
+TITLE[0] = "NBN Game Night"
+GAMES[:] = [game("2026-10-24", "CLE", "SAC", stream=True), game("2026-10-24", "BOS", "MIA"),
+            game("2026-10-25", "LAL", "GSW", stream=True)]
+
+print("the streamer's own titles say the night and the game")
+check("NBN 10/29: MEM @ POR", sn.parse_title("NBN 10/29: MEM @ POR", "2026-10-30") == ("2026-10-29", [("MEM", "POR")]))
+check("NBN 10/29: Box Scores names no game",
+      sn.parse_title("NBN 10/29: Box Scores", "2026-10-30") == ("2026-10-29", []))
+check("two games, aliases, 'vs'", sn.parse_title("NBN 1/2: GS @ NO, CLE vs ATL", "2026-12-31")
+      == ("2027-01-02", [("GSW", "NOP"), ("CLE", "ATL")]))
+check("a typo'd team names no game", sn.parse_title("NBN 10/29: MEM @ POT", "2026-10-30")[1] == [])
+check("no title, nothing", sn.parse_title(None, "2026-10-30") == (None, []))
+
+sn.league_today = lambda: date(2026, 10, 30)
+GAMES[:] = [game("2026-10-29", "CLE", "ATL", time_et="7:00p"), game("2026-10-29", "SAC", "NOP", time_et="8:00p"),
+            game("2026-10-29", "MEM", "POR", time_et="10:00p"),          # not flagged a stream
+            game("2026-10-30", "ORL", "TOR", stream=True)]
+reset()
+TITLE[0] = "NBN 10/29: MEM @ POR"
+post("notification", online())
+p = SENT[0]["payload"] if SENT else {}
+check("the title's game is posted and pinged, flagged on the schedule or not",
+      p.get("content", "").split("\n")[1:2] == [f"<@&{TEAM_ROLE_IDS['MEM']}> (0-0) at <@&{TEAM_ROLE_IDS['POR']}> (0-0)"]
+      and sorted(p["allowed_mentions"]["roles"]) == sorted([TEAM_ROLE_IDS["MEM"], TEAM_ROLE_IDS["POR"]]), p)
+offline_ago(1)
+TITLE[0] = "NBN 10/29: Box Scores"
+SENT.clear()
+post("notification", online())
+lines = SENT[0]["payload"]["content"].split("\n") if SENT else []
+matchup = re.sub(r" \(\d+-\d+\)", "", lines[1]) if len(lines) > 1 else ""
+check("the box scores a minute later are the title's night, a game other than the stream's",
+      lines and "Box Scores" in lines[0]
+      and matchup in (f"<@&{TEAM_ROLE_IDS['CLE']}> at <@&{TEAM_ROLE_IDS['ATL']}>",
+                      f"<@&{TEAM_ROLE_IDS['SAC']}> at <@&{TEAM_ROLE_IDS['NOP']}>"), lines)
+reset()
+TITLE[0] = "NBN 10/29: LAL @ BOS"
+post("notification", online())
+check("a titled game the schedule doesn't have that night still posts",
+      SENT and f"<@&{TEAM_ROLE_IDS['LAL']}>" in SENT[0]["payload"]["content"], SENT)
+reset()
+TITLE[0] = "NBN 10/30: ORL @ TOX"
+post("notification", online())
+check("a typo falls back to the schedule's stream game for the title's night",
+      SENT and f"<@&{TEAM_ROLE_IDS['ORL']}>" in SENT[0]["payload"]["content"], SENT)
+sn.league_today = lambda: TODAY
+TITLE[0] = "NBN Game Night"
+GAMES[:] = [game("2026-10-24", "CLE", "SAC", stream=True), game("2026-10-24", "BOS", "MIA"),
+            game("2026-10-25", "LAL", "GSW", stream=True)]
+
 print("is_restart without an offline notice")
 now = datetime.now(timezone.utc)
 check("no post yet is never a restart", not sn.is_restart({}, now))
@@ -441,16 +548,17 @@ check("a different kind than the last post is never a restart",
 check("past the fallback, a new stream",
       not sn.is_restart({"posted_at": (now - timedelta(hours=13)).isoformat()}, now))
 
-print("box scores, behind schedule")
+print("box scores, behind schedule (no title: the schedule decides)")
+TITLE[0] = None
 reset()
 GAMES[:] = [game("2026-10-22", "NYK", "PHI"), game("2026-10-22", "DEN", "UTA"),
             game("2026-10-23", "OKC", "HOU", stream=True), game("2026-10-24", "CLE", "SAC", stream=True)]
 post("notification", online())
 p = SENT[0]["payload"] if SENT else {}
-check("the oldest unplayed day has no stream game: pings no one",
-      p.get("allowed_mentions") == {"parse": []}, p)
+check("the oldest unplayed day has no stream game: @here, no team pinged",
+      p.get("allowed_mentions") == {"parse": ["everyone"]}, p)
 lines = p.get("content", "").split("\n")
-check("reads Box Scores live, linking nbn.today", lines[0] == "🔴 Box Scores [live](<https://nbn.today>)", lines)
+check("reads Box Scores live, linking nbn.today", lines[0] == "🔴 Box Scores [live](<https://nbn.today>) @here", lines)
 check("one of that night's games, tags shown, with records",
       lines[1:] in ([f"<@&{TEAM_ROLE_IDS['NYK']}> (0-0) at <@&{TEAM_ROLE_IDS['PHI']}> (0-0)"],
                     [f"<@&{TEAM_ROLE_IDS['DEN']}> (0-0) at <@&{TEAM_ROLE_IDS['UTA']}> (0-0)"]), lines)
@@ -476,6 +584,24 @@ post("notification", online())
 check("an unreadable schedule still posts, as NBN is live with no pings",
       len(SENT) == 1 and SENT[0]["payload"]["content"] == "🔴 NBN is [live](<https://nbn.today>)", SENT)
 schedule._load = real_load
+
+print("the title decides the kind")
+TITLE[0] = "NBN Game Night"
+reset()
+GAMES[:] = [game("2026-10-24", "BOS", "MIA")]
+post("notification", online())
+check("a game-night title with no stream game found is still NBN is live, with no matchup",
+      SENT and SENT[0]["payload"] == {"content": "🔴 NBN is [live](<https://nbn.today>)",
+                                      "allowed_mentions": {"parse": []}}, SENT)
+reset()
+TITLE[0] = "box scores"
+GAMES[:] = [game("2026-10-24", "CLE", "SAC", stream=True)]
+post("notification", online())
+check("a box-score title on a night of only stream games is box scores",
+      SENT and "Box Scores" in SENT[0]["payload"]["content"].split("\n")[0], SENT)
+TITLE[0] = "NBN Game Night"
+GAMES[:] = [game("2026-10-24", "CLE", "SAC", stream=True), game("2026-10-24", "BOS", "MIA"),
+            game("2026-10-25", "LAL", "GSW", stream=True)]
 
 print("not worth announcing")
 reset()

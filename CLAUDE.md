@@ -609,17 +609,26 @@ bench included; draft rights, dead cap and UFA/RFA holds can't. A post never
 reuses a line within itself, nor opens with the previous post's first. Only
 the tagged roles can ping. A day of box scores posts "🔴 Box Scores live", one
 of the night's games at random in the same `@AWAY (W-L) at @HOME (W-L)` form —
-tags render but `allowed_mentions` pings no one — and a line from `BOX_BLURBS`
+`@here` on the first line notifies whoever's online, while the tags render
+but ping no team (`allowed_mentions` is `{"parse": ["everyone"]}`, no roles;
+the bot needs "Mention @everyone, @here, and All Roles" in #leaguetalk or
+`@here` stays text) — and a line from `BOX_BLURBS`
 naming a current front-office member of each team (open tenure, position not
 `none`; names markdown-escaped; the lines use no pronouns, since these are real
 members). Each kind remembers its own last opener (`blurb` / `box_blurb` in
 `stream-announce.json`). Unreadable standings drop the records; an unreadable
 roster or a team with no front office drops that game's line; neither stops
 the post. "live" links to nbn.today, as `[live](<https://nbn.today>)`:
-the angle brackets stop Discord adding the site's generic preview card. The day is the earliest
-date in the last week with a game not yet played (`game_day_notify`'s rule,
-since the league runs behind). An unreadable schedule posts "NBN is live" with
-no pings.
+the angle brackets stop Discord adding the site's generic preview card. The
+night is the date the stream started in league time, less
+`NIGHT_ROLLOVER_HOURS` (6), so a box-score stream past midnight stays with its
+games (`night_of`). Every game that date counts, played or not: streams happen
+on their date, while a day is marked done late or never and box scores land
+over the next days, so "unplayed" said nothing about tonight. (The earliest-
+unplayed rule once called a game night's stream the previous day's box scores,
+because that day was never marked done.) Only a date with no games, a catch-up
+stream, falls back to the earliest date in the last week with a game not yet
+played. An unreadable schedule posts "NBN is live" with no pings.
 
 - **The post opens with the server's `:minionannouncement:`**, hardcoded as
   `<:minionannouncement:1564839468823744572>` (`LIVE_EMOJI`): a bot's bare
@@ -637,12 +646,22 @@ no pings.
   the fallback is nothing within `RESTART_GAP_HOURS` (12). A redelivered
   message id is dropped; a stream that began over 15 minutes before we hear of
   it, or a rerun, isn't announced.
+- **The streamer's titles name the night and the game** — "NBN 10/29: MEM @
+  POR", "NBN 10/29: Box Scores" (`parse_title`). The title's date is the night
+  (year: whichever is nearest the stream's start), and the `AWAY @ HOME` games
+  it names (`@`, `at` or `vs`; both sides real teams, `TEAM_ALIASES` for GS,
+  NO, SA…) are the stream games, flagged on the schedule or not; one the
+  schedule doesn't have that night is logged and posted anyway. A typo'd or
+  missing matchup falls back to the schedule's flags for that night. The box
+  scores' game skips both the flagged games and whatever the night's stream
+  post named (`stream_games`).
 - **The title says which stream it is.** On each go-live the channel's title
   is read from Helix `/channels` (current as soon as it's set, unlike
   `/streams`; `fetch_title`, app token as above). A title matching
   `BOX_TITLE_RE` ("box score(s)", any case) is the box-score post, its game
-  drawn from the night's non-stream games; any other title is the stream post
-  when the night has stream games. If the title can't be read, the fallback is
+  drawn from the night's non-stream games; any other title is the stream post,
+  outright: the schedule only fills in the matchups and pings, and a night with
+  no stream game found posts "NBN is live" with none rather than box scores. If the title can't be read, the fallback is
   the night: once it has had its stream post (`stream_day`), any later stream
   that night is box scores, since the stream games have no box score yet and
   would still read as unplayed. Under that fallback only, a game stream that
