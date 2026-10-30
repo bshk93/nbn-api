@@ -609,7 +609,10 @@ bench included; draft rights, dead cap and UFA/RFA holds can't. A post never
 reuses a line within itself, nor opens with the previous post's first. Only
 the tagged roles can ping. A day of box scores posts "🔴 Box Scores live", one
 of the night's games at random in the same `@AWAY (W-L) at @HOME (W-L)` form —
-tags render but `allowed_mentions` pings no one — and a line from `BOX_BLURBS`
+`@here` on the first line notifies whoever's online, while the tags render
+but ping no team (`allowed_mentions` is `{"parse": ["everyone"]}`, no roles;
+the bot needs "Mention @everyone, @here, and All Roles" in #leaguetalk or
+`@here` stays text) — and a line from `BOX_BLURBS`
 naming a current front-office member of each team (open tenure, position not
 `none`; names markdown-escaped; the lines use no pronouns, since these are real
 members). Each kind remembers its own last opener (`blurb` / `box_blurb` in

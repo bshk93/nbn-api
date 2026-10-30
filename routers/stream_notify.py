@@ -413,20 +413,25 @@ def build_payload(kind: Optional[str], games: list, records: Optional[dict] = No
     """`kind` is "stream", "box", or None for a day we couldn't work out.
     `records` None leaves the records off rather than showing 0-0 for all;
     `blurbs` lines up with `games`, a None entry (or none at all) skipped.
-    `allowed_mentions` names exactly the roles that should ping: a stream's
-    teams, and no one on a box-score day, whose tags still render."""
+    `allowed_mentions` names exactly who should be notified: a stream's team
+    roles; on a box-score day, `@here` (whoever's online) and no role, the
+    team tags still rendering. "everyone" in `parse` is what lets `@here`
+    through; nothing else in the content can reach it."""
     def side(team: str) -> str:
         return _tag(team) + (f" ({records.get(team, '0-0')})" if records is not None else "")
 
     head = "Box Scores" if kind == "box" else "NBN is"
-    lines = [f"{LIVE_EMOJI} {head} [live](<{SITE_URL}>)"]
+    lines = [f"{LIVE_EMOJI} {head} [live](<{SITE_URL}>)" + (" @here" if kind == "box" else "")]
     for i, (away, home) in enumerate(games or []):
         lines.append(f"{side(away)} at {side(home)}")
         if blurbs and i < len(blurbs) and blurbs[i]:
             lines.append(blurbs[i])
     roles = [] if kind != "stream" else \
         list(dict.fromkeys(TEAM_ROLE_IDS[t] for g in games for t in g if t in TEAM_ROLE_IDS))
-    mentions = {"parse": [], "roles": roles} if roles else {"parse": []}
+    if kind == "box":
+        mentions = {"parse": ["everyone"]}
+    else:
+        mentions = {"parse": [], "roles": roles} if roles else {"parse": []}
     return {"content": "\n".join(lines), "allowed_mentions": mentions}
 
 

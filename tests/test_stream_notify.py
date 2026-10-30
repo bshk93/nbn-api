@@ -246,7 +246,8 @@ fills = {f"<@&{TEAM_ROLE_IDS['NYK']}> (0-0) at <@&{TEAM_ROLE_IDS['PHI']}> (0-0)"
 away, home = fills[lines[1]]
 box = next((b for b in sn.BOX_BLURBS if b.format(away=away, home=home) == lines[2]), None)
 check("the line is a box-score one, naming each side's front office", box is not None, lines)
-check("still pings no one", p["allowed_mentions"] == {"parse": []})
+check("@here, and no team role pings", lines[0].endswith(" @here") and p["allowed_mentions"] == {"parse": ["everyone"]}
+      and "roles" not in p["allowed_mentions"], p)
 state = json.loads(sn.STATE_FILE.read_text())
 check("remembered as the box-score opener", state.get("box_blurb") == box and state.get("kind") == "box", state)
 check("no front office on a side drops only the line",
@@ -275,7 +276,7 @@ check("defaults to :minionannouncement:, as a bot has to send it",
       saved_emoji == "<:minionannouncement:1564839468823744572>", saved_emoji)
 sn.LIVE_EMOJI = "<:other:1234567890>"
 check("an override opens the post",
-      sn.build_payload("box", [])["content"] == "<:other:1234567890> Box Scores [live](<https://nbn.today>)")
+      sn.build_payload("box", [])["content"] == "<:other:1234567890> Box Scores [live](<https://nbn.today>) @here")
 sn.LIVE_EMOJI = "🔴"
 
 print("team_records off the standings file")
@@ -337,10 +338,10 @@ TITLE[0] = "Box Scores!"
 post("notification", online())
 p = SENT[0]["payload"] if SENT else {}
 lines = p.get("content", "").split("\n")
-check("a box-score title later that night posts, as the box scores", lines[0].endswith("Box Scores [live](<https://nbn.today>)"), lines)
+check("a box-score title later that night posts, as the box scores", lines[0].endswith("Box Scores [live](<https://nbn.today>) @here"), lines)
 check("its game is one of the night's non-stream games",
       len(lines) > 1 and f"<@&{TEAM_ROLE_IDS['CLE']}>" not in lines[1], lines)
-check("and pings no one", p.get("allowed_mentions") == {"parse": []}, p)
+check("and pings @here only, no team", p.get("allowed_mentions") == {"parse": ["everyone"]}, p)
 
 SENT.clear()
 offline_ago(sn.RESTART_GRACE_MINUTES + 10)
@@ -461,6 +462,8 @@ check("the 10-29 stream is that night's stream game, not 10-28's box scores",
       p.get("content", "").split("\n")[:2] ==
       [f"{sn.LIVE_EMOJI} NBN is [live](<https://nbn.today>)",
        f"<@&{TEAM_ROLE_IDS['MEM']}> (0-0) at <@&{TEAM_ROLE_IDS['POR']}> (0-0)"], p)
+check("a stream post never carries @here", "@here" not in p.get("content", "")
+      and "everyone" not in p.get("allowed_mentions", {}).get("parse", []), p)
 check("and pings MEM and POR", sorted(p.get("allowed_mentions", {}).get("roles", [])) ==
       sorted([TEAM_ROLE_IDS["MEM"], TEAM_ROLE_IDS["POR"]]), p)
 offline_ago(2)
@@ -552,10 +555,10 @@ GAMES[:] = [game("2026-10-22", "NYK", "PHI"), game("2026-10-22", "DEN", "UTA"),
             game("2026-10-23", "OKC", "HOU", stream=True), game("2026-10-24", "CLE", "SAC", stream=True)]
 post("notification", online())
 p = SENT[0]["payload"] if SENT else {}
-check("the oldest unplayed day has no stream game: pings no one",
-      p.get("allowed_mentions") == {"parse": []}, p)
+check("the oldest unplayed day has no stream game: @here, no team pinged",
+      p.get("allowed_mentions") == {"parse": ["everyone"]}, p)
 lines = p.get("content", "").split("\n")
-check("reads Box Scores live, linking nbn.today", lines[0] == "🔴 Box Scores [live](<https://nbn.today>)", lines)
+check("reads Box Scores live, linking nbn.today", lines[0] == "🔴 Box Scores [live](<https://nbn.today>) @here", lines)
 check("one of that night's games, tags shown, with records",
       lines[1:] in ([f"<@&{TEAM_ROLE_IDS['NYK']}> (0-0) at <@&{TEAM_ROLE_IDS['PHI']}> (0-0)"],
                     [f"<@&{TEAM_ROLE_IDS['DEN']}> (0-0) at <@&{TEAM_ROLE_IDS['UTA']}> (0-0)"]), lines)
