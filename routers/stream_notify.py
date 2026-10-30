@@ -19,9 +19,14 @@ from the night, its tags shown but pinging no one, and a line from
 `BOX_BLURBS` naming a current front-office member of each team. Neither kind
 reuses a line within a post or opens with its own kind's last opener. "live" is
 the link, and the angle brackets keep Discord from adding the site's generic
-preview card under it. Which day is being streamed is the earliest
-date in the last week with a game not yet played, since the league can run
-behind — the same rule `game_day_notify` uses for a team's next game.
+preview card under it. The night being streamed is the date the stream
+started, in league time, with anything before `NIGHT_ROLLOVER_HOURS` (6 AM)
+counted as the night before, so a box-score stream that runs past midnight
+stays with its games. Every game that date counts, played or not: a day is
+marked done late or never, and box scores land over the next days, so neither
+says anything about tonight. Only a date with no games on the schedule (a
+catch-up stream) falls back to the earliest date in the last week with a game
+not yet played — `game_day_notify`'s rule.
 
 Three gates, so a restart or a redelivery never posts twice:
 
@@ -74,7 +79,7 @@ from fastapi.responses import PlainTextResponse
 from . import discord_transport as transport
 from .constants import DATA_DIR
 from .discord_notify import TEAM_ROLE_IDS
-from .league_time import league_today
+from .league_time import LEAGUE_TZ, league_today
 from .storage import _current_league_year, _load_json, _save_json
 
 router = APIRouter()
@@ -89,6 +94,7 @@ STATE_FILE = DATA_DIR / "stream-announce.json"
 MAX_MESSAGE_AGE   = 600   # seconds; Twitch says to drop anything older
 MAX_STREAM_AGE    = 900   # seconds; a stream this old when we hear of it isn't news
 RESTART_GRACE_MINUTES = 30  # back within this of going offline, as the same kind: the same stream
+NIGHT_ROLLOVER_HOURS = 6   # a stream starting before 6 AM league time is the night before
 RESTART_GAP_HOURS = 12    # fallback when no offline notice came after the last post
 SEEN_IDS_KEEP     = 3600  # seconds a message id is remembered for
 
@@ -176,17 +182,29 @@ def _first_sighting(msg_id: str) -> bool:
         return True
 
 
-def night_games() -> list[dict]:
-    """Every unplayed game on the day being streamed, in tip-off order: the
-    earliest date in the last week with one. Imported at call time, like
-    `game_day_notify` does."""
+def night_of(started: Optional[datetime]) -> str:
+    """The league date a stream belongs to: the day it started, in league
+    time, less `NIGHT_ROLLOVER_HOURS`, so 12:30 AM is still last night."""
+    at = (started or datetime.now(timezone.utc)).astimezone(LEAGUE_TZ)
+    return (at - timedelta(hours=NIGHT_ROLLOVER_HOURS)).date().isoformat()
+
+
+def night_games(night: Optional[str] = None) -> list[dict]:
+    """The games being streamed, in tip-off order: every game scheduled on
+    `night`, played or not. A night with none (a catch-up stream) falls back to
+    the earliest date in the last week with a game not yet played. Imported at
+    call time, like `game_day_notify` does."""
     from .game_day_notify import LOOKBACK_DAYS, _boxed_games, _played
     from .schedule import _load, _time_key
     from .streaming_days import load_streaming_days
+    season = _current_league_year()
+    schedule = _load(season)["games"]
+    tonight = [g for g in schedule if night and g["date"] == night]
+    if tonight:
+        return sorted(tonight, key=lambda g: _time_key(g.get("time_et", "")))
     today = league_today()
     since = (today - timedelta(days=LOOKBACK_DAYS)).isoformat()
-    season = _current_league_year()
-    games = [g for g in _load(season)["games"] if since <= g["date"] <= today.isoformat()]
+    games = [g for g in schedule if since <= g["date"] <= today.isoformat()]
     done = {d for d, rec in load_streaming_days().items() if rec.get("done")}
     boxed = _boxed_games(season)
     unplayed = [g for g in games if not _played(g, done, boxed)]
@@ -218,8 +236,8 @@ def fetch_title(broadcaster_id: str) -> Optional[str]:
         return None
 
 
-def plan_post(state: Optional[dict] = None, title: Optional[str] = None
-              ) -> tuple[str, list[tuple[str, str]], Optional[str]]:
+def plan_post(state: Optional[dict] = None, title: Optional[str] = None,
+              night: Optional[str] = None) -> tuple[str, list[tuple[str, str]], Optional[str]]:
     """(kind, games, day). ("stream", every stream game) when the night has
     one, else ("box", one of its games at random, or none).
 
@@ -230,7 +248,7 @@ def plan_post(state: Optional[dict] = None, title: Optional[str] = None
     the stream games have no box score yet, so they'd still read as unplayed
     and the night would announce them twice. A box-score post's game comes
     from the night's other games when there are any."""
-    games = night_games()
+    games = night_games(night)
     day = games[0]["date"] if games else None
     stream = [(g["away_team"], g["home_team"]) for g in games if g.get("stream")]
     if title is not None:
@@ -371,7 +389,7 @@ def announce(event: dict, now: Optional[datetime] = None) -> bool:
             state = _load_json(STATE_FILE, {})
             title = fetch_title(event.get("broadcaster_user_id") or os.environ.get("TWITCH_BROADCASTER_ID", ""))
             try:
-                kind, games, day = plan_post(state, title)
+                kind, games, day = plan_post(state, title, night_of(started))
             except Exception as e:  # noqa: BLE001 — a missing schedule still gets the link out
                 log.warning("stream_notify: couldn't work out the night's games: %s", e)
                 kind, games, day = None, [], None

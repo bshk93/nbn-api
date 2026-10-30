@@ -616,10 +616,16 @@ members). Each kind remembers its own last opener (`blurb` / `box_blurb` in
 `stream-announce.json`). Unreadable standings drop the records; an unreadable
 roster or a team with no front office drops that game's line; neither stops
 the post. "live" links to nbn.today, as `[live](<https://nbn.today>)`:
-the angle brackets stop Discord adding the site's generic preview card. The day is the earliest
-date in the last week with a game not yet played (`game_day_notify`'s rule,
-since the league runs behind). An unreadable schedule posts "NBN is live" with
-no pings.
+the angle brackets stop Discord adding the site's generic preview card. The
+night is the date the stream started in league time, less
+`NIGHT_ROLLOVER_HOURS` (6), so a box-score stream past midnight stays with its
+games (`night_of`). Every game that date counts, played or not: streams happen
+on their date, while a day is marked done late or never and box scores land
+over the next days, so "unplayed" said nothing about tonight. (The earliest-
+unplayed rule once called a game night's stream the previous day's box scores,
+because that day was never marked done.) Only a date with no games, a catch-up
+stream, falls back to the earliest date in the last week with a game not yet
+played. An unreadable schedule posts "NBN is live" with no pings.
 
 - **The post opens with the server's `:minionannouncement:`**, hardcoded as
   `<:minionannouncement:1564839468823744572>` (`LIVE_EMOJI`): a bot's bare

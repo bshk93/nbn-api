@@ -430,6 +430,56 @@ for k, v in saved_env.items():
     else:
         os.environ[k] = v
 
+print("the night is the date the stream started (10-28 / 10-29, as it happened)")
+check("7 PM EDT is that night", sn.night_of(datetime(2026, 10, 29, 23, 0, tzinfo=timezone.utc)) == "2026-10-29")
+check("12:40 AM is still the night before",
+      sn.night_of(datetime(2026, 10, 30, 4, 40, tzinfo=timezone.utc)) == "2026-10-29")
+check("7 AM is the new day", sn.night_of(datetime(2026, 10, 29, 11, 0, tzinfo=timezone.utc)) == "2026-10-29")
+
+# 10-28 was never marked done and still had games without box scores, and
+# 10-29 was marked done before its stream. The old earliest-unplayed rule
+# called the 10-29 stream 10-28's box scores.
+sn.league_today = lambda: date(2026, 10, 29)
+real_night_of = sn.night_of
+sn.night_of = lambda started: "2026-10-29"
+GAMES[:] = [game("2026-10-28", "CHA", "DET", stream=True), game("2026-10-28", "MIA", "ATL"),
+            game("2026-10-29", "CLE", "ATL", time_et="7:00p"), game("2026-10-29", "MEM", "POR", stream=True, time_et="10:00p"),
+            game("2026-10-29", "SAC", "NOP", time_et="8:00p")]
+BOXED.add(("2026-10-28", bx._game_teams("DET", "CHA")))
+DONE["2026-10-29"] = {"done": True}
+reset()
+TITLE[0] = "NBN Game Night"
+post("notification", online())
+p = SENT[0]["payload"] if SENT else {}
+check("the 10-29 stream is that night's stream game, not 10-28's box scores",
+      p.get("content", "").split("\n")[:2] ==
+      [f"{sn.LIVE_EMOJI} NBN is [live](<https://nbn.today>)",
+       f"<@&{TEAM_ROLE_IDS['MEM']}> (0-0) at <@&{TEAM_ROLE_IDS['POR']}> (0-0)"], p)
+check("and pings MEM and POR", sorted(p.get("allowed_mentions", {}).get("roles", [])) ==
+      sorted([TEAM_ROLE_IDS["MEM"], TEAM_ROLE_IDS["POR"]]), p)
+offline_ago(2)
+TITLE[0] = "Box Scores"
+SENT.clear()
+post("notification", online())
+lines = SENT[0]["payload"]["content"].split("\n") if SENT else []
+import re  # noqa: E402
+matchup = re.sub(r" \(\d+-\d+\)", "", lines[1]) if len(lines) > 1 else ""
+check("the box scores right after are 10-29's, from a non-stream game",
+      matchup in (f"<@&{TEAM_ROLE_IDS['CLE']}> at <@&{TEAM_ROLE_IDS['ATL']}>",
+                  f"<@&{TEAM_ROLE_IDS['SAC']}> at <@&{TEAM_ROLE_IDS['NOP']}>"), lines)
+
+print("a night with no games falls back to the earliest unplayed day")
+sn.night_of = lambda started: "2026-10-30"
+kind, games, day = sn.plan_post({}, "NBN Game Night", "2026-10-30")
+check("catch-up stream: 10-28's unplayed game", day == "2026-10-28" and games == [("MIA", "ATL")], (kind, games, day))
+sn.night_of = real_night_of
+sn.league_today = lambda: TODAY
+BOXED.clear()
+DONE.clear()
+TITLE[0] = "NBN Game Night"
+GAMES[:] = [game("2026-10-24", "CLE", "SAC", stream=True), game("2026-10-24", "BOS", "MIA"),
+            game("2026-10-25", "LAL", "GSW", stream=True)]
+
 print("is_restart without an offline notice")
 now = datetime.now(timezone.utc)
 check("no post yet is never a restart", not sn.is_restart({}, now))
