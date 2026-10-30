@@ -3,7 +3,8 @@
     python3 -m stats_build.advanced              # write into NBN_OUT_DIR
     python3 -m stats_build.advanced --dry-run    # print a summary, write nothing
 
-Two outputs, under `derived/`:
+Two outputs here, under `derived/` (and `player_value.py`'s Win Shares, BPM
+and VORP, which `write` also runs):
 
 - `data/team-advanced.csv`: one row per team per season, regular season and
   playoffs separately (`TYPE` is `REG` or `PLAYOFF`), plus a league row per
@@ -73,7 +74,8 @@ LEAGUE = "LG"
 
 # Summed from player rows. `M` is minutes, which gives the game's length (240
 # in regulation, more with overtime).
-BOX = ("M", "P", "FGM", "FGA", "3PM", "3PA", "FTM", "FTA", "OR", "DR", "TO")
+BOX = ("M", "P", "FGM", "FGA", "3PM", "3PA", "FTM", "FTA", "OR", "DR", "TO",
+       "A", "S", "B", "PF")
 
 HEADER = ["TEAM", "SEASON", "TYPE", "G", "MIN", "POSS", "PACE",
           "ORTG", "DRTG", "NRTG",
@@ -235,7 +237,10 @@ def team_advanced(data_dir: Path) -> list[list]:
 def write(out_dir: Path, data_dir: Path) -> list[str]:
     csvio.write_csv(Path(out_dir) / OUTPUT, HEADER, team_advanced(Path(data_dir)))
     csvio.write_csv(Path(out_dir) / PLAYER_OUTPUT, PLAYER_HEADER, player_context(Path(data_dir)))
-    return [OUTPUT, PLAYER_OUTPUT]
+    # Win Shares, BPM and VORP: built on the same game context, written here
+    # so build.sh's one advanced step covers them.
+    from stats_build import player_value
+    return [OUTPUT, PLAYER_OUTPUT] + player_value.write(out_dir, data_dir)
 
 
 def summary(rows: list[list]) -> str:
