@@ -489,6 +489,51 @@ TITLE[0] = "NBN Game Night"
 GAMES[:] = [game("2026-10-24", "CLE", "SAC", stream=True), game("2026-10-24", "BOS", "MIA"),
             game("2026-10-25", "LAL", "GSW", stream=True)]
 
+print("the streamer's own titles say the night and the game")
+check("NBN 10/29: MEM @ POR", sn.parse_title("NBN 10/29: MEM @ POR", "2026-10-30") == ("2026-10-29", [("MEM", "POR")]))
+check("NBN 10/29: Box Scores names no game",
+      sn.parse_title("NBN 10/29: Box Scores", "2026-10-30") == ("2026-10-29", []))
+check("two games, aliases, 'vs'", sn.parse_title("NBN 1/2: GS @ NO, CLE vs ATL", "2026-12-31")
+      == ("2027-01-02", [("GSW", "NOP"), ("CLE", "ATL")]))
+check("a typo'd team names no game", sn.parse_title("NBN 10/29: MEM @ POT", "2026-10-30")[1] == [])
+check("no title, nothing", sn.parse_title(None, "2026-10-30") == (None, []))
+
+sn.league_today = lambda: date(2026, 10, 30)
+GAMES[:] = [game("2026-10-29", "CLE", "ATL", time_et="7:00p"), game("2026-10-29", "SAC", "NOP", time_et="8:00p"),
+            game("2026-10-29", "MEM", "POR", time_et="10:00p"),          # not flagged a stream
+            game("2026-10-30", "ORL", "TOR", stream=True)]
+reset()
+TITLE[0] = "NBN 10/29: MEM @ POR"
+post("notification", online())
+p = SENT[0]["payload"] if SENT else {}
+check("the title's game is posted and pinged, flagged on the schedule or not",
+      p.get("content", "").split("\n")[1:2] == [f"<@&{TEAM_ROLE_IDS['MEM']}> (0-0) at <@&{TEAM_ROLE_IDS['POR']}> (0-0)"]
+      and sorted(p["allowed_mentions"]["roles"]) == sorted([TEAM_ROLE_IDS["MEM"], TEAM_ROLE_IDS["POR"]]), p)
+offline_ago(1)
+TITLE[0] = "NBN 10/29: Box Scores"
+SENT.clear()
+post("notification", online())
+lines = SENT[0]["payload"]["content"].split("\n") if SENT else []
+matchup = re.sub(r" \(\d+-\d+\)", "", lines[1]) if len(lines) > 1 else ""
+check("the box scores a minute later are the title's night, a game other than the stream's",
+      lines and "Box Scores" in lines[0]
+      and matchup in (f"<@&{TEAM_ROLE_IDS['CLE']}> at <@&{TEAM_ROLE_IDS['ATL']}>",
+                      f"<@&{TEAM_ROLE_IDS['SAC']}> at <@&{TEAM_ROLE_IDS['NOP']}>"), lines)
+reset()
+TITLE[0] = "NBN 10/29: LAL @ BOS"
+post("notification", online())
+check("a titled game the schedule doesn't have that night still posts",
+      SENT and f"<@&{TEAM_ROLE_IDS['LAL']}>" in SENT[0]["payload"]["content"], SENT)
+reset()
+TITLE[0] = "NBN 10/30: ORL @ TOX"
+post("notification", online())
+check("a typo falls back to the schedule's stream game for the title's night",
+      SENT and f"<@&{TEAM_ROLE_IDS['ORL']}>" in SENT[0]["payload"]["content"], SENT)
+sn.league_today = lambda: TODAY
+TITLE[0] = "NBN Game Night"
+GAMES[:] = [game("2026-10-24", "CLE", "SAC", stream=True), game("2026-10-24", "BOS", "MIA"),
+            game("2026-10-25", "LAL", "GSW", stream=True)]
+
 print("is_restart without an offline notice")
 now = datetime.now(timezone.utc)
 check("no post yet is never a restart", not sn.is_restart({}, now))

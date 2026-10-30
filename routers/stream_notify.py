@@ -68,7 +68,7 @@ import random
 import re
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
@@ -145,6 +145,12 @@ BOX_BLURBS = [
 
 # The streamer retitles the box-score stream; that's what says which one this is.
 BOX_TITLE_RE = re.compile(r"box\s*-?\s*scores?", re.I)
+# The streamer's titles: "NBN 10/29: MEM @ POR", "NBN 10/29: Box Scores".
+TITLE_DATE_RE = re.compile(r"\b(\d{1,2})/(\d{1,2})\b")
+TITLE_GAME_RE = re.compile(r"\b([A-Za-z]{2,4})\s*(?:@|at|vs\.?|v\.?)\s*([A-Za-z]{2,4})\b")
+# Other spellings of an abbreviation a streamer might type.
+TEAM_ALIASES = {"BRK": "BKN", "CHO": "CHA", "GS": "GSW", "NO": "NOP", "NOR": "NOP", "NY": "NYK",
+                "PHO": "PHX", "SA": "SAS", "UTAH": "UTA", "WSH": "WAS"}
 CHANNELS_URL = "https://api.twitch.tv/helix/channels"
 
 _lock = threading.Lock()
@@ -236,6 +242,39 @@ def fetch_title(broadcaster_id: str) -> Optional[str]:
         return None
 
 
+def _team(token: str) -> Optional[str]:
+    from .constants import VALID_TEAMS
+    t = token.upper()
+    t = TEAM_ALIASES.get(t, t)
+    return t if t in VALID_TEAMS else None
+
+
+def parse_title(title: Optional[str], near: Optional[str]) -> tuple[Optional[str], list[tuple[str, str]]]:
+    """(date, games) the title names: "NBN 10/29: MEM @ POR" is
+    ("2026-10-29", [("MEM", "POR")]). The year is whichever puts the date
+    nearest `near` (the night the stream started), so a December stream of
+    a 1/2 date isn't read as last January. A matchup only counts when both
+    sides are real teams, so "Box Scores" or a typo names no game."""
+    if not title:
+        return None, []
+    day = None
+    m = TITLE_DATE_RE.search(title)
+    if m:
+        try:
+            ref = date.fromisoformat(near) if near else datetime.now(LEAGUE_TZ).date()
+            month, dom = int(m.group(1)), int(m.group(2))
+            day = min((date(y, month, dom) for y in (ref.year - 1, ref.year, ref.year + 1)),
+                      key=lambda d: abs((d - ref).days)).isoformat()
+        except ValueError:
+            day = None
+    games = []
+    for away, home in TITLE_GAME_RE.findall(title):
+        a, h = _team(away), _team(home)
+        if a and h and a != h and (a, h) not in games:
+            games.append((a, h))
+    return day, games
+
+
 def plan_post(state: Optional[dict] = None, title: Optional[str] = None,
               night: Optional[str] = None) -> tuple[str, list[tuple[str, str]], Optional[str]]:
     """(kind, games, day). ("stream", every stream game) when the night has
@@ -248,17 +287,34 @@ def plan_post(state: Optional[dict] = None, title: Optional[str] = None,
     night that already had its stream post (`stream_day`) is the box scores:
     the stream games have no box score yet, so they'd still read as unplayed
     and the night would announce them twice. A box-score post's game comes
-    from the night's other games when there are any."""
-    games = night_games(night)
-    day = games[0]["date"] if games else None
+    from the night's other games when there are any.
+
+    The streamer's titles say the rest outright (`parse_title`): their date is
+    the night, and the games they name are the stream games, schedule or no
+    schedule. A named game the schedule doesn't have that night is logged and
+    posted anyway, since the title is what's on stream."""
+    title_day, title_games = parse_title(title, night)
+    games = night_games(title_day or night)
+    day = title_day or (games[0]["date"] if games else None)
     stream = [(g["away_team"], g["home_team"]) for g in games if g.get("stream")]
+    if title_games:
+        scheduled = {frozenset((g["away_team"], g["home_team"])) for g in games}
+        for a, h in title_games:
+            if frozenset((a, h)) not in scheduled:
+                log.warning("stream_notify: title names %s @ %s, not on the schedule for %s", a, h, day)
+        stream = title_games
     if title is not None:
         box = bool(BOX_TITLE_RE.search(title))
     else:
         box = bool(day) and (state or {}).get("stream_day") == day
     if (title is not None and not box) or (stream and not box):
         return "stream", stream, day
-    pool = [g for g in games if not g.get("stream")] or games
+    # Not a game that was just on stream: the schedule's flags, and whatever
+    # tonight's stream post named (from its title, flagged or not).
+    posted = {frozenset(g) for g in (state or {}).get("stream_games") or []} \
+        if (state or {}).get("stream_day") == day else set()
+    pool = [g for g in games if not g.get("stream")
+            and frozenset((g["away_team"], g["home_team"])) not in posted] or games
     g = random.choice(pool) if pool else None
     return "box", [(g["away_team"], g["home_team"])] if g else [], day
 
@@ -416,6 +472,7 @@ def announce(event: dict, now: Optional[datetime] = None) -> bool:
                     state[last_key] = template
                 if kind == "stream":
                     state["stream_day"] = day
+                    state["stream_games"] = [list(g) for g in games]
                 _save_json(STATE_FILE, state)
             return sent
     except Exception as e:  # noqa: BLE001

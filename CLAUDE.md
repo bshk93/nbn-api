@@ -643,6 +643,15 @@ played. An unreadable schedule posts "NBN is live" with no pings.
   the fallback is nothing within `RESTART_GAP_HOURS` (12). A redelivered
   message id is dropped; a stream that began over 15 minutes before we hear of
   it, or a rerun, isn't announced.
+- **The streamer's titles name the night and the game** — "NBN 10/29: MEM @
+  POR", "NBN 10/29: Box Scores" (`parse_title`). The title's date is the night
+  (year: whichever is nearest the stream's start), and the `AWAY @ HOME` games
+  it names (`@`, `at` or `vs`; both sides real teams, `TEAM_ALIASES` for GS,
+  NO, SA…) are the stream games, flagged on the schedule or not; one the
+  schedule doesn't have that night is logged and posted anyway. A typo'd or
+  missing matchup falls back to the schedule's flags for that night. The box
+  scores' game skips both the flagged games and whatever the night's stream
+  post named (`stream_games`).
 - **The title says which stream it is.** On each go-live the channel's title
   is read from Helix `/channels` (current as soon as it's set, unlike
   `/streams`; `fetch_title`, app token as above). A title matching
