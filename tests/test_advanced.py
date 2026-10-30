@@ -7,6 +7,10 @@ What would make it lie is pinned:
   and a game with no opponent rows is dropped rather than half-counted.
 - **The league row averages, it doesn't add.** Its game count is games
   played, and its ratings are each team's possessions counted once.
+- **Player context joins `player_seasons*.csv`**: every stint has a row with
+  the same SLUG, season, team and game count, or the page can't line them up.
+- **An every-game player carries his team's whole season** of minutes, so
+  the shares are taken of the right games.
 - **Live data is plausible**: pace 90-110 and ratings 95-125 over 20+ games, and points per
   possession across the league equal total points over total possessions.
 
@@ -16,6 +20,7 @@ Reads live data; writes nothing.
 """
 from __future__ import annotations
 
+import csv
 import sys
 from pathlib import Path
 
@@ -102,6 +107,29 @@ for lg in league:
     check(f"{s}: league ORtg equals league DRtg", lg[col["ORTG"]] == lg[col["DRTG"]])
     check(f"{s}: net ratings sum to about zero",
           abs(sum(r[col["NRTG"]] * r[col["POSS"]] for r in rs)) / lg[col["POSS"]] < 1)
+
+print("player context")
+ctx = a.player_context(DATA_DIR)
+pcol = {c: i for i, c in enumerate(a.PLAYER_HEADER)}
+by_key = {(r[0], r[1], r[2], r[3]): r for r in ctx}
+derived = DATA_DIR / "derived" / "players"
+for fname, kind in (("player_seasons.csv", "REG"), ("player_seasons_playoffs.csv", "PLAYOFF")):
+    with (derived / fname).open(newline="") as fh:
+        seasons_rows = [r for r in csv.DictReader(fh) if r["G"] not in ("", "NA")]
+    lost = [r for r in seasons_rows
+            if by_key.get((r["SLUG"], r["SEASON"][:5], r["TEAM"], kind), [None] * 5)[4] != int(r["G"])]
+    check(f"{fname}: all {len(seasons_rows)} stints join with the same G ({len(lost)} don't)", not lost)
+
+# Each team-game's minutes reach TM_MIN once per player who played in it, so
+# the sum over players is minutes times players-per-game, not five. What does
+# hold exactly: a player who played every game carries the team's minutes.
+team_rows = {(r[col["TEAM"]], r[col["SEASON"]], r[col["TYPE"]]): r for r in teams}
+full = [r for r in ctx if (r[2], r[1], r[3]) in team_rows
+        and r[pcol["G"]] == team_rows[(r[2], r[1], r[3])][col["G"]]]
+check(f"an every-game player carries his team's minutes ({len(full)} stints)", full and all(
+    r[pcol["TM_MIN"]] == team_rows[(r[2], r[1], r[3])][col["MIN"]] for r in full))
+check("possessions are never more than a game's worth per game",
+      all(r[pcol["POSS"]] <= 130 * r[pcol["G"]] for r in ctx))
 
 if FAILS:
     print(f"\n{len(FAILS)} FAILED")
