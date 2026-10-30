@@ -647,8 +647,9 @@ played. An unreadable schedule posts "NBN is live" with no pings.
   is read from Helix `/channels` (current as soon as it's set, unlike
   `/streams`; `fetch_title`, app token as above). A title matching
   `BOX_TITLE_RE` ("box score(s)", any case) is the box-score post, its game
-  drawn from the night's non-stream games; any other title is the stream post
-  when the night has stream games. If the title can't be read, the fallback is
+  drawn from the night's non-stream games; any other title is the stream post,
+  outright: the schedule only fills in the matchups and pings, and a night with
+  no stream game found posts "NBN is live" with none rather than box scores. If the title can't be read, the fallback is
   the night: once it has had its stream post (`stream_day`), any later stream
   that night is box scores, since the stream games have no box score yet and
   would still read as unplayed. Under that fallback only, a game stream that

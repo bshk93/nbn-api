@@ -241,9 +241,10 @@ def plan_post(state: Optional[dict] = None, title: Optional[str] = None,
     """(kind, games, day). ("stream", every stream game) when the night has
     one, else ("box", one of its games at random, or none).
 
-    The title decides first: one saying "box scores" is the box-score post.
-    With a title that doesn't, it's the stream post if the night has stream
-    games. With no title (Twitch couldn't be asked), any later stream on a
+    The title decides the kind outright: one saying "box scores" is the
+    box-score post, and any other is the stream post, with the night's stream
+    games when it has any and no matchup when it doesn't. The schedule only
+    says which games. With no title (Twitch couldn't be asked), any later stream on a
     night that already had its stream post (`stream_day`) is the box scores:
     the stream games have no box score yet, so they'd still read as unplayed
     and the night would announce them twice. A box-score post's game comes
@@ -255,7 +256,7 @@ def plan_post(state: Optional[dict] = None, title: Optional[str] = None,
         box = bool(BOX_TITLE_RE.search(title))
     else:
         box = bool(day) and (state or {}).get("stream_day") == day
-    if stream and not box:
+    if (title is not None and not box) or (stream and not box):
         return "stream", stream, day
     pool = [g for g in games if not g.get("stream")] or games
     g = random.choice(pool) if pool else None

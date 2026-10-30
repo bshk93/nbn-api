@@ -227,6 +227,7 @@ check("an empty roster is None", real_player("CLE") is None)
 discord._roster_augmented = real_aug
 
 print("box scores: one game, a front-office line")
+TITLE[0] = "Box Scores"
 FRONT = {"NYK": "Kim", "PHI": "Darth Awn", "DEN": "jo_bo", "UTA": "Tee"}
 sn.random_front_office = lambda team: FRONT.get(team)
 reset()
@@ -251,6 +252,8 @@ check("remembered as the box-score opener", state.get("box_blurb") == box and st
 check("no front office on a side drops only the line",
       sn.pick_blurbs([("NYK", "BOS")], None, "box")[0] == [None])
 sn.random_front_office = lambda team: None
+
+TITLE[0] = "NBN Game Night"
 
 print("random_front_office off members.json")
 import routers.auth as auth  # noqa: E402
@@ -284,6 +287,9 @@ check("this season's W-L only", real_records() == {"CLE": "5-2", "SAC": "3-4"}, 
 home.STANDINGS_CSV = real_csv
 
 print("redelivery and restarts")
+reset()
+post("notification", online())
+check("first stream posts", len(SENT) == 1)
 SENT.clear()
 post("notification", online())
 check("a restart inside the gap posts nothing", SENT == [])
@@ -470,8 +476,11 @@ check("the box scores right after are 10-29's, from a non-stream game",
 
 print("a night with no games falls back to the earliest unplayed day")
 sn.night_of = lambda started: "2026-10-30"
-kind, games, day = sn.plan_post({}, "NBN Game Night", "2026-10-30")
-check("catch-up stream: 10-28's unplayed game", day == "2026-10-28" and games == [("MIA", "ATL")], (kind, games, day))
+kind, games, day = sn.plan_post({}, "Box Scores", "2026-10-30")
+check("catch-up box scores: 10-28's unplayed game", kind == "box" and day == "2026-10-28"
+      and games == [("MIA", "ATL")], (kind, games, day))
+kind, games, _ = sn.plan_post({}, "NBN Game Night", "2026-10-30")
+check("catch-up under a game-night title: NBN is live, no stream game to name", kind == "stream" and games == [])
 sn.night_of = real_night_of
 sn.league_today = lambda: TODAY
 BOXED.clear()
@@ -491,7 +500,8 @@ check("a different kind than the last post is never a restart",
 check("past the fallback, a new stream",
       not sn.is_restart({"posted_at": (now - timedelta(hours=13)).isoformat()}, now))
 
-print("box scores, behind schedule")
+print("box scores, behind schedule (no title: the schedule decides)")
+TITLE[0] = None
 reset()
 GAMES[:] = [game("2026-10-22", "NYK", "PHI"), game("2026-10-22", "DEN", "UTA"),
             game("2026-10-23", "OKC", "HOU", stream=True), game("2026-10-24", "CLE", "SAC", stream=True)]
@@ -526,6 +536,24 @@ post("notification", online())
 check("an unreadable schedule still posts, as NBN is live with no pings",
       len(SENT) == 1 and SENT[0]["payload"]["content"] == "🔴 NBN is [live](<https://nbn.today>)", SENT)
 schedule._load = real_load
+
+print("the title decides the kind")
+TITLE[0] = "NBN Game Night"
+reset()
+GAMES[:] = [game("2026-10-24", "BOS", "MIA")]
+post("notification", online())
+check("a game-night title with no stream game found is still NBN is live, with no matchup",
+      SENT and SENT[0]["payload"] == {"content": "🔴 NBN is [live](<https://nbn.today>)",
+                                      "allowed_mentions": {"parse": []}}, SENT)
+reset()
+TITLE[0] = "box scores"
+GAMES[:] = [game("2026-10-24", "CLE", "SAC", stream=True)]
+post("notification", online())
+check("a box-score title on a night of only stream games is box scores",
+      SENT and "Box Scores" in SENT[0]["payload"]["content"].split("\n")[0], SENT)
+TITLE[0] = "NBN Game Night"
+GAMES[:] = [game("2026-10-24", "CLE", "SAC", stream=True), game("2026-10-24", "BOS", "MIA"),
+            game("2026-10-25", "LAL", "GSW", stream=True)]
 
 print("not worth announcing")
 reset()
