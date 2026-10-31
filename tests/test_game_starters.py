@@ -10,6 +10,10 @@ What must keep being true:
   * a snapshot entered after the game's date is marked so;
   * the last line for a game wins, so re-recording replaces rather than
     double-counts;
+  * a five reported for one game (read off 2K) beats the entered five, is
+    picked up by a later commit, and rewrites an already-recorded line for
+    that team only;
+  * a report naming someone who didn't play, or isn't on the roster, is refused;
   * recording never raises into the box score commit.
 
     venv/bin/python -m tests.test_game_starters
@@ -36,6 +40,7 @@ def check(name, cond):
 gs.STARTERS_FILE = Path(tempfile.mkdtemp()) / "game-starters.jsonl"
 
 FIVE = {s: {"slug": f"{s.lower()}-guy", "minutes": 30, "res": False} for s in gs.SLOTS}
+FIVE_SLUGS = [f"{s.lower()}-guy" for s in gs.SLOTS]
 SAVED = {**FIVE, "C": {"slug": "new-center", "minutes": 30, "res": False}}
 COACHING = {
     # Entered, then edited: 2K has the entered five.
@@ -86,6 +91,64 @@ check("an unknown team adds no starts", counts["c-guy"]["gs"] == 3)
 check("starts split by team", counts["pg-guy"]["by_team"] == {"DET": 1, "BOS": 2})
 api = gs.get_start_counts(season="26-27", game_type="REG")
 check("team games known skips the unknown team", api["team_games_known"] == {"DET": 1, "BOS": 2})
+
+print("\nreported fives")
+import json  # noqa: E402
+from fastapi import HTTPException  # noqa: E402
+_tmp = Path(tempfile.mkdtemp())
+gs.REPORTS_FILE = _tmp / "reports.json"
+gs.DATA_DIR = _tmp
+gs.PLAYER_BIOS_FILE = _tmp / "bios.json"
+gs.log_write = lambda *a, **k: None
+names = [f"{s.lower()}-guy" for s in gs.SLOTS] + ["new-center", "bench-guy", "x-pg", "x-sg", "x-sf", "x-pf", "x-c"]
+gs.PLAYER_BIOS_FILE.write_text(json.dumps({n: {"name": n.upper()} for n in names}))
+(_tmp / "nyk-roster.csv").write_text("SLUG\n" + "\n".join(f"x-{s.lower()}" for s in gs.SLOTS) + "\n")
+ME = {"name": "chuck", "roles": ["streamer"]}
+XFIVE = [f"x-{s.lower()}" for s in gs.SLOTS]
+
+e = gs.build_entry(date="2026-10-25", season="26-27", game_type="REG", home_team="DET", away_team="BOS",
+                   home_rows=rows(), away_rows=rows(), coaching=COACHING,
+                   reports={"BOS": {"starters": ["bench-guy", *FIVE_SLUGS[1:]], "reported_by": "chuck"}})
+check("a report beats the entered five", e["teams"]["BOS"]["source"] == "reported"
+      and e["teams"]["BOS"]["starters"][0] == "bench-guy")
+check("the other team keeps its entered five", e["teams"]["DET"]["source"] == "entered")
+
+def refused(fn):
+    try:
+        fn()
+        return False
+    except HTTPException:
+        return True
+
+# Before the commit: NYK has no lineup at all; the streamer records 2K's five.
+gs.committed_rows = lambda *a: None
+body = lambda **k: gs.ReportBody(**{"date": "2026-10-26", "home_team": "NYK", "away_team": "BOS",
+                                     "team": "NYK", "starters": XFIVE, **k})
+check("off-roster player refused before the commit",
+      refused(lambda: gs.report_starters(body(starters=["bench-guy", *XFIVE[1:]]), ME)))
+check("four players refused", refused(lambda: gs.report_starters(body(starters=XFIVE[:4]), ME)))
+check("a team not in the game refused", refused(lambda: gs.report_starters(body(team="DET"), ME)))
+r = gs.report_starters(body(), ME)
+check("before the commit it waits", r["recorded"] is False)
+gs.record_game(date="2026-10-26", season="26-27", game_type="REG", home_team="NYK", away_team="BOS",
+               home_rows=[{"slug": s, "min": 30} for s in XFIVE], away_rows=rows())
+g = [x for x in gs.load("26-27") if x["date"] == "2026-10-26"][0]
+check("the commit picks the report up", g["teams"]["NYK"]["starters"] == XFIVE
+      and g["teams"]["NYK"]["source"] == "reported" and g["teams"]["NYK"]["reported_by"] == "chuck")
+
+# After the commit: NYK@BOS on 10-22 was recorded with NYK unknown-ish; fill it in.
+box = {"NYK": [{"slug": s, "min": 30} for s in XFIVE[:4]] + [{"slug": "x-c", "min": 0}], "BOS": rows()}
+gs.committed_rows = lambda *a: box
+before = [x for x in gs.load("26-27") if x["date"] == "2026-10-22"][0]
+check("someone who didn't play that game is refused",
+      refused(lambda: gs.report_starters(body(date="2026-10-22", starters=["bench-guy", *XFIVE[1:]]), ME)))
+r = gs.report_starters(body(date="2026-10-22"), ME)
+after = [x for x in gs.load("26-27") if x["date"] == "2026-10-22"][0]
+check("after the commit the line is rewritten now", r["recorded"] and after["teams"]["NYK"]["starters"] == XFIVE)
+check("the other team's line is untouched", after["teams"]["BOS"] == before["teams"]["BOS"])
+check("flags recomputed from the box score",
+      after["teams"]["NYK"]["flags"] == [{"slug": "x-c", "issue": "no minutes"}])
+check("still one line per game", len([x for x in gs.load("26-27") if x["date"] == "2026-10-22"]) == 1)
 
 print("\nnever raises")
 gs.load_coaching_settings = lambda: (_ for _ in ()).throw(OSError("disk"))

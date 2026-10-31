@@ -1157,6 +1157,17 @@ never entered is recorded as unknown, never guessed from its saved order 2K
 hasn't seen. A starter with no minutes, or missing from the box, is flagged and
 not counted as a start. The last line for a game wins.
 
+**A team whose owner never saves a lineup has nothing to enter**, so 2K picks
+its own five (IND went its first six games of 26-27 that way). For that, a
+`streamer` or `stats` member records the five 2K actually started for one game,
+read off the lineup at tip or the VOD: `POST /api/game-starters/report`, stored
+in `game-starters-reports.json`. A report beats the entered five
+(`source: "reported"`). Made before the commit, `record_game` picks it up; made
+after, it appends a fresh line for the game with only that team replaced. It is
+refused if a player isn't in that team's box score (or, before the commit, on
+its roster). `GET /api/game-starters/unknown` lists played games still missing
+a five, with each team's box score players, for the dashboard's backfill list.
+
 Served by `GET /api/game-starters` and `GET /api/game-starters/counts` (the
 player page's GS column and the award race's 6MOY). Recorded from 26-27;
 `backfill_game_starters.py` (dry run by default) wrote opening night,

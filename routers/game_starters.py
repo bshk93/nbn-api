@@ -10,6 +10,11 @@ each team's entered five and appends one line here.
 What a line can and can't vouch for:
 
   * `source: "entered"` — the five as a streamer entered them. Trusted.
+  * `source: "reported"` — a streamer (or the stats committee) read the five
+    off 2K for this one game and recorded it: `POST /api/game-starters/report`.
+    Beats the entered five, since it is what 2K actually started. This is how
+    a team whose owner never saves a lineup still gets one on record, and how
+    a game already played is filled in afterwards (from its VOD).
   * `source: null`, `starters: null` — nothing was ever entered for this team,
     so 2K used its own default lineup and nobody knows it. Never guessed from
     the team's saved-but-unentered order, which 2K never saw.
@@ -43,15 +48,21 @@ from datetime import datetime, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 
-from .constants import DATA_DIR, DERIVED_DIR, logger
+from .auth import require_any_role
+from .constants import DATA_DIR, DERIVED_DIR, PLAYER_BIOS_FILE, VALID_TEAMS, logger
 from .coaching_settings import load_coaching_settings, _entered_snapshot
-from .storage import _current_league_year
+from .storage import _current_league_year, _load_json, _save_json, log_write, read_csv
 
 router = APIRouter()
 
 STARTERS_FILE = DATA_DIR / "game-starters.jsonl"
+# game key -> team -> {starters, reported_by, reported_at, note}. Kept apart
+# from the jsonl so a report made before the box score is committed is still
+# there when `record_game` runs.
+REPORTS_FILE = DATA_DIR / "game-starters-reports.json"
 PLAYER_SEASONS_CSV = DERIVED_DIR / "players" / "player_seasons.csv"
 SLOTS = ("PG", "SG", "SF", "PF", "C")
 _ET = ZoneInfo("America/New_York")
@@ -100,13 +111,31 @@ def _after_game(entered_at: Optional[str], game_date: str) -> bool:
     return when > game_date
 
 
+def game_key(date: str, game_type: str, home_team: str, away_team: str) -> str:
+    a, b = sorted((home_team, away_team))
+    return f"{date}|{game_type}|{a}|{b}"
+
+
+def load_reports() -> dict:
+    return _load_json(REPORTS_FILE, {})
+
+
+def reported_starters(rep: dict) -> dict:
+    return {"starters": list(rep["starters"]), "source": "reported", "entered_at": None,
+            "reported_by": rep.get("reported_by"), "reported_at": rep.get("reported_at")}
+
+
 def build_entry(*, date: str, season: str, game_type: str, home_team: str, away_team: str,
                 home_rows: list[dict], away_rows: list[dict], coaching: dict,
-                reconstructed: bool = False) -> dict:
-    """The line for one game. `*_rows` are `{slug, min}` per player."""
+                reports: Optional[dict] = None, reconstructed: bool = False) -> dict:
+    """The line for one game. `*_rows` are `{slug, min}` per player.
+    `reports` is team -> this game's reported five, which wins over the
+    entered one."""
+    reports = reports or {}
     teams = {}
     for team, rows in ((home_team, home_rows), (away_team, away_rows)):
-        t = team_starters(coaching.get(team))
+        rep = reports.get(team)
+        t = reported_starters(rep) if rep else team_starters(coaching.get(team))
         t["flags"] = _flags(t["starters"], rows)
         t["entered_after_game"] = _after_game(t["entered_at"], date)
         teams[team] = t
@@ -129,7 +158,8 @@ def record_game(**kw) -> None:
     """Called from the box score commit. Never raises: a missing starters
     line is a gap in a nice-to-have, a failed commit is not."""
     try:
-        append(build_entry(coaching=load_coaching_settings(), **kw))
+        reports = load_reports().get(game_key(kw["date"], kw["game_type"], kw["home_team"], kw["away_team"]))
+        append(build_entry(coaching=load_coaching_settings(), reports=reports, **kw))
     except Exception as exc:
         logger.warning("game-starters: couldn't record %s %s@%s — %s",
                        kw.get("date"), kw.get("away_team"), kw.get("home_team"), exc)
@@ -168,6 +198,109 @@ def starts_by_player(entries: list[dict], game_type: str = "REG") -> dict:
     return {k: {"gs": v["gs"], "by_team": dict(v["by_team"])} for k, v in out.items()}
 
 
+def committed_rows(season: str, date: str, game_type: str, home_team: str, away_team: str) -> Optional[dict]:
+    """team -> [{slug, min}] from the raw box score, or None if the game isn't
+    committed. The raw rows carry a name, not a slug; the name is the bio's."""
+    from .boxscores import allstats_path  # boxscores imports this module
+    path = allstats_path(season, game_type)
+    if not path.exists():
+        return None
+    bios = _load_json(PLAYER_BIOS_FILE, {})
+    slug_of = {}
+    for slug, b in bios.items():
+        slug_of.setdefault((b.get("name") or "").strip().upper(), slug)
+    _, rows = read_csv(path)
+    out: dict[str, list] = {home_team: [], away_team: []}
+    for r in rows:
+        team = (r.get("TEAM") or "").strip()
+        opp = (r.get("OPP_RAW") or r.get("OPP") or "").strip().lstrip("@")
+        if r.get("DATE") != date or team not in out or opp not in out or opp == team:
+            continue
+        out[team].append({"slug": slug_of.get((r.get("PLAYER") or "").strip().upper()),
+                          "min": int(float(r.get("M") or 0))})
+    return out if out[home_team] or out[away_team] else None
+
+
+class ReportBody(BaseModel):
+    date: str
+    home_team: str
+    away_team: str
+    team: str
+    starters: list[str]          # PG, SG, SF, PF, C
+    game_type: str = "REG"
+    season: Optional[str] = None
+    note: str = ""
+
+
+@router.post("/api/game-starters/report")
+def report_starters(body: ReportBody, info: dict = Depends(require_any_role("streamer", "stats"))):
+    """Record the five 2K started for one team in one game, read off the game
+    (its lineup screen at tip, or the VOD). For a team with no lineup entered,
+    or one whose entered five isn't what 2K used. Before the box score is
+    committed it waits for the commit; after, it rewrites the game's line now.
+    Reporting again replaces the earlier report."""
+    home, away, team = body.home_team.upper(), body.away_team.upper(), body.team.upper()
+    gtype = body.game_type.upper()
+    if gtype not in ("REG", "PLAYOFF"):
+        raise HTTPException(422, "game_type must be REG or PLAYOFF")
+    if home not in VALID_TEAMS or away not in VALID_TEAMS or home == away:
+        raise HTTPException(422, "Unknown teams")
+    if team not in (home, away):
+        raise HTTPException(422, f"{team} isn't in this game")
+    five = [s.strip() for s in body.starters]
+    if len(five) != 5 or not all(five) or len(set(five)) != 5:
+        raise HTTPException(422, "Need five different players, PG to C")
+    bios = _load_json(PLAYER_BIOS_FILE, {})
+    unknown = [s for s in five if s not in bios]
+    if unknown:
+        raise HTTPException(422, f"Unknown player: {', '.join(unknown)}")
+    season = body.season or _current_league_year()
+
+    rows = committed_rows(season, body.date, gtype, home, away)
+    if rows is not None:
+        played = {r["slug"] for r in rows.get(team, [])}
+        missing = [bios[s].get("name", s) for s in five if s not in played]
+        if missing:
+            raise HTTPException(422, f"Not in {team}'s box score for this game: {', '.join(missing)}")
+    else:
+        roster_file = DATA_DIR / f"{team.lower()}-roster.csv"
+        if roster_file.exists():
+            _, roster = read_csv(roster_file)
+            on = {r.get("SLUG") for r in roster}
+            off = [bios[s].get("name", s) for s in five if s not in on]
+            if off:
+                raise HTTPException(422, f"Not on {team}'s roster: {', '.join(off)}")
+
+    key = game_key(body.date, gtype, home, away)
+    rep = {"starters": five, "reported_by": info.get("name"),
+           "reported_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+           "note": body.note.strip()}
+    reports = load_reports()
+    reports.setdefault(key, {})[team] = rep
+    _save_json(REPORTS_FILE, reports)
+
+    line = None
+    if rows is not None:
+        prior = next((e for e in load(season) if game_key(e["date"], e["game_type"], e["home_team"],
+                                                          e["away_team"]) == key), None)
+        if prior:
+            # Keep the other team as recorded; replace this one.
+            line = {**prior, "recorded_at": rep["reported_at"], "teams": dict(prior["teams"])}
+            t = reported_starters(rep)
+            t["flags"] = _flags(five, rows[team])
+            t["entered_after_game"] = False
+            line["teams"][team] = t
+        else:
+            # Committed before this file existed: the other side is unknown,
+            # not guessed from today's settings.
+            line = build_entry(date=body.date, season=season, game_type=gtype, home_team=home,
+                               away_team=away, home_rows=rows[home], away_rows=rows[away],
+                               coaching={}, reports=reports[key])
+        append(line)
+    log_write(info, f"POST game-starters/report {key} {team}")
+    return {"key": key, "team": team, "report": rep, "recorded": line is not None, "line": line}
+
+
 @router.get("/api/game-starters")
 def get_game_starters(season: Optional[str] = Query(None), team: Optional[str] = Query(None)):
     season = season or _current_league_year()
@@ -176,6 +309,35 @@ def get_game_starters(season: Optional[str] = Query(None), team: Optional[str] =
         t = team.upper()
         entries = [e for e in entries if t in (e["home_team"], e["away_team"])]
     return {"season": season, "games": entries}
+
+
+@router.get("/api/game-starters/reports")
+def get_reports():
+    """Every reported five, keyed like `game_key`. Public: the lineup a team
+    started is public once played, and its depth order already is
+    (`/api/rotations`)."""
+    return load_reports()
+
+
+@router.get("/api/game-starters/unknown")
+def get_unknown(season: Optional[str] = Query(None)):
+    """Played games where a team's five is unknown, newest first, each with
+    the team's box score players to choose from (slug, name, minutes)."""
+    season = season or _current_league_year()
+    bios = _load_json(PLAYER_BIOS_FILE, {})
+    out = []
+    for e in reversed(load(season)):
+        missing = [t for t, d in (e.get("teams") or {}).items() if not d.get("starters")]
+        if not missing:
+            continue
+        rows = committed_rows(season, e["date"], e["game_type"], e["home_team"], e["away_team"]) or {}
+        for team in missing:
+            players = sorted(({"slug": r["slug"], "name": (bios.get(r["slug"]) or {}).get("name", ""),
+                               "min": r["min"]} for r in rows.get(team, []) if r["slug"]),
+                             key=lambda p: -p["min"])
+            out.append({"date": e["date"], "game_type": e["game_type"], "home_team": e["home_team"],
+                        "away_team": e["away_team"], "team": team, "players": players})
+    return {"season": season, "games": out}
 
 
 @router.get("/api/game-starters/counts")
