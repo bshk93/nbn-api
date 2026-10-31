@@ -8,6 +8,8 @@ What must keep being true:
   * scoring is DraftKings classic, with a triple-double earning both bonuses;
   * a day locks when the stream goes live, a box score or the VOD comes in,
     or the day ends, never at the schedule's NBA tip time; the lock sticks;
+  * last night's stream, running past midnight or restarted after it, neither
+    locks today nor ends last night;
   * a lineup can't be saved or deleted once the day is locked;
   * a streamer can reopen a day only a stream locked; that stream can't relock
     it, and a later stream (the real games) still can;
@@ -89,6 +91,9 @@ LIVE = [OFF]
 pk.stream_status = lambda: LIVE[0]
 STREAM_DAY = {}
 pk._streaming_day = lambda date: STREAM_DAY
+import routers.game_day as gd  # noqa: E402
+UNFINISHED: set = set()   # nights whose games aren't all in yet
+gd._night_unfinished = lambda date: date in UNFINISHED
 
 GOOD = {"PG": "pg-one", "SG": "sg-one", "SF": "sf-one", "PF": "pf-one", "C": "c-one", "6TH": "wing-one"}
 
@@ -150,6 +155,21 @@ NOW[0] = datetime(2026, 11, 1, 0, 1, tzinfo=pk.LEAGUE_TZ)
 pk.note_stream_live(LATE)
 LIVE[0] = LATE
 check("not locked by the banner", pk.lock_state("2026-11-01", []) is None)
+check("last night is still its stream's day, not over", pk.lock_state("2026-10-31", [])["why"] == "stream")
+LIVE[0] = OFF
+pk.LOCKS_FILE.unlink()
+check("last night is over once it ends", pk.lock_state("2026-10-31", [])["why"] == "day over")
+
+print("last night's stream dropping and coming back after midnight doesn't lock today")
+RESUMED = {"live": True, "started_at": "2026-11-01T05:40:00Z", "title": "NBN 10/31 pt 2"}   # 1:40am ET
+UNFINISHED.add("2026-10-31")
+NOW[0] = datetime(2026, 11, 1, 1, 45, tzinfo=pk.LEAGUE_TZ)
+pk.note_stream_live(RESUMED)
+LIVE[0] = RESUMED
+check("not locked", pk.lock_state("2026-11-01", []) is None)
+UNFINISHED.clear()
+check("a small-hours stream after a finished night is that day's", pk.lock_state("2026-11-01", [])["why"] == "stream")
+pk.LOCKS_FILE.unlink()
 LIVE[0] = OFF
 
 LIVE[0] = GAMES_ON

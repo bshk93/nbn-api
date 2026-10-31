@@ -15,9 +15,11 @@ salary cap; the skill is guessing who has the big night.
     when something asks Twitch (the homepage banner does, every minute while
     anyone browses), so a day also locks on the first box score for that
     date, its VOD link or "done" mark on the streaming day, and at the
-    latest at midnight ET. A stream that began before the day did (last
-    night's, running past midnight) never locks it. The first of these is recorded in
-    `pickem-locks.json` and is permanent. Other members' lineups stay hidden
+    latest once the day is over. "The day" is the game day
+    (`routers/game_day.py`), not the ET date: last night's stream running
+    past midnight, or dropping and coming back at 1am, is still last night's
+    games, so it neither locks today nor ends last night early. The first of
+    these is recorded in `pickem-locks.json` and is permanent. Other members' lineups stay hidden
     until the lock.
   * **Scoring.** DraftKings classic: PTS 1, 3PM +0.5, REB 1.25, AST 1.5,
     STL 2, BLK 2, TO -0.5, plus +1.5 for a double-double and +3 for a
@@ -57,6 +59,7 @@ from .auth import _resolve_token, get_token_info, require_any_role
 from .boxscores import allstats_path
 from .coaching_settings import _roster_slugs
 from .constants import DATA_DIR, VALID_TEAMS, logger
+from .game_day import game_day, stream_game_day
 from .league_time import LEAGUE_TZ, league_now
 from .names import player_name
 from .players import _primary_pos, effective_secondary, load_attributes, load_ovr, load_player_bios
@@ -145,19 +148,15 @@ def _record_lock(date: str, why: str, stream: Optional[dict] = None) -> dict:
 
 def _game_stream(date: str, status: dict) -> bool:
     """A live stream counts as the day's games starting unless someone
-    reopened the day because of that very stream, or it began before the day
-    did: a stream still running past midnight ET is the previous day's games
-    (it locked 2026-10-25 on the 10/24 stream once)."""
+    reopened the day because of that very stream, or it is another day's
+    games: a stream still running past midnight ET, or restarted after it, is
+    the previous day's (it locked 2026-10-25 on the 10/24 stream once)."""
     if not status.get("live"):
         return False
     started = status.get("started_at")
-    if started:
-        try:
-            began = datetime.fromisoformat(started.replace("Z", "+00:00")).astimezone(LEAGUE_TZ)
-            if began.date().isoformat() < date:
-                return False
-        except ValueError:
-            pass
+    day = stream_game_day(started)
+    if day and day != date:
+        return False
     ignored = (_load_json(LOCKS_FILE, {}).get(date) or {}).get("ignore_streams") or []
     return started not in ignored
 
@@ -167,7 +166,8 @@ def lock_state(date: str, rows: list[dict]) -> Optional[dict]:
     rec = _load_json(LOCKS_FILE, {}).get(date) or {}
     if rec.get("why"):
         return rec
-    today = league_now().date().isoformat()
+    status = stream_status()
+    today = game_day(status, league_now().date().isoformat())
     if date < today:
         end = Date.fromisoformat(date) + timedelta(days=1)
         return {"at": datetime(end.year, end.month, end.day, tzinfo=LEAGUE_TZ).isoformat(), "why": "day over"}
@@ -178,7 +178,6 @@ def lock_state(date: str, rows: list[dict]) -> Optional[dict]:
     day = _streaming_day(date)
     if day.get("done") or day.get("youtube_url"):
         return _record_lock(date, "vod")
-    status = stream_status()
     if _game_stream(date, status):
         return _record_lock(date, "stream", status)
     return None
@@ -187,10 +186,10 @@ def lock_state(date: str, rows: list[dict]) -> Optional[dict]:
 def note_stream_live(status: dict) -> None:
     """Called by routers/stream_live.py whenever it sees the channel live, so
     the lock is stamped even if nobody opens Pick'em during the stream."""
-    today = league_now().date().isoformat()
-    _, games = slate_games(today)
-    if games and _game_stream(today, status):
-        _record_lock(today, "stream", status)
+    day = stream_game_day(status.get("started_at")) or league_now().date().isoformat()
+    _, games = slate_games(day)
+    if games and _game_stream(day, status):
+        _record_lock(day, "stream", status)
 
 
 def reopen(date: str, by: str) -> dict:
@@ -561,7 +560,7 @@ def reopen_day(date: str, info: dict = Depends(require_any_role("streamer", "bod
 def season_over(season: str, st: dict) -> bool:
     """The last scheduled day has passed and every played day is final."""
     dates = [g.get("date") for g in load_schedule(season).get("games", []) if g.get("date")]
-    if not dates or league_now().date().isoformat() <= max(dates):
+    if not dates or game_day(stream_status(), league_now().date().isoformat()) <= max(dates):
         return False
     return all(d["final"] for d in st["days"])
 
