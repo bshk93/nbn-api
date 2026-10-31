@@ -137,12 +137,20 @@ KNOWN_FIXES = {
     ("players/player_seasons_playoffs.csv", "PLAYER", "Richard, will", "Richard, Will"),
     ("players/player_seasons_playoffs.csv", "PLAYER", "Riley, will", "Riley, Will"),
 }
+# R writes "Missed" for every team in a season whose playoffs haven't started;
+# the port leaves it blank, since nobody has missed anything yet.
+_TEAMS_LC = ["atl", "bkn", "bos", "cha", "chi", "cle", "dal", "den", "det", "gsw",
+             "hou", "ind", "lac", "lal", "mem", "mia", "mil", "min", "nop", "nyk",
+             "okc", "orl", "phi", "phx", "por", "sac", "sas", "tor", "uta", "was"]
+KNOWN_FIXES |= {(f"data/{t}-seasons.csv", "PLAYOFF_RESULT", "Missed", "") for t in _TEAMS_LC}
+KNOWN_FIXES.add(("standings/standings-history.csv", "PLAYOFF_RESULT", "Missed", ""))
 
 KNOWN_TIES = {
     ("data/cle-players.csv", "CHRISTOPHER, JOSH", "GMSC_AVG", "1.28", "1.27"),
     ("data/cle-players.csv", "REDDISH, CAM", "GMSC_AVG", "0.58", "0.57"),
     ("data/mia-players.csv", "HARKLESS, MAURICE", "GMSC_AVG", "1.25", "1.24"),
     ("data/nop-players.csv", "JONES, DAMIAN", "GMSC_AVG", "4.02", "4.03"),
+    ("data/phx-players.csv", "ALLEN, GRAYSON", "GMSC_AVG", "-0.23", "-0.22"),  # -0.9 / 4, 26-27
     ("data/okc-players.csv", "RONDO, RAJON", "GMSC_AVG", "3.57", "3.58"),
     ("data/por-players.csv", "LOWRY, KYLE", "GMSC_AVG", "4.92", "4.93"),
 }

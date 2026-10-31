@@ -1035,7 +1035,12 @@ def playoff_results(playoff_rows: list[dict]) -> dict[tuple[str, str], str]:
 
 
 def team_seasons(standings: dict[str, list[dict]], ratings, results, team: str):
-    """One team's season-by-season history."""
+    """One team's season-by-season history.
+
+    A season whose playoffs haven't started has no result yet, so it is blank
+    rather than "Missed" (R wrote "Missed" for every team all regular season).
+    """
+    po_seasons = {season for season, _team in results}
     rows = []
     for season in sorted(standings):
         row = next((r for r in standings[season] if r["TEAM"] == team), None)
@@ -1044,7 +1049,7 @@ def team_seasons(standings: dict[str, list[dict]], ratings, results, team: str):
         off, dfn = ratings.get((team, season), (None, None))
         rows.append([season, row["W"], row["L"], row["PCT"], row["PPG"], row["OPPG"],
                      row["DIFF"], row["SEED"], row["SEED_NUM"], off, dfn,
-                     results.get((season, team), "Missed"),
+                     results.get((season, team), "Missed" if season in po_seasons else ""),
                      (team, season) in FOTY, (team, season) in COTY])
     return TEAM_SEASON_COLS, rows
 

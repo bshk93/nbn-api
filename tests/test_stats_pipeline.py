@@ -147,6 +147,16 @@ check("16 playoff wins is the title — there is no bracket in the raw rows",
 check("a team's own duplicate player rows don't inflate its win count",
       pipeline._champion_team_seasons(po * 3) == champs)
 
+_st = {"25-26": [{"TEAM": t, "W": 1, "L": 1, "PCT": .5, "PPG": 1, "OPPG": 1, "DIFF": 0,
+                   "SEED": "East-1", "SEED_NUM": 1} for t in ("ATL", "BKN", "BOS")]}
+_st["26-27"] = _st["25-26"]
+_res = pipeline.playoff_results(po)
+_, _ts = pipeline.team_seasons(_st, {}, _res, "BOS")
+check("a team out of a season's playoffs Missed them", _ts[0][11] == "Missed")
+check("a season with no playoffs yet is blank, not Missed", _ts[1][11] == "")
+check("the champion still reads Champion",
+      pipeline.team_seasons(_st, {}, _res, "ATL")[1][0][11] == "Champion")
+
 print("\nstandings and seeding")
 def _game(date, team, opp, pts):
     return {"DATE": date, "TEAM": team, "OPP": opp, "P": str(pts), "SEASON": "25-26"}
