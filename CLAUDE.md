@@ -1137,6 +1137,10 @@ caller or a third file would be served stale. Pinned by `tests/test_etag.py`.
 `Cache-Control: private, no-cache`, and a matching `If-None-Match` gets an
 empty 304. It saves the download, not the work. An endpoint that sets its own
 `Cache-Control` or `ETag`, or a cookie, is left alone. Also `tests/test_etag.py`.
+nginx used to add `Cache-Control: no-store` to every `/api` answer, which
+would cancel this. Since 2026-11-01 it adds it only when the API sent none
+(`map` in `/etc/nginx/conf.d/nbn-api-cache.conf`, used by the `/api/` blocks
+of nbn.today, pdc.nbn.today and dev.nbn.today).
 
 ## Docs discipline
 
