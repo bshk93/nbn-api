@@ -26,6 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import routers.transactions as T  # noqa: E402
+REAL_APPLY_OPTION = T._apply_option
 import routers.season_calendar as cal  # noqa: E402
 from routers.league_time import LEAGUE_TZ  # noqa: E402
 
@@ -143,6 +144,33 @@ check("on July 1 the undecided option is declined", ("second", "27-28", "UFA") i
 check("...and the team told he's a UFA now", any(t == "BOS" and "free agent now" in x for t, x in SENT))
 check("...its ledger entry names the June 30 close",
       any("June 30" in t["description"] and t["details"]["player"] == "second" for t in LEDGER))
+
+print("\na Full Bird decline with no EAPS on file is priced off this season's average salary")
+# The real _apply_option this time: 2026-11-02 declined nothing but crashed,
+# because a QVFA hold can't pick 150% vs 190% without EAPS and the sweep
+# passed no answer. Average salary here is $10M, so $3M is below it: 190%.
+import json as _json  # noqa: E402
+_cl = Path(tempfile.mkdtemp()) / "cap-levels.json"
+_cl.write_text(_json.dumps({"26-27": {"eaps": 0}, "27-28": {"eaps": 0}}))
+T.CAP_LEVELS_FILE = _cl
+T._apply_option = REAL_APPLY_OPTION
+T.save_player_bios = lambda bios: None
+T.log_write = lambda *a, **k: None
+T._derive_bird_tier = lambda bio, team, season, slug=None: "QVFA"
+T._current_league_year = lambda: "26-27"
+BIOS["fb"] = {"name": "FULL, BIRD", "draft_year": 2024, "draft_round": 1, "type": "player",
+              "salaries": {"25-26": "$2,900,000", "26-27": "$3,000,000", "27-28": "$5,000,000"},
+              "cap_holds": {"27-28": "TEAM_OPT"}}
+BIOS["vet"] = {"name": "AVERAGE, VET", "type": "player", "salaries": {"26-27": "$17,000,000"}}
+TEAMS.update({"fb": "SAS", "vet": "SAS"})
+LEDGER.clear()
+r = T.sweep_team_options(at("2026-11-03 02:00"))
+check("the sweep declines him rather than crashing", ("SAS", "fb", "27-28") in r["declined"])
+check("...at 190% of his last salary", BIOS["fb"]["salaries"].get("27-28") == "$5,700,000"
+      and BIOS["fb"]["cap_holds"] == {"27-28": "UFA"})
+check("...noted as a placeholder", "below EAPS" in (BIOS["fb"].get("cap_hold_notes") or {}).get("27-28", ""))
+check("...and the ledger says what was assumed",
+      any(t["details"]["player"] == "fb" and t["details"]["eaps_assumption"] == "below" for t in LEDGER))
 
 print()
 if FAILS:

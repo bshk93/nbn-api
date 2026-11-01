@@ -685,16 +685,10 @@ def _apply_option(details: OptionDetails, info: dict) -> Optional[str]:
         # salary and Bird tier (declared bird_tier, else derived from tenure).
         cap_hold_amount = details.cap_hold_amount
         if not cap_hold_amount:
-            prev_entries = sorted(bio["salaries"].items(), key=lambda kv: _season_start(kv[0]))
-            prev_salary = prev_entries[-1][1] if prev_entries else None
-            if prev_salary:
-                cap_levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
-                tier = details.bird_tier or _derive_bird_tier(bio, team, details.year, details.player)
-                min_amt = _rookie_min_salary(details.year, cap_levels) or None
-                max_amt = _max_salary(bio, details.year, cap_levels)
-                amount, note = _compute_fa_hold_amount(
-                    prev_salary, tier, details.year, cap_levels, details.eaps_assumption, min_amt, max_amt,
-                )
+            cap_levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
+            priced = _declined_option_hold(bio, team, details, cap_levels)
+            if priced:
+                amount, note = priced
                 cap_hold_amount = f"${amount:,}"
                 if note:
                     bio["cap_hold_notes"] = {**bio.get("cap_hold_notes", {}), details.year: note}
@@ -709,6 +703,75 @@ def _apply_option(details: OptionDetails, info: dict) -> Optional[str]:
     save_player_bios(bios)
     log_write(info, f"TXN option — {details.player} {details.decision} {details.option_type} {details.year}")
     return team
+
+
+def _declined_option_hold(bio: dict, team: str, details: "OptionDetails",
+                          cap_levels: dict) -> Optional[tuple[int, Optional[str]]]:
+    """§ 3.10 "Declined option": the hold a declined option leaves, priced off
+    the last real salary before the option year (not the option amount).
+    None when there is no earlier salary to price from. Raises the same 422
+    as `_compute_fa_hold_amount` when a Full Bird hold needs an EAPS that
+    isn't set and `details.eaps_assumption` doesn't say which side it is."""
+    key = _season_start(details.year)
+    prev_entries = sorted(((yr, amt) for yr, amt in (bio.get("salaries") or {}).items()
+                           if _season_start(yr) < key), key=lambda kv: _season_start(kv[0]))
+    prev_salary = prev_entries[-1][1] if prev_entries else None
+    if not prev_salary:
+        return None
+    tier = details.bird_tier or _derive_bird_tier(bio, team, details.year, details.player)
+    min_amt = _rookie_min_salary(details.year, cap_levels) or None
+    max_amt = _max_salary(bio, details.year, cap_levels)
+    return _compute_fa_hold_amount(
+        prev_salary, tier, details.year, cap_levels, details.eaps_assumption, min_amt, max_amt,
+    )
+
+
+def _eaps_unset(hold_season: str, cap_levels: dict) -> bool:
+    return not (cap_levels.get(hold_season, {}) or {}).get("eaps")
+
+
+def _eaps_estimate(bios: dict) -> Optional[int]:
+    """A stand-in for an EAPS nobody has set yet: this season's average salary
+    across signed standard contracts on rosters (free-agent holds left out).
+    EAPS is the projected league-average salary (§ 1.1), so this season's
+    actual average is the nearest figure the league already has. Used to
+    suggest an above/below answer, and by the deadline sweep, which has no one
+    to ask. Never stored as EAPS."""
+    season = _current_league_year()
+    amounts = []
+    for slug in _build_team_map():
+        bio = bios.get(slug) or {}
+        if bio.get("type") != "player" or (bio.get("cap_holds") or {}).get(season) in _FA_HOLD_TYPES:
+            continue
+        amt = _parse_dollar((bio.get("salaries") or {}).get(season))
+        if amt:
+            amounts.append(amt)
+    return round(sum(amounts) / len(amounts)) if amounts else None
+
+
+def _option_hold_preview(details: "OptionDetails", ctx: dict) -> Optional[dict]:
+    """What declining leaves on the books, for the dialog: the hold amount, or
+    that it needs an above/below EAPS answer first (with a suggested one)."""
+    bios = ctx["bios"]
+    bio = bios.get(details.player) or {}
+    team = _build_team_map().get(details.player)
+    if not team or details.cap_hold_amount:
+        return None
+    try:
+        priced = _declined_option_hold(bio, team, details, ctx["cap_levels"])
+    except HTTPException as e:
+        estimate = _eaps_estimate(bios)
+        key = _season_start(details.year)
+        prev = max(((yr, amt) for yr, amt in (bio.get("salaries") or {}).items()
+                    if _season_start(yr) < key), key=lambda kv: _season_start(kv[0]))[1]
+        prev_amt = _parse_dollar(prev)
+        return {"needs_eaps": True, "detail": e.detail, "prev_salary": prev_amt,
+                "eaps_estimate": estimate,
+                "suggested": ("above" if prev_amt > estimate else "below") if estimate else None}
+    if not priced:
+        return None
+    amount, note = priced
+    return {"needs_eaps": False, "amount": amount, "note": note}
 
 
 def _apply_guarantee(details: GuaranteeDetails, info: dict) -> Optional[str]:
@@ -3045,6 +3108,7 @@ def sweep_team_options(now: Optional[datetime] = None) -> dict:
         return done
     info = {"name": "system"}
     txns = []
+    cap_levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
     with _txn_lock:
         bios = load_player_bios()
         for o in lapsed:
@@ -3052,7 +3116,20 @@ def sweep_team_options(now: Optional[datetime] = None) -> dict:
                 continue  # decided since the list was read
             details = OptionDetails(player=o["slug"], decision="decline", option_type="TEAM_OPT",
                                     year=o["year"], cap_hold_type="UFA")
-            applied = _apply_option(details, info)
+            # No one to ask whether he's above or below an EAPS nobody has
+            # set, so answer from this season's average salary. The hold's
+            # note records it as a placeholder.
+            if _eaps_unset(o["year"], cap_levels):
+                hold = _option_hold_preview(details, {"bios": bios, "cap_levels": cap_levels})
+                if hold and hold["needs_eaps"] and hold["suggested"]:
+                    details.eaps_assumption = hold["suggested"]
+            try:
+                applied = _apply_option(details, info)
+            except HTTPException as e:
+                # One player the sweep can't price mustn't hold up the rest;
+                # he stays undecided and is retried next hour.
+                done.setdefault("errors", []).append((o["slug"], o["year"], e.detail))
+                continue
             what = "rookie-scale deadline" if o["kind"] == "rookie" else "June 30 close of its window"
             txn = {
                 "id": secrets.token_hex(8),
@@ -7330,6 +7407,24 @@ def _validate_option(details: OptionDetails, ctx: dict) -> list[CheckResult]:
     if details.decision != "decline":
         return checks
 
+    hold = _option_hold_preview(details, ctx)
+    if hold and hold["needs_eaps"]:
+        est = hold["eaps_estimate"]
+        hint = (f" This season's average salary is ${est:,}, so his ${hold['prev_salary']:,} is "
+                f"probably {hold['suggested']} it." if est else "")
+        checks.append(CheckResult(
+            check="eaps_assumption", passed=False, level="error",
+            message=(f"{details.year} has no EAPS set yet, so the Full Bird hold (§ 3.10) needs an "
+                     f"answer: is his ${hold['prev_salary']:,} salary above EAPS (150%) or at or "
+                     f"below it (190%)?{hint}"),
+        ))
+    elif hold:
+        checks.append(CheckResult(
+            check="eaps_assumption", passed=True,
+            message=(f"He leaves a {details.year} free-agent hold of ${hold['amount']:,} (§ 3.10)"
+                     + (f" ({hold['note']})." if hold["note"] else ".")),
+        ))
+
     team = _build_team_map().get(details.player)
     if not team:
         return checks
@@ -9976,7 +10071,8 @@ def validate_option(body: OptionDetails):
     ctx = _validation_ctx()
     if body.player not in ctx["bios"]:
         raise HTTPException(400, f"Unknown player '{body.player}'.")
-    return _validation_result(_validate_option(body, ctx), {})
+    hold = _option_hold_preview(body, ctx) if body.decision == "decline" else None
+    return _validation_result(_validate_option(body, ctx), {"hold": hold} if hold else {})
 
 
 @router.post("/api/validate/renounce")
@@ -10159,6 +10255,7 @@ class SelfOptionIn(BaseModel):
     player: str
     decision: str            # "accept" or "decline"
     cap_hold_type: str = "UFA"  # only consulted on decline; "UFA" or "RFA"
+    eaps_assumption: Optional[str] = None  # decline only, when the hold needs it (§ 3.10)
     description: str = ""
 
 
@@ -10214,7 +10311,8 @@ def self_option(body: SelfOptionIn, info: dict = Depends(get_token_info)):
 
     txn_date = league_today_str()
     details = OptionDetails(player=player, decision=body.decision, option_type="TEAM_OPT",
-                            year=year, cap_hold_type=body.cap_hold_type)
+                            year=year, cap_hold_type=body.cap_hold_type,
+                            eaps_assumption=body.eaps_assumption)
     ctx = {
         "bios":       bios,
         "team_state": load_team_state(),
