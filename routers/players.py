@@ -8,7 +8,7 @@ from .constants import (
     DATA_DIR, PLAYER_BIOS_FILE, OVR_FILE, ATTRIBUTES_FILE, VALID_TEAMS,
     _ovr_lock, _txn_lock, CURATOR_FIELDS, BIO_REWARD_FIELDS, BIO_REWARDS_FILE, _bio_rewards_lock, logger,
 )
-from .storage import _load_json, _load_json_shared, _save_json, read_csv, log_write
+from .storage import _load_json, _load_json_shared, _save_json, read_csv, log_write, shared_json_response
 from .auth import get_token_info, has_role, require_any_role, require_admin
 from .bets import _award_bio_reward, NBY_BIO_REWARD
 
@@ -431,9 +431,9 @@ def get_players(slugs: Optional[str] = None):
     # which a page naming a dozen players (the homepage feed) shouldn't pay.
     # Unknown slugs are simply absent from the result. Read-only, so it reads
     # the shared parse rather than the 620KB file on every call.
-    bios = player_bios_shared()
     if slugs is None:
-        return bios
+        return shared_json_response("players", [PLAYER_BIOS_FILE], player_bios_shared)
+    bios = player_bios_shared()
     wanted = {s.strip() for s in slugs.split(",") if s.strip()}
     return {s: bios[s] for s in wanted if s in bios}
 
@@ -650,9 +650,13 @@ def get_attributes():
 def get_attributes_current():
     # `2k_pos_seen` rides along: every position 2K has listed for him, which
     # the team page needs for the secondary pool (see "Positions" above).
-    history = load_attributes()
-    return {slug: {**entries[-1], "2k_pos_seen": twok_positions_seen(slug, history)}
-            for slug, entries in history.items() if entries}
+    # Built once per change to the file: the 2.7MB history was parsed and the
+    # 900KB answer encoded on every team page load.
+    def build():
+        history = _load_json_shared(ATTRIBUTES_FILE, {})
+        return {slug: {**entries[-1], "2k_pos_seen": twok_positions_seen(slug, history)}
+                for slug, entries in history.items() if entries}
+    return shared_json_response("attributes-current", [ATTRIBUTES_FILE], build)
 
 
 @router.get("/api/attributes/{slug}")

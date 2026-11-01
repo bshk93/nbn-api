@@ -116,14 +116,19 @@ def _player_entry(state: dict, slug: str) -> dict:
 # ── eligibility (Phase B) ───────────────────────────────────────────────────
 
 @router.get("/api/poext/eligible")
-def get_eligible():
+def get_eligible(team: Optional[str] = None):
     """Every rostered player, `eligible` + a server-composed `reason` — the
     same `_accepts_offers`-style contract `GET /api/fa/pool` uses, off the
     exact eligibility check `POST /api/validate/extension` runs (§ 6.2 rules
     1-2 only; service and terms are proposal-specific and can't be judged with
-    no proposed contract to check them against). Public, like the FA pool."""
+    no proposed contract to check them against). Public, like the FA pool.
+
+    `?team=` returns one team's players: the team page needs only its own,
+    and the check below is the costly part."""
     bios = load_player_bios()
     team_map = _build_team_map()
+    if team:
+        team_map = {s: t for s, t in team_map.items() if t == team.upper()}
     cur_season = _current_league_year()
     out = []
     for slug, team in sorted(team_map.items()):

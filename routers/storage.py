@@ -100,6 +100,39 @@ def _load_json_shared(path: Path, default):
     return data
 
 
+_SHARED_RESPONSES: dict = {}
+
+
+def _file_digest(path: Path):
+    try:
+        return hashlib.blake2b(path.read_bytes(), digest_size=16).digest()
+    except FileNotFoundError:
+        return None
+
+
+def shared_json_response(name: str, paths: list, build):
+    """A read-only endpoint's whole response, encoded once per change to the
+    files it is built from and shared between requests. Keyed on file content,
+    like `_load_json_shared`, so any write is picked up on the next call.
+
+    `build()` must depend on nothing but the contents of `paths`. Anything else
+    it reads (today's date, the caller, a third file) would be served stale.
+    Encoded the way FastAPI's JSONResponse encodes, so the bytes are the same
+    as the uncached endpoint's. FastAPI encoding a big dict is most of what
+    `/api/players` costs on every team page load.
+    """
+    from fastapi import Response
+    key = tuple(_file_digest(p) for p in paths)
+    hit = _SHARED_RESPONSES.get(name)
+    if hit and hit[0] == key:
+        body = hit[1]
+    else:
+        body = json.dumps(build(), ensure_ascii=False, allow_nan=False,
+                          indent=None, separators=(",", ":")).encode("utf-8")
+        _SHARED_RESPONSES[name] = (key, body)
+    return Response(content=body, media_type="application/json")
+
+
 def _save_json(path: Path, data):
     _atomic_write(path, json.dumps(data, indent=2))
 

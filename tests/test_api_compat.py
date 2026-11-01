@@ -35,6 +35,12 @@ def check(name, cond):
         FAILS.append(name)
 
 
+def as_json(r):
+    """An endpoint's answer as data, whether it returned a dict or a
+    pre-encoded Response (`storage.shared_json_response`)."""
+    return json.loads(r.body) if hasattr(r, "body") else r
+
+
 def same(a, b):
     return json.dumps(a, sort_keys=True, default=str) == json.dumps(b, sort_keys=True, default=str)
 
@@ -66,7 +72,7 @@ teams = sorted(VALID_TEAMS)
 new, old = {}, {}
 for store, ctx in ((new, nullcontext), (old, old_loaders)):
     with ctx():
-        store["players"] = players.get_players()
+        store["players"] = as_json(players.get_players())
         store["players?slugs"] = players.get_players(slugs=",".join(some_slugs))
         store["names"] = boxscores._bios_by_name()
         store["gamelog"] = {s: (boxscores.get_player_gamelog(s) if s in bios_now else None) for s in some_slugs[:5]}
@@ -99,9 +105,9 @@ tmp.write_text(json.dumps({"a-b": {"name": "B, A"}}))
 saved_file = players.PLAYER_BIOS_FILE
 players.PLAYER_BIOS_FILE = tmp
 try:
-    first = players.get_players()
+    first = as_json(players.get_players())
     tmp.write_text(json.dumps({"a-b": {"name": "B, A"}, "c-d": {"name": "D, C"}}))
-    check("new player appears", set(players.get_players()) == {"a-b", "c-d"} and set(first) == {"a-b"})
+    check("new player appears", set(as_json(players.get_players())) == {"a-b", "c-d"} and set(first) == {"a-b"})
 finally:
     players.PLAYER_BIOS_FILE = saved_file
 

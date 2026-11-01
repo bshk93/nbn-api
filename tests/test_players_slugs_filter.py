@@ -1,7 +1,8 @@
 """GET /api/players?slugs= returns only the bios asked for."""
+import json
 from unittest.mock import patch
 
-from routers import players
+from routers import players, storage
 
 BIOS = {
     "curry-stephen": {"name": "CURRY, STEPHEN"},
@@ -11,8 +12,13 @@ BIOS = {
 
 
 def _get(slugs):
+    # The whole-file answer is a cached, pre-encoded Response; clear the cache
+    # so the mocked bios are what gets encoded, and decode it back.
+    storage._SHARED_RESPONSES.clear()
     with patch.object(players, "player_bios_shared", return_value=dict(BIOS)):
-        return players.get_players(slugs=slugs)
+        r = players.get_players(slugs=slugs)
+    storage._SHARED_RESPONSES.clear()
+    return json.loads(r.body) if hasattr(r, "body") else r
 
 
 def test_no_filter_returns_everything():

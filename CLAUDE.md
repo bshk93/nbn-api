@@ -1126,6 +1126,18 @@ helper moved onto the shared parse is computed both ways (shared, and with the
 old `_load_json` forced back in) and must match, as must the defaults of the
 helpers that gained optional parameters.
 
+**Shared responses (`storage.shared_json_response`)** go one step further for
+the two biggest team-page reads, `GET /api/players` (no `?slugs=`) and
+`GET /api/attributes/current`: the whole encoded answer is kept until one of
+its files changes, since FastAPI encoding a 600–900KB dict was most of their
+cost. Its `build()` may read nothing but the files it is keyed on. A date, a
+caller or a third file would be served stale. Pinned by `tests/test_etag.py`.
+
+**ETags (`etag.py`)**: every 200 JSON answer to a GET gets an `ETag` and
+`Cache-Control: private, no-cache`, and a matching `If-None-Match` gets an
+empty 304. It saves the download, not the work. An endpoint that sets its own
+`Cache-Control` or `ETag`, or a cookie, is left alone. Also `tests/test_etag.py`.
+
 ## Docs discipline
 
 Keep `CLAUDE.md` and `docs/` in sync with every code change. If a change affects an endpoint, a data field, a transaction type, or any behavior described in the docs, update the relevant doc in the same commit.
