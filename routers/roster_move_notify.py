@@ -80,7 +80,7 @@ def announcement(txn: dict) -> Optional[tuple[str, str]]:
         year = f"{d['year']} " if d.get("year") else ""
         if d.get("decision") == "accept":
             return DISCORD_FA_NEWS_CHANNEL, f"{team} exercise {player}'s {year}team option."
-        fa = "a restricted" if d.get("cap_hold_type") == "RFA" else "an unrestricted"
+        fa = "an RFA-eligible" if d.get("cap_hold_type") == "RFA" else "an unrestricted"
         return (DISCORD_FA_NEWS_CHANNEL,
                 f"{team} decline {player}'s {year}team option. {player} becomes {fa} free agent.")
     if kind == "convert_twoway":

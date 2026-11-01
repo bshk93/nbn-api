@@ -66,7 +66,7 @@ cases = [
      "Vsevolod Ishchenko becomes an unrestricted free agent."),
     (txn("option", decision="decline", year="27-28", cap_hold_type="RFA"), "fa-news",
      "The Milwaukee Bucks decline Vsevolod Ishchenko's 27-28 team option. "
-     "Vsevolod Ishchenko becomes a restricted free agent."),
+     "Vsevolod Ishchenko becomes an RFA-eligible free agent."),
     (txn("convert_twoway"), "fa-news",
      "The Milwaukee Bucks convert Vsevolod Ishchenko from a two-way to a standard contract."),
     (txn("sign_pick"), "fa-news", "The Milwaukee Bucks sign Vsevolod Ishchenko to a rookie-scale contract."),

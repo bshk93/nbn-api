@@ -404,7 +404,9 @@ class OptionDetails(BaseModel):
     decision: str       # "accept" or "decline"
     option_type: str    # "PLAYER_OPT" or "TEAM_OPT"
     year: str           # e.g. "26-27"
-    cap_hold_type: str = "UFA"
+    # Decline only. Left out, § 3.1 decides it from his experience
+    # (`_option_fa_tag`); given, it must agree with § 3.1 where that's known.
+    cap_hold_type: Optional[str] = None
     # § 3.10: auto-computed from bird_tier + the last real salary when omitted
     # — see _compute_fa_hold_amount. Pass explicitly only to override.
     cap_hold_amount: Optional[str] = None
@@ -652,12 +654,15 @@ def _apply_option(details: OptionDetails, info: dict) -> Optional[str]:
         raise HTTPException(status_code=422, detail="option_type must be PLAYER_OPT or TEAM_OPT")
     if details.decision not in ("accept", "decline"):
         raise HTTPException(status_code=422, detail="decision must be 'accept' or 'decline'")
-    if details.cap_hold_type not in ("UFA", "RFA"):
+    if details.cap_hold_type not in (None, "UFA", "RFA"):
         raise HTTPException(status_code=422, detail="cap_hold_type must be UFA or RFA")
 
     bios = load_player_bios()
     if details.player not in bios:
         raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
+    if details.decision == "decline" and not details.cap_hold_type:
+        # Written back so the ledger entry records the tag that was applied.
+        details.cap_hold_type = _option_fa_tag(bios[details.player], details.year)[0] or "UFA"
 
     team_map = _build_team_map()
     team = team_map.get(details.player)
@@ -703,6 +708,21 @@ def _apply_option(details: OptionDetails, info: dict) -> Optional[str]:
     save_player_bios(bios)
     log_write(info, f"TXN option — {details.player} {details.decision} {details.option_type} {details.year}")
     return team
+
+
+def _option_fa_tag(bio: dict, hold_season: str) -> tuple[Optional[str], str]:
+    """§ 3.1: the hold a declined option leaves is RFA (RFA-*eligible*: the QO
+    still decides) for a player under 4 years of experience entering
+    `hold_season`, or finishing a first-round rookie-scale deal; UFA for
+    anyone else. Returns (tag, why); tag is None when his experience isn't
+    on file, which § 3.1 leaves to be judged by hand."""
+    if _finishes_rookie_scale(bio, hold_season):
+        return "RFA", "he is finishing his first-round rookie-scale deal"
+    exp = _qo_years_exp(bio, hold_season)
+    if exp is None:
+        return None, "his NBA experience isn't on file"
+    yrs = f"he will have {exp} year{'s' if exp != 1 else ''} of experience entering {hold_season}"
+    return ("RFA", yrs) if exp < 4 else ("UFA", yrs)
 
 
 def _declined_option_hold(bio: dict, team: str, details: "OptionDetails",
@@ -3115,7 +3135,7 @@ def sweep_team_options(now: Optional[datetime] = None) -> dict:
             if ((bios.get(o["slug"]) or {}).get("cap_holds") or {}).get(o["year"]) != "TEAM_OPT":
                 continue  # decided since the list was read
             details = OptionDetails(player=o["slug"], decision="decline", option_type="TEAM_OPT",
-                                    year=o["year"], cap_hold_type="UFA")
+                                    year=o["year"])
             # No one to ask whether he's above or below an EAPS nobody has
             # set, so answer from this season's average salary. The hold's
             # note records it as a placeholder.
@@ -3149,9 +3169,12 @@ def sweep_team_options(now: Optional[datetime] = None) -> dict:
         notify_transaction(txn, relay_to_roster_log=True)
         announce_roster_move(txn)
         when = "now" if d["year"] == cur else "after this season"
+        status = ("a free agent {when}, RFA-eligible: he becomes a restricted free agent only if you "
+                  "extend a qualifying offer before July 1 (§ 3.1)" if d.get("cap_hold_type") == "RFA"
+                  else "an unrestricted free agent {when} (§ 6.1)").format(when=when)
         inbox.notify_team(d["team"], f"{_player_name(d['player'], bios)}'s {d['year']} team option wasn't "
-                                     f"exercised in its window, so it was declined. He becomes an "
-                                     f"unrestricted free agent {when} (§ 6.1).", link=f"/teams/{d['team']}/")
+                                     f"exercised in its window, so it was declined. He becomes "
+                                     f"{status}.", link=f"/teams/{d['team']}/")
         done["declined"].append((d["team"], d["player"], d["year"]))
     return done
 
@@ -7407,6 +7430,30 @@ def _validate_option(details: OptionDetails, ctx: dict) -> list[CheckResult]:
     if details.decision != "decline":
         return checks
 
+    tag, why = _option_fa_tag(bio, details.year)
+    if tag is None:
+        checks.append(CheckResult(
+            check="option_fa_status", passed=False, level="warning",
+            message=(f"{why[0].upper() + why[1:]}, so § 3.1 can't say whether he is RFA-eligible. "
+                     f"He is recorded as {details.cap_hold_type or 'UFA'} unless you say otherwise."),
+        ))
+    elif details.cap_hold_type and details.cap_hold_type != tag:
+        checks.append(CheckResult(
+            check="option_fa_status", passed=False, level="error",
+            message=f"{name} can't be a {details.cap_hold_type} hold: {why}, so he is a {tag} (§ 3.1).",
+        ))
+    elif tag == "RFA":
+        checks.append(CheckResult(
+            check="option_fa_status", passed=True,
+            message=(f"He is RFA-eligible ({why}). He becomes a restricted free agent only if you "
+                     f"extend a qualifying offer before July 1, from this menu (§ 3.1)."),
+        ))
+    else:
+        checks.append(CheckResult(
+            check="option_fa_status", passed=True,
+            message=f"He becomes an unrestricted free agent: {why} (§ 3.1).",
+        ))
+
     hold = _option_hold_preview(details, ctx)
     if hold and hold["needs_eaps"]:
         est = hold["eaps_estimate"]
@@ -10254,7 +10301,7 @@ def self_renounce(body: SelfRenounceIn, info: dict = Depends(get_token_info)):
 class SelfOptionIn(BaseModel):
     player: str
     decision: str            # "accept" or "decline"
-    cap_hold_type: str = "UFA"  # only consulted on decline; "UFA" or "RFA"
+    cap_hold_type: Optional[str] = None  # decline only; left out, § 3.1 decides it
     eaps_assumption: Optional[str] = None  # decline only, when the hold needs it (§ 3.10)
     description: str = ""
 
@@ -10272,17 +10319,14 @@ def self_option(body: SelfOptionIn, info: dict = Depends(get_token_info)):
 
     Same three safety properties as `self_renounce`: the team is derived
     from the player's own roster row, never supplied; no force, a real error
-    is always fatal; the date is server-stamped. `cap_hold_type` on decline
-    still needs the owner's own answer rather than a guess — § 3.1's
-    UFA/RFA eligibility test is itself flagged in the rulebook as "proposed,
-    pending BOD confirmation," so nothing here derives it automatically,
-    same caution `declare_winner`'s QO branch (free_agency.py) already
-    applies to the sibling § 3.9 formula.
+    is always fatal; the date is server-stamped. On decline, UFA vs RFA is
+    § 3.1's experience test (`_option_fa_tag`), adopted 2026-10-02; the owner
+    no longer picks it.
     """
     player = body.player
     if body.decision not in ("accept", "decline"):
         raise HTTPException(status_code=422, detail="decision must be 'accept' or 'decline'")
-    if body.cap_hold_type not in ("UFA", "RFA"):
+    if body.cap_hold_type not in (None, "UFA", "RFA"):
         raise HTTPException(status_code=422, detail="cap_hold_type must be UFA or RFA")
 
     bios = load_player_bios()

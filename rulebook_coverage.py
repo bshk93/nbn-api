@@ -102,6 +102,7 @@ CHECK_SECTIONS: dict[str, tuple[str, ...]] = {
     "option_eligible":            ("6.1",),
     "option_window":              ("6.1",),
     "eaps_assumption":            ("3.10",),
+    "option_fa_status":           ("3.1",),
     "pick_advance_limit":         ("7.2",),
     "pick_advance_limit_{}_{}":   ("7.2",),
     "trailing_hold":              ("3.10",),
