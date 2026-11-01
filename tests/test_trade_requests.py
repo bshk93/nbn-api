@@ -65,11 +65,11 @@ tr._load_store = lambda: STORE
 tr._save_store = lambda s: None
 tr.log_write = lambda info, msg: None
 
-# is_team_owner is the one auth helper that touches disk (members.json) for
+# is_front_office is the one auth helper that touches disk (members.json) for
 # real, so it's the one stubbed — has_role/require_role are pure over the
 # passed-in info dict and safe to leave real.
 OWNERS = {"phxOwner": "PHX", "bosOwner": "BOS", "gswOwner": "GSW"}
-tr.is_team_owner = lambda info, team: OWNERS.get(info["name"]) == team.upper()
+tr.is_front_office = lambda info, team: OWNERS.get(info["name"]) == team.upper()
 
 tr._require_trade_validatable = lambda body, ctx: None
 tr._validation_ctx = lambda: {"bios": {}}

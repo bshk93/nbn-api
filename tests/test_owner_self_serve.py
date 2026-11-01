@@ -5,10 +5,10 @@ undo behind it.
 Written 2026-08-08, when renounce became reachable by someone other than the
 office. Three things carry the safety of that:
 
-  * `auth.is_team_owner` — a *position* check on members.json tenures, not a
-    role check. Every FO member of a team carries the team role (it gates the
-    trading block and jersey numbers); only the owner may move real roster
-    state. A GM or coach must fail this.
+  * `auth.is_front_office` — a *position* check on members.json tenures, not a
+    role check, so a lapsed tenure stops counting the day it ends even if the
+    team role lingers. Owner-only until 2026-11-01; now any current owner, GM
+    or coach of the team passes.
   * `_renounce_eligibility` — one copy of the § 3.10 test, shared by the
     validator and the apply path, so the roster page can never offer a
     renounce the apply path would reject (or hide one it would accept).
@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from routers.auth import is_team_owner  # noqa: E402
+from routers.auth import is_front_office  # noqa: E402
 from routers.transactions import (  # noqa: E402
     _renounce_eligibility, _validate_renounce, _RENOUNCE_SNAPSHOT_FIELDS,
     RenounceDetails, _validate_option, OptionDetails,
@@ -49,36 +49,45 @@ def check(name, cond):
         FAILS.append(name)
 
 
-# ── is_team_owner ─────────────────────────────────────────────────────────────
+# ── is_front_office ─────────────────────────────────────────────────────────────
 # Patched onto the module so the test doesn't depend on who really owns what.
 def with_members(members):
     import routers.auth as auth
     auth.load_members = lambda: members
 
 
-print("\nis_team_owner — position, not role")
+print("\nis_front_office — current tenure, not role")
 
 with_members({"gm_guy": {"roles": ["phx", "rosters"], "tenures": [
     {"team": "PHX", "start": "2020-07-01", "end": None, "position": "gm"}]}})
-check("a GM with the team role is not an owner",
-      not is_team_owner({"name": "gm_guy", "roles": ["phx", "rosters"]}, "PHX", TODAY))
+check("a current GM passes",
+      is_front_office({"name": "gm_guy", "roles": ["phx", "rosters"]}, "PHX", TODAY))
+
+with_members({"coach_guy": {"roles": ["phx"], "tenures": [
+    {"team": "PHX", "start": "2020-07-01", "end": None, "position": "coach"}]}})
+check("a current coach passes",
+      is_front_office({"name": "coach_guy", "roles": ["phx"]}, "PHX", TODAY))
+
+with_members({"role_only": {"roles": ["phx"], "tenures": []}})
+check("the team role alone, with no tenure, does not pass",
+      not is_front_office({"name": "role_only", "roles": ["phx"]}, "PHX", TODAY))
 
 with_members({"owner_guy": {"roles": ["phx"], "tenures": [
     {"team": "PHX", "start": "2020-07-01", "end": None, "position": "owner"}]}})
 check("an open-ended owner tenure passes",
-      is_team_owner({"name": "owner_guy", "roles": ["phx"]}, "PHX", TODAY))
+      is_front_office({"name": "owner_guy", "roles": ["phx"]}, "PHX", TODAY))
 check("...but only for their own team",
-      not is_team_owner({"name": "owner_guy", "roles": ["phx"]}, "BOS", TODAY))
+      not is_front_office({"name": "owner_guy", "roles": ["phx"]}, "BOS", TODAY))
 
 with_members({"ex_owner": {"roles": ["phx"], "tenures": [
     {"team": "PHX", "start": "2018-07-01", "end": "2024-06-30", "position": "owner"}]}})
 check("a lapsed tenure does not pass",
-      not is_team_owner({"name": "ex_owner", "roles": ["phx"]}, "PHX", TODAY))
+      not is_front_office({"name": "ex_owner", "roles": ["phx"]}, "PHX", TODAY))
 
 with_members({"future_owner": {"roles": ["phx"], "tenures": [
     {"team": "PHX", "start": "2027-07-01", "end": None, "position": "owner"}]}})
 check("a tenure that hasn't started does not pass",
-      not is_team_owner({"name": "future_owner", "roles": ["phx"]}, "PHX", TODAY))
+      not is_front_office({"name": "future_owner", "roles": ["phx"]}, "PHX", TODAY))
 
 # The team is derived from the roster server-side, but role-holders of *other*
 # teams must still never pass — this is the check standing between "has a token"
@@ -86,12 +95,12 @@ check("a tenure that hasn't started does not pass",
 with_members({"other_owner": {"roles": ["bos"], "tenures": [
     {"team": "BOS", "start": "2020-07-01", "end": None, "position": "owner"}]}})
 check("owning one team grants nothing over another",
-      not is_team_owner({"name": "other_owner", "roles": ["bos"]}, "PHX", TODAY))
+      not is_front_office({"name": "other_owner", "roles": ["bos"]}, "PHX", TODAY))
 
 check("an unknown member passes nothing",
-      not is_team_owner({"name": "nobody", "roles": []}, "PHX", TODAY))
+      not is_front_office({"name": "nobody", "roles": []}, "PHX", TODAY))
 check("admin passes (consistent with every other check in auth.py)",
-      is_team_owner({"name": "nobody", "roles": ["admin"]}, "PHX", TODAY))
+      is_front_office({"name": "nobody", "roles": ["admin"]}, "PHX", TODAY))
 
 
 # ── _renounce_eligibility ─────────────────────────────────────────────────────

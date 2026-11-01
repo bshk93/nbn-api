@@ -24,7 +24,7 @@ from .storage import (
     read_csv, write_csv, _load_json, _save_json, log_write, _parse_dollar, _season_start, _season_shift,
     _season_for_date, _current_league_year, _league_rollovers, _season_start_date,
 )
-from .auth import require_role, get_token_info, is_team_owner
+from .auth import require_role, get_token_info, is_front_office
 from .discord_notify import notify_transaction, _player_name
 from .roster_move_notify import announce as announce_roster_move
 from . import inbox
@@ -10022,9 +10022,9 @@ def self_qualifying_offer(body: SelfQualifyingOfferIn, info: dict = Depends(get_
     team = _build_team_map().get(body.player)
     if not team:
         raise HTTPException(status_code=422, detail=f"{body.player!r} is not on any roster.")
-    if not is_team_owner(info, team):
+    if not is_front_office(info, team):
         raise HTTPException(status_code=403,
-                            detail=f"Only {team}'s owner can make {team}'s qualifying offers.")
+                            detail=f"Only {team}'s front office can make {team}'s qualifying offers.")
 
     txn_date = league_today_str()
     details = QualifyingOfferDetails(player=body.player, action=body.action)
@@ -10106,10 +10106,10 @@ def self_renounce(body: SelfRenounceIn, info: dict = Depends(get_token_info)):
     team = _build_team_map().get(player)
     if not team:
         raise HTTPException(status_code=422, detail=f"{player!r} is not on any roster.")
-    if not is_team_owner(info, team):
+    if not is_front_office(info, team):
         raise HTTPException(
             status_code=403,
-            detail=f"Only {team}'s owner can renounce {team} players.",
+            detail=f"Only {team}'s front office can renounce {team} players.",
         )
 
     txn_date = league_today_str()
@@ -10195,10 +10195,10 @@ def self_option(body: SelfOptionIn, info: dict = Depends(get_token_info)):
     team = _build_team_map().get(player)
     if not team:
         raise HTTPException(status_code=422, detail=f"{player!r} is not on any roster.")
-    if not is_team_owner(info, team):
+    if not is_front_office(info, team):
         raise HTTPException(
             status_code=403,
-            detail=f"Only {team}'s owner can act on {team} players.",
+            detail=f"Only {team}'s front office can act on {team} players.",
         )
 
     holds = bios[player].get("cap_holds") or {}
@@ -10292,10 +10292,10 @@ def self_release(body: SelfReleaseIn, info: dict = Depends(get_token_info)):
     team = _build_team_map().get(player)
     if not team:
         raise HTTPException(status_code=422, detail=f"{player!r} is not on any roster.")
-    if not is_team_owner(info, team):
+    if not is_front_office(info, team):
         raise HTTPException(
             status_code=403,
-            detail=f"Only {team}'s owner can release {team} players.",
+            detail=f"Only {team}'s front office can release {team} players.",
         )
 
     txn_date = league_today_str()
@@ -10543,10 +10543,10 @@ def self_convert_twoway(body: SelfConvertTwoWayIn, info: dict = Depends(get_toke
     team = _build_team_map().get(player)
     if not team:
         raise HTTPException(status_code=422, detail=f"{player!r} is not on any roster.")
-    if not is_team_owner(info, team):
+    if not is_front_office(info, team):
         raise HTTPException(
             status_code=403,
-            detail=f"Only {team}'s owner can act on {team} players.",
+            detail=f"Only {team}'s front office can act on {team} players.",
         )
 
     bio = bios[player]
@@ -10686,10 +10686,10 @@ def self_sign_pick(body: SelfSignPickIn, info: dict = Depends(get_token_info)):
     team = _build_team_map().get(player)
     if not team:
         raise HTTPException(status_code=422, detail=f"{player!r} is not on any roster.")
-    if not is_team_owner(info, team):
+    if not is_front_office(info, team):
         raise HTTPException(
             status_code=403,
-            detail=f"Only {team}'s owner can act on {team} players.",
+            detail=f"Only {team}'s front office can act on {team} players.",
         )
 
     bio = bios[player]
@@ -10766,10 +10766,10 @@ def self_stash(body: SelfStashIn, info: dict = Depends(get_token_info)):
     team = _build_team_map().get(player)
     if not team:
         raise HTTPException(status_code=422, detail=f"{player!r} is not on any roster.")
-    if not is_team_owner(info, team):
+    if not is_front_office(info, team):
         raise HTTPException(
             status_code=403,
-            detail=f"Only {team}'s owner can act on {team} players.",
+            detail=f"Only {team}'s front office can act on {team} players.",
         )
 
     txn_date = league_today_str()

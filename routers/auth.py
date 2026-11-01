@@ -246,18 +246,21 @@ def require_any_role(*roles: str):
     return check
 
 
-def is_team_owner(info: dict, team: str, today: Optional[str] = None) -> bool:
-    """True when this member holds a *current* `owner`-position tenure with `team`.
+FRONT_OFFICE_POSITIONS = ("owner", "gm", "coach")
 
-    Distinct from `has_role(info, team.lower())`, which every front-office member
-    of that team carries (it gates the team's own cosmetic/soft writes — trading
-    block, jersey numbers). Owner tenure is the stricter gate, for self-serve
-    writes that move real roster state. A GM or coach passes the role check and
-    fails this one.
 
-    Roles live on the member; positions live on tenures, so this has to read
-    members.json rather than the token's role list. Admin passes, matching every
-    other permission check in this file.
+def is_front_office(info: dict, team: str, today: Optional[str] = None) -> bool:
+    """True when this member holds a *current* tenure with `team` in any front-office
+    position — owner, GM or coach.
+
+    This gates the self-serve roster moves (options, release, renounce, QOs,
+    two-way conversion, pick signing, stash). It was owner-only until 2026-11-01,
+    when the league opened those moves to the whole front office.
+
+    Not the same as `has_role(info, team.lower())`: the role is held on the
+    member and can outlive a job, while a tenure ends on a date. Positions live
+    on tenures, so this reads members.json rather than the token's role list.
+    Admin passes, matching every other permission check in this file.
     """
     if has_role(info, "admin"):
         return True
@@ -265,7 +268,7 @@ def is_team_owner(info: dict, team: str, today: Optional[str] = None) -> bool:
     today = today or league_today_str()
     member = load_members().get(info.get("name", "")) or {}
     for t in member.get("tenures", []):
-        if (t.get("team") or "").upper() != team or t.get("position") != "owner":
+        if (t.get("team") or "").upper() != team or t.get("position") not in FRONT_OFFICE_POSITIONS:
             continue
         # An open-ended tenure (end: null) is current; a dated one is current
         # only while today still falls inside it.
@@ -357,11 +360,13 @@ def post_member_signal(body: MemberSignal, info: dict = Depends(get_token_info))
 @router.get("/api/auth/me")
 def get_me(authorization: Optional[str] = Header(None),
            nbn_session: Optional[str] = Cookie(None)):
-    """Returns the current token's member name, roles, and the teams they
-    currently own. Always 200 — empty if no/invalid token.
+    """Returns the current token's member name, roles, and the teams whose
+    front office they are on. Always 200 — empty if no/invalid token.
 
-    `owner_of` is computed by the same `is_team_owner` the write endpoints gate
-    on, so the UI can't offer an owner-only action the server would then refuse
+    `owner_of` is computed by the same `is_front_office` the write endpoints gate
+    on (the name is older than the rule: it lists every team this member is on
+    the front office of, not only teams they own), so the UI can't offer a
+    self-serve move the server would then refuse
     (or hide one it would have allowed). It is not itself a permission — every
     write re-checks server-side.
 
@@ -375,7 +380,7 @@ def get_me(authorization: Optional[str] = Header(None),
     return {
         "name": info["name"],
         "roles": info["roles"],
-        "owner_of": sorted(t for t in VALID_TEAMS if is_team_owner(info, t)),
+        "owner_of": sorted(t for t in VALID_TEAMS if is_front_office(info, t)),
     }
 
 

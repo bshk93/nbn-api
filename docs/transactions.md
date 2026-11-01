@@ -252,13 +252,13 @@ the roster page can't offer a renounce the apply path would reject:
   very state a ledger replay would need, so it's recorded at the event rather than
   reconstructed later.
 
-**Owner self-serve:** `POST /api/self/renounce` lets a team's *owner* run this
-from their own roster page. Narrower than this endpoint on three counts: the team
-is derived from the player's roster row and matched against the caller's owner
-tenure (never taken from the body), `force` is unavailable so error-level checks
+**Front-office self-serve:** `POST /api/self/renounce` lets a team's owner, GM or
+coach run this from their own roster page (owner-only until 2026-11-01). Narrower
+than this endpoint on three counts: the team is derived from the player's roster
+row and matched against the caller's current tenure (never taken from the body), `force` is unavailable so error-level checks
 are fatal, and the date is server-stamped so a transaction can't be backdated into
-a prior league year. Ownership is a tenure *position*, not a role — every FO
-member carries the team role, but a GM or coach fails `auth.is_team_owner`.
+a prior league year. The gate is a current tenure (`auth.is_front_office`), not
+the team role, so it ends on the tenure's end date even if the role lingers.
 
 ---
 

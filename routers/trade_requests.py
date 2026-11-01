@@ -25,7 +25,7 @@ import season_clock
 from . import inbox, trc_notify
 from .constants import TRADE_REQUESTS_FILE
 from .storage import _load_json, _save_json, log_write
-from .auth import get_token_info, has_role, require_role, is_team_owner
+from .auth import get_token_info, has_role, require_role, is_front_office
 from .transactions import (
     TradeValidateInput, TradeIn,
     _validation_ctx, _require_trade_validatable, _validate_trade,
@@ -162,7 +162,7 @@ def _can_see(info: dict, item: dict) -> bool:
     just its owner."""
     if has_role(info, "admin") or has_role(info, "trc") or has_role(info, "trc_head"):
         return True
-    return any(has_role(info, p.lower()) or is_team_owner(info, p) for p in item["parties"])
+    return any(has_role(info, p.lower()) or is_front_office(info, p) for p in item["parties"])
 
 
 def _tell_parties(item: dict, text: str) -> None:
