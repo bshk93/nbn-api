@@ -120,7 +120,7 @@ fa.load_members = lambda: MEMBERS
 fa.log_write = lambda info, msg: None
 # Every inbox delivery, as (member, text).
 INBOX: list = []
-fa.inbox.notify_member = lambda member, text, link=None: INBOX.append((member, text))
+fa.inbox.notify_member = lambda member, text, link=None, **_: INBOX.append((member, text))
 OFFER_SHEET_NOTICES: list = []
 fa.notify_offer_sheet_received = lambda details: OFFER_SHEET_NOTICES.append(details)
 fa._member_current_team = lambda name, members=None: CURRENT_TEAM.get(name)

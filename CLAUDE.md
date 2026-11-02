@@ -845,6 +845,30 @@ picks are never nudged.
 
 Pinned by `tests/test_tradeblock_nudge.py`.
 
+## Inbox (`routers/inbox.py`)
+
+Per-member messages in `inboxes.json`; mutes in `inbox_prefs.json` (both NBS_DATA_DIR).
+
+- **Every message has a `kind`** (one of `KINDS`: `fa`, `extensions`, `trades`,
+  `tradeblock`, `transactions`, `games`, `news`, `suggestions`, `finances`,
+  `committees`, `account`, `other`). Callers normally leave it out and it is read
+  off the link (`kind_for_link`); pass `kind=` only where the link would mislead
+  (a plain `/teams/X/` link reads as `transactions`, so `game_day_notify`'s
+  coaching receipt passes `games`). Entries written before `kind` existed are
+  classified the same way on read, never rewritten on disk.
+- **Mutes skip the write, not the read.** A muted kind is never stored, so
+  unmuting doesn't bring back what was missed — and a message with `actions`
+  always arrives, muted or not.
+- **Archived = read + hidden.** It leaves `unread_count`, and prunes like a read
+  entry (90 days).
+- `GET /api/inbox` also returns `kinds` (id + label, in display order) and
+  `muted`. The page's weekly digest is computed in the page, so it stays live.
+- Routes: `POST {id}/read|unread|archive|unarchive`, `POST read-all[?kind=]`,
+  `POST bulk {ids, op}` (unknown ids skipped), `GET|PUT prefs {muted}`.
+- Test stubs of `notify_*` take `**_`, so a new optional parameter doesn't break them.
+
+Pinned by `tests/test_inbox.py`.
+
 ## Cap history (`routers/cap_history.py`)
 
 A daily row per team — Team Salary on both bases, apron position, hard-cap

@@ -101,6 +101,7 @@ JOIN_BLACKLIST_FILE   = DATA_DIR / "join-blacklist.json"
 MEMBER_SEEN_FILE      = DATA_DIR / "member-seen.json"
 # Per-member notifications: { "<member>": [{id, ts, text, link, read}] }
 INBOX_FILE = DATA_DIR / "inboxes.json"
+INBOX_PREFS_FILE = DATA_DIR / "inbox_prefs.json"
 # Discord FA-signing backfill state — see
 # nbn-api/docs/discord-transaction-backfill.md. The flagged bucket is the set of
 # candidates a human still has to judge; the submitted-state file is written on

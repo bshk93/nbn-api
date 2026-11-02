@@ -136,7 +136,7 @@ def coaching_entered(team: str, entered_by: Optional[str]) -> None:
     """Handoff 2."""
     try:
         inbox.notify_team(team, f"Your coaching settings were entered in 2K by {entered_by or 'a streamer'}",
-                          link=f"/teams/{team}/")
+                          link=f"/teams/{team}/", kind="games")
     except Exception as exc:
         logger.warning("coaching_entered notify failed for %s: %s", team, exc)
 
