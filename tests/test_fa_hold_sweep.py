@@ -58,7 +58,7 @@ T._load_transactions = lambda: LEDGER
 T._append_transaction = lambda txn: LEDGER.append(txn)
 T.notify_transaction = lambda txn, relay_to_roster_log=False: POSTS.append(("embed", relay_to_roster_log))
 T.announce_roster_move = lambda txn: POSTS.append(("fa-news", txn["details"]["player"]))
-T.inbox.notify_team = lambda team, text, link=None: SENT.append((team, text))
+T.inbox.notify_team = lambda team, text, link=None, **_: SENT.append((team, text))
 cal.opening_night = lambda season: "2026-10-20"
 
 

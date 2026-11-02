@@ -70,7 +70,7 @@ T.load_player_bios = lambda: BIOS
 T._build_team_map = lambda: TEAMS
 T._current_league_year = lambda: "26-27"
 T.TEAM_OPTION_NOTICES_FILE = Path(tempfile.mkdtemp()) / "notices.json"
-T.inbox.notify_team = lambda team, text, link=None: SENT.append((team, text))
+T.inbox.notify_team = lambda team, text, link=None, **_: SENT.append((team, text))
 T._apply_option = apply_option
 T._append_transaction = lambda txn: LEDGER.append(txn)
 T.notify_transaction = lambda txn, relay_to_roster_log=False: POSTS.append(("embed", relay_to_roster_log))

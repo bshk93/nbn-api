@@ -53,9 +53,9 @@ H = {n: {"Authorization": "Bearer " + t} for n, t in TOK.items()}
 auth.load_members = lambda: MEMBERS
 
 SENT = []  # (kind, to, text)
-inbox.notify_member = lambda to, text, link=None: SENT.append(("member", to, text))
-inbox.notify_role = lambda role, text, link=None: SENT.append(("role", role, text))
-inbox.notify_team = lambda team, text, link=None: SENT.append(("team", team, text))
+inbox.notify_member = lambda to, text, link=None, **_: SENT.append(("member", to, text))
+inbox.notify_role = lambda role, text, link=None, **_: SENT.append(("role", role, text))
+inbox.notify_team = lambda team, text, link=None, **_: SENT.append(("team", team, text))
 
 TODAY = date(2026, 10, 24)
 gdn.league_today = lambda: TODAY

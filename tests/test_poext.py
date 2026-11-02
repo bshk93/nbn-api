@@ -99,7 +99,7 @@ poext.log_write = lambda info, msg: None
 # Every inbox delivery, as (member, text) — notify_role/notify_roles fan out
 # through notify_member against MEMBERS, so patching the one leaf records all.
 INBOX: list = []
-poext.inbox.notify_member = lambda member, text, link=None: INBOX.append((member, text))
+poext.inbox.notify_member = lambda member, text, link=None, **_: INBOX.append((member, text))
 poext.inbox.load_members = lambda: MEMBERS
 poext._player_display_name = lambda slug: slug
 # The ledger unlock consults; finalize's fake apply_extension appends to it.

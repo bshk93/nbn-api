@@ -57,7 +57,7 @@ news._announce_published = lambda a: None
 # hears about a ranking and when, and a real notify_member would write to the
 # live inbox file from a test run.
 INBOX = []
-news.inbox.notify_member = lambda name, text, link=None: INBOX.append((name, text, link))
+news.inbox.notify_member = lambda name, text, link=None, **_: INBOX.append((name, text, link))
 def inbox_since(mark): return INBOX[mark:]
 def recipients(mark): return sorted(n for n, _t, _l in INBOX[mark:])
 

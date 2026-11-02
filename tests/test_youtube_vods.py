@@ -58,7 +58,7 @@ sd.STREAMING_DAYS_FILE = TMP / "streaming-days.json"
 yv.YOUTUBE_VODS_FILE = TMP / "youtube-vods.json"
 yv.log_write = lambda info, msg: None
 NOTES = []
-yv.inbox.notify_roles = lambda roles, text, link=None: NOTES.append((roles, text))
+yv.inbox.notify_roles = lambda roles, text, link=None, **_: NOTES.append((roles, text))
 
 (TMP / "schedule-26-27.json").write_text(json.dumps({"season": "26-27", "source": "", "games": [
     {"id": "g1", "date": "2026-10-21", "time_et": "7:30p", "away_team": "MIN", "home_team": "MIA",

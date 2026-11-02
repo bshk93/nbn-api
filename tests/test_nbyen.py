@@ -177,8 +177,8 @@ check("a manual adjustment with a reason lands as kind 'admin'",
 print("\n-- buying a stream --")
 
 SENT = []   # (who, text): inbox notices, captured instead of written
-sched.inbox.notify_member = lambda name, text, link=None: SENT.append((name, text))
-sched.inbox.notify_roles = lambda roles, text, link=None: SENT.append(("+".join(roles), text))
+sched.inbox.notify_member = lambda name, text, link=None, **_: SENT.append((name, text))
+sched.inbox.notify_roles = lambda roles, text, link=None, **_: SENT.append(("+".join(roles), text))
 
 sched.league_today_str = lambda: "2026-10-20"
 (TMP / "schedule-26-27.json").write_text(json.dumps({"season": "26-27", "source": "", "games": [
