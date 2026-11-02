@@ -302,7 +302,12 @@ def test_team_option_windows():
     c = window(r25, "27-28", "2026-11-03")
     check("...and is refused the day after, as an error",
           not c.passed and c.level == "error" and "declined automatically" in c.message)
-    check("next fall's rookie option can be decided now", window(r25, "28-29", "2026-10-19").passed)
+    c = window(r25, "28-29", "2026-10-19")
+    check("next fall's rookie option can't be decided yet",
+          not c.passed and c.level == "error" and "Jul 1, 2027" in c.message)
+    check("...and opens with the 27-28 league year", window(r25, "28-29", "2027-07-01").passed)
+    check("...not the day before", not window(r25, "28-29", "2027-06-30").passed)
+    check("...through its own deadline", window(r25, "28-29", "2027-11-01").passed)
 
     c = window(second, "27-28", "2026-10-19")
     check("any other option is refused during the season",

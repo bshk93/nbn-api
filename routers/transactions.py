@@ -7360,13 +7360,19 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
 
 def _option_window_check(bio: dict, year: str, date: str, name: str) -> CheckResult:
     """§ 6.1's decision windows (league office, 2026-10-19). A rookie-scale
-    option is due by the deadline and is declined automatically after it; any
+    option opens with the league year before it (2026-11-02), is due by the
+    deadline and is declined automatically after it; any
     other team option is decided between the end of the previous regular
     season and June 30. An error, so an owner can't decide outside it; the
     office can still force one through for a correction."""
     w = season_calendar.team_option_window(bio, year)
     when = lambda d: datetime.strptime(d, "%Y-%m-%d").strftime("%b %-d, %Y")
     if w["kind"] == "rookie":
+        if w["opens"] and date < w["opens"]:
+            return CheckResult(check="option_window", passed=False, level="error",
+                               message=f"{name}'s {year} option is a rookie-scale option, decided from "
+                                       f"{when(w['opens'])} through {when(w['closes'])}. Only next "
+                                       f"season's options can be decided now (§ 6.1).")
         if w["closes"] and date > w["closes"]:
             return CheckResult(check="option_window", passed=False, level="error",
                                message=f"{name}'s {year} option is a rookie-scale option, due by "

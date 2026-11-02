@@ -149,9 +149,11 @@ def team_option_window(bio: dict, year: str) -> dict:
     """When a team option on `year` may be decided (§ 6.1, league office
     2026-10-19), inclusive dates, None meaning unbounded or unknown.
 
-    * rookie-scale (`kind: "rookie"`): any time up to the team option
-      deadline in the season before; unexercised by then, it's declined
-      automatically (sweep_team_options.py).
+    * rookie-scale (`kind: "rookie"`): from the start of the league year
+      before (July 1, or that season's rollover) through that season's team
+      option deadline; unexercised by then, it's declined automatically
+      (sweep_team_options.py). So only next season's options are open at any
+      one time, never the one after (league office, 2026-11-02).
     * every other team option (`kind: "other"`): from the day after the
       previous season's last regular-season game through June 30, the day
       before the option season's league year starts. `opens` is None when that
@@ -159,7 +161,10 @@ def team_option_window(bio: dict, year: str) -> dict:
       guesses."""
     prev = _prev_season(year)
     if is_rookie_scale_option(bio, year):
-        return {"kind": "rookie", "opens": None,
+        import season_clock
+        opens = (season_clock.season_start_date(prev, season_clock.load_rollovers())
+                 .strftime("%Y-%m-%d") if prev else None)
+        return {"kind": "rookie", "opens": opens,
                 "closes": team_option_deadline(prev) if prev else None}
     bounds = regular_season_bounds(prev) if prev else None
     opens = ((datetime.strptime(bounds[1], "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
