@@ -1080,6 +1080,7 @@ session doing the box scores writes them.
 | `DELETE /api/tweets/{n}` | `stats` or `rosters`, or the member who posted it | |
 | `POST /api/tweets/member` | any member | one tweet, `{text, identity: self\|profile\|anon, profile_id?, handle?, name?, team?, save?}`; 10 a day |
 | `GET`/`POST /api/tweets/profiles`, `DELETE /api/tweets/profiles/{n}` | member (delete: owner or admin) | your own handle and saved identities |
+| `PUT`/`DELETE /api/tweets/profiles/{n}/avatar`, `GET /api/tweets/avatars/{key}.jpg` | owner (delete: or admin); get is public | a saved identity's picture, multipart `file` |
 | `GET /api/tweets/{n}/poster` | admin | who really posted |
 
 - **The text is fiction; the numbers are not.** The skill checks every stat in
@@ -1095,6 +1096,11 @@ session doing the box scores writes them.
   is stored as `poster` and dropped from the public list, along with `author`;
   only `GET /api/tweets/{n}/poster` (admin) shows it. Signed in, your own
   member tweets come back with `mine: true`.
+- **A saved identity can have a picture**, cropped to a 128px square and
+  stored in `tweet-avatars/` under a random key that changes on each upload
+  (so it caches forever and doesn't name the owner). Tweets pick up their
+  profile's current picture when listed, as `avatar`; forgetting the profile
+  deletes the file. Free, unlike the NB¥500 member avatar in `auth.py`.
 - **A handle belongs to whoever used it first** (`_handle_owner`): a member's
   own handle, a saved profile, the cast, or a past tweet. Others get a 409.
   Official batches (`POST /api/tweets`) aren't checked against it.

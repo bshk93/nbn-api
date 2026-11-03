@@ -14,6 +14,8 @@ What's worth pinning:
     posted is kept but never shown publicly, except to admin.
   * **A handle belongs to whoever used it first**: nobody else can post as
     the cast, as another member, or as someone's saved scoop account.
+  * **A saved profile's picture is its owner's to set**, shows on every
+    tweet posted under that profile, and goes when the profile does.
   * **Each stored tweet goes to Discord once**, as an embed, and the batch
     is saved even when Discord fails.
 
@@ -198,6 +200,62 @@ tw.delete_profile(pid, MO)
 check("deleting a profile forgets it", tw.my_profiles(MO)["profiles"] == [])
 refused("its handle stays taken by its tweets", 409, tw.post_member_tweet,
         tw.MemberTweet(text="x", identity="anon", handle="ShamsOfNBN", name="Fake"), BRYN)
+
+print("profile pictures")
+import asyncio, io, tempfile  # noqa: E401,E402
+from PIL import Image  # noqa: E402
+tw.TWEET_AVATARS_DIR = Path(tempfile.mkdtemp())
+
+
+class Upload:
+    def __init__(self, data, content_type="image/png"):
+        self.data, self.content_type = data, content_type
+
+    async def read(self, n=-1):
+        return self.data[:n] if n >= 0 else self.data
+
+
+def png(w, h):
+    buf = io.BytesIO()
+    Image.new("RGB", (w, h), (200, 30, 30)).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def upload(pid, up, who):
+    return asyncio.run(tw.set_profile_avatar(pid, up, who))
+
+
+tw.post_member_tweet(tw.MemberTweet(text="pic soon", identity="anon", handle="WojOfNBN", name="Woj", save=True), MO)
+woj = next(p for p in tw.my_profiles(MO)["profiles"] if p["handle"] == "WojOfNBN")
+check("a new profile has no picture", woj["avatar"] is None)
+set1 = upload(woj["id"], Upload(png(800, 400)), MO)
+key1 = set1["avatar"].rsplit("/", 1)[1]
+with Image.open(tw.TWEET_AVATARS_DIR / key1) as im:
+    check("the picture is cropped square and shrunk", im.size == (tw.AVATAR_PX, tw.AVATAR_PX))
+check("my profiles show it", tw.my_profiles(MO)["profiles"][-1]["avatar"] == set1["avatar"])
+listed = tw.list_tweets(limit=100, before=None, team=None, authorization=None)
+check("an old tweet under the profile shows it", next(t for t in listed if t["handle"] == "WojOfNBN")["avatar"] == set1["avatar"])
+check("other tweets don't", all("avatar" not in t for t in listed if t["handle"] != "WojOfNBN"))
+newer = tw.post_member_tweet(tw.MemberTweet(text="with pic", identity="profile", profile_id=woj["id"]), MO)
+check("a new tweet comes back with it", newer["avatar"] == set1["avatar"])
+check("its Discord post shows it", SENT[-1]["embeds"][0]["author"]["icon_url"] == tw.SITE + set1["avatar"])
+check("the picture is served", tw.get_profile_avatar(key1).status_code == 200)
+refused("someone else's profile can't take a picture", 404, upload, woj["id"], Upload(png(10, 10)), BRYN)
+refused("a non-image type is refused", 415, upload, woj["id"], Upload(b"x", "text/plain"), MO)
+refused("garbage bytes are refused", 422, upload, woj["id"], Upload(b"not a png"), MO)
+refused("an oversized file is refused", 413, upload, woj["id"], Upload(b"x" * (tw.AVATAR_MAX_BYTES + 1)), MO)
+set2 = upload(woj["id"], Upload(png(64, 64)), MO)
+check("a new picture gets a new URL", set2["avatar"] != set1["avatar"])
+check("the old file is removed", not (tw.TWEET_AVATARS_DIR / key1).exists())
+refused("a key that isn't one is 404", 404, tw.get_profile_avatar, "../tweets.json")
+refused("removing someone else's picture is refused", 403, tw.delete_profile_avatar, woj["id"], BRYN)
+check("removing it clears it", tw.delete_profile_avatar(woj["id"], MO)["avatar"] is None)
+upload(woj["id"], Upload(png(64, 64)), MO)
+key3 = tw.my_profiles(MO)["profiles"][-1]["avatar"].rsplit("/", 1)[1]
+tw.delete_profile(woj["id"], MO)
+check("forgetting the profile removes its picture", not (tw.TWEET_AVATARS_DIR / key3).exists())
+check("and its tweets go back to no picture",
+      all("avatar" not in t for t in tw.list_tweets(limit=100, before=None, team=None, authorization=None)))
 
 for i in range(tw.MEMBER_DAILY_LIMIT - 1):
     tw.post_member_tweet(tw.MemberTweet(text=f"spam {i}"), BRYN)

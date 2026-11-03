@@ -27,6 +27,9 @@ again later:
     GET    /api/tweets/profiles        member — my own handle and my saved profiles
     POST   /api/tweets/profiles        member — save one {handle, name, team?}
     DELETE /api/tweets/profiles/{n}    the member who saved it, or admin
+    PUT    /api/tweets/profiles/{n}/avatar   the member who saved it — a picture (multipart `file`)
+    DELETE /api/tweets/profiles/{n}/avatar   the member who saved it, or admin
+    GET    /api/tweets/avatars/{key}.jpg     public — a saved profile's picture
     GET    /api/tweets/{n}/poster      admin — who really posted a member tweet
 
 Who really posted is stored on every member tweet (`poster`) and never leaves
@@ -35,6 +38,13 @@ belongs to whoever used it first (`_handle_owner`): the official cast, a
 member's own handle, a saved profile, or a past tweet. Nobody else can post
 under it, so a scoop account can't be impersonated and nobody can post as
 @NBNStatMuse.
+
+A saved profile can carry a picture, cropped square and stored in
+TWEET_AVATARS_DIR under a random key. The key changes on every upload, so the
+URL can be cached for good, and it says nothing about who owns the profile.
+A tweet takes its profile's current picture when listed (`_avatars`), so a new
+picture shows on old tweets too, and a forgotten profile's tweets go back to
+the logo or initial.
 
 Other routers post through `post_one` for real events that happen off the box
 score: arena naming rights (routers/arenas.py) post one when a bid lands. Those
@@ -50,19 +60,22 @@ Pinned by tests/test_tweets.py.
 """
 from __future__ import annotations
 
+import io
 import logging
 import os
 import re
+import secrets
 import threading
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 
 from . import discord_transport as transport
 from .auth import _resolve_token, get_token_info, has_role, load_members, require_admin, require_any_role
-from .constants import TWEET_PROFILES_FILE, TWEETS_FILE
+from .constants import TWEET_AVATARS_DIR, TWEET_PROFILES_FILE, TWEETS_FILE
 from .league_time import league_today_str
 from .storage import _load_json, _save_json, log_write
 
@@ -157,7 +170,9 @@ def _embed(item: dict) -> dict:
     teams = item.get("teams") or []
     colour_team = item.get("team") or (teams[1] if teams else None)
     author = {"name": f"{item['name']} (@{item['handle']})"}
-    if item.get("slug"):
+    if item.get("avatar"):
+        author["icon_url"] = SITE + item["avatar"]
+    elif item.get("slug"):
         author["icon_url"] = f"{SITE}/api/players/{item['slug']}/headshot"
     embed = {
         "author": author,
@@ -217,8 +232,15 @@ def delete_by_ref(ref: str) -> int:
 _PRIVATE = ("poster", "author", "profile_id")
 
 
-def _public(item: dict, me: Optional[str]) -> dict:
+def _avatars() -> dict[int, str]:
+    """Saved profile id -> its picture's URL, for the profiles that have one."""
+    return {p["id"]: _avatar_url(p["avatar"]) for p in _load_profiles()["items"] if p.get("avatar")}
+
+
+def _public(item: dict, me: Optional[str], avatars: Optional[dict] = None) -> dict:
     out = {k: v for k, v in item.items() if k not in _PRIVATE}
+    if avatars and item.get("profile_id") in avatars:
+        out["avatar"] = avatars[item["profile_id"]]
     if me and item.get("poster") == me:
         out["mine"] = True
     return out
@@ -241,7 +263,8 @@ def list_tweets(limit: int = Query(20, ge=1, le=MAX_LIMIT),
     me = None
     if authorization and authorization.startswith("Bearer "):
         me = (_resolve_token(authorization) or {}).get("name")
-    return [_public(t, me) for t in items[:limit]]
+    avatars = _avatars()
+    return [_public(t, me, avatars) for t in items[:limit]]
 
 
 @router.post("/api/tweets")
@@ -281,6 +304,10 @@ def delete_tweet(tweet_id: int, info: dict = Depends(get_token_info)):
 
 MEMBER_DAILY_LIMIT = 10     # tweets per member per rolling 24 hours
 MAX_PROFILES = 10           # saved identities per member
+AVATAR_MAX_BYTES = 8 * 1024 * 1024   # a phone photo; it is shrunk on the way in
+AVATAR_PX = 128             # shown at 36px, so this covers a 3x screen
+AVATAR_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+AVATAR_KEY_RE = re.compile(r"^[0-9a-f]{16}$")
 
 
 def _load_profiles() -> dict:
@@ -289,6 +316,21 @@ def _load_profiles() -> dict:
 
 def _save_profiles(store: dict):
     _save_json(TWEET_PROFILES_FILE, store)
+
+
+def _avatar_url(key: str) -> str:
+    return f"/api/tweets/avatars/{key}.jpg"
+
+
+def _drop_avatar_file(key: Optional[str]):
+    if key and AVATAR_KEY_RE.match(key):
+        (TWEET_AVATARS_DIR / f"{key}.jpg").unlink(missing_ok=True)
+
+
+def _profile_out(p: dict) -> dict:
+    out = {k: p[k] for k in ("id", "handle", "name", "team")}
+    out["avatar"] = _avatar_url(p["avatar"]) if p.get("avatar") else None
+    return out
 
 
 def _self_handle(member: str) -> str:
@@ -352,8 +394,7 @@ def my_profiles(info: dict = Depends(get_token_info)):
     me = info["name"]
     return {
         "self": {"handle": _self_handle(me), "name": me, "team": _member_team(me)},
-        "profiles": [{k: p[k] for k in ("id", "handle", "name", "team")}
-                     for p in _load_profiles()["items"] if p["owner"] == me],
+        "profiles": [_profile_out(p) for p in _load_profiles()["items"] if p["owner"] == me],
     }
 
 
@@ -378,7 +419,7 @@ def save_profile(body: Identity, info: dict = Depends(get_token_info)):
         p = _add_profile(body, info["name"], _load_store()["items"], profiles)
         _save_profiles(profiles)
     log_write(info, f"POST tweets/profiles — @{p['handle']}")
-    return {k: p[k] for k in ("id", "handle", "name", "team")}
+    return _profile_out(p)
 
 
 @router.delete("/api/tweets/profiles/{profile_id}")
@@ -392,10 +433,78 @@ def delete_profile(profile_id: int, info: dict = Depends(get_token_info)):
             raise HTTPException(status_code=404, detail="Profile not found")
         if profiles["items"][idx]["owner"] != info["name"] and not has_role(info, "admin"):
             raise HTTPException(status_code=403, detail="Not your profile")
-        profiles["items"].pop(idx)
+        gone = profiles["items"].pop(idx)
         _save_profiles(profiles)
+    _drop_avatar_file(gone.get("avatar"))
     log_write(info, f"DELETE tweets/profiles/{profile_id}")
     return {"ok": True}
+
+
+def _square(contents: bytes) -> "Image.Image":
+    """The picture cropped to its centre square and shrunk to AVATAR_PX."""
+    from PIL import Image, ImageOps
+    img = ImageOps.exif_transpose(Image.open(io.BytesIO(contents)))
+    img = img.convert("RGB")
+    side = min(img.size)
+    left, top = (img.width - side) // 2, (img.height - side) // 2
+    img = img.crop((left, top, left + side, top + side))
+    return img.resize((AVATAR_PX, AVATAR_PX), Image.LANCZOS) if side > AVATAR_PX else img
+
+
+@router.put("/api/tweets/profiles/{profile_id}/avatar")
+async def set_profile_avatar(profile_id: int, file: UploadFile = File(...),
+                             info: dict = Depends(get_token_info)):
+    """Give a saved identity a picture. Only its owner can: a picture is part
+    of passing as that account."""
+    if file.content_type not in AVATAR_TYPES:
+        raise HTTPException(status_code=415, detail="Picture must be JPEG, PNG, WebP or GIF")
+    contents = await file.read(AVATAR_MAX_BYTES + 1)
+    if len(contents) > AVATAR_MAX_BYTES:
+        raise HTTPException(status_code=413, detail=f"Picture must be {AVATAR_MAX_BYTES // (1024 * 1024)} MB or smaller")
+    try:
+        img = _square(contents)
+    except Exception:
+        raise HTTPException(status_code=422, detail="Could not read that picture")
+    key = secrets.token_hex(8)
+    with _lock:
+        profiles = _load_profiles()
+        p = next((p for p in profiles["items"] if p["id"] == profile_id), None)
+        if p is None or p["owner"] != info["name"]:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        TWEET_AVATARS_DIR.mkdir(parents=True, exist_ok=True)
+        img.save(TWEET_AVATARS_DIR / f"{key}.jpg", "JPEG", quality=88, optimize=True)
+        old, p["avatar"] = p.get("avatar"), key
+        _save_profiles(profiles)
+    _drop_avatar_file(old)
+    log_write(info, f"PUT tweets/profiles/{profile_id}/avatar — @{p['handle']}")
+    return _profile_out(p)
+
+
+@router.delete("/api/tweets/profiles/{profile_id}/avatar")
+def delete_profile_avatar(profile_id: int, info: dict = Depends(get_token_info)):
+    with _lock:
+        profiles = _load_profiles()
+        p = next((p for p in profiles["items"] if p["id"] == profile_id), None)
+        if p is None:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        if p["owner"] != info["name"] and not has_role(info, "admin"):
+            raise HTTPException(status_code=403, detail="Not your profile")
+        old = p.pop("avatar", None)
+        _save_profiles(profiles)
+    _drop_avatar_file(old)
+    log_write(info, f"DELETE tweets/profiles/{profile_id}/avatar")
+    return _profile_out(p)
+
+
+@router.get("/api/tweets/avatars/{name}")
+def get_profile_avatar(name: str):
+    key = name.removesuffix(".jpg")
+    path = TWEET_AVATARS_DIR / f"{key}.jpg"
+    if not AVATAR_KEY_RE.match(key) or not path.exists():
+        raise HTTPException(status_code=404, detail="No such picture")
+    # A new picture gets a new key, so this one never changes.
+    return FileResponse(str(path), media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
 @router.post("/api/tweets/member")
@@ -439,9 +548,10 @@ def post_member_tweet(body: MemberTweet, info: dict = Depends(get_token_info)):
                 "likes": 0, "retweets": 0}
         store["items"].append(item)
         _save_store(store)
-    _notify([item])
+    out = _public(item, me, _avatars())
+    _notify([out])
     log_write(info, f"POST tweets/member — #{item['id']} as @{item['handle']}")
-    return _public(item, me)
+    return out
 
 
 @router.get("/api/tweets/{tweet_id}/poster")
