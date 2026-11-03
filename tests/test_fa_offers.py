@@ -266,8 +266,7 @@ o1 = make_offer(PHX_GM)
 check("a GM can draft the whole offer", o1["status"] == "draft" and o1["created_by"] == "phxGM")
 check("offer number comes from the monotonic seq", o1["number"] == 1)
 check("`offer` is exactly a SignDetails payload",
-      set(o1["offer"]) == {"player", "team", "contract", "signing_method",
-                           "bird_rights_type", "eaps_assumption"})
+      set(o1["offer"]) == set(fa.SignDetails.model_fields))
 check("pitch and promises live outside `offer`",
       o1["pitch"] and o1["promises"]["role"] == "starter")
 check("a draft carries no round yet", o1["round_id"] is None)

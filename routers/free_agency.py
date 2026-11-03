@@ -467,6 +467,28 @@ def _conflict_team(name: str, slug: str, offers: list[dict]) -> Optional[str]:
     return team if any(o["team"] == team for o in _offers_for(offers, slug)) else None
 
 
+def _release_named_elsewhere(offers: list[dict], offer: dict) -> Optional[str]:
+    """Why this offer can't name the releases it does, or None. Each pending
+    offer or waiver claim of a team must name its own cuts: if two could both
+    win on the same one, the second would win with no room left to sign."""
+    mine = set(offer["offer"].get("releases") or [])
+    if not mine:
+        return None
+    for o in offers:
+        if (o["id"] != offer["id"] and o["team"] == offer["team"] and _is_live(o)
+                and o["status"] != "draft"):
+            both = mine & set(o["offer"].get("releases") or [])
+            if both:
+                return (f"{_player_name(sorted(both)[0])} is already named as a release on your "
+                        f"offer for {_player_name(o['player'])}. Each pending offer needs its own.")
+    from .waivers import pending_claim_releases
+    for slug, claim_player in pending_claim_releases(offer["team"]).items():
+        if slug in mine:
+            return (f"{_player_name(slug)} is already named as a release on your waiver claim "
+                    f"for {_player_name(claim_player)}. Each pending offer needs its own.")
+    return None
+
+
 def _sign_details(offer: dict) -> SignDetails:
     return SignDetails(**offer["offer"])
 
@@ -743,6 +765,8 @@ class OfferCreate(BaseModel):
     signing_method: Optional[str] = None
     bird_rights_type: Optional[str] = None
     eaps_assumption: Optional[str] = None
+    # SignDetails.releases: players cut only if this offer wins.
+    releases: list[str] = []
     pitch: str = ""
     promises: PromisesIn = PromisesIn()
 
@@ -752,6 +776,7 @@ class OfferPatch(BaseModel):
     signing_method: Optional[str] = None
     bird_rights_type: Optional[str] = None
     eaps_assumption: Optional[str] = None
+    releases: Optional[list[str]] = None
     pitch: Optional[str] = None
     promises: Optional[PromisesIn] = None
 
@@ -1271,6 +1296,7 @@ def create_offer(body: OfferCreate, info: dict = Depends(get_token_info)):
                 "signing_method": body.signing_method,
                 "bird_rights_type": body.bird_rights_type,
                 "eaps_assumption": body.eaps_assumption,
+                "releases": body.releases,
             },
             "pitch": body.pitch,
             "promises": promises,
@@ -1297,7 +1323,7 @@ def patch_offer(offer_id: str, body: OfferPatch, info: dict = Depends(get_token_
             raise HTTPException(409, "A submitted offer is final — the committee may send it back, the team may not withdraw it (§ 3.14)")
         if "contract" in fields:
             offer["offer"]["contract"] = body.contract.model_dump()
-        for key in ("signing_method", "bird_rights_type", "eaps_assumption"):
+        for key in ("signing_method", "bird_rights_type", "eaps_assumption", "releases"):
             if key in fields:
                 offer["offer"][key] = fields[key]
         if "pitch" in fields:
@@ -1362,6 +1388,10 @@ def submit_offer(offer_id: str, info: dict = Depends(get_token_info)):
         # A resubmission skips the window check on purpose (§ 4.3a): the 24-hour
         # clock governs *new* offers from other teams, and a revision the
         # committee itself asked for is part of its own review.
+
+        clash = _release_named_elsewhere(offers, offer)
+        if clash:
+            raise HTTPException(422, clash)
 
         ctx = _validation_ctx()
         validation = _run_validation(offer, ctx)
@@ -2489,6 +2519,7 @@ def declare_winner(slug: str, body: DeclareWinnerIn, info: dict = Depends(requir
                 signing_method=terms.get("signing_method"),
                 bird_rights_type=terms.get("bird_rights_type"),
                 eaps_assumption=terms.get("eaps_assumption") or body.eaps_assumption,
+                releases=terms.get("releases") or [],
             )
             description = f"FA round {round_id} — offer #{offer['number']} won the ballot"
             # The #fa-news line below is a bot post, which the #roster-log

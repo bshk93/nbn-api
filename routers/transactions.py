@@ -335,6 +335,10 @@ class SignDetails(BaseModel):
     # "above" or "below" (the previous salary, relative to EAPS). Ignored
     # otherwise.
     eaps_assumption: Optional[str] = None
+    # Players this team releases (§ 5.1) only if the signing goes through,
+    # to make roster room for it. Counted in the roster check; released right
+    # after the signing is written, never before. See `_signing_release_checks`.
+    releases: list[str] = []
 
 
 class ExtensionDetails(BaseModel):
@@ -487,6 +491,10 @@ class OfferSheetDetails(BaseModel):
     signing_method: Optional[str] = None
     bird_rights_type: Optional[str] = None
     eaps_assumption: Optional[str] = None  # "above" or "below" — see SignDetails
+    # The offering team's releases if the player joins it (see SignDetails).
+    # Stored on the offer and carried out by an `offer_sheet_decision` of
+    # `not_matched`; a match releases nobody.
+    releases: list[str] = []
 
 
 class OfferSheetDecisionDetails(BaseModel):
@@ -1316,6 +1324,10 @@ def _apply_offer_sheet_decision(details: "OfferSheetDecisionDetails", txn_date: 
 
     offering_team, retaining_team = offer["offering_team"], offer["retaining_team"]
     signing_team = retaining_team if details.outcome == "matched" else offering_team
+    releases: list[str] = []
+    if details.outcome == "not_matched":
+        _, releases = _signing_release_checks(offering_team, offer.get("releases") or [], offer["player"],
+                                              load_player_bios(), _season_for_date(txn_date))
 
     contract = ContractIn(**offer["contract"]) if isinstance(offer["contract"], dict) else offer["contract"]
     _apply_sign(
@@ -1355,6 +1367,8 @@ def _apply_offer_sheet_decision(details: "OfferSheetDecisionDetails", txn_date: 
         "offer_id": details.offer_id,
         "offer_date": offer["date"],
         "contract": offer["contract"],
+        # Carried out by the caller once the ledger lock is released.
+        "releases": releases,
     }
 
 
@@ -3331,6 +3345,7 @@ def _open_offer_sheets() -> list[dict]:
                 "hold": _offer_hold_amount(d.get("contract") or {}),
                 "signing_method": d.get("signing_method"),
                 "bird_rights_type": d.get("bird_rights_type"),
+                "releases": d.get("releases") or [],
                 "submitted_by": txn.get("created_by"),
                 "description": txn.get("description") or "",
             })
@@ -5269,9 +5284,12 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
                 ),
             ))
 
+    release_checks, releases = _signing_release_checks(team, details.releases, details.player, bios, season)
+    checks.extend(release_checks)
+    rel_std, rel_tw = _released_counts(releases, bios)
     if details.contract.type != "two-way":
         r = _roster_size_check(
-            team, _count_standard_roster(team, excluding=details.player) + 1, "signing",
+            team, _count_standard_roster(team, excluding=details.player) + 1 - rel_std, "signing",
             ctx.get("txn_date"))
         if r:
             checks.append(r)
@@ -5281,7 +5299,7 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
         # and their own three-slot cap went unenforced on both the offer path and
         # the office's submit path.
         r = _two_way_slot_check(
-            team, _count_two_way_roster(team, excluding=details.player) + 1, "signing")
+            team, _count_two_way_roster(team, excluding=details.player) + 1 - rel_tw, "signing")
         if r:
             checks.append(r)
         checks.extend(_check_two_way_terms(details.contract, details.player, team,
@@ -5756,6 +5774,76 @@ def _trade_release_checks(details, bios: dict, season: str) -> list[CheckResult]
     return checks
 
 
+def _signing_release_checks(team: str, releases: list[str], signee: str,
+                            bios: dict, season: str) -> tuple[list[CheckResult], list[str]]:
+    """§ 5.1 checks on the players a signing (or a waiver claim, or an offer
+    sheet) names to release if it goes through, and which of them to count.
+
+    A team at the roster limit names its cut on the offer instead of making it
+    first, so losing the FA lottery or the waiver priority costs it nobody.
+    Same shape as `_trade_release_checks`, with one difference: a player who is
+    no longer on the team is a warning, not an error, and isn't counted. An FA
+    offer is judged again when it wins, days later, and by then the team may
+    have traded that player away — which made the room anyway, so the roster
+    check is left to decide. A player with no contract left, or the signee
+    himself, is an error: there is nothing to release.
+
+    Returns the checks and the slugs that count (and will be released)."""
+    if not releases:
+        return [], []
+    team_map = _build_team_map()
+    checks: list[CheckResult] = []
+    valid: list[str] = []
+    seen: set[str] = set()
+    for slug in releases:
+        name = _player_name(slug, bios) or slug
+        key = f"signing_release_{slug}"
+        if slug in seen:
+            checks.append(CheckResult(check=key, passed=False, level="error",
+                                      message=f"{name} is listed for release more than once."))
+            continue
+        seen.add(slug)
+        if slug == signee:
+            checks.append(CheckResult(check=key, passed=False, level="error",
+                                      message=f"{team} can't release {name} to make room for {name}."))
+            continue
+        if team_map.get(slug) != team:
+            checks.append(CheckResult(check=key, passed=False, level="warning",
+                                      message=(f"{name} is no longer on {team}, so there is no one to "
+                                               "release; the roster is counted without them.")))
+            continue
+        years = _release_contract_years(bios.get(slug) or {}, season)
+        if not years:
+            checks.append(CheckResult(check=key, passed=False, level="error",
+                                      message=f"{name} has no real contract years left to release — renounce instead (§ 3.10)."))
+            continue
+        valid.append(slug)
+        checks.append(CheckResult(check=key, passed=True,
+                                  message=(f"{team} releases {name} only if this goes through (§ 5.1): "
+                                           f"under contract through {max(years)}, dead cap on the "
+                                           "original payment schedule.")))
+    return checks, valid
+
+
+def _released_counts(slugs: list[str], bios: dict) -> tuple[int, int]:
+    """(standard, two-way) bodies among `slugs` — which pool each release frees."""
+    tw = sum(1 for s in slugs if (bios.get(s) or {}).get("type") == "two-way")
+    std = sum(1 for s in slugs if _is_standard_roster_slot((bios.get(s) or {}).get("type", "")))
+    return std, tw
+
+
+def _apply_signing_releases(slugs: list[str], txn_date: str, info: dict, *,
+                            description: str, relay_to_roster_log: bool = False) -> list[dict]:
+    """The releases a signing named, each its own ordinary release — own ledger
+    entry, dead cap, waiver wire — exactly as `apply_trade` does a trade's.
+    Warnings (a roster left short) don't block: they were on the signing's own
+    checks, and the signing is done. Takes `_txn_lock`, so call it after the
+    signing's own lock is released."""
+    return [apply_release(ReleaseDetails(player=slug), txn_date, info, description=description,
+                          force_warnings_only=True, relay_to_roster_log=relay_to_roster_log)
+            for slug in slugs]
+
+
 def _validate_release(details: ReleaseDetails, ctx: dict) -> list[CheckResult]:
     """§ 5.1 release checks. Real content mirrors renounce's shape: an
     eligibility test (error) plus the same roster-count consequence
@@ -6134,11 +6222,14 @@ def _validate_offer_sheet(details: OfferSheetDetails, ctx: dict) -> list[CheckRe
     if r:
         checks.append(r)
 
+    release_checks, releases = _signing_release_checks(team, details.releases, details.player, bios, season)
+    checks.extend(release_checks)
     if details.contract.type != "two-way":
         # If the incumbent passes, this adds a body to the offering team. Judged
         # now rather than at decision time: a team shouldn't extend an offer it
         # has no room to honour, and the incumbent's choice can't create room.
-        r = _roster_size_check(team, _count_standard_roster(team) + 1,
+        # The releases it names happen only then too, so they count here.
+        r = _roster_size_check(team, _count_standard_roster(team) + 1 - _released_counts(releases, bios)[0],
                                "extending an offer sheet they'd have to honour", ctx.get("txn_date"))
         if r:
             checks.append(r)
@@ -6187,13 +6278,17 @@ def _validate_offer_sheet_decision(details: OfferSheetDecisionDetails, ctx: dict
         if r:
             checks.append(r)
 
-    if details.outcome == "not_matched" and (contract.get("type") != "two-way"):
-        r = _roster_size_check(team, _count_standard_roster(team) + 1, "adding this player",
-                               ctx.get("txn_date"))
-        if r:
-            checks.append(r)
+    if details.outcome == "not_matched":
+        release_checks, releases = _signing_release_checks(
+            team, offer.get("releases") or [], offer["player"], bios, season)
+        checks.extend(release_checks)
+        if contract.get("type") != "two-way":
+            r = _roster_size_check(team, _count_standard_roster(team) + 1 - _released_counts(releases, bios)[0],
+                                   "adding this player", ctx.get("txn_date"))
+            if r:
+                checks.append(r)
 
-    if not checks:
+    if all(c.passed for c in checks):
         who = (bios.get(offer["player"]) or {}).get("name") or offer["player"]
         checks.append(CheckResult(
             check="offer_sheet_decision", passed=True,
@@ -9030,12 +9125,23 @@ def apply_sign(details: SignDetails, txn_date: str, info: dict, *,
     checks = _run_validation("sign", details, val_ctx)
     failed = [c for c in checks if not c.passed]
     blocking = [c for c in failed if c.level == "error"] if force_warnings_only else failed
+    bad_releases = [c for c in failed if c.check.startswith("signing_release_") and c.level == "error"]
+    if bad_releases:
+        # Not forceable, as a trade's aren't: there's no release to apply for
+        # the signee or a player with no contract.
+        raise HTTPException(status_code=422, detail={
+            "validation": True,
+            "checks": [c.model_dump() for c in checks],
+            "can_force": False,
+        })
     if blocking and not force:
         raise HTTPException(status_code=422, detail={
             "validation": True,
             "checks": [c.model_dump() for c in checks],
             "can_force": True,
         })
+    _, releases = _signing_release_checks(details.team.upper(), details.releases, details.player,
+                                          val_ctx["bios"], val_ctx["cur_season"])
 
     txn_id = secrets.token_hex(8)
     with _txn_lock:
@@ -9056,6 +9162,11 @@ def apply_sign(details: SignDetails, txn_date: str, info: dict, *,
         _append_transaction(txn)
 
     notify_transaction(txn, forced_checks, relay_to_roster_log=relay_to_roster_log)
+    if releases:
+        release_txns = _apply_signing_releases(
+            releases, txn_date, info, relay_to_roster_log=relay_to_roster_log,
+            description=f"Released to make room for signing {txn_id}" + (f" ({description})" if description else ""))
+        txn = {**txn, "release_txn_ids": [r["id"] for r in release_txns]}
     return txn
 
 
@@ -9329,6 +9440,19 @@ def apply_release(details: ReleaseDetails, txn_date: str, info: dict, *,
     type=="release" path, factored out so a trade can carry releases
     (`apply_trade`). Opens the § 5.1 waiver wire like any release.
     `force_warnings_only` is `apply_sign`'s: warnings pass, errors still block."""
+    with _txn_lock:
+        txn, forced_checks = release_under_lock(details, txn_date, info, description=description,
+                                                force=force, force_warnings_only=force_warnings_only)
+    announce_release(txn, forced_checks, relay_to_roster_log=relay_to_roster_log)
+    return txn
+
+
+def release_under_lock(details: ReleaseDetails, txn_date: str, info: dict, *,
+                       description: str = "", force: bool = False,
+                       force_warnings_only: bool = False) -> tuple[dict, Optional[list[str]]]:
+    """`apply_release` without the lock or the announcements, for a caller that
+    already holds `_txn_lock` (the waiver sweep, carrying out a winning claim's
+    releases). Announce with `announce_release` once the lock is released."""
     val_ctx = {
         "bios":        load_player_bios(),
         "team_state":  load_team_state(),
@@ -9348,30 +9472,37 @@ def apply_release(details: ReleaseDetails, txn_date: str, info: dict, *,
         })
 
     txn_id = secrets.token_hex(8)
-    with _txn_lock:
-        team, dead_cap, terminated_salary, snapshot = _apply_release(details, txn_date, info)
-        stored_details = details.model_dump()
-        stored_details["team"] = team
-        stored_details["dead_cap"] = dead_cap
-        stored_details["terminated_salary"] = terminated_salary
-        # Restore source for a waiver claim during the § 5.1 48-hour window
-        # (routers/waivers.py) — same idea as renounce's `_snapshot`, just a
-        # different mutation to undo.
-        stored_details["_snapshot"] = snapshot
-        forced_checks = [c.check for c in failed] if failed and (force or force_warnings_only) else None
-        if forced_checks:
-            stored_details["_forced_checks"] = forced_checks
-        txn = {
-            "id": txn_id,
-            "type": "release",
-            "date": txn_date,
-            "created_by": info.get("name", "unknown"),
-            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "description": description,
-            "details": stored_details,
-        }
-        _append_transaction(txn)
+    team, dead_cap, terminated_salary, snapshot = _apply_release(details, txn_date, info)
+    stored_details = details.model_dump()
+    stored_details["team"] = team
+    stored_details["dead_cap"] = dead_cap
+    stored_details["terminated_salary"] = terminated_salary
+    # Restore source for a waiver claim during the § 5.1 48-hour window
+    # (routers/waivers.py) — same idea as renounce's `_snapshot`, just a
+    # different mutation to undo.
+    stored_details["_snapshot"] = snapshot
+    forced_checks = [c.check for c in failed] if failed and (force or force_warnings_only) else None
+    if forced_checks:
+        stored_details["_forced_checks"] = forced_checks
+    txn = {
+        "id": txn_id,
+        "type": "release",
+        "date": txn_date,
+        "created_by": info.get("name", "unknown"),
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "description": description,
+        "details": stored_details,
+    }
+    _append_transaction(txn)
+    return txn, forced_checks
 
+
+def announce_release(txn: dict, forced_checks: Optional[list[str]] = None, *,
+                     relay_to_roster_log: bool = False) -> None:
+    """The Discord side of a release: the transaction embed, and the waiver
+    wire opening. Never under `_txn_lock`."""
+    stored_details = txn["details"]
+    team, snapshot = stored_details["team"], stored_details.get("_snapshot")
     notify_transaction(txn, forced_checks, relay_to_roster_log=relay_to_roster_log)
     if snapshot:
         # § 5.1 waiver wire (nbn-today/docs/waiver-wire-spec.md § 6) — opens the
@@ -9381,7 +9512,6 @@ def apply_release(details: ReleaseDetails, txn_date: str, info: dict, *,
         # imports from, so a top-level import here would be circular.
         from .waiver_notify import notify_waived
         notify_waived(stored_details["player"], team)
-    return txn
 
 
 @router.post("/api/transactions")
@@ -9554,6 +9684,11 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
         notify_offer_sheet_received(stored_details)
     elif body.type == "offer_sheet_decision":
         matched = stored_details.get("outcome") == "matched"
+        if not matched and stored_details.get("releases"):
+            release_txns = _apply_signing_releases(
+                stored_details["releases"], body.date, info, relay_to_roster_log=body.relay_to_roster_log,
+                description=f"Released to make room for offer sheet {stored_details.get('offer_id')}")
+            txn = {**txn, "release_txn_ids": [r["id"] for r in release_txns]}
         text = (f"{stored_details.get('retaining_team')} matched your offer sheet for "
                 f"{stored_details.get('player')} — they keep the player."
                 if matched else

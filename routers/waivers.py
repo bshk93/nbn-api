@@ -62,6 +62,8 @@ from .transactions import (
     _check_signing_method_funding, _check_signing_method_declared,
     _roster_size_check, _count_standard_roster, _buyout_salary_above_ntmle,
     _two_way_slot_check, _count_two_way_roster,
+    _signing_release_checks, _released_counts, ReleaseDetails,
+    release_under_lock, announce_release,
 )
 from .league_time import league_today_str
 
@@ -82,6 +84,9 @@ class WaiverClaimDetails(BaseModel):
     # claiming team still has to fund it from something real.
     signing_method: Optional[str] = None
     eaps_assumption: Optional[str] = None
+    # Players the claiming team releases only if this claim wins, to make
+    # roster room for it — SignDetails.releases, for a claim.
+    releases: list[str] = []
 
 
 class WaiverResolveDetails(BaseModel):
@@ -120,6 +125,7 @@ def _waiver_claims_for(released_txn_id: str, txns: Optional[list[dict]] = None) 
             "team": (d.get("team") or "").upper(),
             "signing_method": d.get("signing_method"),
             "eaps_assumption": d.get("eaps_assumption"),
+            "releases": d.get("releases") or [],
             "submitted_at": t.get("created_at"),
             "created_by": t.get("created_by"),
         })
@@ -264,12 +270,15 @@ def _validate_waiver_claim(claim: dict, release_txn: dict, ctx: dict) -> list[Ch
                 ),
             ))
 
+    release_checks, releases = _signing_release_checks(team, claim.get("releases") or [], player, bios, season)
+    checks.extend(release_checks)
+    rel_std, rel_tw = _released_counts(releases, bios)
     # A two-way sits outside the 15 but has its own three slots (§ 2.2).
     # Nothing checked them here, so CHA claimed a fourth two-way (2026-10-19).
     if contract_type == "two-way":
-        r = _two_way_slot_check(team, _count_two_way_roster(team) + 1, "claiming")
+        r = _two_way_slot_check(team, _count_two_way_roster(team) + 1 - rel_tw, "claiming")
     else:
-        r = _roster_size_check(team, _count_standard_roster(team) + 1, "claiming", ctx["txn_date"])
+        r = _roster_size_check(team, _count_standard_roster(team) + 1 - rel_std, "claiming", ctx["txn_date"])
     if r:
         checks.append(r)
 
@@ -380,6 +389,43 @@ def _priority_order(claims: list[dict], release_date: str) -> dict:
 
 # ── applying a winning claim ──────────────────────────────────────────────────
 
+def _claim_fails(checks: list[CheckResult]) -> bool:
+    """Whether a claim loses at resolution. Any failed check does — a sealed
+    claim has nobody to confirm a warning — except a named release whose player
+    has since left the team: that made the room the release was for, and the
+    roster check still has the last word."""
+    return any(not c.passed and not (c.check.startswith("signing_release_") and c.level == "warning")
+               for c in checks)
+
+
+def _release_for_claim(claim: dict, release_txn: dict, txn_date: str, info: dict,
+                       ctx: dict) -> list[tuple]:
+    """Carries out a winning claim's releases (§ 5.1), under the caller's
+    `_txn_lock`. Returns (txn, forced_checks) pairs to announce once the lock
+    is released."""
+    _, slugs = _signing_release_checks(claim["team"], claim.get("releases") or [],
+                                       release_txn["details"]["player"], ctx["bios"], ctx["cur_season"])
+    desc = f"Released to make room for waiver claim on {release_txn['details']['player']}"
+    return [release_under_lock(ReleaseDetails(player=slug), txn_date, info,
+                               description=desc, force_warnings_only=True)
+            for slug in slugs]
+
+
+def pending_claim_releases(team: str) -> dict[str, str]:
+    """release slug -> the waived player, for every open claim `team` has on
+    file. Read by FA offer submission, so a cut can't back two pending moves."""
+    txns = _load_transactions()
+    out: dict[str, str] = {}
+    for t in txns:
+        if t.get("type") != "release" or _is_waiver_resolved(t["id"], txns):
+            continue
+        for c in _waiver_claims_for(t["id"], txns):
+            if c["team"] == team.upper():
+                for slug in c.get("releases") or []:
+                    out[slug] = (t.get("details") or {}).get("player")
+    return out
+
+
 def _apply_waiver_transfer(release_txn: dict, claim: dict, txn_date: str, info: dict) -> None:
     """Re-applies the released contract, untouched, onto the claiming team via
     `_apply_sign` (spec § 4 step 4) — reuses its roster/bio write and its
@@ -472,7 +518,7 @@ def _resolve_one_waiver(release_txn: dict, txns: list[dict]) -> Optional[tuple]:
 
     if priority["status"] == "no_claims":
         _log_waiver_clear(release_txn, "unclaimed", _SYSTEM_INFO)
-        return ("closed", player, False, release_txn["id"], None, None)
+        return ("closed", player, False, release_txn["id"], None, None, [])
 
     if priority["status"] == "tied":
         already_flagged = any(
@@ -488,7 +534,7 @@ def _resolve_one_waiver(release_txn: dict, txns: list[dict]) -> Optional[tuple]:
     winner = None
     for claim in priority["order"]:
         checks = _validate_waiver_claim(claim, release_txn, ctx)
-        if not any(not c.passed for c in checks):
+        if not _claim_fails(checks):
             winner = claim
             break
 
@@ -497,13 +543,14 @@ def _resolve_one_waiver(release_txn: dict, txns: list[dict]) -> Optional[tuple]:
             release_txn, "unclaimed", _SYSTEM_INFO,
             notes="Every claim on file failed re-validation at resolution time (spec § 5 step 6).",
         )
-        return ("closed", player, False, release_txn["id"], None, None)
+        return ("closed", player, False, release_txn["id"], None, None, [])
 
     today = league_today_str()
     _apply_waiver_transfer(release_txn, winner, today, _SYSTEM_INFO)
     clear = _log_waiver_clear(release_txn, "claimed", _SYSTEM_INFO,
                               claimed_by=winner["team"], signing_method=winner.get("signing_method"))
-    return ("closed", player, True, release_txn["id"], winner["team"], clear)
+    cuts = _release_for_claim(winner, release_txn, today, _SYSTEM_INFO, ctx)
+    return ("closed", player, True, release_txn["id"], winner["team"], clear, cuts)
 
 
 def _notify_waiver_claimants(released_txn_id: str, player: str, claimed_by: Optional[str]) -> None:
@@ -539,9 +586,11 @@ def _announce_claim(clear_txn: Optional[dict]) -> None:
 def _fire_waiver_notification(note: tuple) -> None:
     from . import waiver_notify
     if note[0] == "closed":
-        _, player, claimed, txn_id, claimed_by, clear_txn = note
+        _, player, claimed, txn_id, claimed_by, clear_txn, cuts = note
         waiver_notify.notify_window_closed(player, claimed, claimed_by)
         _announce_claim(clear_txn)
+        for cut, forced in cuts:
+            announce_release(cut, forced, relay_to_roster_log=True)
         _notify_waiver_claimants(txn_id, player, claimed_by)
     elif note[0] == "tied":
         _, player, tied_teams, h2h, season = note
@@ -606,7 +655,7 @@ def validate_waiver_claim(txn_id: str, body: WaiverClaimDetails):
     if release_txn is None:
         raise HTTPException(status_code=404, detail="No such release")
     claim = {"team": body.team.upper(), "signing_method": body.signing_method,
-             "eaps_assumption": body.eaps_assumption}
+             "eaps_assumption": body.eaps_assumption, "releases": body.releases}
     ctx = _val_ctx(release_txn["date"])
     checks = _validate_waiver_claim(claim, release_txn, ctx)
     return {
@@ -615,6 +664,26 @@ def validate_waiver_claim(txn_id: str, body: WaiverClaimDetails):
         "contract": _forward_contract(release_txn["details"].get("_snapshot") or {},
                                        _season_for_date(release_txn["date"])),
     }
+
+
+def _release_named_elsewhere(team: str, releases: list[str]) -> Optional[str]:
+    """Why a new claim can't name these releases, or None: each pending claim
+    or FA offer must name its own cuts, or two winners would share one."""
+    if not releases:
+        return None
+    from .free_agency import _is_live, _load_offers, _player_name
+    taken = pending_claim_releases(team)
+    for slug in releases:
+        if slug in taken:
+            return (f"{_player_name(slug)} is already named as a release on your waiver claim for "
+                    f"{_player_name(taken[slug])}. Each pending claim needs its own.")
+    for o in _load_offers():
+        if o["team"] == team and _is_live(o) and o["status"] != "draft":
+            both = set(releases) & set(o["offer"].get("releases") or [])
+            if both:
+                return (f"{_player_name(sorted(both)[0])} is already named as a release on your FA "
+                        f"offer for {_player_name(o['player'])}. Each pending claim needs its own.")
+    return None
 
 
 @router.post("/api/waivers/{txn_id}/claim")
@@ -640,7 +709,11 @@ def submit_waiver_claim(txn_id: str, body: WaiverClaimDetails, info: dict = Depe
     if any(c["team"] == team for c in existing):
         raise HTTPException(status_code=409, detail=f"{team} already has a claim on file for this player")
 
-    claim = {"team": team, "signing_method": body.signing_method, "eaps_assumption": body.eaps_assumption}
+    claim = {"team": team, "signing_method": body.signing_method, "eaps_assumption": body.eaps_assumption,
+             "releases": body.releases}
+    clash = _release_named_elsewhere(team, body.releases)
+    if clash:
+        raise HTTPException(status_code=422, detail=clash)
     ctx = _val_ctx(release_txn["date"])
     checks = _validate_waiver_claim(claim, release_txn, ctx)
     failed = [c for c in checks if not c.passed]
@@ -660,6 +733,7 @@ def submit_waiver_claim(txn_id: str, body: WaiverClaimDetails, info: dict = Depe
             "released_txn_id": txn_id, "player": release_txn["details"]["player"],
             "team": team, "signing_method": body.signing_method,
             "eaps_assumption": body.eaps_assumption,
+            "releases": body.releases,
         },
     }
     with _txn_lock:
@@ -725,8 +799,7 @@ def resolve_waiver(txn_id: str, body: WaiverResolveDetails,
                 raise HTTPException(status_code=422, detail=f"{team} has no claim on file for this player")
             ctx = _val_ctx(release_txn["date"])
             checks = _validate_waiver_claim(claim, release_txn, ctx)
-            failed = [c for c in checks if not c.passed]
-            if failed:
+            if _claim_fails(checks):
                 raise HTTPException(status_code=422, detail={
                     "validation": True, "checks": [c.model_dump() for c in checks],
                 })
@@ -734,12 +807,16 @@ def resolve_waiver(txn_id: str, body: WaiverResolveDetails,
             _apply_waiver_transfer(release_txn, claim, today, info)
             txn = _log_waiver_clear(release_txn, "claimed", info, claimed_by=team,
                                     signing_method=claim.get("signing_method"), resolution="manual")
+            cuts = _release_for_claim(claim, release_txn, today, info, ctx)
         else:
             txn = _log_waiver_clear(release_txn, "unclaimed", info, resolution="manual")
+            cuts = []
 
     from . import waiver_notify
     waiver_notify.notify_window_closed(release_txn["details"]["player"], bool(body.team),
                                        team if body.team else None)
     _announce_claim(txn)
+    for cut, forced in cuts:
+        announce_release(cut, forced, relay_to_roster_log=True)
     _notify_waiver_claimants(txn_id, release_txn["details"]["player"], team if body.team else None)
     return txn

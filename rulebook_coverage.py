@@ -121,6 +121,7 @@ CHECK_SECTIONS: dict[str, tuple[str, ...]] = {
     "qo_hold_eaps":               ("3.10",),
     "release_eligible":           ("5.1",),
     "trade_release_{}":           ("5.1",),
+    "signing_release_{}":         ("2.1", "5.1"),
     "renounce_eligible":          ("3.10",),
     "rescind_cap_restriction":    ("3.10",),
     "rookie_scale":               ("7.1",),
