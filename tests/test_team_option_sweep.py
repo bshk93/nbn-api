@@ -10,7 +10,7 @@ sweep runs hourly (`sweep_team_options.py`) and does two things:
   Each goes once per close date, and after downtime only the most urgent one
   goes, not both at once.
 - **Automatic decline.** Once a window has closed, every option in it still
-  undecided is declined as a UFA hold and announced like an owner's own
+  undecided is declined (a rookie-scale one always as a UFA hold, § 6.1) and announced like an owner's own
   decline. Options whose window is still open are left alone.
 
 Every write is stubbed: bios, ledger, Discord, inbox, the notices file.
@@ -119,15 +119,15 @@ SENT.clear()
 T.sweep_team_options(at("2026-11-03 00:15"))
 check("every undecided rookie option due then is declined",
       sorted((p, y) for p, y, _ in APPLIED) == [("r24", "27-28"), ("r25", "27-28")])
-check("...as an RFA-eligible hold, both being under 4 years of experience (§ 3.1)",
-      all(h == "RFA" for _, _, h in APPLIED))
+check("...as a UFA hold, though both are under 4 years of experience (§ 6.1)",
+      all(h == "UFA" for _, _, h in APPLIED))
 check("...one ledger entry each, marked automatic",
       len(LEDGER) == 2 and all(t["details"]["_source"] == "auto_deadline" and t["created_by"] == "system"
                                for t in LEDGER))
 check("...announced and relayed to #roster-log",
       POSTS.count(("embed", True)) == 2 and sum(1 for p in POSTS if p[0] == "fa-news") == 2)
-check("...and the team told he's a free agent after this season, RFA-eligible",
-      len(SENT) == 2 and all(t == "PHX" and "after this season, RFA-eligible" in x for t, x in SENT))
+check("...and the team told he's an unrestricted free agent after this season",
+      len(SENT) == 2 and all(t == "PHX" and "unrestricted free agent after this season" in x for t, x in SENT))
 check("a 2025 pick's 28-29 option is left for next fall", ("r25", "28-29") not in [(p, y) for p, y, _ in APPLIED])
 check("a 2026 pick's option is left too", "r26" not in [p for p, _, _ in APPLIED])
 check("a second-rounder's option is left until June 30", "second" not in [p for p, _, _ in APPLIED])
@@ -170,7 +170,7 @@ LEDGER.clear()
 r = T.sweep_team_options(at("2026-11-03 02:00"))
 check("the sweep declines him rather than crashing", ("SAS", "fb", "27-28") in r["declined"])
 check("...at 190% of his last salary", BIOS["fb"]["salaries"].get("27-28") == "$5,700,000"
-      and BIOS["fb"]["cap_holds"] == {"27-28": "RFA"})
+      and BIOS["fb"]["cap_holds"] == {"27-28": "UFA"})
 check("...noted as a placeholder", "below EAPS" in (BIOS["fb"].get("cap_hold_notes") or {}).get("27-28", ""))
 check("...and the ledger says what was assumed",
       any(t["details"]["player"] == "fb" and t["details"]["eaps_assumption"] == "below" for t in LEDGER))
@@ -180,7 +180,14 @@ BIOS["old"] = {"name": "OLD, VET", "draft_year": 2018, "type": "player",
                "salaries": {"26-27": "$4,000,000", "27-28": "$4,500,000"}, "cap_holds": {"27-28": "TEAM_OPT"}}
 BIOS["rs"] = {"name": "ROOKIE, SCALE", "draft_year": 2023, "draft_round": 1, "draft_pick": 10}
 BIOS["nobody"] = {"name": "NO, DRAFT"}
-check("under 4 years: RFA", T._option_fa_tag(BIOS["fb"], "27-28")[0] == "RFA")
+BIOS["r2"] = {"name": "SECOND, YEAR", "draft_year": 2024, "draft_round": 2, "cap_holds": {"27-28": "TEAM_OPT"}}
+BIOS["rso"] = {"name": "ROOKIE, OPTION", "draft_year": 2024, "draft_round": 1, "draft_pick": 13,
+               "cap_holds": {"27-28": "TEAM_OPT"}}
+check("under 4 years: RFA", T._option_fa_tag(BIOS["r2"], "27-28")[0] == "RFA")
+check("a declined rookie-scale option: UFA, though under 4 years (§ 6.1)",
+      T._option_fa_tag(BIOS["rso"], "27-28")[0] == "UFA")
+check("...and so is its 3rd-year option",
+      T._option_fa_tag({**BIOS["rso"], "draft_year": 2025}, "27-28")[0] == "UFA")
 check("4 or more: UFA", T._option_fa_tag(BIOS["old"], "27-28")[0] == "UFA")
 check("finishing a first-round rookie deal: RFA despite 4 years", T._option_fa_tag(BIOS["rs"], "27-28")[0] == "RFA")
 check("no experience on file: undecided", T._option_fa_tag(BIOS["nobody"], "27-28")[0] is None)

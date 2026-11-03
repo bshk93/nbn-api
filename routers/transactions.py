@@ -711,11 +711,18 @@ def _apply_option(details: OptionDetails, info: dict) -> Optional[str]:
 
 
 def _option_fa_tag(bio: dict, hold_season: str) -> tuple[Optional[str], str]:
-    """§ 3.1: the hold a declined option leaves is RFA (RFA-*eligible*: the QO
-    still decides) for a player under 4 years of experience entering
-    `hold_season`, or finishing a first-round rookie-scale deal; UFA for
-    anyone else. Returns (tag, why); tag is None when his experience isn't
-    on file, which § 3.1 leaves to be judged by hand."""
+    """The hold a declined option leaves. A declined rookie-scale option (the
+    3rd or 4th season of a first-round deal) is always UFA (§ 6.1, as in the
+    NBA CBA): only a pick who plays out all four years gets a QO. Otherwise
+    § 3.1: RFA (RFA-*eligible*: the QO still decides) for a player under 4
+    years of experience entering `hold_season`, or finishing a first-round
+    rookie-scale deal; UFA for anyone else. Returns (tag, why); tag is None
+    when his experience isn't on file, which § 3.1 leaves to be judged by
+    hand. Read before the decline is applied, while the year is still tagged
+    TEAM_OPT."""
+    if ((bio.get("cap_holds") or {}).get(hold_season) == "TEAM_OPT"
+            and season_calendar.is_rookie_scale_option(bio, hold_season)):
+        return "UFA", "it is a rookie-scale option, and declining one leaves him unrestricted (§ 6.1)"
     if _finishes_rookie_scale(bio, hold_season):
         return "RFA", "he is finishing his first-round rookie-scale deal"
     exp = _qo_years_exp(bio, hold_season)
@@ -7437,6 +7444,7 @@ def _validate_option(details: OptionDetails, ctx: dict) -> list[CheckResult]:
         return checks
 
     tag, why = _option_fa_tag(bio, details.year)
+    cite = "" if "§" in why else " (§ 3.1)"
     if tag is None:
         checks.append(CheckResult(
             check="option_fa_status", passed=False, level="warning",
@@ -7446,7 +7454,7 @@ def _validate_option(details: OptionDetails, ctx: dict) -> list[CheckResult]:
     elif details.cap_hold_type and details.cap_hold_type != tag:
         checks.append(CheckResult(
             check="option_fa_status", passed=False, level="error",
-            message=f"{name} can't be a {details.cap_hold_type} hold: {why}, so he is a {tag} (§ 3.1).",
+            message=f"{name} can't be a {details.cap_hold_type} hold: {why}, so he is a {tag}{cite}.",
         ))
     elif tag == "RFA":
         checks.append(CheckResult(
@@ -7457,7 +7465,7 @@ def _validate_option(details: OptionDetails, ctx: dict) -> list[CheckResult]:
     else:
         checks.append(CheckResult(
             check="option_fa_status", passed=True,
-            message=f"He becomes an unrestricted free agent: {why} (§ 3.1).",
+            message=f"He becomes an unrestricted free agent: {why}{cite}.",
         ))
 
     hold = _option_hold_preview(details, ctx)
