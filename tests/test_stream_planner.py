@@ -166,7 +166,87 @@ two = [game("x1", "2026-11-20", "BOS", "NYK"), game("y1", "2026-11-20", "LAL", "
 p = sp.plan(D1, D2, two, **base_inputs(ratings=r))
 check("day one picks the better game", p["days"][0]["projected_pick"] == "x1")
 check("day two doesn't repeat the same pair", p["days"][1]["projected_pick"] == "y2")
-check("exposure counts projected picks", next(e for e in p["exposure"] if e["team"] == "BOS")["projected"] == 1)
+check("exposure counts projected picks", next(e for e in p["exposure"] if e["team"] == "BOS")["picked"] == 1)
+
+# ── the cooldown (v2) ────────────────────────────────────────────────────────
+
+print("cooldown")
+# SAS, Nov 2026: an under-share team kept topping days a week apart on fair
+# share alone. Here SAS is the only team never streamed, so fair share loves
+# every SAS game; it may top one day, then must sit out 7 days either side.
+hist = [game(f"h{i}", f"2026-11-0{i}", a, h, stream=True) for i, (a, h) in enumerate(
+    [("LAL", "GSW"), ("BOS", "NYK"), ("MIA", "ORL"), ("DEN", "UTA"), ("PHX", "SAC"), ("DAL", "HOU")], start=1)]
+sas = [game("s1", "2026-11-20", "CHA", "SAS"), game("o1", "2026-11-20", "LAL", "BOS"),
+       game("s2", "2026-11-24", "ATL", "SAS"), game("o2", "2026-11-24", "MIA", "DEN"),
+       game("s3", "2026-11-28", "SAS", "TOR"), game("o3", "2026-11-28", "PHX", "DAL")]
+p = sp.plan(date(2026, 11, 20), date(2026, 11, 28), hist + sas, **base_inputs())
+pk = {d["date"]: d["projected_pick"] for d in p["days"]}
+check("the under-share team tops the first day", pk["2026-11-20"] == "s1")
+check("but not again within 7 days", pk["2026-11-24"] == "o2")
+sas_day2 = next(g for g in p["days"][4]["games"] if g["id"] == "s2")
+check("the passed-over game is marked with its clash, and still outscores the pick",
+      factor(p["days"][4], "s2", "fairness") > factor(p["days"][4], "o2", "fairness") and sas_day2["cooldown"] == {"team": "SAS", "date": "2026-11-20", "days": 4})
+check("after 7 days it can come back", pk["2026-11-28"] == "s3")
+check("no SAS pick within 7 days of another", all(
+    abs((date.fromisoformat(a) - date.fromisoformat(b)).days) > 7
+    for a in pk for b in pk if a < b and pk[a] in ("s1", "s2", "s3") and pk[b] in ("s1", "s2", "s3")))
+
+only = [game("r", "2026-11-18", "LAL", "MIA", stream=True), game("q", "2026-11-20", "LAL", "GSW"),
+        game("q2", "2026-11-20", "MIA", "BOS")]
+d = sp.plan(D1, D1, only, **base_inputs())["days"][0]
+check("every game on cooldown: the pick is forced", d["forced"] and d["projected_pick"] is not None)
+only2 = [game("r", "2026-11-18", "LAL", "MIA", stream=True), game("r2", "2026-11-15", "BOS", "NYK", stream=True),
+         game("q", "2026-11-20", "LAL", "GSW"), game("q2", "2026-11-20", "BOS", "CHA")]
+d = sp.plan(D1, D1, only2, **base_inputs())["days"][0]
+check("forced picks the furthest clash", d["projected_pick"] == "q2")
+
+d = sp.plan(D1, D1, [game("r", "2026-11-14", "LAL", "MIA", stream=True)] + one, **base_inputs())["days"][0]
+check("repeat: 6 days away costs less than 2 days away",
+      factor(d, "y", "repeat") == -sp.REPEAT_FAR_PTS)
+
+r = {t: 0.0 for t in TEAMS}
+d = sp.plan(D1, D1, [game("t1", "2026-11-20", "ATL", "BKN"), game("t2", "2026-11-20", "TOR", "WAS")],
+            **base_inputs(ratings=r))["days"][0]
+check("quality: tied ratings score the same, whatever the team names", factor(d, "t1", "quality") == factor(d, "t2", "quality"))
+
+# ── picks and skips drive later days ─────────────────────────────────────────
+
+print("picks and skips")
+r = {**{t: 0.0 for t in TEAMS}, "BOS": 3.0, "NYK": 3.0}
+two = [game("x1", "2026-11-20", "BOS", "NYK"), game("y1", "2026-11-20", "LAL", "GSW"),
+       game("x2", "2026-11-21", "NYK", "BOS"), game("y2", "2026-11-21", "GSW", "LAL")]
+p = sp.plan(D1, D2, two, **base_inputs(ratings=r), picks={"y1"})
+check("a chosen game is the day's pick", p["days"][0]["projected_pick"] == "y1" and p["days"][0]["pick_source"] == "chosen")
+check("and the next day re-ranks around it", p["days"][1]["projected_pick"] == "x2")
+p = sp.plan(D1, D2, two, **base_inputs(ratings=r), skips={"2026-11-20"})
+check("a skipped day has no pick", p["days"][0]["projected_pick"] is None and p["days"][0]["skipped"])
+check("and doesn't push the next day off its best game", p["days"][1]["projected_pick"] == "x2")
+p = sp.plan(D1, D2, two, **base_inputs(ratings=r), picks={"nope"})
+check("an unknown pick is reported, not used", p["ignored_picks"] == ["nope"] and p["days"][0]["projected_pick"] == "x1")
+
+# ── meetings, last stream, balance ───────────────────────────────────────────
+
+print("meetings and balance")
+sch = [game("m1", "2026-10-25", "BOS", "NYK", stream=True), game("m2", "2026-11-01", "NYK", "BOS"),
+       game("m3", "2026-11-20", "BOS", "NYK"), game("m4", "2026-12-20", "NYK", "BOS"),
+       game("z", "2026-11-20", "LAL", "GSW")]
+res = [{"date": "2026-10-25", "home": "NYK", "away": "BOS", "home_pts": 100, "away_pts": 110},
+       {"date": "2026-11-01", "home": "BOS", "away": "NYK", "home_pts": 99, "away_pts": 101}]
+d = sp.plan(D1, D1, sch, **base_inputs(), results=res, today=D1)["days"][0]
+g = next(x for x in d["games"] if x["id"] == "m3")
+check("meetings list the other games this season, in date order",
+      [m["id"] for m in g["meetings"]] == ["m1", "m2", "m4"])
+check("a played meeting carries its score and stream flag",
+      g["meetings"][0]["away_pts"] == 110 and g["meetings"][0]["streamed"] and not g["meetings"][1]["streamed"])
+check("a future meeting has no score", g["meetings"][2]["home_pts"] is None)
+check("last stream is the latest on or before today", g["last_stream"] == {"away": "2026-10-25", "home": "2026-10-25"}
+      and next(x for x in d["games"] if x["id"] == "z")["last_stream"] == {"away": None, "home": None})
+p = sp.plan(D1, D1, sch, **base_inputs(), results=res, today=D1)
+bal = {c["name"]: c for c in p["balance"]["conferences"]}
+check("balance counts both teams of each stream (BOS and NYK, plus the day's pick)", bal["East"]["appearances"] + bal["West"]["appearances"] == 4)
+check("balance has six divisions", len(p["balance"]["divisions"]) == 6)
+check("exposure carries conference and division",
+      next(e for e in p["exposure"] if e["team"] == "BOS")["division"] == "Atlantic")
 
 # ── head-to-head from games ──────────────────────────────────────────────────
 
@@ -200,6 +280,8 @@ sp._rosters = lambda bios, ovr: base_inputs()["rosters"]
 sp.injuries_mod.load_injuries = lambda: {"players": [{"slug": "bos-star", "status": "Out"}]}
 sp._load_json = lambda path, default: None
 sp._h2h = lambda today: ({}, {}, [])
+sp.gh.get_index = lambda: (None, None)
+sp.po.season_results = lambda index, season: []
 app = FastAPI()
 app.include_router(sp.router)
 c = TestClient(app)
@@ -214,6 +296,10 @@ check("'to' before 'from' is refused", c.get("/api/stream-planner?from=2026-11-1
                                              headers={"Authorization": "Bearer " + STREAM}).status_code == 422)
 check("a bad date is refused", c.get("/api/stream-planner?from=soon",
                                      headers={"Authorization": "Bearer " + STREAM}).status_code == 422)
+res = c.get("/api/stream-planner?picks=y&skip=2026-11-21", headers={"Authorization": "Bearer " + STREAM})
+check("picks= reaches the plan", res.status_code == 200 and res.json()["days"][0]["projected_pick"] == "y")
+check("a bad skip date is refused", c.get("/api/stream-planner?skip=tomorrow",
+                                          headers={"Authorization": "Bearer " + STREAM}).status_code == 422)
 
 print()
 if FAILS:

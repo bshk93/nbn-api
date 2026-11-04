@@ -23,17 +23,29 @@ The score, in points (WEIGHTS):
   fairness           the even share of *scheduled* streams (bought ones don't
                      count against a team) minus what each team has had or is
                      already flagged for; under-exposed teams gain, over-exposed lose
-  repeat             a team streamed within REPEAT_DAYS either side of the date
-                     (bought streams count here: it's the same team on stream)
+  repeat             a team on stream close to the date, either side: more off
+                     within REPEAT_NEAR_DAYS than within COOLDOWN_DAYS (bought
+                     streams count here: it's the same team on stream)
 
 Milestones are the page's (+5, from `milestones.js`), so there is one
 milestone implementation, not a Python mirror.
 
 Days: a day with a flagged game that nobody bought is **locked** — its stream
 is chosen — and is not ranked. A day whose only stream is bought still needs
-its pick. Days are scored in order, assuming each open day's top game is the
-one streamed (`projected`): it counts toward fairness and repeats for the
-days after, so a week of picks doesn't land on one under-exposed team.
+its pick.
+
+**The cooldown is a rule, not a weight.** A game with a team on stream within
+COOLDOWN_DAYS either side (set, bought, or picked earlier in this plan) is
+still ranked and shown, marked `cooldown`, but can't be the day's pick unless
+every game that day is on cooldown — then the one whose clash is furthest away
+is picked, marked `forced`. Without it, fair share kept dragging the same
+under-exposed team back every few days (SAS, Nov 2026).
+
+Days are scored in order. Each open day's pick is the caller's choice when it
+sent one (`picks`, by game id; `skips`, by date, for a day it leaves empty),
+otherwise the best game off cooldown (`projected`). Either way the pick counts
+toward fairness and the cooldown for every day after, so a swap re-ranks the
+rest of the range.
 
 Everything below the loaders is pure (inputs in, plan out) so the tests run
 without a data dir. Pinned by tests/test_stream_planner.py.
@@ -77,8 +89,10 @@ LABELS = {
 }
 MAX_DAYS = 31
 DEFAULT_DAYS = 7
-REPEAT_DAYS = 3            # a team on stream this close (either side) is a repeat
-REPEAT_PER_TEAM = 10       # points off per repeated team, capped at WEIGHTS["repeat"]
+COOLDOWN_DAYS = 7          # a team on stream this close (either side) can't be the pick
+REPEAT_NEAR_DAYS = 3       # and this close costs the most
+REPEAT_NEAR_PTS = 10       # points off per team within REPEAT_NEAR_DAYS ...
+REPEAT_FAR_PTS = 5         # ... and within COOLDOWN_DAYS, capped at WEIGHTS["repeat"]
 SPREAD_FOR_ZERO = 12.0     # a projected spread this wide scores no closeness
 OWNER_GAMES_FULL = 30      # meetings for a full volume score
 FRANCHISE_GAMES_FULL = 24
@@ -212,14 +226,21 @@ def injury_adjustments(rosters: dict[str, list[dict]], out_slugs: set[str]) -> d
 # ── Scoring one game ─────────────────────────────────────────────────────────
 
 def _quality(away, home, ratings: dict[str, float]) -> dict:
-    order = sorted(ratings, key=lambda t: ratings[t])
-    n = max(len(order) - 1, 1)
-    pct = {t: i / n for i, t in enumerate(order)}
-    a, h = pct.get(away, 0.5), pct.get(home, 0.5)
+    vals = list(ratings.values())
+    n = max(len(vals) - 1, 1)
+    # Tied teams share a percentile (the mean of their places), so equal
+    # ratings — every team at 0.0 before the first game — don't rank by name.
+    def pct_of(t):
+        v = ratings[t]
+        below = sum(1 for x in vals if x < v)
+        ties = sum(1 for x in vals if x == v)
+        return (below + (ties - 1) / 2) / n
+    a = pct_of(away) if away in ratings else 0.5
+    h = pct_of(home) if home in ratings else 0.5
     frac = 0.6 * (a + h) / 2 + 0.4 * min(a, h)
     def rk(t):
-        return len(order) - order.index(t) if t in order else "?"
-    return _pts("quality", frac, f"Rating rank {away} #{rk(away)}, {home} #{rk(home)} of {len(order)}")
+        return 1 + sum(1 for x in vals if x > ratings[t]) if t in ratings else "?"
+    return _pts("quality", frac, f"Rating rank {away} #{rk(away)}, {home} #{rk(home)} of {len(vals)}")
 
 
 def _closeness(away, home, ratings) -> dict:
@@ -292,16 +313,35 @@ def _fairness(away, home, counts: dict[str, int], share: float) -> dict:
     return _pts("fairness", frac, note)
 
 
-def _repeat(away, home, day: date, on_stream: dict[str, list[date]]) -> dict:
+def nearest_stream(team: str, day: date, on_stream: dict[str, list[date]]) -> Optional[date]:
+    """The team's stream closest to `day` (either side, not `day` itself)."""
+    near = [d for d in on_stream.get(team, []) if d != day]
+    return min(near, key=lambda d: (abs((d - day).days), d)) if near else None
+
+
+def cooldown(away: str, home: str, day: date, on_stream: dict[str, list[date]]) -> Optional[dict]:
+    """{team, date, days} for the closer clash within COOLDOWN_DAYS, or None."""
     hits = []
     for t in (away, home):
-        near = [d for d in on_stream.get(t, []) if d != day and abs((d - day).days) <= REPEAT_DAYS]
-        if near:
-            nearest = min(near, key=lambda d: abs((d - day).days))
-            hits.append(f"{t} on stream {nearest.strftime('%b %-d')}")
-    pen = min(REPEAT_PER_TEAM * len(hits), WEIGHTS["repeat"])
+        d = nearest_stream(t, day, on_stream)
+        if d and abs((d - day).days) <= COOLDOWN_DAYS:
+            hits.append({"team": t, "date": d.isoformat(), "days": abs((d - day).days)})
+    return min(hits, key=lambda h: h["days"]) if hits else None
+
+
+def _repeat(away, home, day: date, on_stream: dict[str, list[date]]) -> dict:
+    hits, pen = [], 0
+    for t in (away, home):
+        d = nearest_stream(t, day, on_stream)
+        if d is None:
+            continue
+        gap = abs((d - day).days)
+        if gap <= COOLDOWN_DAYS:
+            pen += REPEAT_NEAR_PTS if gap <= REPEAT_NEAR_DAYS else REPEAT_FAR_PTS
+            hits.append(f"{t} on stream {d.strftime('%b %-d')}")
+    pen = min(pen, WEIGHTS["repeat"])
     return {"pts": -float(pen), "max": WEIGHTS["repeat"], "label": LABELS["repeat"],
-            "detail": " · ".join(hits) if hits else f"Neither team on stream within {REPEAT_DAYS} days"}
+            "detail": " · ".join(hits) if hits else f"Neither team on stream within {COOLDOWN_DAYS} days"}
 
 
 def score_game(g: dict, day: date, ctx: dict) -> dict:
@@ -348,36 +388,63 @@ def _is_bought(g: dict) -> bool:
     return bool(g.get("stream")) and bool(g.get("stream_buyer"))
 
 
+def _conference(team: str) -> str:
+    return "East" if team in po.EAST else "West"
+
+
+def meetings_index(schedule: list[dict], results: list[dict]) -> dict[frozenset, list[dict]]:
+    """This season's games between each pair: every scheduled meeting with its
+    score once played (`season_results`, matched on date + home + away) and
+    whether it was on stream. Date order."""
+    scores = {(r["date"], r["home"], r["away"]): r for r in results}
+    out: dict[frozenset, list[dict]] = defaultdict(list)
+    for g in schedule:
+        r = scores.get((g["date"], g["home_team"], g["away_team"]))
+        out[frozenset((g["away_team"], g["home_team"]))].append({
+            "id": g["id"], "date": g["date"], "away": g["away_team"], "home": g["home_team"],
+            "away_pts": r["away_pts"] if r else None, "home_pts": r["home_pts"] if r else None,
+            "streamed": bool(g.get("stream"))})
+    for v in out.values():
+        v.sort(key=lambda m: m["date"])
+    return out
+
+
 def plan(start: date, end: date, schedule: list[dict], *, ratings: dict[str, float],
          odds: dict[str, dict], season_frac: float, rosters: dict[str, list[dict]],
          out: set[str], names: dict[str, str], owners: dict[str, str],
-         owner_h2h: dict, franchise_h2h: dict) -> dict:
+         owner_h2h: dict, franchise_h2h: dict,
+         picks: Optional[set[str]] = None, skips: Optional[set[str]] = None,
+         results: Optional[list[dict]] = None, today: Optional[date] = None) -> dict:
     """The whole plan for [start, end]. `schedule` is the season's games
-    (schedule-{season}.json rows); every other argument is described in the
-    module docstring. Pure."""
+    (schedule-{season}.json rows); `picks` are game ids the caller has chosen,
+    `skips` dates it leaves empty; `results` are the season's played games
+    (`playoff_odds.season_results`) for the meetings. The rest is described in
+    the module docstring. Pure."""
+    picks, skips = set(picks or ()), set(skips or ())
+    today = today or start
     counts: dict[str, int] = defaultdict(int)          # scheduled streams, had + flagged
     bought: dict[str, int] = defaultdict(int)
     on_stream: dict[str, list[date]] = defaultdict(list)
+    last: dict[str, Optional[str]] = {}
     for g in schedule:
         d = date.fromisoformat(g["date"])
-        if _is_scheduled_stream(g):
-            for t in (g["away_team"], g["home_team"]):
-                counts[t] += 1
-                on_stream[t].append(d)
-        elif _is_bought(g):
-            for t in (g["away_team"], g["home_team"]):
-                bought[t] += 1
-                on_stream[t].append(d)
+        if not g.get("stream"):
+            continue
+        for t in (g["away_team"], g["home_team"]):
+            (counts if _is_scheduled_stream(g) else bought)[t] += 1
+            on_stream[t].append(d)
+            if d <= today and (last.get(t) or "") < g["date"]:
+                last[t] = g["date"]
     stream_dates = {g["date"] for g in schedule if _is_scheduled_stream(g)}
     days_with_games = sorted({g["date"] for g in schedule})
-    # The even share: every stream day so far and every day still to plan
-    # gives two teams a scheduled stream, spread over thirty teams.
     teams = sorted(VALID_TEAMS)
     by_date: dict[str, list[dict]] = defaultdict(list)
     for g in schedule:
         by_date[g["date"]].append(g)
+    meets = meetings_index(schedule, results or [])
 
-    projected: dict[str, int] = defaultdict(int)
+    picked: dict[str, int] = defaultdict(int)
+    used_picks: set[str] = set()
     out_days = []
     day = start
     while day <= end:
@@ -388,37 +455,74 @@ def plan(start: date, end: date, schedule: list[dict], *, ratings: dict[str, flo
         entry = {"date": ds, "games_count": len(games),
                  "locked": _brief(locked) if locked else None,
                  "bought": [_brief(g) for g in bought_games],
-                 "games": [], "projected_pick": None}
+                 "games": [], "projected_pick": None, "pick_source": None,
+                 "forced": False, "skipped": False}
         if games and not locked:
+            # The even share: every stream day so far, every pick in this plan
+            # and this one give two teams a scheduled stream, over thirty teams.
             stream_days = len(stream_dates | {d["date"] for d in out_days if d["projected_pick"]}) + 1
             share = 2 * stream_days / len(teams)
             ctx = {"ratings": ratings, "odds": odds, "season_frac": season_frac, "rosters": rosters,
                    "out": out, "names": names, "owners": owners, "owner_h2h": owner_h2h,
                    "franchise_h2h": franchise_h2h,
-                   "counts": {t: counts[t] + projected[t] for t in teams},
+                   "counts": {t: counts[t] + picked[t] for t in teams},
                    "share": share, "on_stream": on_stream}
-            ranked = sorted((score_game(g, day, ctx) for g in games if not _is_bought(g)),
-                            key=lambda r: (-r["score"], r["time_et"], r["home"]))
+            ranked = []
+            for g in games:
+                if _is_bought(g):
+                    continue
+                r = score_game(g, day, ctx)
+                r["cooldown"] = cooldown(r["away"], r["home"], day, on_stream)
+                r["meetings"] = [m for m in meets.get(frozenset((r["away"], r["home"])), []) if m["id"] != r["id"]]
+                r["last_stream"] = {"away": last.get(r["away"]), "home": last.get(r["home"])}
+                ranked.append(r)
+            ranked.sort(key=lambda r: (-r["score"], r["time_et"], r["home"]))
             for i, r in enumerate(ranked):
                 r["rank"] = i + 1
             entry["games"] = ranked
-            if ranked:
-                pick = ranked[0]
+            chosen = next((r for r in ranked if r["id"] in picks), None)
+            pick = None
+            if chosen:
+                pick, entry["pick_source"] = chosen, "chosen"
+                used_picks.add(chosen["id"])
+            elif ds in skips:
+                entry["skipped"] = True
+            elif ranked:
+                fresh = [r for r in ranked if not r["cooldown"]]
+                if fresh:
+                    pick = fresh[0]
+                else:   # every game clashes: the one whose clash is furthest away
+                    pick = max(ranked, key=lambda r: (r["cooldown"]["days"], r["score"]))
+                    entry["forced"] = True
+                entry["pick_source"] = "projected"
+            if pick:
                 entry["projected_pick"] = pick["id"]
                 for t in (pick["away"], pick["home"]):
-                    projected[t] += 1
+                    picked[t] += 1
                     on_stream[t].append(day)
         out_days.append(entry)
         day += timedelta(days=1)
 
     total_streams = len(stream_dates) + sum(1 for d in out_days if d["projected_pick"])
     share = 2 * total_streams / len(teams) if teams else 0
-    exposure = sorted(({"team": t, "scheduled": counts[t], "projected": projected[t], "bought": bought[t],
-                        "vs_share": round(counts[t] + projected[t] - share, 2)} for t in teams),
-                      key=lambda r: (r["scheduled"] + r["projected"], r["team"]))
+    exposure = sorted(({"team": t, "conference": _conference(t), "division": _DIVISION_OF.get(t),
+                        "scheduled": counts[t], "picked": picked[t], "bought": bought[t],
+                        "last_stream": last.get(t),
+                        "vs_share": round(counts[t] + picked[t] - share, 2)} for t in teams),
+                      key=lambda r: (r["scheduled"] + r["picked"], r["team"]))
+
+    def group(name: str, members: list[str]) -> dict:
+        return {"name": name, "teams": len(members),
+                "appearances": sum(counts[t] + picked[t] for t in members),
+                "share": round(share * len(members), 2)}
+    balance = {
+        "conferences": [group(c, [t for t in teams if _conference(t) == c]) for c in ("East", "West")],
+        "divisions": [group(dv, sorted(ts)) for dv, ts in DIVISIONS.items()],
+    }
     return {"from": start.isoformat(), "to": end.isoformat(), "weights": WEIGHTS, "labels": LABELS,
-            "share": round(share, 2), "exposure": exposure, "days": out_days,
-            "season_days": len(days_with_games)}
+            "cooldown_days": COOLDOWN_DAYS, "share": round(share, 2), "exposure": exposure,
+            "balance": balance, "days": out_days, "season_days": len(days_with_games),
+            "ignored_picks": sorted(picks - used_picks)}
 
 
 def _brief(g: dict) -> dict:
@@ -484,8 +588,21 @@ def odds_inputs(run: Optional[dict]) -> tuple[dict, dict, float, Optional[str]]:
 @router.get("/api/stream-planner")
 def get_stream_planner(from_: Optional[str] = Query(default=None, alias="from"),
                        to: Optional[str] = Query(default=None),
+                       picks: Optional[str] = Query(default=None),
+                       skip: Optional[str] = Query(default=None),
                        info: dict = Depends(require_any_role("streamer"))):
+    """`picks`: comma-separated game ids the caller has chosen; `skip`:
+    comma-separated dates it leaves empty. Both steer the days after them."""
     today = date.fromisoformat(league_today_str())
+    pick_ids = {x.strip() for x in (picks or "").split(",") if x.strip()}
+    skip_dates = {x.strip() for x in (skip or "").split(",") if x.strip()}
+    if len(pick_ids) > MAX_DAYS or len(skip_dates) > MAX_DAYS:
+        raise HTTPException(status_code=422, detail=f"At most {MAX_DAYS} picks or skips")
+    for d in skip_dates:
+        try:
+            date.fromisoformat(d)
+        except ValueError:
+            raise HTTPException(status_code=422, detail=f"skip dates must be YYYY-MM-DD, got {d!r}")
     try:
         start = date.fromisoformat(from_) if from_ else today
         end = date.fromisoformat(to) if to else start + timedelta(days=DEFAULT_DAYS - 1)
@@ -511,5 +628,6 @@ def get_stream_planner(from_: Optional[str] = Query(default=None, alias="from"),
     names = {slug: player_name((b or {}).get("name") or slug) for slug, b in bios.items()}
     result = plan(start, end, schedule, ratings=ratings, odds=odds, season_frac=frac, rosters=rosters,
                   out=out, names=names, owners={t: o for t, o in owners.items() if o},
-                  owner_h2h=owner, franchise_h2h=franchise)
+                  owner_h2h=owner, franchise_h2h=franchise, picks=pick_ids, skips=skip_dates,
+                  results=po.season_results(gh.get_index()[0], season), today=today)
     return {"season": season, "today": today.isoformat(), "odds_as_of": as_of, **result}
