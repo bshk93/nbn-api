@@ -666,6 +666,33 @@ played. An unreadable schedule posts "NBN is live" with no pings.
 
 Pinned by `tests/test_stream_notify.py` (no network).
 
+## Stream planner (`routers/stream_planner.py`)
+
+`GET /api/stream-planner?from=&to=` (`streamer`, admin passes; default the
+next 7 days, at most 31) behind the Planner tab on `/committees/stream`. One
+scheduled stream game a day, bought streams on top: it ranks each day's
+unflagged games by points (`WEIGHTS`) and says why, per factor. Its docstring
+is the whole model.
+
+- **Read-only.** The page flags a pick with the existing
+  `POST /api/schedule/{id}/stream`; nothing here writes, and nothing picks on
+  its own.
+- **No rule of its own for strength or injuries.** Ratings are the hourly
+  playoff-odds run's (`playoff-odds.json`); Out players come off through
+  `roster_priors` on `MINUTES` weights, the same scale; with no odds run yet
+  the roster prior stands alone. Owner head-to-head is attributed by game day
+  from `load_owner_tenures` (`stats_build/pipeline.py`), like `owner_stats`.
+- **A flagged, unbought game locks its day**; a day whose only stream is
+  bought still gets its pick. Fair share counts scheduled streams only; the
+  repeat penalty counts bought ones too (it's the same team on stream).
+- **Days are scored in order**, each open day's top game assumed streamed
+  (`projected_pick`), so a week doesn't land on one under-exposed team.
+- **Milestones are the page's** (`milestones.js`, +5), so there is one
+  milestone implementation rather than a Python mirror.
+
+The scoring (`plan` and its helpers) is pure, so the tests run without a data
+dir. Pinned by `tests/test_stream_planner.py`.
+
 ## Link previews (`routers/og.py`)
 
 Six pages on the site are one shell serving many items, with the item fetched
