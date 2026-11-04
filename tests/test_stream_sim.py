@@ -7,7 +7,8 @@ What must keep being true:
   * the `stream` flag decides the side; a game with no schedule entry is
     counted as unmatched and lands on neither;
   * possessions, margins, home wins and overtime are counted per game;
-  * the player table only holds players with real minutes on both sides.
+  * a rate is pooled (sum over sum), not an average of nightly rates;
+  * a gap only reads as a real one when the t-test says so.
 
     venv/bin/python -m tests.test_stream_sim
 """
@@ -59,29 +60,38 @@ SCHED = [
 ]
 
 out = ss.compare(ROWS, SCHED)
-st, sm = out["summary"]["stream"], out["summary"]["sim"]
+M = {m["key"]: m for m in out["metrics"]}
 
 print("splitting games")
-check("one streamed game, one simmed", (st["games"], sm["games"]) == (1, 1))
+check("one streamed game, one simmed", out["games"] == {"stream": 1, "sim": 1})
+check("two team-games a side", out["team_games"] == {"stream": 2, "sim": 2})
 check("a game off the schedule is unmatched, on neither side", out["unmatched"] == 1)
 check("the streamed game is listed with its score",
       out["stream_games"] == [{"date": "2026-10-20", "home_team": "AAA", "away_team": "BBB",
                                "home_score": 90, "away_score": 80, "streamer": "kim", "youtube_url": None}])
 
-print("\nper team-game numbers")
-check("points per team-game", st["pts"] == 85 and sm["pts"] == 110)
-check("possessions: FGA - OREB + TOV + 0.44 FTA", st["pace"] == 22)
-check("margin per game", st["margin"] == 10 and sm["margin"] == 20)
-check("home team won both", st["home_win_pct"] == 1 and sm["home_win_pct"] == 1)
-check("over 240 player-minutes a side is overtime", st["ot_pct"] == 0 and sm["ot_pct"] == 1)
-check("the top scorer's share of his team's points", st["top_pts_share"] == 1)
+print("\nmeasures")
+check("points per team-game", M["pts"]["stream"] == 85 and M["pts"]["sim"] == 110)
+check("possessions: FGA - OREB + TOV + 0.44 FTA", M["pace"]["stream"] == 22)
+check("margin per game", M["margin"]["stream"] == 10 and M["margin"]["sim"] == 20)
+check("combined score per game", M["total"]["stream"] == 170)
+check("home team won both", M["home_won"]["stream"] == 1 and M["home_won"]["sim"] == 1)
+check("over 240 player-minutes a side is overtime", M["ot"]["stream"] == 0 and M["ot"]["sim"] == 1)
+check("the top scorer's share of his team's points", M["top_pts"]["stream"] == 1)
+check("difference and relative difference", M["pts"]["diff"] == -25 and abs(M["pts"]["rel"] + 25 / 110) < 1e-9)
+check("a 90-point night is a 40-point game", M["p40"]["stream"] == 1)
+check("every measure has a group, a family and a signal", all(m["group"] and m["family"] and m["signal"] for m in out["metrics"]))
 
-print("\nplayers")
-slugs = {p["slug"] for p in out["players"]}
-check("players on both sides are listed", {"star-a", "star-b"} <= slugs)
-check("a player on one side only is not", "star-c" not in slugs)
-a = next(p for p in out["players"] if p["slug"] == "star-a")
-check("each side's per-game line", a["stream"]["pts"] == 90 and a["sim"]["pts"] == 100)
+print("\npooling")
+fg = next(m for m in ss.METRICS if m["key"] == "fg_pct")
+v, per = ss._side(fg, [{"FGM": 1, "FGA": 1}, {"FGM": 0, "FGA": 9}])
+check("FG% is makes over attempts (1 of 10), not the mean of 100% and 0%", v == 0.1 and per == [1.0, 0.0])
+
+print("\nsignal")
+check("|t| of 3+ is clear", ss.signal(-3.2) == "clear")
+check("|t| of 2-3 is likely", ss.signal(2.4) == "likely")
+check("under 2 is noise", ss.signal(1.1) == "noise")
+check("no spread at all says nothing", ss.signal(None) == "none")
 
 print()
 if FAILS:
