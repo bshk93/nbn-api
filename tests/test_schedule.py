@@ -432,6 +432,51 @@ check("an unclaimed game carries no streamer key on disk",
 check("an unflagged game carries no stream key on disk",
       not any("stream" in x for x in raw["games"]))
 
+# ── batch stream flags (the Planner's Save all) ──────────────────────────────
+
+print("stream batch")
+seed("27-28", [
+    g("b1", "2027-11-01", "BOS", "DET"), g("b2", "2027-11-01", "PHI", "NYK"),
+    g("b3", "2027-11-02", "LAL", "GSW"), g("b4", "2027-11-03", "MIA", "ORL"),
+    {**g("b5", "2027-11-03", "DEN", "UTA"), "stream": True, "stream_buyer": "Buyer"},
+    {**g("b6", "2027-11-04", "SAC", "PHX"), "stream": True},
+    g("b7", "2027-11-04", "HOU", "DAL"),
+])
+
+
+def flagged27():
+    return {x["id"] for x in games("27-28") if x["stream"] and not x.get("stream_buyer")}
+
+
+B = "/api/schedule/stream-batch?season=27-28"
+check("a non-streamer can't save a batch",
+      c.post(B, json={"picks": [{"date": "2027-11-01", "game_id": "b1"}]}, headers=PLAIN).status_code == 403)
+r = c.post(B, json={"picks": [{"date": "2027-11-01", "game_id": "b1"}, {"date": "2027-11-04", "game_id": "b7"},
+                              {"date": "2027-11-02", "game_id": "b9"}]}, headers=STREAM)
+check("one bad pick refuses the whole batch", r.status_code == 409 and flagged27() == {"b6"})
+probs = r.json()["detail"]["problems"]
+check("and names every bad day",
+      any("2027-11-04" in x and "already set to SAC @ PHX" in x for x in probs)
+      and any("2027-11-02" in x and "no game b9" in x for x in probs) and len(probs) == 2)
+r = c.post(B, json={"picks": [{"date": "2027-11-02", "game_id": "b1"}]}, headers=STREAM)
+check("a game on another date is refused", r.status_code == 409 and "is on 2027-11-01" in r.json()["detail"]["problems"][0])
+r = c.post(B, json={"picks": [{"date": "2027-11-03", "game_id": "b5"}]}, headers=STREAM)
+check("a bought game can't be a pick", r.status_code == 409 and "bought" in r.json()["detail"]["problems"][0])
+r = c.post(B, json={"picks": [{"date": "2027-11-01", "game_id": "b1"}, {"date": "2027-11-01", "game_id": "b2"}]},
+           headers=STREAM)
+check("two picks for one day are refused", r.status_code == 409)
+check("an empty batch is a 422", c.post(B, json={"picks": []}, headers=STREAM).status_code == 422)
+r = c.post(B, json={"picks": [{"date": "2027-11-01", "game_id": "b1"}, {"date": "2027-11-02", "game_id": "b3"},
+                              {"date": "2027-11-03", "game_id": "b4"}]}, headers=STREAM)
+check("a clean batch flags every pick at once",
+      r.status_code == 200 and flagged27() == {"b1", "b3", "b4", "b6"} and len(r.json()["flagged"]) == 3)
+check("a day whose only stream was bought still took its pick",
+      next(x for x in games("27-28") if x["id"] == "b4")["stream"])
+check("the bought game is untouched",
+      next(x for x in games("27-28") if x["id"] == "b5")["stream_buyer"] == "Buyer")
+check("admin can save a batch too", c.post(B, json={"picks": [{"date": "2027-11-04", "game_id": "b7"}]},
+                                           headers=ADMIN).status_code == 409)  # Nov 4 is already set
+
 print()
 if FAILS:
     print(f"{len(FAILS)} FAILED: " + ", ".join(FAILS))

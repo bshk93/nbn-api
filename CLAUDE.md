@@ -685,8 +685,23 @@ is the whole model.
 - **A flagged, unbought game locks its day**; a day whose only stream is
   bought still gets its pick. Fair share counts scheduled streams only; the
   repeat penalty counts bought ones too (it's the same team on stream).
-- **Days are scored in order**, each open day's top game assumed streamed
-  (`projected_pick`), so a week doesn't land on one under-exposed team.
+- **The cooldown is a rule, not a weight** (`COOLDOWN_DAYS`, 7). A game with
+  a team on stream within 7 days either side (set, bought, or picked earlier in
+  the plan) is still ranked, marked `cooldown`, but can't be the day's pick
+  unless every game that day clashes (then the furthest clash, `forced`). Fair
+  share alone kept dragging one under-exposed team back every few days (SAS,
+  Nov 2026). Quality ranks tied ratings equally, never by team name.
+- **Days are scored in order**, and each day's pick steers the days after it:
+  the caller's choice when it sent one (`picks=` game ids, `skip=` dates),
+  otherwise the best game off cooldown (`projected_pick`, `pick_source`). The
+  page sends Chuck's current selection, so a swap re-ranks the rest of the range.
+- Each game also carries this season's `meetings` (score once played, and
+  whether streamed) and both teams' `last_stream`; the response carries
+  `exposure` (with conference and division) and `balance` for the side tally.
+- **Saving a plan is `POST /api/schedule/stream-batch`** (`routers/schedule.py`,
+  `streamer`): every pick is checked first and any bad day is a 409 naming all
+  of them, with nothing written; then one save and one `log_write`. Pinned by
+  `tests/test_schedule.py`.
 - **Milestones are the page's** (`milestones.js`, +5), so there is one
   milestone implementation rather than a Python mirror.
 

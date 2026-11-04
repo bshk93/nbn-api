@@ -504,6 +504,72 @@ def unmark_schedule_game_stream(game_id: str, season: str | None = None,
     return _public(game)
 
 
+class StreamPick(BaseModel):
+    date: str
+    game_id: str
+
+
+class StreamBatch(BaseModel):
+    picks: list[StreamPick]
+
+
+STREAM_BATCH_MAX = 31
+
+
+def _match(game: dict) -> str:
+    return f"{game['away_team']} @ {game['home_team']}"
+
+
+@router.post("/api/schedule/stream-batch")
+def mark_stream_batch(body: StreamBatch, season: str | None = None,
+                      info: dict = Depends(require_role("streamer"))):
+    """Flag a whole plan's stream games at once (the Planner's Save all).
+
+    All or nothing: every pick is checked first, and any problem is a 409
+    naming every bad day, with nothing written. One pick per date; the game must
+    be on that date, not a bought stream, and its date must not already have a
+    stream someone flagged (bought streams are extra, so they don't count)."""
+    preferred = _resolve_season(season)
+    picks = body.picks
+    if not picks:
+        raise HTTPException(status_code=422, detail="No picks to save")
+    if len(picks) > STREAM_BATCH_MAX:
+        raise HTTPException(status_code=422, detail=f"At most {STREAM_BATCH_MAX} picks at a time")
+    with _schedule_lock:
+        data = _load(preferred)
+        by_id = {g["id"]: g for g in data["games"]}
+        problems, seen = [], set()
+        for p in picks:
+            if p.date in seen:
+                problems.append(f"{p.date}: more than one pick for this day")
+                continue
+            seen.add(p.date)
+            game = by_id.get(p.game_id)
+            if not game:
+                problems.append(f"{p.date}: no game {p.game_id} in {preferred}")
+                continue
+            if game["date"] != p.date:
+                problems.append(f"{p.date}: {_match(game)} is on {game['date']}")
+                continue
+            if game.get("stream_buyer"):
+                problems.append(f"{p.date}: {_match(game)} is a bought stream already")
+                continue
+            set_already = next((x for x in data["games"] if x["date"] == p.date and x.get("stream")
+                                and not x.get("stream_buyer")), None)
+            if set_already:
+                problems.append(f"{p.date}: already set to {_match(set_already)}")
+        if problems:
+            raise HTTPException(status_code=409, detail={"message": "Nothing was saved.", "problems": problems})
+        flagged = []
+        for p in picks:
+            by_id[p.game_id]["stream"] = True
+            flagged.append(by_id[p.game_id])
+        _save(preferred, data)
+    log_write(info, f"POST schedule/stream-batch — {preferred} " +
+              ", ".join(f"{g['date']} {g['away_team']}@{g['home_team']}" for g in flagged))
+    return {"season": preferred, "flagged": [_public(g) for g in flagged]}
+
+
 # ── Video link ─────────────────────────────────────────────────────────────
 #
 # The game's own YouTube video, once it's up. routers/youtube_vods.py finds most
