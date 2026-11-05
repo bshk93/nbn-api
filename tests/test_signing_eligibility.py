@@ -130,8 +130,51 @@ def main():
     check("below floor in October but BEFORE opening night is an error",
           r is not None and not r.passed and r.level == "error")
     r = mins({"26-27": "$39,820"}, date="2026-10-20")
-    check("...and from opening night on it warns (may be prorated)",
+    check("...and ON opening night nothing is prorated, so it is still an error",
+          r is not None and not r.passed and r.level == "error")
+
+    # § 3.12 proration, computed off the schedule: the pinned 26-27 season is
+    # 2026-10-20 to 2027-04-15, 178 days, the signing day counted as left.
+    check("opening night prorates nothing",
+          T._minimum_proration("2026-10-20") is None)
+    p = T._minimum_proration("2027-04-14")
+    check("two days before the last game leaves 2 of 178",
+          p == {"season": "26-27", "days": 2, "of": 178})
+    check("before opening night and after the last game prorate nothing",
+          T._minimum_proration("2026-10-19") is None
+          and T._minimum_proration("2027-04-16") is None)
+    floor = T._prorate(1357763, p)
+    check("the prorated rookie floor is 1,357,763 x 2 / 178", floor == 15256)
+    r = mins({"26-27": f"${floor:,}"}, date="2027-04-14", exp=0)
+    check("Year 1 at the prorated floor passes", r is not None and r.passed)
+    check("...and says it was prorated", "prorated to 2 of 178" in r.message)
+    r = mins({"26-27": "$10,000"}, date="2027-04-14", exp=0)
+    check("Year 1 below the prorated floor is now an error, not a warning",
+          r is not None and not r.passed and r.level == "error"
+          and "prorated" in r.message)
+    r = mins({"26-27": f"${floor:,}", "27-28": "$1,000"}, date="2027-04-14", exp=0)
+    check("only Year 1 is prorated: a later year below the floor still errors",
+          r is not None and not r.passed and r.level == "error" and "never prorated" in r.message)
+    r = mins({"26-27": "$30,000"}, date="2027-04-14", exp=10)
+    check("a prorated Year 1 below the player's prorated tier warns",
           r is not None and not r.passed and r.level == "warning")
+
+    # The 1-yr vet minimum's cap hit prorates the same way.
+    sd = T.SignDetails(player="vet", team="BOS", signing_method="minimum",
+                       contract=T.ContractIn(salaries={"26-27": "$1"}, years_experience=10))
+    lvls = {"26-27": {"min_salary_scale": {"0": 1357763, "2": 2449421, "10+": 3876529}}}
+    want = T._prorate(2449421, p)
+    sd.contract.salaries = {"26-27": f"${want:,}"}
+    r = T._check_minimum_contract_cap_hit(sd, bios2, "26-27", lvls, txn_date="2027-04-14")
+    check("a prorated 1-yr vet min at 2-yr min x 2/178 passes", r is not None and r.passed)
+    sd.contract.salaries = {"26-27": "$2,449,421"}
+    r = T._check_minimum_contract_cap_hit(sd, bios2, "26-27", lvls, txn_date="2027-04-14")
+    check("...and the full-season figure in-season warns",
+          r is not None and not r.passed and f"${want:,}" in r.message)
+    check("the contract record carries the proration",
+          T._proration_record({"26-27": "$1"}, "2027-04-14") == {"proration": p}
+          and T._proration_record({"27-28": "$1"}, "2027-04-14") == {}
+          and T._proration_record({"26-27": "$1"}, "2026-08-01") == {})
     check("a league year with no schedule falls back to the month rule",
           T._signed_after_opening_night("2026-04-11")
           and not T._signed_after_opening_night("2025-08-01"))

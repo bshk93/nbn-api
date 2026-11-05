@@ -60,6 +60,20 @@ def regular_season_bounds(season: str) -> Optional[tuple[str, str]]:
     return bounds
 
 
+def proration_days(date: str) -> Optional[tuple[int, int]]:
+    """(days remaining, days in the regular season) for a signing on `date`,
+    for § 3.12's in-season proration. Both count inclusively, and the signing
+    day is a day remaining, as the NBA counts it: a signing on opening night
+    gets every day, so nothing is prorated. None when the date isn't inside
+    its league year's regular season (before opening night, after the last
+    game) or that season has no schedule."""
+    b = regular_season_bounds(_season_for_date(date))
+    if not b or not (b[0] <= date <= b[1]):
+        return None
+    first, last, day = (datetime.strptime(d, "%Y-%m-%d") for d in (b[0], b[1], date))
+    return (last - day).days + 1, (last - first).days + 1
+
+
 def opening_night(season: str) -> Optional[str]:
     b = regular_season_bounds(season)
     return b[0] if b else None
@@ -185,4 +199,5 @@ def season_calendar(season: str) -> dict:
         "trade_deadline": trade_deadline(season),
         "draft_days": draft_days(season),
         "team_option_deadline": team_option_deadline(season),
+        "regular_season_days": (proration_days(b[0])[1] if b else None),
     }

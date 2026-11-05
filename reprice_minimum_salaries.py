@@ -65,7 +65,7 @@ from routers import audit                                              # noqa: E
 from routers.constants import CAP_LEVELS_FILE                          # noqa: E402
 from routers.players import load_player_bios, save_player_bios         # noqa: E402
 from routers.storage import _load_json, _parse_dollar, _season_start, _current_league_year  # noqa: E402
-from routers.transactions import _min_salary_for, _one_year_min_cap_hit  # noqa: E402
+from routers.transactions import _min_salary_for, _one_year_min_cap_hit, _prorate  # noqa: E402
 
 EXEMPT_TYPES = {"two-way", "dead"}
 
@@ -94,7 +94,14 @@ def _contract_target(bio: dict, season: str, cap_levels: dict, entry: dict):
     is_one_year = len([s for s in (entry.get("salaries") or {})
                        if holds.get(s) not in ("UFA", "RFA")]) == 1
     fn = _one_year_min_cap_hit if is_one_year else _min_salary_for
-    return fn(bio, season, cap_levels, contract)
+    target = fn(bio, season, cap_levels, contract)
+    # An in-season signing's Year 1 pays only the days that were left (§ 3.12),
+    # recorded on the entry when it was signed. Re-pricing it as a full season
+    # would hand the player days he was never under contract for.
+    proration = entry.get("proration")
+    if target is not None and proration and proration.get("season") == season:
+        target = _prorate(target, proration)
+    return target
 
 
 def build_plan(bios: dict, cap_levels: dict, players: set[str] | None = None):

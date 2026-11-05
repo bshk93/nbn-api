@@ -1541,6 +1541,7 @@ def _apply_convert_twoway(details: ConvertTwoWayDetails, txn_date: str, info: di
         "guarantee_schedule": details.contract.guarantee_schedule,
         "cap_holds": details.contract.cap_holds,
         "years_experience": details.contract.years_experience,
+        **_proration_record(details.contract.salaries, txn_date),
         "txn_id": txn_id,
     }]
 
@@ -1778,6 +1779,7 @@ def _apply_sign(details: SignDetails, txn_date: str, info: dict, txn_id: Optiona
         "guarantee_schedule": details.contract.guarantee_schedule,
         "cap_holds": details.contract.cap_holds,
         "years_experience": details.contract.years_experience,
+        **_proration_record(details.contract.salaries, txn_date),
         "txn_id": txn_id,
     }]
 
@@ -5336,7 +5338,8 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
     if r:
         checks.append(r)
 
-    r = _check_minimum_contract_cap_hit(details, bios, season, ctx["cap_levels"])
+    r = _check_minimum_contract_cap_hit(details, bios, season, ctx["cap_levels"],
+                                        txn_date=ctx.get("txn_date"))
     if r:
         checks.append(r)
 
@@ -5445,21 +5448,60 @@ def _signed_after_opening_night(txn_date: Optional[str]) -> bool:
     return int(txn_date[5:7]) not in (7, 8, 9)
 
 
+def _minimum_proration(txn_date: Optional[str]) -> Optional[dict]:
+    """§ 3.12: a minimum signed after opening night pays only the days left
+    in the regular season — full-season minimum × days remaining ÷ days in
+    the season, the signing day counted as remaining (the NBA's rule). Only
+    Year 1 is prorated, and only when Year 1 is the season the signing falls
+    in. Returns {season, days, of}, or None when nothing is prorated: an
+    offseason or opening-night signing, or a season with no schedule (the
+    days can't be counted, so `_check_minimum_salary` falls back to asking a
+    person to confirm)."""
+    if not txn_date:
+        return None
+    d = season_calendar.proration_days(txn_date)
+    if not d or d[0] >= d[1]:
+        return None
+    return {"season": _season_for_date(txn_date), "days": d[0], "of": d[1]}
+
+
+def _prorate(amount: int, proration: Optional[dict]) -> int:
+    """`amount` scaled by a `_minimum_proration` result, rounded to the
+    dollar (half up, so the transactions form's Math.round agrees)."""
+    if not proration:
+        return amount
+    return int(amount * proration["days"] / proration["of"] + 0.5)
+
+
+def _proration_record(salaries: dict, txn_date: Optional[str]) -> dict:
+    """`{"proration": ...}` for a contract entry whose Year 1 is prorated,
+    else `{}`. Recorded so `reprice_minimum_salaries.py` re-prices that year
+    as the prorated figure, not a full season."""
+    p = _minimum_proration(txn_date)
+    return {"proration": p} if p and p["season"] in (salaries or {}) else {}
+
+
+# Rounding slack when comparing a submitted figure to a prorated one.
+_PRORATION_SLACK = 1
+
+
 def _check_minimum_salary(contract, player: str, bios: dict, season: str,
                           cap_levels: dict, txn_date: Optional[str] = None,
                           signing_method: Optional[str] = None) -> Optional[CheckResult]:
     """§ 3.12: no contract year may pay below that season's minimum salary.
 
-    Proration is the wrinkle. The league prorates in-season minimum signings
-    (practice, not yet written into the rulebook — see BACKLOG), so a Year 1
-    figure below the full-season minimum can be perfectly legal if the deal
-    was signed after the season started. That excuse applies to **Year 1
-    only**: every later year of the contract is a full season, so the floor is
-    hard there regardless.
+    Proration is the wrinkle. A minimum signed after opening night pays only
+    the days left in the regular season (§ 3.12, `_minimum_proration`), so
+    Year 1 of an in-season signing is checked against the prorated floor.
+    That applies to **Year 1 only**: every later year of the contract is a
+    full season, so the floor is hard there regardless.
 
     Hence the split:
-      * Year 1, signed in-season   -> below floor is a *warning* (likely prorated)
-      * Year 1, signed in the offseason, or any later year -> *error*
+      * Year 1, signed in-season   -> below the *prorated* floor is an error
+      * Year 1, in-season but the days can't be counted (no schedule, or
+        after the last game) -> below floor is a *warning* to confirm
+      * Year 1, signed in the offseason or on opening night, or any later
+        year -> below the full floor is an *error*
       * between the league floor and the player's own experience tier ->
         warning, since experience is inferred from `draft_year` rather than
         verified (same treatment § 3.11 gives it)
@@ -5479,14 +5521,32 @@ def _check_minimum_salary(contract, player: str, bios: dict, season: str,
         return None
     check_name = "minimum_salary"
     is_one_year_min = signing_method == "minimum" and len(contract.salaries or {}) == 1
-    in_season = _signed_after_opening_night(txn_date)
+    proration = _minimum_proration(txn_date)
+    # In-season, but the days can't be counted: no schedule for that league
+    # year, or the signing came after its last game.
+    bounds = (season_calendar.regular_season_bounds(_season_for_date(txn_date))
+              if txn_date else None)
+    in_season = (_signed_after_opening_night(txn_date)
+                 and not (bounds and txn_date <= bounds[1]))
 
     for yr, raw in sorted((contract.salaries or {}).items()):
-        floor = _min_salary_floor(yr, cap_levels)
-        if not floor:
+        full_floor = _min_salary_floor(yr, cap_levels)
+        if not full_floor:
             continue        # no scale configured at or before this season
         amount = _parse_dollar(raw)
-        if amount < floor:
+        prorated = proration if proration and proration["season"] == yr else None
+        floor = _prorate(full_floor, prorated)
+        if prorated and amount < floor - _PRORATION_SLACK:
+            return CheckResult(
+                check=check_name, passed=False, level="error",
+                message=(
+                    f"{yr} salary of ${amount:,} is below the prorated {yr} minimum of "
+                    f"${floor:,} (§ 3.12): ${full_floor:,} × {prorated['days']} of "
+                    f"{prorated['of']} regular-season days left on {txn_date}."
+                ),
+            )
+        if not prorated and amount < floor:
+            # In-season with no way to count the days: a person confirms it.
             prorateable = (yr == season and in_season)
             if prorateable:
                 return CheckResult(
@@ -5509,7 +5569,9 @@ def _check_minimum_salary(contract, player: str, bios: dict, season: str,
         tier_floor = (_one_year_min_cap_hit(bios.get(player) or {}, yr, cap_levels, contract)
                      if is_one_year_min else
                      _min_salary_for(bios.get(player) or {}, yr, cap_levels, contract))
-        if tier_floor and amount < tier_floor:
+        if tier_floor:
+            tier_floor = _prorate(tier_floor, prorated)
+        if tier_floor and amount < tier_floor - (_PRORATION_SLACK if prorated else 0):
             declared = _contract_years_exp(contract, yr)
             basis = (f"{declared} years of experience in {yr}, per the contract"
                      if declared is not None else
@@ -5544,6 +5606,12 @@ def _check_minimum_salary(contract, player: str, bios: dict, season: str,
                 ),
             )
 
+    if proration and proration["season"] in (contract.salaries or {}):
+        return CheckResult(
+            check=check_name, passed=True,
+            message=(f"Every contract year meets the § 3.12 minimum salary, {proration['season']} "
+                     f"prorated to {proration['days']} of {proration['of']} regular-season days."),
+        )
     return CheckResult(
         check=check_name, passed=True,
         message="Every contract year meets the § 3.12 minimum salary.",
@@ -5603,7 +5671,8 @@ def _min_salary_for(bio: dict, season: str, cap_levels: dict,
 
 
 def _check_minimum_contract_cap_hit(details: SignDetails, bios: dict, season: str,
-                                     cap_levels: dict) -> Optional[CheckResult]:
+                                     cap_levels: dict,
+                                     txn_date: Optional[str] = None) -> Optional[CheckResult]:
     """§ 3.12: a 1-year `minimum` signing's cap hit should equal the 2-year
     veteran minimum regardless of the player's actual experience tier. Only
     checked for genuinely 1-year minimum deals (a single salary year) signed
@@ -5622,21 +5691,29 @@ def _check_minimum_contract_cap_hit(details: SignDetails, bios: dict, season: st
                                      details.contract)
     if expected is None:
         return None
+    full = expected
+    proration = _minimum_proration(txn_date)
+    if proration and proration["season"] != season:
+        proration = None
+    expected = _prorate(expected, proration)
     submitted = _parse_dollar(salaries[season])
     # Say which rule produced the figure: a 2+ year veteran is capped at the
     # 2-year minimum, a 0/1-year player is priced at his own tier. And say
     # where his experience came from, since a declared figure is not inferred.
     two_yr_amt = ((cap_levels.get(season, {}) or {}).get("min_salary_scale") or {}).get("2", 0)
-    if expected == two_yr_amt:
-        basis = (f"the 2-year veteran minimum (${expected:,}), whatever his experience; "
+    if full == two_yr_amt:
+        basis = (f"the 2-year veteran minimum (${full:,}), whatever his experience; "
                  f"the league covers any difference")
     else:
-        basis = f"his own minimum tier (${expected:,})"
+        basis = f"his own minimum tier (${full:,})"
+    if proration:
+        basis += (f", prorated to {proration['days']} of {proration['of']} "
+                  f"regular-season days: ${expected:,}")
     if _contract_years_exp(details.contract, season) is not None:
         source = "stated on the contract"
     else:
         source = "inferred from his real NBA draft year"
-    if submitted == expected:
+    if abs(submitted - expected) <= (_PRORATION_SLACK if proration else 0):
         return CheckResult(
             check="minimum_contract_cap_hit", passed=True,
             message=f"1-yr minimum cap hit matches {basis} (§ 3.12).",
@@ -10045,6 +10122,8 @@ def _signing_fact_sheet(team: str, player: str, contract, ctx: dict, *,
         "standard_count_before": before,
         "standard_count_after": after,
         "empty_roster_charge_after": books.erc_after,
+        # § 3.12: {season, days, of} when a signing today prorates Year 1.
+        "minimum_proration": _minimum_proration(ctx.get("txn_date")),
     }
 
 
