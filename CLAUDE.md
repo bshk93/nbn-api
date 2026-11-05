@@ -704,6 +704,14 @@ is the whole model.
   `tests/test_schedule.py`.
 - **Milestones are the page's** (`milestones.js`, +5), so there is one
   milestone implementation rather than a Python mirror.
+- **`priority=`** picks a preset from `PRIORITIES` (`balanced`, `coverage`,
+  `rivalry`, `quality`, `stakes`): multipliers on `WEIGHTS`, applied to each
+  factor's `pts` and `max` after scoring. `weights` in the response is the
+  effective set and `priorities` lists the presets for the page's control.
+  The cooldown is a rule under every preset.
+- **`open_days=N`** replaces `to`: walk until N open days (games, no locked
+  stream), at most 31 out. `to` is the last day walked; `open_days_short` says
+  it ran out first. It's the page's 7/14 days with Hide saved days on.
 
 The scoring (`plan` and its helpers) is pure, so the tests run without a data
 dir. Pinned by `tests/test_stream_planner.py`.

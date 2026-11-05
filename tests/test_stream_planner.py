@@ -265,6 +265,53 @@ check("owner h2h follows the owner on game day",
       oh[frozenset(("Ann", "Cy"))]["games"] == 1 and oh[frozenset(("Bob", "Cy"))]["games"] == 2)
 check("owner h2h credits wins to the owner", oh[frozenset(("Bob", "Cy"))]["wins"]["Cy"] == 2)
 
+# ── open days ────────────────────────────────────────────────────────────────
+
+print("open days")
+od = [game("l1", "2026-11-20", "BOS", "NYK", stream=True), game("l2", "2026-11-20", "LAL", "GSW"),
+      # 11-21: no games
+      game("o1", "2026-11-22", "MIA", "ORL"), game("o2", "2026-11-23", "DEN", "UTA"),
+      game("o3", "2026-11-24", "PHX", "SAC")]
+p = sp.plan(D1, date(2026, 12, 20), od, **base_inputs(), open_days=2)
+check("open_days walks past a locked day and an empty one",
+      [d["date"] for d in p["days"]] == ["2026-11-20", "2026-11-21", "2026-11-22", "2026-11-23"])
+check("open_days: 'to' is the last day walked", p["to"] == "2026-11-23")
+check("open_days: found two, not short", p["open_days_found"] == 2 and not p["open_days_short"])
+p = sp.plan(D1, date(2026, 12, 20), od, **base_inputs(), open_days=5)
+check("open_days past the schedule is short", p["open_days_short"] and p["open_days_found"] == 3)
+p = sp.plan(D1, D2, od, **base_inputs())
+check("no open_days keeps the plain range", p["to"] == "2026-11-21" and not p["open_days_short"])
+
+# ── priorities ───────────────────────────────────────────────────────────────
+
+print("priorities")
+r = {**{t: 0.0 for t in TEAMS}, "BOS": 6.0, "NYK": 6.0}
+oh = {frozenset(("owner-LAL", "owner-GSW")): {"games": 30, "wins": {"owner-LAL": 15, "owner-GSW": 15}, "series": {1, 2}}}
+fh = {frozenset(("LAL", "GSW")): {"games": 24, "wins": {"LAL": 12, "GSW": 12}, "series": {"24-25"}}}
+inp = base_inputs(ratings=r, owner_h2h=oh, franchise_h2h=fh)
+bal = sp.plan(D1, D1, one, **inp)
+rivalry = sp.plan(D1, D1, one, **inp, priority="rivalry")
+qual = sp.plan(D1, D1, one, **inp, priority="quality")
+check("quality preset picks the better teams", qual["days"][0]["projected_pick"] == "x")
+check("rivalry preset picks the rivalry", rivalry["days"][0]["projected_pick"] == "y")
+check("a preset scales a factor's pts and max",
+      factor(rivalry["days"][0], "y", "owner_rivalry") > factor(bal["days"][0], "y", "owner_rivalry")
+      and rivalry["weights"]["owner_rivalry"] == sp.WEIGHTS["owner_rivalry"] * 2.5)
+check("balanced reports the plain weights", bal["weights"] == {k: float(v) for k, v in sp.WEIGHTS.items()}
+      and bal["priority"] == "balanced")
+check("the presets are listed", [x["key"] for x in bal["priorities"]] == list(sp.PRIORITIES))
+cov_sched = [game("h1", "2026-11-10", "BOS", "NYK", stream=True), game("h2", "2026-11-01", "BOS", "NYK", stream=True),
+             game("x", "2026-11-20", "BOS", "NYK"), game("y", "2026-11-20", "LAL", "GSW")]
+cov = sp.plan(D1, D1, cov_sched, **base_inputs(ratings=r), priority="coverage")
+y = next(g for g in cov["days"][0]["games"] if g["id"] == "y")
+check("coverage: the unstreamed pair is the pick", cov["days"][0]["projected_pick"] == "y")
+check("coverage scales fair share", y["factors"]["fairness"]["max"] == sp.WEIGHTS["fairness"] * 2.5)
+try:
+    sp.plan(D1, D1, one, **base_inputs(), priority="vibes")
+    check("an unknown priority raises", False)
+except ValueError:
+    check("an unknown priority raises", True)
+
 # ── the endpoint ─────────────────────────────────────────────────────────────
 
 print("endpoint")
@@ -298,6 +345,13 @@ check("a bad date is refused", c.get("/api/stream-planner?from=soon",
                                      headers={"Authorization": "Bearer " + STREAM}).status_code == 422)
 res = c.get("/api/stream-planner?picks=y&skip=2026-11-21", headers={"Authorization": "Bearer " + STREAM})
 check("picks= reaches the plan", res.status_code == 200 and res.json()["days"][0]["projected_pick"] == "y")
+check("an unknown priority is refused", c.get("/api/stream-planner?priority=vibes",
+                                             headers={"Authorization": "Bearer " + STREAM}).status_code == 422)
+check("open_days over MAX_DAYS is refused", c.get("/api/stream-planner?open_days=40",
+                                                  headers={"Authorization": "Bearer " + STREAM}).status_code == 422)
+res = c.get("/api/stream-planner?open_days=1&priority=rivalry&to=2026-11-20", headers={"Authorization": "Bearer " + STREAM})
+check("open_days and priority reach the plan", res.status_code == 200 and res.json()["priority"] == "rivalry"
+      and res.json()["open_days_found"] == 1 and len(res.json()["days"]) == 1)
 check("a bad skip date is refused", c.get("/api/stream-planner?skip=tomorrow",
                                           headers={"Authorization": "Bearer " + STREAM}).status_code == 422)
 

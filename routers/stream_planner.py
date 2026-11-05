@@ -47,6 +47,19 @@ otherwise the best game off cooldown (`projected`). Either way the pick counts
 toward fairness and the cooldown for every day after, so a swap re-ranks the
 rest of the range.
 
+**Priorities** (`priority=`, PRIORITIES): a preset that scales each factor's
+weight — `balanced` (the weights above), `coverage` (fair share
+and repeats count for more), `rivalry` (rivalries and close games), `quality`
+(good teams and star players) and `stakes` (the playoff race). Each factor's `pts` and
+`max` are multiplied after it's scored, and `weights` in the response is the
+effective set. The cooldown stays a rule under every preset.
+
+**Open days** (`open_days=N`): instead of a fixed `to`, walk from `from` until
+N open days (games, and no locked stream) have been planned, at most MAX_DAYS
+out. Locked and empty days on the way are returned as usual, and `to` is the
+last day walked; `open_days_short` says the window ran out first. It's the
+Planner's "7 days" with Hide saved days on.
+
 Everything below the loaders is pure (inputs in, plan out) so the tests run
 without a data dir. Pinned by tests/test_stream_planner.py.
 """
@@ -87,6 +100,26 @@ LABELS = {
     "franchise_rivalry": "Franchise rivalry", "stakes": "Stakes", "stars": "Star power",
     "fairness": "Fair share", "repeat": "Recent repeat",
 }
+# Multipliers on WEIGHTS per preset; a factor not named stays at ×1.
+PRIORITIES = {
+    "balanced": {"label": "Balanced", "desc": "The standard weights", "mult": {}},
+    "coverage": {"label": "Team coverage", "desc": "Fair share and recent repeats count for much more, so every team gets on stream",
+                 "mult": {"fairness": 2.5, "repeat": 2.0, "quality": 0.5, "stars": 0.5}},
+    "rivalry": {"label": "Rivalries", "desc": "Owner and franchise rivalries and close games first",
+              "mult": {"owner_rivalry": 2.5, "franchise_rivalry": 2.0, "closeness": 1.5, "fairness": 0.5}},
+    "quality": {"label": "Team quality", "desc": "Good teams and star players first",
+                "mult": {"quality": 2.0, "stars": 2.0, "closeness": 1.5, "fairness": 0.5}},
+    "stakes": {"label": "Playoff race", "desc": "Games with playoff seeding on the line first",
+               "mult": {"stakes": 2.5, "closeness": 1.5, "quality": 1.25}},
+}
+DEFAULT_PRIORITY = "balanced"
+
+
+def effective_weights(priority: str) -> dict[str, float]:
+    mult = PRIORITIES[priority]["mult"]
+    return {k: round(w * mult.get(k, 1.0), 2) for k, w in WEIGHTS.items()}
+
+
 MAX_DAYS = 31
 DEFAULT_DAYS = 7
 COOLDOWN_DAYS = 7          # a team on stream this close (either side) can't be the pick
@@ -365,6 +398,10 @@ def score_game(g: dict, day: date, ctx: dict) -> dict:
         "fairness": _fairness(away, home, ctx["counts"], ctx["share"]),
         "repeat": _repeat(away, home, day, ctx["on_stream"]),
     }
+    for k, m in (ctx.get("mult") or {}).items():
+        if m != 1.0 and k in factors:
+            f = factors[k]
+            f["pts"], f["max"] = round(f["pts"] * m, 1), round(f["max"] * m, 2)
     oda, odh = ctx["odds"].get(away) or {}, ctx["odds"].get(home) or {}
     return {
         "id": g["id"], "date": g["date"], "time_et": g.get("time_et") or "",
@@ -414,13 +451,18 @@ def plan(start: date, end: date, schedule: list[dict], *, ratings: dict[str, flo
          out: set[str], names: dict[str, str], owners: dict[str, str],
          owner_h2h: dict, franchise_h2h: dict,
          picks: Optional[set[str]] = None, skips: Optional[set[str]] = None,
-         results: Optional[list[dict]] = None, today: Optional[date] = None) -> dict:
+         results: Optional[list[dict]] = None, today: Optional[date] = None,
+         priority: str = DEFAULT_PRIORITY, open_days: Optional[int] = None) -> dict:
     """The whole plan for [start, end]. `schedule` is the season's games
     (schedule-{season}.json rows); `picks` are game ids the caller has chosen,
     `skips` dates it leaves empty; `results` are the season's played games
     (`playoff_odds.season_results`) for the meetings. The rest is described in
     the module docstring. Pure."""
     picks, skips = set(picks or ()), set(skips or ())
+    if priority not in PRIORITIES:
+        raise ValueError(f"unknown priority {priority!r}")
+    mult = PRIORITIES[priority]["mult"]
+    open_seen = 0
     today = today or start
     counts: dict[str, int] = defaultdict(int)          # scheduled streams, had + flagged
     bought: dict[str, int] = defaultdict(int)
@@ -466,7 +508,7 @@ def plan(start: date, end: date, schedule: list[dict], *, ratings: dict[str, flo
                    "out": out, "names": names, "owners": owners, "owner_h2h": owner_h2h,
                    "franchise_h2h": franchise_h2h,
                    "counts": {t: counts[t] + picked[t] for t in teams},
-                   "share": share, "on_stream": on_stream}
+                   "share": share, "on_stream": on_stream, "mult": mult}
             ranked = []
             for g in games:
                 if _is_bought(g):
@@ -501,6 +543,10 @@ def plan(start: date, end: date, schedule: list[dict], *, ratings: dict[str, flo
                     picked[t] += 1
                     on_stream[t].append(day)
         out_days.append(entry)
+        if games and not locked:
+            open_seen += 1
+        if open_days and open_seen >= open_days:
+            break
         day += timedelta(days=1)
 
     total_streams = len(stream_dates) + sum(1 for d in out_days if d["projected_pick"])
@@ -519,7 +565,11 @@ def plan(start: date, end: date, schedule: list[dict], *, ratings: dict[str, flo
         "conferences": [group(c, [t for t in teams if _conference(t) == c]) for c in ("East", "West")],
         "divisions": [group(dv, sorted(ts)) for dv, ts in DIVISIONS.items()],
     }
-    return {"from": start.isoformat(), "to": end.isoformat(), "weights": WEIGHTS, "labels": LABELS,
+    return {"from": start.isoformat(), "to": out_days[-1]["date"] if out_days else end.isoformat(),
+            "weights": effective_weights(priority), "labels": LABELS, "priority": priority,
+            "priorities": [{"key": k, "label": v["label"], "desc": v["desc"]} for k, v in PRIORITIES.items()],
+            "open_days": open_days, "open_days_found": open_seen,
+            "open_days_short": bool(open_days) and open_seen < open_days,
             "cooldown_days": COOLDOWN_DAYS, "share": round(share, 2), "exposure": exposure,
             "balance": balance, "days": out_days, "season_days": len(days_with_games),
             "ignored_picks": sorted(picks - used_picks)}
@@ -590,9 +640,17 @@ def get_stream_planner(from_: Optional[str] = Query(default=None, alias="from"),
                        to: Optional[str] = Query(default=None),
                        picks: Optional[str] = Query(default=None),
                        skip: Optional[str] = Query(default=None),
+                       priority: str = Query(default=DEFAULT_PRIORITY),
+                       open_days: Optional[int] = Query(default=None),
                        info: dict = Depends(require_any_role("streamer"))):
     """`picks`: comma-separated game ids the caller has chosen; `skip`:
-    comma-separated dates it leaves empty. Both steer the days after them."""
+    comma-separated dates it leaves empty. Both steer the days after them.
+    `priority`: a PRIORITIES key. `open_days`: plan until this many open
+    days instead of to `to` (see the module docstring)."""
+    if priority not in PRIORITIES:
+        raise HTTPException(status_code=422, detail=f"priority must be one of {', '.join(PRIORITIES)}")
+    if open_days is not None and not 1 <= open_days <= MAX_DAYS:
+        raise HTTPException(status_code=422, detail=f"open_days must be 1 to {MAX_DAYS}")
     today = date.fromisoformat(league_today_str())
     pick_ids = {x.strip() for x in (picks or "").split(",") if x.strip()}
     skip_dates = {x.strip() for x in (skip or "").split(",") if x.strip()}
@@ -605,7 +663,8 @@ def get_stream_planner(from_: Optional[str] = Query(default=None, alias="from"),
             raise HTTPException(status_code=422, detail=f"skip dates must be YYYY-MM-DD, got {d!r}")
     try:
         start = date.fromisoformat(from_) if from_ else today
-        end = date.fromisoformat(to) if to else start + timedelta(days=DEFAULT_DAYS - 1)
+        end = date.fromisoformat(to) if to and not open_days else start + timedelta(
+            days=(MAX_DAYS if open_days else DEFAULT_DAYS) - 1)
     except ValueError:
         raise HTTPException(status_code=422, detail="from/to must be YYYY-MM-DD")
     if end < start:
@@ -629,5 +688,6 @@ def get_stream_planner(from_: Optional[str] = Query(default=None, alias="from"),
     result = plan(start, end, schedule, ratings=ratings, odds=odds, season_frac=frac, rosters=rosters,
                   out=out, names=names, owners={t: o for t, o in owners.items() if o},
                   owner_h2h=owner, franchise_h2h=franchise, picks=pick_ids, skips=skip_dates,
-                  results=po.season_results(gh.get_index()[0], season), today=today)
+                  results=po.season_results(gh.get_index()[0], season), today=today,
+                  priority=priority, open_days=open_days)
     return {"season": season, "today": today.isoformat(), "odds_as_of": as_of, **result}
