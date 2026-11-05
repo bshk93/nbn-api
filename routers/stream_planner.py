@@ -48,9 +48,9 @@ toward fairness and the cooldown for every day after, so a swap re-ranks the
 rest of the range.
 
 **Priorities** (`priority=`, PRIORITIES): a preset that scales each factor's
-weight — `balanced` (the weights above), `coverage` (every team on: fair share
-and repeats count for more), `spicy` (rivalries and close games), `quality`
-(the best basketball) and `stakes` (the playoff race). Each factor's `pts` and
+weight — `balanced` (the weights above), `coverage` (fair share
+and repeats count for more), `rivalry` (rivalries and close games), `quality`
+(good teams and star players) and `stakes` (the playoff race). Each factor's `pts` and
 `max` are multiplied after it's scored, and `weights` in the response is the
 effective set. The cooldown stays a rule under every preset.
 
@@ -103,11 +103,11 @@ LABELS = {
 # Multipliers on WEIGHTS per preset; a factor not named stays at ×1.
 PRIORITIES = {
     "balanced": {"label": "Balanced", "desc": "The standard weights", "mult": {}},
-    "coverage": {"label": "Every team on", "desc": "Fair share and recent repeats count for much more: get every team on stream",
+    "coverage": {"label": "Team coverage", "desc": "Fair share and recent repeats count for much more, so every team gets on stream",
                  "mult": {"fairness": 2.5, "repeat": 2.0, "quality": 0.5, "stars": 0.5}},
-    "spicy": {"label": "Spicy matchups", "desc": "Owner and franchise rivalries and close games first",
+    "rivalry": {"label": "Rivalries", "desc": "Owner and franchise rivalries and close games first",
               "mult": {"owner_rivalry": 2.5, "franchise_rivalry": 2.0, "closeness": 1.5, "fairness": 0.5}},
-    "quality": {"label": "Best basketball", "desc": "Good teams and star players first",
+    "quality": {"label": "Team quality", "desc": "Good teams and star players first",
                 "mult": {"quality": 2.0, "stars": 2.0, "closeness": 1.5, "fairness": 0.5}},
     "stakes": {"label": "Playoff race", "desc": "Games with playoff seeding on the line first",
                "mult": {"stakes": 2.5, "closeness": 1.5, "quality": 1.25}},

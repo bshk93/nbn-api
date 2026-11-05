@@ -705,7 +705,7 @@ is the whole model.
 - **Milestones are the page's** (`milestones.js`, +5), so there is one
   milestone implementation rather than a Python mirror.
 - **`priority=`** picks a preset from `PRIORITIES` (`balanced`, `coverage`,
-  `spicy`, `quality`, `stakes`): multipliers on `WEIGHTS`, applied to each
+  `rivalry`, `quality`, `stakes`): multipliers on `WEIGHTS`, applied to each
   factor's `pts` and `max` after scoring. `weights` in the response is the
   effective set and `priorities` lists the presets for the page's control.
   The cooldown is a rule under every preset.

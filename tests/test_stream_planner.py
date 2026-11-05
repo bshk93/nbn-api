@@ -290,13 +290,13 @@ oh = {frozenset(("owner-LAL", "owner-GSW")): {"games": 30, "wins": {"owner-LAL":
 fh = {frozenset(("LAL", "GSW")): {"games": 24, "wins": {"LAL": 12, "GSW": 12}, "series": {"24-25"}}}
 inp = base_inputs(ratings=r, owner_h2h=oh, franchise_h2h=fh)
 bal = sp.plan(D1, D1, one, **inp)
-spicy = sp.plan(D1, D1, one, **inp, priority="spicy")
+rivalry = sp.plan(D1, D1, one, **inp, priority="rivalry")
 qual = sp.plan(D1, D1, one, **inp, priority="quality")
 check("quality preset picks the better teams", qual["days"][0]["projected_pick"] == "x")
-check("spicy preset picks the rivalry", spicy["days"][0]["projected_pick"] == "y")
+check("rivalry preset picks the rivalry", rivalry["days"][0]["projected_pick"] == "y")
 check("a preset scales a factor's pts and max",
-      factor(spicy["days"][0], "y", "owner_rivalry") > factor(bal["days"][0], "y", "owner_rivalry")
-      and spicy["weights"]["owner_rivalry"] == sp.WEIGHTS["owner_rivalry"] * 2.5)
+      factor(rivalry["days"][0], "y", "owner_rivalry") > factor(bal["days"][0], "y", "owner_rivalry")
+      and rivalry["weights"]["owner_rivalry"] == sp.WEIGHTS["owner_rivalry"] * 2.5)
 check("balanced reports the plain weights", bal["weights"] == {k: float(v) for k, v in sp.WEIGHTS.items()}
       and bal["priority"] == "balanced")
 check("the presets are listed", [x["key"] for x in bal["priorities"]] == list(sp.PRIORITIES))
@@ -349,8 +349,8 @@ check("an unknown priority is refused", c.get("/api/stream-planner?priority=vibe
                                              headers={"Authorization": "Bearer " + STREAM}).status_code == 422)
 check("open_days over MAX_DAYS is refused", c.get("/api/stream-planner?open_days=40",
                                                   headers={"Authorization": "Bearer " + STREAM}).status_code == 422)
-res = c.get("/api/stream-planner?open_days=1&priority=spicy&to=2026-11-20", headers={"Authorization": "Bearer " + STREAM})
-check("open_days and priority reach the plan", res.status_code == 200 and res.json()["priority"] == "spicy"
+res = c.get("/api/stream-planner?open_days=1&priority=rivalry&to=2026-11-20", headers={"Authorization": "Bearer " + STREAM})
+check("open_days and priority reach the plan", res.status_code == 200 and res.json()["priority"] == "rivalry"
       and res.json()["open_days_found"] == 1 and len(res.json()["days"]) == 1)
 check("a bad skip date is refused", c.get("/api/stream-planner?skip=tomorrow",
                                           headers={"Authorization": "Bearer " + STREAM}).status_code == 422)
