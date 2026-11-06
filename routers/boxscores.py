@@ -280,7 +280,7 @@ def _build_loop(started: str) -> None:
         _refresh_odds()
 
 
-# Playoff odds and fair value (Wall Street 2) read the build's standings, so
+# Playoff odds and fair value (the /finances Market tab) read the build's standings, so
 # they are refreshed after a clean build instead of waiting for the hourly
 # timer. The script takes its own lock, so this and the timer never overlap.
 ODDS_SCRIPT = Path(__file__).resolve().parent.parent / "snapshot_playoff_odds.py"

@@ -87,7 +87,7 @@ app.include_router(boxscores.router)
 app.include_router(game_highs.router)    # GET /api/game-highs, behind /stats/highs
 app.include_router(player_insights.router)  # GET /api/players/{slug}/insights — feats, streaks, teammates
 app.include_router(playoff_odds.router)     # GET /api/playoff-odds (+ /history), behind /standings; computed by nbn-playoff-odds.timer
-app.include_router(fair_value.router)       # GET /api/fair-value (+ /history), behind the hidden /invest/fair; computed after the playoff odds
+app.include_router(fair_value.router)       # GET /api/fair-value (+ /history), behind the /finances Market tab; computed after the playoff odds
 app.include_router(bets.router)
 app.include_router(proposals.router)
 app.include_router(misc.router)
