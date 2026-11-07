@@ -211,6 +211,12 @@ check("today is the hourly run's, not a late day", "2026-10-23" not in st)
 with mock.patch.object(fv, "read_history", lambda season=None: []):
     check("no history, nothing to redo", fv.stale_days("26-27", "2026-10-23", games) == [])
 
+print("\nhistory since")
+with mock.patch.object(fv, "read_history", lambda season=None: [_row("2026-10-20", 1), _row("2026-10-21", 1), _row("2026-10-23", 3)]):
+    got = fv.get_fair_value_history(season="26-27", since="2026-10-21")
+    check("since keeps that day and later", [d["date"] for d in got["days"]] == ["2026-10-21", "2026-10-23"])
+    check("no since is the whole season", len(fv.get_fair_value_history(season="26-27")["days"]) == 3)
+
 print("\ninjuries")
 check("a range is its middle", fv.injury_days("6-8 weeks") == 49)
 check("day-to-day is short", fv.injury_days("Day-To-Day") == fv.INJURY_DAYS_SHORT)

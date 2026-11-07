@@ -1375,9 +1375,16 @@ def get_fair_value():
 
 
 @router.get("/api/fair-value/history")
-def get_fair_value_history(season: Optional[str] = None):
-    """One row per day: every team's price and the PV pieces behind it."""
+def get_fair_value_history(season: Optional[str] = None, since: Optional[str] = None):
+    """One row per day: every team's price and the PV pieces behind it.
+
+    `since` (YYYY-MM-DD) keeps only days on or after it, so a caller that wants
+    the last week (the homepage's Market Movers) doesn't pull the whole season.
+    """
     if season is None:
         run = _load_json(CURRENT_FILE, None)
         season = run["season"] if run else None
-    return {"season": season, "days": read_history(season)}
+    days = read_history(season)
+    if since:
+        days = [d for d in days if d["date"] >= since]
+    return {"season": season, "days": days}
