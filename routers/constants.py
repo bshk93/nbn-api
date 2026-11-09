@@ -140,6 +140,10 @@ IRL_ROSTERS_FILE = DATA_DIR / "irl-rosters.json"
 # edited otherwise. Not regenerable as a whole, so it is backed up.
 IRL_IDS_FILE = DATA_DIR / "irl-ids.json"
 IRL_DIR = DATA_DIR / "irl"
+# Which ratings changes (GET /api/ratings-changes) the updates committee has
+# put into the league's 2K roster file: {"slug|date": {by, at}}. Hand-kept, so
+# backed up.
+RATINGS_UPDATED_FILE = DATA_DIR / "ratings-updated.json"
 
 PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PLAYER", "PROTECTED", "SWAP_OWNER", "NOTES", "FROZEN", "FROZEN_REASON"]
 
@@ -148,6 +152,7 @@ _bio_rewards_lock   = threading.Lock()
 _txn_lock           = threading.Lock()
 _manual_queue_lock  = threading.Lock()
 _ovr_lock      = threading.Lock()
+_ratings_updated_lock = threading.Lock()
 _state_lock    = threading.Lock()
 _deadcap_lock  = threading.Lock()
 _trade_exc_lock = threading.Lock()
@@ -207,6 +212,9 @@ VALID_ROLES = {
     # POST /api/transactions' trade branch (see create_transaction), scoped to
     # type=="trade" only — it is not a `rosters` substitute for anything else.
     "trc", "trc_head",
+    # Updates committee: ticks off each change on /ratings-changes once it has
+    # been entered into the league's 2K roster file. Grants nothing else.
+    "updates",
 } | {t.lower() for t in VALID_TEAMS}
 
 # Roles that are implicitly granted by holding another role

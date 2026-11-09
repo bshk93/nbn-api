@@ -1,4 +1,5 @@
 import re
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -6,10 +7,11 @@ from pydantic import BaseModel
 
 from .constants import (
     DATA_DIR, PLAYER_BIOS_FILE, OVR_FILE, ATTRIBUTES_FILE, VALID_TEAMS,
+    RATINGS_UPDATED_FILE, _ratings_updated_lock,
     _ovr_lock, _txn_lock, CURATOR_FIELDS, BIO_REWARD_FIELDS, BIO_REWARDS_FILE, _bio_rewards_lock, logger,
 )
 from .storage import _load_json, _load_json_shared, _save_json, read_csv, log_write, shared_json_response
-from .auth import get_token_info, has_role, require_any_role, require_admin
+from .auth import get_token_info, has_role, require_any_role, require_admin, require_role
 from .bets import _award_bio_reward, NBY_BIO_REWARD
 
 router = APIRouter()
@@ -730,6 +732,7 @@ def get_ratings_changes(
 ):
     history = load_attributes()
     bios = load_player_bios()
+    updated = _load_json(RATINGS_UPDATED_FILE, {})
     entries = []
     for player_slug, snapshots in history.items():
         if slug and player_slug != slug:
@@ -756,9 +759,44 @@ def get_ratings_changes(
             # into the live OVR badge/roster tables. Absent (falsy) for any
             # snapshot taken before this field existed, same as "team" above.
             change["ovr_stub"] = bool(cur.get("ovr_stub"))
+            # Set once the updates committee has put this change into the
+            # league's 2K roster file; null until then.
+            change["updated"] = updated.get(f"{player_slug}|{date}")
             entries.append(change)
     entries.sort(key=lambda e: e["date"], reverse=True)
     return {"count": len(entries), "entries": entries[:limit]}
+
+
+class RatingsUpdatedBody(BaseModel):
+    slug: str
+    date: str
+    updated: bool
+
+
+@router.put("/api/ratings-changes/updated")
+def set_ratings_updated(body: RatingsUpdatedBody, info: dict = Depends(require_role("updates"))):
+    """Tick (or untick) one change on /ratings-changes as entered into 2K.
+
+    A change is one player's snapshot on one date, so (slug, date) names it.
+    Refuses a pair that isn't a real change, so a typo can't leave a tick
+    nothing will ever show."""
+    snapshots = load_attributes().get(body.slug) or []
+    is_change = any(
+        cur.get("date") == body.date and _diff_2k_snapshots(prev, cur)
+        for prev, cur in zip(snapshots, snapshots[1:])
+    )
+    if not is_change:
+        raise HTTPException(status_code=404, detail=f"No ratings change for {body.slug} on {body.date}")
+    key = f"{body.slug}|{body.date}"
+    with _ratings_updated_lock:
+        data = _load_json(RATINGS_UPDATED_FILE, {})
+        if body.updated:
+            data[key] = {"by": info.get("name"), "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        else:
+            data.pop(key, None)
+        _save_json(RATINGS_UPDATED_FILE, data)
+    log_write(info, f"ratings change {key} {'marked' if body.updated else 'unmarked'} updated")
+    return {"slug": body.slug, "date": body.date, "updated": data.get(key)}
 
 
 # ── Team map ──────────────────────────────────────────────────────────────────
