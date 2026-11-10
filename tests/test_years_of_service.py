@@ -79,6 +79,16 @@ check("old string-form cap holds are read", s["i"] == {"24-25"}, s["i"])
 s = build(contracted={"j": {"25-26", "27-28"}})
 check("a salary on the bio counts a season that has started", s["j"] == {"25-26"}, s["j"])
 
+row = {"type": "sign", "date": "2023-06-29",
+       "description": "The Indiana Pacers sign Craig Porter Jr. to a 2yr 2-way contract",
+       "details": {"player": "k", "contract": {"salaries": {}}}}
+BOUNDS.update({"22-23": ("2022-10-18", "2023-04-09"), "23-24": ("2023-10-24", "2024-04-14")})
+s = build(txns=[row])
+check("an old 2yr row signed in June counts the next two seasons",
+      s["k"] == {"23-24", "24-25"}, s["k"])
+check("2+1 reads as three years", y._described_length("a 2+1 TO minimum contract") == 3)
+check("no length in the prose: None", y._described_length("agrees to sign with the Suns") is None)
+
 print("years_of_service")
 SERVICE = {"vet": {"20-21", "21-22", "22-23", "23-24", "24-25", "25-26"},
            "gap": {"24-25"}, "rookie": set()}

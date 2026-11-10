@@ -18,7 +18,10 @@ a roster day is taken from what is on file:
 - a signing in the ledger that put him on a roster during that regular season
   (dated inside it, or before it with no release before opening night), plus
   each later season the signed contract pays him for, unless he was released
-  before that season's opening night;
+  before that season's opening night. Old rows carry no contract terms, only
+  prose ("signs ... to a 2yr 2-way contract", "a 2+1 TO minimum"), so the
+  length is read from that, as the league office counts it (Craig Porter:
+  IND 2yr two-way June 2023 = 23-24 and 24-25);
 - a salary on his bio for that season (kept from 25-26 on), unless it is a
   free-agent hold or dead money on a team's deadcap file: a two-way who never
   got into a game still carries his $0 line;
@@ -38,6 +41,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 import threading
 from collections import defaultdict
 from typing import Optional
@@ -76,6 +80,27 @@ def _holds(raw) -> dict:
     if isinstance(raw, str):
         return dict(p.split(":", 1) for p in raw.split(",") if ":" in p)
     return {}
+
+
+_PLUS = re.compile(r"\b(\d)\s*\+\s*(\d)\b")
+_YEARS = re.compile(r"(?i)\b(\d)\s*-?\s*(?:yr|year)s?\b")
+
+
+def _described_length(description: Optional[str]) -> Optional[int]:
+    """A contract's length from an old ledger row's prose: "2yr 2-way" is 2,
+    "2+1 TO" is 3. None when it doesn't say. Before the ledger kept contract
+    terms (most of it before 2026), this is all a signing has."""
+    text = description or ""
+    m = _PLUS.search(text)
+    if m:
+        return int(m.group(1)) + int(m.group(2))
+    m = _YEARS.search(text)
+    return int(m.group(1)) if m else None
+
+
+def _shift(season: str, n: int) -> str:
+    a = int(season[:2]) + n
+    return f"{a % 100:02d}-{(a + 1) % 100:02d}"
 
 
 def _mtime(path) -> int:
@@ -178,6 +203,13 @@ def build_service(games, txns: list[dict], rostered: set[str], today: str,
         holds = _holds(contract.get("cap_holds"))
         later = [s for s in (contract.get("salaries") or {})
                  if holds.get(s) not in _FA_HOLDS and _start_year(s) > _start_year(signed_in)]
+        length = None if contract.get("salaries") else _described_length(t.get("description"))
+        if length:
+            # An old row with only its description: a deal signed after the
+            # regular season ended (June) starts the next season.
+            b = bounds(signed_in)
+            begins = signed_in if not b or signed <= b[1] else _shift(signed_in, 1)
+            later = [_shift(begins, i) for i in range(length)]
         for season in [signed_in, *later]:
             b = bounds(season)
             if not b or b[0] > today:
