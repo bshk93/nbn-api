@@ -30,9 +30,10 @@ def season_for(d):
     return f"{yy - 1:02d}-{yy:02d}" if mm < 7 else f"{yy:02d}-{yy + 1:02d}"
 
 
-def build(games=(), txns=(), rostered=(), today="2026-11-10"):
+def build(games=(), txns=(), rostered=(), today="2026-11-10", contracted=None):
     return y.build_service(list(games), list(txns), set(rostered), today,
-                           bounds_for=BOUNDS.get, season_for_date=season_for)
+                           bounds_for=BOUNDS.get, season_for_date=season_for,
+                           contracted=contracted)
 
 
 def sign(player, date, salaries=None, holds=None, kind="sign"):
@@ -74,6 +75,9 @@ check("before opening night it doesn't", "26-27" not in s["h"], s["h"])
 
 s = build(txns=[sign("i", "2024-08-01", holds="25-26:RFA", salaries={"24-25": "$1", "25-26": "$1"})])
 check("old string-form cap holds are read", s["i"] == {"24-25"}, s["i"])
+
+s = build(contracted={"j": {"25-26", "27-28"}})
+check("a salary on the bio counts a season that has started", s["j"] == {"25-26"}, s["j"])
 
 print("years_of_service")
 SERVICE = {"vet": {"20-21", "21-22", "22-23", "23-24", "24-25", "25-26"},

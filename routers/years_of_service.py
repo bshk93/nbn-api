@@ -19,10 +19,13 @@ a roster day is taken from what is on file:
   (dated inside it, or before it with no release before opening night), plus
   each later season the signed contract pays him for, unless he was released
   before that season's opening night;
+- a salary on his bio for that season (kept from 25-26 on), unless it is a
+  free-agent hold or dead money on a team's deadcap file: a two-way who never
+  got into a game still carries his $0 line;
 - being on a roster today, once this season's opening night has passed.
 
-That undercounts a player who sat on a roster all season without playing and
-whose signing predates the ledger's contract detail. A contract that states the
+That undercounts a player who sat on a roster all season without playing
+before 25-26 and whose signing predates the ledger's contract detail. A contract that states the
 player's experience overrides all of this (`_contract_years_exp`), which is how
 the office corrects one.
 
@@ -33,6 +36,7 @@ judged by hand.
 """
 from __future__ import annotations
 
+import csv
 import json
 import threading
 from collections import defaultdict
@@ -104,10 +108,38 @@ def _rostered_today() -> set[str]:
     return out
 
 
+def _contracted() -> dict[str, set[str]]:
+    """slug -> seasons his bio carries a salary for that is neither a
+    free-agent hold nor dead money on a team's deadcap file."""
+    dead: dict[str, set[str]] = defaultdict(set)
+    for path in DATA_DIR.glob("*-deadcap.csv"):
+        try:
+            with path.open(newline="") as fh:
+                for row in csv.DictReader(fh):
+                    for season, amt in row.items():
+                        if season != "SLUG" and (amt or "").strip() not in ("", "0", "$0"):
+                            dead[(row.get("SLUG") or "").strip()].add(season)
+        except OSError:
+            continue
+    try:
+        bios = json.loads((DATA_DIR / "player-bios.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    out: dict[str, set[str]] = {}
+    for slug, bio in bios.items():
+        holds = _holds(bio.get("cap_holds"))
+        seasons = {s for s in (bio.get("salaries") or {})
+                   if holds.get(s) not in _FA_HOLDS and s not in dead[slug]}
+        if seasons:
+            out[slug] = seasons
+    return out
+
+
 def build_service(games, txns: list[dict], rostered: set[str], today: str,
                   bounds_for=season_calendar.regular_season_bounds,
                   season_for_date=season_clock.season_for_date,
-                  current_season: Optional[str] = None) -> dict[str, set[str]]:
+                  current_season: Optional[str] = None,
+                  contracted: Optional[dict[str, set[str]]] = None) -> dict[str, set[str]]:
     """slug -> the NBN seasons he spent a regular-season day on a roster.
 
     `games` is (slug, season, date) for every regular-season box score line.
@@ -157,6 +189,12 @@ def build_service(games, txns: list[dict], rostered: set[str], today: str,
                 continue
             service[player].add(season)
 
+    for slug, seasons in (contracted or {}).items():
+        for season in seasons:
+            b = bounds(season)
+            if b and b[0] <= today:
+                service[slug].add(season)
+
     if current_season is None:
         current_season = season_for_date(today)
     b = bounds(current_season)
@@ -180,7 +218,8 @@ def service_seasons(slug: str) -> set[str]:
     index, index_key = get_index()
     today = league_today_str()
     key = (index_key, _mtime(TRANSACTIONS_FILE), _mtime(DATA_DIR / "player-bios.json"),
-           tuple(_mtime(p) for p in _roster_paths()), today)
+           tuple(_mtime(p) for p in _roster_paths()),
+           tuple(_mtime(p) for p in sorted(DATA_DIR.glob("*-deadcap.csv"))), today)
     with _lock:
         if _cache["key"] != key:
             try:
@@ -190,7 +229,8 @@ def service_seasons(slug: str) -> set[str]:
             rollovers = season_clock.load_rollovers()
             _cache["service"] = build_service(
                 _games(index), txns, _rostered_today(), today,
-                season_for_date=lambda d: season_clock.season_for_date(d, rollovers))
+                season_for_date=lambda d: season_clock.season_for_date(d, rollovers),
+                contracted=_contracted())
             _cache["key"] = key
         return set(_cache["service"].get(slug, ()))
 
