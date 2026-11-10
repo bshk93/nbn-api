@@ -80,7 +80,7 @@ def _contract_target(bio: dict, season: str, cap_levels: dict, entry: dict):
     plain dict from `bio["contracts"]`, but both helpers read the tier via
     `getattr(contract, "years_experience", None)` — a plain dict never has
     that attribute, so it must be wrapped or the persisted value is silently
-    ignored and every contract falls through to the draft_year proxy."""
+    ignored and every contract falls through to years of service."""
     # salaries/cap_holds too: a declared tier climbs one row per contract year
     # from the contract's first season, so the helper needs to know which that is.
     contract = SimpleNamespace(years_experience=entry.get("years_experience"),
@@ -162,7 +162,7 @@ def build_plan(bios: dict, cap_levels: dict, players: set[str] | None = None):
                 if before_amt == target:
                     continue
                 basis = ("declared years_experience" if entry.get("years_experience") is not None
-                         else "draft_year proxy")
+                         else "years of service")
                 changes.append({
                     "player": slug, "contract_idx": idx, "season": season,
                     "before": raw, "after": _fmt_dollar(target), "basis": basis,
