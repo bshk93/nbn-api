@@ -92,8 +92,9 @@ check("no length in the prose: None", y._described_length("agrees to sign with t
 print("years_of_service")
 SERVICE = {"vet": {"20-21", "21-22", "22-23", "23-24", "24-25", "25-26"},
            "gap": {"24-25"}, "rookie": set()}
-real = y.service_seasons
+real, real_begun = y.service_seasons, y.begun_seasons
 y.service_seasons = lambda slug: SERVICE.get(slug, set())
+y.begun_seasons = lambda: {"20-21", "21-22", "22-23", "23-24", "24-25", "25-26"}
 try:
     check("2007 draftee who played every NBN season: NBA years",
           y.years_of_service({"draft_year": 2007}, "26-27", "vet") == 19)
@@ -104,8 +105,10 @@ try:
     check("only seasons before the one asked about count",
           y.years_of_service({"draft_year": 2007}, "23-24", "vet") == 16)
     check("no draft year: None", y.years_of_service({}, "26-27", "vet") is None)
+    check("seasons not yet started count as served, so later years climb",
+          y.years_of_service({"draft_year": 2024}, "28-29", "rookie") == 2)
 finally:
-    y.service_seasons = real
+    y.service_seasons, y.begun_seasons = real, real_begun
 
 if FAILS:
     print(f"\n{len(FAILS)} failed")

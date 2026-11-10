@@ -18,6 +18,7 @@ import routers.years_of_service as yos  # noqa: E402
 
 # Two NBN seasons on a roster before 26-27.
 yos.service_seasons = lambda slug: {"24-25", "25-26"} if slug == "hinson-blake" else set()
+yos.begun_seasons = lambda: {"20-21", "21-22", "22-23", "23-24", "24-25", "25-26", "26-27"}
 
 FAILS = []
 

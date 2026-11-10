@@ -263,22 +263,37 @@ def service_seasons(slug: str) -> set[str]:
                 _games(index), txns, _rostered_today(), today,
                 season_for_date=lambda d: season_clock.season_for_date(d, rollovers),
                 contracted=_contracted())
+            _cache["begun"] = {season for _slug, season, _date in _games(index)}
             _cache["key"] = key
         return set(_cache["service"].get(slug, ()))
+
+
+def begun_seasons() -> set[str]:
+    """Seasons whose regular season has started (a box score is on file)."""
+    service_seasons("")
+    return set(_cache.get("begun", ()))
 
 
 def years_of_service(bio: dict, season: str, slug: Optional[str] = None) -> Optional[int]:
     """Years of experience entering `season`: NBA years before 2020-21 from the
     draft year, plus NBN seasons with a roster day before `season`. None for a
-    player with no draft year on file."""
+    player with no draft year on file.
+
+    A season that hasn't started yet counts as served, so a later contract
+    year climbs a tier the way a stated figure does (`_contract_years_exp`).
+    Without that, every future year of a deal read the same count."""
     dy = (bio or {}).get("draft_year")
     if not dy:
         return None
     slug = slug or player_slug(bio.get("name") or "")
     start = _start_year(season)
     pre = max(0, min(FIRST_NBN_YEAR, start) - int(dy))
-    nbn = sum(1 for s in service_seasons(slug)
-              if FIRST_NBN_YEAR <= _start_year(s) < start)
+    served, begun = service_seasons(slug), begun_seasons()
+    nbn = 0
+    for year in range(FIRST_NBN_YEAR, start):
+        s = f"{year % 100:02d}-{(year + 1) % 100:02d}"
+        if s in served or s not in begun:
+            nbn += 1
     return pre + nbn
 
 
