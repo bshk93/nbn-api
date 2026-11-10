@@ -14,6 +14,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tests import _yos  # noqa: E402
+_yos.pin()
 from routers.free_agency import _fa_pool  # noqa: E402
 
 FAILS = []

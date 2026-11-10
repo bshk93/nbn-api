@@ -18,6 +18,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tests import _yos  # noqa: E402
+_yos.pin()
 import routers.transactions as tx  # noqa: E402
 
 FAILS = []
@@ -78,7 +81,7 @@ def main():
     print("\nexperience — reported, never blocking")
     out = terms(contract(CLEAN, CLEAN_HOLDS), {"draft_year": 2018, "name": "REATH, DUOP"})
     exp = [r for r in out if r.check == "two_way_experience"][0]
-    check("an old draft class is flagged for a human", "Confirm by hand" in exp.message and "8 years" in exp.message)
+    check("over 3 years of service is flagged for a human", "Confirm by hand" in exp.message and "8 years" in exp.message)
     check("...without blocking the signing", exp.passed and not failed(out))
     exp = [r for r in terms(contract(CLEAN, CLEAN_HOLDS), {"draft_year": None})
            if r.check == "two_way_experience"][0]

@@ -24,6 +24,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tests import _yos  # noqa: E402
+_yos.pin()
 from routers import transactions as T  # noqa: E402
 
 FAILS = []

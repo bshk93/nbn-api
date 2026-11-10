@@ -25,6 +25,9 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tests import _yos  # noqa: E402
+_yos.pin()
 import routers.transactions as T  # noqa: E402
 REAL_APPLY_OPTION = T._apply_option
 import routers.season_calendar as cal  # noqa: E402

@@ -29,6 +29,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tests import _yos  # noqa: E402
+_yos.pin()
 from routers.transactions import (  # noqa: E402
     ContractIn, _check_contract_raises, _min_salary_floor,
     _min_scale_for_season, _minimum_year_ceiling,
@@ -163,7 +166,7 @@ def main():
           == SCALE["4"])
     check("a 10+ veteran stays on the top row as the deal runs",
           ceil(12, "26-27") == SCALE["10+"] and ceil(12, "28-29") == SCALE["10+"])
-    check("declaring nothing still falls back to the draft_year proxy",
+    check("declaring nothing falls back to years of service",
           _minimum_year_ceiling(VET, "26-27", CAP_LEVELS,
                                 ContractIn(salaries={"26-27": "$1"})) == SCALE["10+"])
 

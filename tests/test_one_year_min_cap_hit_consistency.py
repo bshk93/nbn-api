@@ -23,6 +23,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tests import _yos  # noqa: E402
+_yos.pin()
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -91,14 +94,14 @@ def main():
     check("...names the 2-year minimum and why",
           "2-year veteran minimum ($2,449,421), whatever his experience" in warn.message)
     check("...and says the experience was stated, not inferred",
-          "stated on the contract" in warn.message and "draft year" not in warn.message)
+          "stated on the contract" in warn.message and "years of service" not in warn.message)
     inferred = tx._check_minimum_contract_cap_hit(
         tx.SignDetails(player="p", team="GSW", signing_method="minimum",
                        contract=tx.ContractIn(salaries={"26-27": f"${SCALE['5']:,}"})),
         {"p": {"draft_year": 2018}}, "26-27", CAP_LEVELS,
     )
-    check("with nothing stated, it says it used the draft year",
-          inferred is not None and "draft year" in inferred.message)
+    check("with nothing stated, it says it used years of service",
+          inferred is not None and "years of service" in inferred.message)
     rookie = tx._check_minimum_contract_cap_hit(
         tx.SignDetails(player="p", team="GSW", signing_method="minimum",
                        contract=tx.ContractIn(salaries={"26-27": "$1"}, years_experience=0)),
