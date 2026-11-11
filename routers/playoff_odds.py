@@ -44,7 +44,7 @@ import json
 import math
 import random
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -295,7 +295,7 @@ def read_history(season: Optional[str] = None) -> list[dict]:
 
 def _history_row(run: dict) -> dict:
     return {"date": run["date"], "season": run["season"],
-            "teams": {r["team"]: {k: r[k] for k in ("playoffs", "top6", "seed1", "title", "proj_w")}
+            "teams": {r["team"]: {k: r[k] for k in ("playoffs", "top6", "seed1", "title", "proj_w", "rating")}
                       for r in run["teams"]}}
 
 
@@ -312,16 +312,41 @@ def save_run(run: dict) -> None:
     _atomic_write(HISTORY_FILE, "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows))
 
 
+RATING_LOOKBACK_DAYS = 7
+
+
+def rating_lookback(rows: list[dict], run_date: str, days: int = RATING_LOOKBACK_DAYS):
+    """(date, {team: rating}) from the newest history row at least `days` before
+    `run_date` that recorded ratings, or (None, {}).
+
+    The homepage's Power Rankings card ranks by rating and shows each team's
+    move against this. Rows written before `rating` joined the history have
+    none and are skipped rather than read as zeros.
+    """
+    cutoff = (date.fromisoformat(run_date) - timedelta(days=days)).isoformat()
+    for r in sorted(rows, key=lambda r: r["date"], reverse=True):
+        if r["date"] > cutoff:
+            continue
+        ratings = {t: v["rating"] for t, v in r.get("teams", {}).items()
+                   if isinstance(v, dict) and v.get("rating") is not None}
+        if ratings:
+            return r["date"], ratings
+    return None, {}
+
+
 @router.get("/api/playoff-odds")
 def get_playoff_odds():
-    """The latest run, plus each team's playoff odds from the last earlier day."""
+    """The latest run, plus each team's playoff odds from the last earlier day,
+    and its rating from a week before (`rating_lookback`)."""
     run = _load_json(CURRENT_FILE, None)
     if not run:
         raise HTTPException(status_code=404, detail="No playoff odds have been computed yet")
     earlier = [r for r in read_history(run["season"]) if r["date"] < run["date"]]
     prev = earlier[-1] if earlier else None
+    rating_prev_date, rating_prev = rating_lookback(earlier, run["date"])
     return {**run, "prev_date": prev["date"] if prev else None,
-            "prev": {t: v["playoffs"] for t, v in prev["teams"].items()} if prev else {}}
+            "prev": {t: v["playoffs"] for t, v in prev["teams"].items()} if prev else {},
+            "rating_prev_date": rating_prev_date, "rating_prev": rating_prev}
 
 
 @router.get("/api/playoff-odds/history")

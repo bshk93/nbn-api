@@ -71,6 +71,19 @@ check("centred on the league", abs(pri["AAA"] + pri["BBB"] + pri["CCC"]) < 1e-9)
 check("stronger roster, higher prior", pri["AAA"] > pri["CCC"] > pri["BBB"])
 check("an unknown roster is average", pri["DDD"] == 0.0)
 
+print("rating history")
+hrow = po._history_row({"date": "2026-11-11", "season": "26-27", "teams": out["teams"]})
+check("a history row keeps each team's rating", hrow["teams"]["BOS"]["rating"] == rows["BOS"]["rating"])
+hist = [
+    {"date": "2026-11-01", "teams": {"BOS": {"playoffs": 0.5, "rating": 3.0}}},
+    {"date": "2026-11-03", "teams": {"BOS": {"playoffs": 0.5}}},                 # before ratings were kept
+    {"date": "2026-11-04", "teams": {"BOS": {"playoffs": 0.5, "rating": 4.0}}},
+    {"date": "2026-11-08", "teams": {"BOS": {"playoffs": 0.5, "rating": 5.0}}},  # inside the week
+]
+check("the lookback takes the newest row a week old", po.rating_lookback(hist, "2026-11-11") == ("2026-11-04", {"BOS": 4.0}))
+check("and skips rows with no ratings", po.rating_lookback(hist, "2026-11-10") == ("2026-11-01", {"BOS": 3.0}))
+check("nothing old enough is nothing", po.rating_lookback(hist, "2026-11-05") == (None, {}))
+
 if FAILS:
     print(f"\n{len(FAILS)} FAILED")
     sys.exit(1)
