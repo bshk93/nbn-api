@@ -1,0 +1,15 @@
+[Unit]
+Description=Post the night's "Tonight" card to #leaguetalk
+Documentation=file:///home/skim/projects/nbn-api/routers/tonight_card.py
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=skim
+WorkingDirectory=/home/skim/projects/nbn-api
+# The bot token and DISCORD_LEAGUETALK_CHANNEL live in .env.
+EnvironmentFile=-/home/skim/projects/nbn-api/.env
+ExecStart=/home/skim/projects/nbn-api/venv/bin/python /home/skim/projects/nbn-api/post_tonight.py
+StandardOutput=journal
+StandardError=journal

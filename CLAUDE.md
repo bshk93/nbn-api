@@ -1222,6 +1222,32 @@ would cancel this. Since 2026-11-01 it adds it only when the API sent none
 (`map` in `/etc/nginx/conf.d/nbn-api-cache.conf`, used by the `/api/` blocks
 of nbn.today, pdc.nbn.today and dev.nbn.today).
 
+## Tonight graphic and the 11am card (`routers/tonight.py`, `routers/tonight_card.py`)
+
+| Route | Auth | What |
+|---|---|---|
+| `GET /api/tonight?date=` | Public | One game day (default: `game_day()`): every game with records, odds, a star per side and storylines; the featured game and its teams' colours; the previous night's top three lines; `next` slate when the date has none. Drawn by nbn-today's `tonight-hero.js` (the homepage poster and carousel) |
+| `GET /api/tonight/card.png?date=` | Public | The same answer as a 1200x675 PNG (Pillow). Cached in `$DATA_DIR/tonight-cards/` by a hash of the answer; `v=` is ignored, it only busts Discord's cache. 404 on a date with no games |
+
+- **One answer, two pictures.** Who is featured, each star and every storyline
+  are decided in `tonight.py` only; the page and the card just draw it. The
+  rules (stream game first, else win% + playoff stakes; the hot hand is best
+  mean Game Score over the last 5 games *for this team*, 3 minimum, else top
+  OVR in `home._five`) are its docstring. Career milestones are added on the
+  page from milestones.js, which is their one home.
+- **The card reads the site checkout** (`NBN_SITE_DIR`, as og.py does) for
+  `build/team-colors.json`, `logos/`, `logo.png` and the Barlow/Inter woff2s,
+  with DejaVu as the fallback font. Headshots come from `headshots.headshot_path`.
+- **The post** is `post_tonight.py`, run by `nbn-tonight.timer` at 11:00
+  America/New_York: one message to `DISCORD_LEAGUETALK_CHANNEL`, the card as the
+  embed's image URL (so `discord_transport` stays JSON). Nothing on a day with no
+  games; at most one post per date (`tonight-posted.json`), so the timer's
+  `Persistent=true` catch-up can't double-post. `--dry-run` prints the message.
+  Install once: copy both units to `/etc/systemd/system/`, then
+  `sudo systemctl daemon-reload && sudo systemctl enable --now nbn-tonight.timer`.
+
+Pinned by `tests/test_tonight.py`.
+
 ## Docs discipline
 
 Keep `CLAUDE.md` and `docs/` in sync with every code change. If a change affects an endpoint, a data field, a transaction type, or any behavior described in the docs, update the relevant doc in the same commit.

@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily "Tonight" card to #leaguetalk at 11:00 ET
+
+[Timer]
+# 11:00 league time, whatever the DST offset. A day with no games posts
+# nothing; post_tonight.py keeps each date to one post (tonight-posted.json),
+# so the catch-up after downtime can't post a date twice.
+OnCalendar=*-*-* 11:00:00 America/New_York
+Persistent=true
+
+[Install]
+WantedBy=timers.target
