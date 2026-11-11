@@ -218,6 +218,18 @@ with tempfile.TemporaryDirectory() as tmp:
         (C.POSTED_FILE, C.CARD_DIR, C.tonight, C._leaguetalk_channel, C.render,
          real_transport.configured, real_transport.send, real_transport.flush) = orig
 
+print("\nthe line")
+from routers import playoff_odds as PO  # noqa: E402
+ln = PO.game_line("HHH", "AAA", {"HHH": 4.2, "AAA": 0.0})
+check("home favoured gives the home team as fav", ln["fav"] == "HHH")
+check("spread is home - away + home edge, to the half point", ln["spread"] == 6.0)
+check("p_home is over a half for the favourite", ln["p_home"] > 0.5)
+ln = PO.game_line("HHH", "AAA", {"HHH": 0.0, "AAA": 6.0})
+check("an away favourite is the fav", ln["fav"] == "AAA" and ln["spread"] == 4.0 and ln["p_home"] < 0.5)
+ln = PO.game_line("HHH", "AAA", {"HHH": -2.1, "AAA": 0.0})
+check("under a quarter point is a pick'em, no fav", ln["fav"] is None and ln["spread"] == 0)
+check("an unrated team counts as average", PO.game_line("HHH", "ZZZ", {"HHH": 0.0})["spread"] == PO.HOME_EDGE)
+
 print()
 if FAILS:
     print(f"{len(FAILS)} FAILED")

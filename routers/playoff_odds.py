@@ -136,6 +136,24 @@ def _phi(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 
+def game_line(home: str, away: str, ratings: dict[str, float]) -> dict:
+    """One game's projected line, off the same model as a simulated game:
+    home margin = home rating − away rating + HOME_EDGE.
+
+    `margin` is the exact projection; `spread` is it rounded to the nearest
+    half point, as a line is quoted, with `fav` the team giving it (None at 0,
+    a pick'em). `p_home` is the home side's chance to win. A team with no
+    rating counts as average (0.0)."""
+    margin = ratings.get(home, 0.0) - ratings.get(away, 0.0) + HOME_EDGE
+    spread = round(abs(margin) * 2) / 2
+    return {
+        "margin": margin,
+        "fav": None if spread == 0 else (home if margin > 0 else away),
+        "spread": spread,
+        "p_home": round(_phi(margin / GAME_SD), 4),
+    }
+
+
 def simulate(results: list[dict], schedule: list[dict], priors: dict[str, float],
              sims: int = SIMS, seed: int = 0,
              playoff_bonus: Optional[dict[str, float]] = None, draft_samples: int = 0) -> dict:
