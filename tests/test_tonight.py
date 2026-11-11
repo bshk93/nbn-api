@@ -151,6 +151,21 @@ check("a near-black logo is dark", C._is_dark(logo.crop(logo.getchannel("A").get
 check("the hash names the answer", C.card_hash(DATA) == C.card_hash(dict(DATA))
       and C.card_hash(DATA) != C.card_hash({**DATA, "count": 4}))
 
+with tempfile.TemporaryDirectory() as tmp:
+    logos = Path(tmp) / "logos"
+    logos.mkdir()
+    Image.new("RGBA", (10, 10), (0, 0, 0, 255)).save(logos / "logo-uta.png")
+    Image.new("RGBA", (10, 10), (255, 255, 255, 255)).save(logos / "logo-uta-dark.png")
+    Image.new("RGBA", (10, 10), (200, 0, 0, 255)).save(logos / "logo-chi.png")
+    orig_site = C.SITE_DIR
+    C.SITE_DIR = Path(tmp)
+    try:
+        check("a team's dark-background logo is preferred", C.default_logo("UTA").getpixel((0, 0))[:3] == (255, 255, 255))
+        check("otherwise the usual logo", C.default_logo("CHI").getpixel((0, 0))[:3] == (200, 0, 0))
+        check("no logo file is None", C.default_logo("BOS") is None)
+    finally:
+        C.SITE_DIR = orig_site
+
 print("\nthe post")
 post = C.build_post(DATA)
 check("one line, no pings", post["content"].startswith("\U0001F3C0 **3 games tonight**")

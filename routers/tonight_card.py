@@ -9,8 +9,10 @@ Conventions carried over from nbn-today/build/og_cards.py:
 
 * **A logo is cropped to its alpha bbox before it is fitted**, since the files
   in logos/ carry very different amounts of transparent padding.
-* **A black mark gets a light plate under it** (UTA), or it vanishes on the
-  dark strip. Every other logo gets a soft light halo in its own shape, which
+* **A black mark gets a light plate under it**, or it vanishes on the dark
+  strip. Utah no longer needs one: the site now has a white
+  `logo-uta-dark.png`, which `default_logo` prefers. The plate stays for any
+  black mark without a dark version. Every other logo gets a soft light halo in its own shape, which
   is enough for a black outline (SAS, BKN) to read.
 
 `render(data, headshot=, logo=)` takes its two image loaders as arguments, so
@@ -117,11 +119,16 @@ def default_headshot(slug: str) -> Optional[Image.Image]:
 
 
 def default_logo(team: str) -> Optional[Image.Image]:
-    p = SITE_DIR / "logos" / f"logo-{team.lower()}.png"
-    try:
-        return Image.open(p).convert("RGBA")
-    except OSError:
-        return None
+    """The logo for a dark background: `logo-{abbr}-dark.png` where the site
+    has one (Utah's white mark; nbn-today build/make_logo_thumbs.py), else the
+    usual `logo-{abbr}.png`. Everything this card draws a logo on is dark."""
+    logos = SITE_DIR / "logos"
+    for p in (logos / f"logo-{team.lower()}-dark.png", logos / f"logo-{team.lower()}.png"):
+        try:
+            return Image.open(p).convert("RGBA")
+        except OSError:
+            continue
+    return None
 
 
 # ── Drawing ──────────────────────────────────────────────────────────────────
