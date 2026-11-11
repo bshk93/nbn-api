@@ -264,7 +264,7 @@ def render(data: dict, headshot: Callable[[str], Optional[Image.Image]] = defaul
     _text(d, (56, 22), str(n), _font("display", 230))
     _text(d, (60, 262), "GAMES" if n != 1 else "GAME", _font("display", 84))
     _text(d, (60, 336), "TONIGHT", _font("display", 84))
-    _text(d, (62, 432), f"{day.strftime('%a').upper()} · {day.strftime('%b').upper()} {day.day}",
+    _text(d, (62, 432), f"{day.strftime('%a').upper()} {day.month}/{day.day}/{day.year % 100:02d}",
           _font("display", 30), fill=(255, 255, 255, 230))
 
     if feat:
