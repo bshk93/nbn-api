@@ -40,6 +40,19 @@ def get_roster(team: str):
     return {"headers": headers, "rows": rows}
 
 
+@router.get("/api/rosters/slugs")
+def get_roster_slugs():
+    """Every team's roster as slugs, {"ATL": [...], ...}: one request where a
+    page would otherwise fetch all 30 roster CSVs (the homepage's Milestone
+    Watch did). Roster order is the file's. A missing file is an empty list."""
+    out = {}
+    for team in sorted(VALID_TEAMS):
+        path = DATA_DIR / f"{team.lower()}-roster.csv"
+        rows = read_csv(path)[1] if path.exists() else []
+        out[team] = [s for s in ((r.get("SLUG") or "").strip() for r in rows) if s]
+    return out
+
+
 @router.put("/api/roster/{team}")
 def put_roster(team: str, body: dict, info: dict = Depends(require_role("rosters"))):
     path = team_path(team, "roster")

@@ -1222,6 +1222,20 @@ would cancel this. Since 2026-11-01 it adds it only when the API sent none
 (`map` in `/etc/nginx/conf.d/nbn-api-cache.conf`, used by the `/api/` blocks
 of nbn.today, pdc.nbn.today and dev.nbn.today).
 
+### The gamelog index and all rosters at once
+
+`GET /api/players/{slug}/gamelog` answers from `_rows_by_player`
+(`routers/boxscores.py`): each raw `allstats-*.csv` parsed once into
+`{PLAYER: rows}` and kept until that file's mtime or size changes. It used to
+parse all 157k rows on every player page, 1.4s with the GIL held, which also
+stalled whatever else was in flight on the one worker. The rows are the file's
+own dicts, so treat them as read-only.
+
+`GET /api/rosters/slugs` (public) is every team's roster as slugs, for a page
+that needs all 30 (the homepage's Milestone Watch fetched 30 CSVs for it).
+
+Pinned by `tests/test_gamelog_index.py` (temp dir, no live data).
+
 ## Tonight graphic and the 11am card (`routers/tonight.py`, `routers/tonight_card.py`)
 
 | Route | Auth | What |
