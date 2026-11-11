@@ -246,13 +246,6 @@ def _initials(name: str) -> str:
     return "".join(p[0] for p in parts[:2]).upper() or "?"
 
 
-def _time_label(t: str) -> str:
-    t = (t or "").strip()
-    if t.endswith(("p", "a")):
-        return f"{t[:-1]} {'PM' if t[-1] == 'p' else 'AM'} ET"
-    return t or "TBD"
-
-
 def render(data: dict, headshot: Callable[[str], Optional[Image.Image]] = default_headshot,
            logo: Callable[[str], Optional[Image.Image]] = default_logo) -> bytes:
     games = data.get("games") or []
@@ -279,7 +272,9 @@ def render(data: dict, headshot: Callable[[str], Optional[Image.Image]] = defaul
         # Right: the featured matchup.
         left, right = 430, W - 40
         mid = (left + right) // 2
-        label = ("GAME OF THE NIGHT · " + _time_label(feat.get("time_et"))).upper()
+        # No tip time anywhere: times mean nothing in NBN, where a game is
+        # played when it's streamed or simmed.
+        label = "GAME OF THE NIGHT"
         lf = _font("display", 28)
         lw = d.textlength(label, font=lf)
         x0 = mid - lw / 2
@@ -348,13 +343,11 @@ def render(data: dict, headshot: Callable[[str], Optional[Image.Image]] = defaul
         cw = (W - 40) / cols
         for i, g in enumerate(rest[:cols]):
             cx = int(20 + cw * i + cw / 2)
-            cy = H - STRIP_H + 44
-            _paste_logo(canvas, logo(g["away"]), cx - 30, cy, 40)
-            _paste_logo(canvas, logo(g["home"]), cx + 30, cy, 40)
+            cy = H - STRIP_H // 2
+            _paste_logo(canvas, logo(g["away"]), cx - 34, cy, 50)
+            _paste_logo(canvas, logo(g["home"]), cx + 34, cy, 50)
             d = ImageDraw.Draw(canvas)
-            d.text((cx, cy), "@", font=_font("display", 22), fill=(255, 255, 255, 200), anchor="mm")
-            d.text((cx, cy + 46), _time_label(g.get("time_et")).replace(" ET", ""),
-                   font=_font("display", 22), fill=WHITE, anchor="mm")
+            d.text((cx, cy), "@", font=_font("display", 24), fill=(255, 255, 255, 200), anchor="mm")
     else:
         d.text((W // 2, H - STRIP_H // 2), "NBN.TODAY", font=_font("display", 40), fill=WHITE, anchor="mm")
 
@@ -433,8 +426,7 @@ def build_post(data: dict) -> dict:
         "footer": {"text": "nbn.today"},
     }
     if feat:
-        tip = _time_label(feat.get("time_et"))
-        lines = [f"**Game of the night:** {feat['away']} @ {feat['home']} · {tip}"
+        lines = [f"**Game of the night:** {feat['away']} @ {feat['home']}"
                  + (" · \U0001F534 stream" if feat.get("stream") else "")]
         lines += [f"• {s}" for s in feat.get("storylines") or [] if not s.startswith("Live on")][:4]
         embed["description"] = "\n".join(lines)
