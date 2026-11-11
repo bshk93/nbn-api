@@ -34,7 +34,7 @@ from fastapi.responses import Response
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from .constants import DATA_DIR
-from .tonight import SITE_DIR, _check_date, last_name, tonight
+from .tonight import SITE_DIR, _check_date, _team_colors, last_name, tonight
 
 router = APIRouter()
 
@@ -247,7 +247,8 @@ def _initials(name: str) -> str:
 
 
 def render(data: dict, headshot: Callable[[str], Optional[Image.Image]] = default_headshot,
-           logo: Callable[[str], Optional[Image.Image]] = default_logo) -> bytes:
+           logo: Callable[[str], Optional[Image.Image]] = default_logo,
+           colors: Optional[dict] = None) -> bytes:
     games = data.get("games") or []
     feat = next((g for g in games if g.get("featured")), games[0] if games else None)
     theme = data.get("theme") or {}
@@ -263,9 +264,7 @@ def render(data: dict, headshot: Callable[[str], Optional[Image.Image]] = defaul
     _text(d, (56, 22), str(n), _font("display", 230))
     _text(d, (60, 262), "GAMES" if n != 1 else "GAME", _font("display", 84))
     _text(d, (60, 336), "TONIGHT", _font("display", 84))
-    season = data.get("season") or ""
-    yrs = f"20{season[:2]}–{season[3:]}" if len(season) == 5 else season
-    _text(d, (62, 432), f"{day.strftime('%a').upper()} · {day.strftime('%b').upper()} {day.day} · {yrs}",
+    _text(d, (62, 432), f"{day.strftime('%a').upper()} · {day.strftime('%b').upper()} {day.day}",
           _font("display", 30), fill=(255, 255, 255, 230))
 
     if feat:
@@ -339,15 +338,28 @@ def render(data: dict, headshot: Callable[[str], Optional[Image.Image]] = defaul
     d.line([(0, H - STRIP_H), (W, H - STRIP_H)], fill=GOLD + (255,), width=3)
     rest = [g for g in games if g is not feat]
     if rest:
+        # Each game is its own tile, with a gap between tiles and a top edge
+        # in the two teams' colours (their chart colours, which are picked to
+        # read on a dark page), so nine pairs of logos don't run together.
+        colors = _team_colors() if colors is None else colors
         cols = min(len(rest), 9)
+        gap = 10
         cw = (W - 40) / cols
+        y0, y1 = H - STRIP_H + 16, H - 12
         for i, g in enumerate(rest[:cols]):
-            cx = int(20 + cw * i + cw / 2)
-            cy = H - STRIP_H // 2
-            _paste_logo(canvas, logo(g["away"]), cx - 34, cy, 50)
-            _paste_logo(canvas, logo(g["home"]), cx + 34, cy, 50)
-            d = ImageDraw.Draw(canvas)
-            d.text((cx, cy), "@", font=_font("display", 24), fill=(255, 255, 255, 200), anchor="mm")
+            x0 = int(20 + cw * i + gap / 2)
+            x1 = int(20 + cw * (i + 1) - gap / 2)
+            mid = (x0 + x1) // 2
+            d.rounded_rectangle([x0, y0, x1, y1], radius=4, fill=(30, 35, 48, 255))
+            for side, (a, b) in (("away", (x0, mid)), ("home", (mid, x1))):
+                c = _hex(((colors.get(g[side]) or {}).get("chart")), (120, 130, 150))
+                d.rectangle([a, y0, b, y0 + 5], fill=_lift(c, 90) + (255,))
+            lx = (x1 - x0) * 0.27
+            for team, cx in ((g["away"], int(x0 + lx)), (g["home"], int(x1 - lx))):
+                _paste_logo(canvas, logo(team), cx, y0 + 38, 40)
+                d = ImageDraw.Draw(canvas)
+                d.text((cx, y1 - 13), team, font=_font("display", 18), fill=(255, 255, 255, 230), anchor="mm")
+            d.text((mid, y0 + 38), "@", font=_font("display", 20), fill=(255, 255, 255, 150), anchor="mm")
     else:
         d.text((W // 2, H - STRIP_H // 2), "NBN.TODAY", font=_font("display", 40), fill=WHITE, anchor="mm")
 
