@@ -25,6 +25,10 @@ The rules, each a pure function below so the tests can pin them:
   `STREAK_MIN`+, the stars' last-5 lines, and playoff odds between 25% and
   75%. Career milestones are added on the page from milestones.js, which is
   the one home of that logic.
+* **Line** (each game's `line`): `playoff_odds.game_line` on the stream
+  planner's `ratings_now()` — the odds run's rating less each team's Out
+  players — so the homepage slate quotes the same spread the planner scores
+  closeness on. `spread` is to the half point, `fav` None for a pick'em.
 * **Last night** (`last_night`): the newest date before this one with box
   scores, its three best lines by Game Score — the build's formula, the one
   `/stats/highs` ranks by.
@@ -375,6 +379,12 @@ def build(day: str) -> dict:
         stars[t] = _star_out(s, t, bios, ovr)
 
     feat = pick_featured(games, recs, odds)
+    try:
+        from .playoff_odds import game_line
+        from .stream_planner import ratings_now
+        ratings = ratings_now() if games else {}
+    except Exception:  # noqa: BLE001 — no ratings is no line, not an error page
+        ratings = {}
     out_games = []
     for g in games:
         a, h = g["away_team"], g["home_team"]
@@ -384,6 +394,7 @@ def build(day: str) -> dict:
             "youtube_url": g.get("youtube_url"),
             "records": {"away": _rec(*recs.get(a, [0, 0])), "home": _rec(*recs.get(h, [0, 0]))},
             "odds": ({"away": odds.get(a), "home": odds.get(h)} if odds else None),
+            "line": game_line(h, a, ratings) if ratings else None,
             "stars": {"away": stars.get(a), "home": stars.get(h)},
             "storylines": storylines(g, results, odds, stars)[:MAX_STORIES]
                           if g is not feat else storylines(g, results, odds, stars),
@@ -425,7 +436,8 @@ def _cache_key(day: str) -> tuple:
     rosters = tuple(_mtime(DATA_DIR / f"{t.lower()}-roster.csv") for t in sorted(VALID_TEAMS))
     return (day, gh._files_key(), _mtime(_schedule_path(season)), rosters,
             _mtime(CURRENT_FILE), _mtime(DATA_DIR / "player-bios.json"),
-            _mtime(DATA_DIR / "ovr-history.json"), _mtime(TEAM_COLORS_FILE))
+            _mtime(DATA_DIR / "ovr-history.json"), _mtime(TEAM_COLORS_FILE),
+            _mtime(DATA_DIR / "injuries.json"))
 
 
 def tonight(day: Optional[str] = None) -> dict:

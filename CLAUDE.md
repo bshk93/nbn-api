@@ -1230,7 +1230,10 @@ of nbn.today, pdc.nbn.today and dev.nbn.today).
 | `GET /api/tonight/card.png?date=` | Public | The same answer as a 1200x675 PNG (Pillow). Cached in `$DATA_DIR/tonight-cards/` by a hash of the answer; `v=` is ignored, it only busts Discord's cache. 404 on a date with no games |
 
 - **One answer, two pictures.** Who is featured, each star and every storyline
-  are decided in `tonight.py` only; the page and the card just draw it. The
+  are decided in `tonight.py` only; the page and the card just draw it. Each game's
+  `line` (`{margin, fav, spread, p_home}`, the homepage slate's spread) is
+  `playoff_odds.game_line` on `stream_planner.ratings_now()`, the planner's own
+  strength, so the slate and the planner's closeness can't disagree. The
   rules (stream game first, else win% + playoff stakes; the hot hand is best
   mean Game Score over the last 5 games *for this team*, 3 minimum, else top
   OVR in `home._five`) are its docstring. Career milestones are added on the

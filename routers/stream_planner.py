@@ -277,9 +277,9 @@ def _quality(away, home, ratings: dict[str, float]) -> dict:
 
 
 def _closeness(away, home, ratings) -> dict:
-    margin = ratings.get(home, 0.0) - ratings.get(away, 0.0) + po.HOME_EDGE
+    line = po.game_line(home, away, ratings)
+    margin, p_home = line["margin"], line["p_home"]
     fav, spread = (home, margin) if margin >= 0 else (away, -margin)
-    p_home = po._phi(margin / po.GAME_SD)
     frac = _clamp(1 - spread / SPREAD_FOR_ZERO)
     return _pts("closeness", frac, f"{fav} by {spread:.1f} projected · {home} {round(p_home * 100)}% to win")
 
@@ -635,6 +635,24 @@ def odds_inputs(run: Optional[dict]) -> tuple[dict, dict, float, Optional[str]]:
     return {t: r["rating"] for t, r in odds.items()}, odds, frac, run.get("date")
 
 
+def current_ratings(rosters: dict[str, list[dict]], out: set[str], run: Optional[dict]) -> dict[str, float]:
+    """Each team's rating tonight: the playoff-odds run's (the roster prior
+    alone before the first run), less what its Out players are worth. The one
+    strength both the planner and the homepage's lines (`tonight.py`) use."""
+    ratings = odds_inputs(run)[0]
+    if not ratings:   # before the first odds run: the roster prior alone
+        ratings = po.roster_priors({t: weighted_top8([p["ovr"] for p in ps]) for t, ps in rosters.items()})
+    adj = injury_adjustments(rosters, out)
+    return {t: r + adj.get(t, 0.0) for t, r in ratings.items()}
+
+
+def ratings_now() -> dict[str, float]:
+    """`current_ratings` from the files on disk."""
+    rosters = _rosters(player_bios_shared(), ovr_shared())
+    return current_ratings(rosters, out_slugs(injuries_mod.load_injuries()),
+                           _load_json(po.CURRENT_FILE, None))
+
+
 @router.get("/api/stream-planner")
 def get_stream_planner(from_: Optional[str] = Query(default=None, alias="from"),
                        to: Optional[str] = Query(default=None),
@@ -677,11 +695,9 @@ def get_stream_planner(from_: Optional[str] = Query(default=None, alias="from"),
     bios, ovr = player_bios_shared(), ovr_shared()
     rosters = _rosters(bios, ovr)
     out = out_slugs(injuries_mod.load_injuries())
-    ratings, odds, frac, as_of = odds_inputs(_load_json(po.CURRENT_FILE, None))
-    if not ratings:   # before the first odds run: the roster prior alone
-        ratings = po.roster_priors({t: weighted_top8([p["ovr"] for p in ps]) for t, ps in rosters.items()})
-    adj = injury_adjustments(rosters, out)
-    ratings = {t: r + adj.get(t, 0.0) for t, r in ratings.items()}
+    run = _load_json(po.CURRENT_FILE, None)
+    _, odds, frac, as_of = odds_inputs(run)
+    ratings = current_ratings(rosters, out, run)
     franchise, owner, tenures = _h2h(today)
     owners = {t: owner_on(tenures, t, today) for t in VALID_TEAMS}
     names = {slug: player_name((b or {}).get("name") or slug) for slug, b in bios.items()}
