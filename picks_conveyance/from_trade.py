@@ -143,3 +143,31 @@ def register_swap(pick_key: tuple, to_team: str, swap_with: str,
     registry.add_swap_group(gid, members=members, priority=[swap_with, to_team],
                             txn_entry=txn_entry)
     return True
+
+
+def register_pick_swap(year: int, rnd: int, from_team: str, from_orig: str,
+                       to_team: str, to_orig: str, txn_id: str | None = None,
+                       txn_date: str | None = None) -> str:
+    """A trade's `swap` asset: `from_team` gives `to_team` the right to swap
+    picks. `to_team` ends with the better of the two, `from_team` with the
+    worse. Unlike `register_swap`, both picks are named outright, so nothing
+    depends on which team owns what at the moment of the write, or on the
+    order the trade's legs run in.
+
+    The caller has already checked that each team holds its pick outright
+    (`_pick_swap_problems` in routers/transactions.py). Raises
+    `registry.SwapConflict` if either pick is already in a swap group, the
+    same guard `register_swap` has. Returns the new group id."""
+    a = (year, rnd, from_orig)
+    b = (year, rnd, to_orig)
+    existing = registry.find_swap_group_for(a) or registry.find_swap_group_for(b)
+    if existing is not None:
+        raise registry.SwapConflict(
+            f"{a} or {b} is already a member of swap group {existing!r}")
+    members = [{"year": year, "round": rnd, "orig": from_orig},
+               {"year": year, "round": rnd, "orig": to_orig}]
+    gid = f"sg_auto_{year}_{rnd}_{'_'.join(sorted([from_orig, to_orig]))}"
+    txn_entry = {"id": txn_id, "date": txn_date} if txn_id else None
+    registry.add_swap_group(gid, members=members, priority=[to_team, from_team],
+                            txn_entry=txn_entry)
+    return gid

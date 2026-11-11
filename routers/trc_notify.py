@@ -77,6 +77,8 @@ def _truncate(text: str, limit: int) -> str:
 def _asset(a: dict, bios: dict) -> str:
     if a.get("type") == "player":
         return _player_name(a["slug"], bios) or a["slug"]
+    if a.get("type") == "swap":
+        return f"{a.get('year')} R{a.get('round')} swap rights ({a.get('swap_orig')} for {a.get('orig')})"
     label = f"{a.get('year')} R{a.get('round')} ({a.get('orig')})"
     if a.get("protection"):
         label += " protected"
@@ -158,6 +160,9 @@ def _trade_asset(a: dict, bios: dict) -> str:
     name, or a pick as "ATL 2027 2nd"."""
     if a.get("type") == "player":
         return _player_name(a["slug"], bios) or a["slug"]
+    if a.get("type") == "swap":
+        return (f"the right to swap {a.get('year')} {_ordinal(a.get('round'))}s "
+                f"({a.get('swap_orig')} for {a.get('orig')})")
     label = f"{a.get('orig')} {a.get('year')} {_ordinal(a.get('round'))}"
     if a.get("protection"):
         label += f" (top-{a['protection']} protected)"

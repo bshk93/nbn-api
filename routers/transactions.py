@@ -76,6 +76,23 @@ def _register_trade_swap(pick_key: tuple, to_team: str, swap_with: str,
                          f"for {pick_key} (flat SWAP_OWNER field is unaffected)")
 
 
+def _register_pick_swap(asset, from_team: str, to_team: str,
+                        txn_id: str | None = None, txn_date: str | None = None) -> None:
+    """Write a trade's `swap` asset as a two-team swap group. Not fail-open
+    like the registrations above: the group is the whole of a swap asset, so
+    losing it would record a trade that did nothing. `_pick_swap_problems`
+    has already passed by the time this runs, so a failure here is a bug."""
+    from picks_conveyance import from_trade
+    try:
+        from_trade.register_pick_swap(asset.year, asset.round, from_team, asset.orig,
+                                      to_team, asset.swap_orig,
+                                      txn_id=txn_id, txn_date=txn_date)
+    except Exception as e:
+        logger.exception(f"picks_conveyance: failed to register pick swap {asset!r}")
+        raise HTTPException(status_code=500,
+                            detail=f"Couldn't record the {asset.year} R{asset.round} pick swap: {e}")
+
+
 def _register_trade_ladder(pick_key: tuple, from_team: str, to_team: str,
                           protect_top: int, fallback_picks: list[tuple],
                           txn_id: str | None = None, txn_date: str | None = None) -> None:
@@ -545,7 +562,7 @@ class SignPickDetails(BaseModel):
 
 
 class TradeAsset(BaseModel):
-    type: str                        # "player" or "pick"
+    type: str                        # "player", "pick" or "swap"
     slug: Optional[str] = None
     year: Optional[int] = None
     round: Optional[int] = None
@@ -568,6 +585,11 @@ class TradeAsset(BaseModel):
     # else substitute pick(s)" clause explicitly stated in the trade.
     ladder_protect_top: Optional[int] = None
     ladder_fallback: Optional[list[dict]] = None
+    # A `swap` asset moves no pick. from_team gives to_team the right to swap
+    # picks: from_team's `orig` pick against to_team's `swap_orig` pick, same
+    # year and round. to_team ends with the better of the two, from_team the
+    # worse. Each team must hold its pick outright (_pick_swap_problems).
+    swap_orig: Optional[str] = None
 
 
 class TradeTransfer(BaseModel):
@@ -1965,6 +1987,8 @@ def _trade_leg_ownership_problems(details: TradeIn, bios: dict, team_map: dict,
                     problems.append(
                         f"Player {asset.slug!r} is on {actual_team or 'no team'}, not {xfer.from_team}")
                 continue
+            if asset.type == "swap":
+                continue
             key = (asset.year, asset.round, asset.orig)
             pick_row = pick_index.get(key)
             if not pick_row:
@@ -2001,7 +2025,96 @@ def _trade_leg_ownership_problems(details: TradeIn, bios: dict, team_map: dict,
                 _check_retrade_allowed(key, asset, xfer.from_team, conveyance_store)
             except HTTPException as e:
                 problems.append(str(e.detail))
+    problems.extend(_pick_swap_problems(details, pick_index, conveyance_store))
     return problems
+
+
+def _swap_assets(details: TradeIn):
+    """(from_team, to_team, asset) for every `swap` asset in the trade."""
+    for xfer in details.transfers:
+        for asset in xfer.assets:
+            if asset.type == "swap":
+                yield xfer.from_team.upper(), xfer.to_team.upper(), asset
+
+
+def _pick_swap_problems(details: TradeIn, pick_index: dict,
+                        conveyance_store) -> list[str]:
+    """Every reason a `swap` asset can't be written. Each team must hold its
+    own pick outright: one owner, not drafted, not frozen, and no structure on
+    it already (another swap, a protection, a ladder). A swap layered on a
+    contingent pick has no single meaning, so it is refused rather than
+    guessed at. Pure, like `_trade_leg_ownership_problems`, which calls it."""
+    problems: list[str] = []
+    ladder_keys: set[tuple] = set()
+    try:
+        from picks_conveyance import registry
+        for ladder in registry.load_registry().get("ladders", []):
+            ladder_keys |= registry._ladder_keys(ladder)
+    except Exception:
+        logger.exception("pick swap check: could not read ladders")
+    for from_t, to_t, asset in _swap_assets(details):
+        if not (asset.year and asset.round and asset.orig and asset.swap_orig):
+            problems.append("A pick swap needs a year, a round and both picks")
+            continue
+        a_orig, b_orig = asset.orig.upper(), asset.swap_orig.upper()
+        label = f"the {asset.year} R{asset.round} swap ({a_orig} / {b_orig})"
+        if a_orig == b_orig:
+            problems.append(f"{label} names the same pick twice")
+            continue
+        for team, orig in ((from_t, a_orig), (to_t, b_orig)):
+            key = (asset.year, asset.round, orig)
+            row = pick_index.get(key)
+            pick_label = f"{asset.year} R{asset.round} {orig}"
+            if not row:
+                problems.append(f"Pick {pick_label} not found")
+                continue
+            if (row.get("PLAYER") or "").strip():
+                problems.append(f"Pick {pick_label} was already used and can't be swapped")
+                continue
+            if row.get("FROZEN", "").strip().upper() == "TRUE":
+                problems.append(f"Pick {pick_label} is frozen and can't be swapped")
+                continue
+            node = None
+            if conveyance_store is not None:
+                try:
+                    node = _lookup_conveyance_node(key, conveyance_store)
+                except Exception:
+                    node = None
+            if node is not None:
+                outright = node.get("type") == "settled" and node.get("team") == team
+            else:
+                outright = row.get("OWNER", "").upper() == team or (
+                    row.get("OWNER", "") == "?" and orig == team)
+            if not outright:
+                problems.append(
+                    f"{team} doesn't hold pick {pick_label} outright, so it can't be part "
+                    f"of {label}. A swap can only be made between two picks that each have "
+                    "one owner and no protection or swap on them already")
+                continue
+            if key in ladder_keys:
+                problems.append(f"Pick {pick_label} is tied to a protection ladder and can't be swapped")
+    return problems
+
+
+def _check_pick_swaps(details: TradeIn) -> list[CheckResult]:
+    """`_pick_swap_problems` as checks, so /api/validate/trade (and the trade
+    builder behind it) reports a swap that can't be written before anyone
+    submits it. Ownership is otherwise left out of that endpoint, but a swap
+    means nothing unless each side holds its pick."""
+    swaps = list(_swap_assets(details))
+    if not swaps:
+        return []
+    picks = load_picks()
+    pick_index = {(int(p["YEAR"]), int(p["ROUND"]), p["ORIG"].upper()): p for p in picks}
+    problems = _pick_swap_problems(details, pick_index, _load_conveyance_store_for_shadow_check())
+    if problems:
+        return [CheckResult(check="pick_swap", passed=False, level="error", message=m)
+                for m in problems]
+    return [CheckResult(
+        check="pick_swap", passed=True,
+        message=(f"{to_t} can swap its {a.year} R{a.round} pick ({a.swap_orig.upper()}) for "
+                 f"{from_t}'s ({a.orig.upper()}): {to_t} gets the better pick, {from_t} the worse."))
+        for from_t, to_t, a in swaps]
 
 
 def _apply_trade(details: TradeIn, txn_date: str, info: dict,
@@ -2017,7 +2130,7 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
         if xfer.to_team not in VALID_TEAMS:
             raise HTTPException(status_code=422, detail=f"Unknown team: {xfer.to_team!r}")
         for asset in xfer.assets:
-            if asset.type not in ("player", "pick"):
+            if asset.type not in ("player", "pick", "swap"):
                 raise HTTPException(status_code=422, detail=f"Unknown asset type: {asset.type!r}")
             if asset.swap_with:
                 asset.swap_with = asset.swap_with.upper()
@@ -2034,13 +2147,23 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
                 if asset.slug in seen_players:
                     raise HTTPException(status_code=422, detail=f"Player {asset.slug!r} appears in multiple transfers")
                 seen_players.add(asset.slug)
+            elif asset.type == "swap":
+                if not all([asset.year, asset.round, asset.orig, asset.swap_orig]):
+                    raise HTTPException(status_code=422, detail="Pick swap missing year/round/orig/swap_orig")
+                asset.orig = asset.orig.upper()
+                asset.swap_orig = asset.swap_orig.upper()
+                for orig in (asset.orig, asset.swap_orig):
+                    key = (asset.year, asset.round, orig)
+                    if key in seen_picks:
+                        raise HTTPException(status_code=422, detail=f"Pick {asset.year} R{asset.round} {orig} appears more than once in this trade")
+                    seen_picks.add(key)
             else:
                 if not all([asset.year, asset.round, asset.orig]):
                     raise HTTPException(status_code=422, detail="Pick asset missing year/round/orig")
                 asset.orig = asset.orig.upper()
                 key = (asset.year, asset.round, asset.orig)
                 if key in seen_picks:
-                    raise HTTPException(status_code=422, detail=f"Pick {asset.year} R{asset.round} {asset.orig} appears in multiple transfers")
+                    raise HTTPException(status_code=422, detail=f"Pick {asset.year} R{asset.round} {asset.orig} appears more than once in this trade")
                 seen_picks.add(key)
 
     bios     = load_player_bios()
@@ -2115,6 +2238,8 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
                                                    fallback_tuples,
                                                    txn_id=txn_id, txn_date=txn_date)
                         p["OWNER"] = xfer.to_team
+    for from_t, to_t, asset in _swap_assets(details):
+        _register_pick_swap(asset, from_t, to_t, txn_id=txn_id, txn_date=txn_date)
     save_picks(picks)
 
     trade_removals: dict[str, set[str]] = {}
@@ -6465,7 +6590,7 @@ def _check_stepien_rule(details: TradeIn, all_picks: list[dict] | None = None) -
     import itertools
     import re
 
-    if not any(a.type == "pick" and a.round == 1
+    if not any(a.type in ("pick", "swap") and a.round == 1
                for x in details.transfers for a in x.assets):
         return []
     if all_picks is None:
@@ -6563,11 +6688,28 @@ def _check_stepien_rule(details: TradeIn, all_picks: list[dict] | None = None) -
         group_members[gid] = [key, counterpart]
         picks[key] = picks[counterpart] = {"kind": "group", "gid": gid}
 
+    def pick_swap(asset, from_t, to_t):
+        # Each team is certain of exactly one of the two picks, as in any
+        # two-team group. `_pick_swap_problems` refuses anything but two
+        # outright picks, so both are plain bands here.
+        a = (asset.year, (asset.orig or "").upper())
+        b = (asset.year, (asset.swap_orig or "").upper())
+        if a not in picks or b not in picks:
+            return
+        gid = f"_sim_pickswap_{a[0]}_{a[1]}_{b[1]}"
+        groups[gid] = {from_t, to_t}
+        group_members[gid] = [a, b]
+        picks[a] = picks[b] = {"kind": "group", "gid": gid}
+
     trade_keys = set()
     affected: set[str] = set()
     for xfer in details.transfers:
         from_t, to_t = xfer.from_team.upper(), xfer.to_team.upper()
         for asset in xfer.assets:
+            if asset.type == "swap" and asset.round == 1:
+                affected |= {from_t, to_t}
+                pick_swap(asset, from_t, to_t)
+                continue
             if asset.type != "pick" or asset.round != 1:
                 continue
             affected |= {from_t, to_t}
@@ -6710,7 +6852,7 @@ def _check_pick_advance_limit(details: TradeIn, cur_season: str) -> list[CheckRe
     seen: set[tuple] = set()
     for xfer in details.transfers:
         for asset in xfer.assets:
-            if asset.type != "pick" or asset.year is None:
+            if asset.type not in ("pick", "swap") or asset.year is None:
                 continue
             key = (asset.year, asset.round, (asset.orig or "").upper())
             if key in seen:
@@ -7515,6 +7657,9 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
 
     # ── 7-year advance limit (§ 7.2) ────────────────────────────────────────────
     checks.extend(_check_pick_advance_limit(details, season))
+
+    # ── Pick swaps: each side must hold its pick outright ─────────────────────
+    checks.extend(_check_pick_swaps(details))
 
     # ── Extension trade freeze (§ 4.5 / § 6.2 rule 11) ──────────────────────────
     checks.extend(_check_extension_trade_restriction(details, ctx))

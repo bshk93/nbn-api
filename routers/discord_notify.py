@@ -393,6 +393,9 @@ def _describe(txn: dict, bios: dict) -> str:
                         mods.append(f"swap w/ {a['swap_with']}")
                     if mods:
                         label += f" ({', '.join(mods)})"
+                elif a.get("type") == "swap":
+                    label = (f"{a.get('year')} R{a.get('round')} swap rights "
+                             f"({a.get('swap_orig')} for {a.get('orig')})")
                 else:
                     continue
                 if not label:
