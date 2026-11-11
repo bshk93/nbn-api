@@ -796,6 +796,18 @@ def set_ratings_updated(body: RatingsUpdatedBody, info: dict = Depends(require_r
             data.pop(key, None)
         _save_json(RATINGS_UPDATED_FILE, data)
     log_write(info, f"ratings change {key} {'marked' if body.updated else 'unmarked'} updated")
+    # Loading the DNA can overwrite the positions his team set, so a streamer
+    # has to look. Rostered players only: a signing re-freezes from 2K anyway.
+    from . import coaching_settings
+    try:
+        if body.updated:
+            team = _build_team_map().get(body.slug)
+            if team:
+                coaching_settings.note_dna_update(team, body.slug, body.date, info.get("name"))
+        else:
+            coaching_settings.drop_dna_update(body.slug, body.date)
+    except Exception as exc:
+        logger.warning("dna position check failed for %s: %s", key, exc)
     return {"slug": body.slug, "date": body.date, "updated": data.get(key)}
 
 
