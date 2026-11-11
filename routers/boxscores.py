@@ -918,6 +918,44 @@ def _gamelog_row(r: dict, season: str) -> dict:
     }
 
 
+# path -> (mtime_ns, size, {PLAYER upper: [raw rows, file order]}). One entry
+# per raw file, rebuilt only when that file changes: a closed season is read
+# once per process, the current one once per commit. The gamelog used to parse
+# every file (157k rows) on each request, 1.4s with the GIL held.
+_GAMELOG_INDEX: dict = {}
+_gamelog_index_lock = threading.Lock()
+
+
+def _rows_by_player(path) -> dict:
+    st = path.stat()
+    sig = (st.st_mtime_ns, st.st_size)
+    hit = _GAMELOG_INDEX.get(str(path))
+    if hit is not None and hit[0] == sig:
+        return hit[1]
+    with _gamelog_index_lock:
+        hit = _GAMELOG_INDEX.get(str(path))
+        if hit is not None and hit[0] == sig:
+            return hit[1]
+        out: dict = {}
+        _, rows = read_csv(path)
+        for r in rows:
+            out.setdefault(r.get("PLAYER", "").strip().upper(), []).append(r)
+        _GAMELOG_INDEX[str(path)] = (sig, out)
+        return out
+
+
+def _gamelog_files() -> list:
+    """(path, season) for every raw file, regular seasons then playoffs."""
+    files = []
+    for path in sorted(DATA_DIR.glob("allstats-??-??.csv")):
+        files.append((path, path.stem[len("allstats-"):]))
+    for path in sorted(DATA_DIR.glob("allstats-playoffs-??.csv")):
+        end_yr = path.stem[len("allstats-playoffs-"):]
+        start_yr = str(int(end_yr) - 1).zfill(2)[-2:]
+        files.append((path, f"{start_yr}-{end_yr}"))
+    return files
+
+
 @router.get("/api/players/{slug}/gamelog")
 def get_player_gamelog(slug: str):
     bios = player_bios_shared()
@@ -929,22 +967,9 @@ def get_player_gamelog(slug: str):
         raise HTTPException(status_code=404, detail="Player has no name")
 
     results = []
-
-    for path in sorted(DATA_DIR.glob("allstats-??-??.csv")):
-        season = path.stem[len("allstats-"):]
-        _, rows = read_csv(path)
-        for r in rows:
-            if r.get("PLAYER", "").strip().upper() == player_name:
-                results.append(_gamelog_row(r, season))
-
-    for path in sorted(DATA_DIR.glob("allstats-playoffs-??.csv")):
-        end_yr = path.stem[len("allstats-playoffs-"):]
-        start_yr = str(int(end_yr) - 1).zfill(2)[-2:]
-        season = f"{start_yr}-{end_yr}"
-        _, rows = read_csv(path)
-        for r in rows:
-            if r.get("PLAYER", "").strip().upper() == player_name:
-                results.append(_gamelog_row(r, season))
+    for path, season in _gamelog_files():
+        for r in _rows_by_player(path).get(player_name, ()):
+            results.append(_gamelog_row(r, season))
 
     results.sort(key=lambda r: r["date"], reverse=True)
     return results
