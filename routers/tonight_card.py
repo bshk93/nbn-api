@@ -279,7 +279,9 @@ def render(data: dict, headshot: Callable[[str], Optional[Image.Image]] = defaul
         x0 = mid - lw / 2
         if feat.get("stream"):
             # The dot is drawn: Barlow has no U+25CF.
-            pill = "STREAM"
+            # Who's streaming it, as the homepage's label says it.
+            # Kept in its own case: upper-cased, "That1gal" reads as "THATIGAL".
+            pill = "STREAM" + (f" \u00b7 {feat['streamer']}" if feat.get("streamer") else "")
             pw = d.textlength(pill, font=lf) + 50
             x0 = mid - (lw + pw + 14) / 2
             d.rounded_rectangle([x0, 34, x0 + pw, 74], radius=6, fill=LIVE + (255,))
@@ -439,7 +441,8 @@ def build_post(data: dict) -> dict:
     }
     if feat:
         lines = [f"**Game of the night:** {feat['away']} @ {feat['home']}"
-                 + (" · \U0001F534 stream" if feat.get("stream") else "")]
+                 + ((" · \U0001F534 streamed by " + feat["streamer"] if feat.get("streamer") else " · \U0001F534 stream")
+                    if feat.get("stream") else "")]
         lines += [f"• {s}" for s in feat.get("storylines") or [] if not s.startswith("Live on")][:4]
         embed["description"] = "\n".join(lines)
         color = ((data.get("theme") or {}).get("home") or {}).get("primary")

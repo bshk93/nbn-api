@@ -176,6 +176,9 @@ check("featured game and storylines in the embed",
       "BKN @ CHI" in post["embeds"][0]["description"] and "season series" in post["embeds"][0]["description"]
       and "Live on Twitch" not in post["embeds"][0]["description"])
 check("embed colour is the home team's", post["embeds"][0]["color"] == 0xCE1141)
+check("a stream game names its streamer", "streamed by Kamal" in C.build_post(
+    {**DATA, "games": [{**DATA["games"][0], "streamer": "Kamal"}] + DATA["games"][1:]})["embeds"][0]["description"])
+check("no streamer, just the stream", "\U0001F534 stream" in post["embeds"][0]["description"])
 
 sent = []
 
