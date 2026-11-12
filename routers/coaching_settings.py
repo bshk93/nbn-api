@@ -291,6 +291,24 @@ class ConfirmBody(BaseModel):
     jerseys: dict[str, Optional[str]] = {}
     # slug → the primary position the streamer was shown and set.
     primaries: dict[str, Optional[str]] = {}
+    # slug → the DNA check the streamer did (see note_dna_update): the date of
+    # the ratings update shown, and what 2K had if it had been overwritten
+    # (`had` null or left out: 2K still matched). A check for a newer update
+    # than the one shown stays open.
+    dna: dict[str, "DnaCheck"] = {}
+
+
+class DnaHad(BaseModel):
+    primary: Optional[str] = None
+    secondary: Optional[str] = None
+
+
+class DnaCheck(BaseModel):
+    date: str
+    had: Optional[DnaHad] = None
+
+
+ConfirmBody.model_rebuild()
 
 
 def load_position_checks() -> dict:
@@ -334,6 +352,7 @@ def position_items(team: str, rec: dict, bios: dict, roster: list[str], today: s
     pins = set(rec.get("pins") or [])
     checked = rec.get("checked") or {}
     jerseys = rec.get("jerseys") or {}
+    dna = rec.get("dna") or {}
     items = []
     for slug in roster:
         bio = bios.get(slug) or {}
@@ -350,7 +369,10 @@ def position_items(team: str, rec: dict, bios: dict, roster: list[str], today: s
         jersey = bio.get("jersey_number") or None
         # A cleared number is nothing to enter: 2K always shows one.
         jersey_changed = jersey is not None and slug in jerseys and (jerseys[slug] or None) != jersey
-        if not (changed or primary_changed or jersey_changed or locked):
+        # His ratings were loaded into 2K (the DNA), which can overwrite the
+        # positions the team set. Open until a streamer has looked.
+        dna_check = dna.get(slug)
+        if not (changed or primary_changed or jersey_changed or locked or dna_check):
             continue
         items.append({
             "slug": slug,
@@ -367,7 +389,9 @@ def position_items(team: str, rec: dict, bios: dict, roster: list[str], today: s
             "jersey_was": jerseys.get(slug) or None,
             "jersey_changed": jersey_changed,
             "locked": locked,
-            "due": changed or primary_changed or jersey_changed or checked.get(slug) != today,
+            "dna": dna_check,
+            "due": (changed or primary_changed or jersey_changed or bool(dna_check)
+                    or (locked and checked.get(slug) != today)),
         })
     return items
 
@@ -407,7 +431,7 @@ def team_positions_view(team: str, data: Optional[dict] = None, bios: Optional[d
 
 
 def _waiting(item: dict) -> bool:
-    return item["changed"] or item["primary_changed"] or item["jersey_changed"]
+    return bool(item["changed"] or item["primary_changed"] or item["jersey_changed"] or item["dna"])
 
 
 def has_position_changes(team: str) -> bool:
@@ -422,6 +446,43 @@ def note_jersey_change(team: str, slug: str, old: Optional[str]) -> None:
         jerseys = data.setdefault(team, {}).setdefault("jerseys", {})
         if slug not in jerseys:
             jerseys[slug] = old or None
+            save_position_checks(data)
+
+
+def note_dna_update(team: str, slug: str, date: str, by: Optional[str]) -> None:
+    """The updates committee has loaded this player's ratings (the DNA) into
+    the league's 2K file, which can overwrite the positions his team set. Open
+    a check for the streamer, or move an open one to the newer update. Any
+    check left on another team (he has since been traded) is dropped. Tells
+    the next game's streamer, once, on the way from nothing waiting."""
+    with _coaching_lock:
+        data = load_position_checks()
+        for other, rec in data.items():
+            if other != team and slug in (rec.get("dna") or {}):
+                rec["dna"].pop(slug)
+        dna = data.setdefault(team, {}).setdefault("dna", {})
+        open_ = dna.get(slug)
+        if open_ and open_.get("date", "") >= date:
+            save_position_checks(data)
+            return
+        was_waiting = has_position_changes(team) or coaching_pending(team)
+        dna[slug] = {"date": date, "by": by, "at": _now()}
+        save_position_checks(data)
+    if not was_waiting:
+        game_day_notify.dna_updated(team, by)
+
+
+def drop_dna_update(slug: str, date: str) -> None:
+    """The tick was taken back: close a check still open for that update."""
+    with _coaching_lock:
+        data = load_position_checks()
+        hit = False
+        for rec in data.values():
+            open_ = (rec.get("dna") or {}).get(slug)
+            if open_ and open_.get("date") == date:
+                rec["dna"].pop(slug)
+                hit = True
+        if hit:
             save_position_checks(data)
 
 
@@ -498,11 +559,29 @@ def confirm_positions(team: str, body: ConfirmBody, info: dict = Depends(require
         jerseys = rec.setdefault("jerseys", {})
         for slug, num in body.jerseys.items():
             jerseys[slug] = num or None
+        from .players import POSITION_ORDER
+        bad = [s for s, c in body.dna.items() if c.had and any(
+            p is not None and p not in POSITION_ORDER for p in (c.had.primary, c.had.secondary))]
+        if bad:
+            raise HTTPException(status_code=422, detail=f"Not a position: {', '.join(sorted(bad))}")
+        dna = rec.get("dna") or {}
+        dna_done = rec.setdefault("dna_done", {})
+        for slug, check in body.dna.items():
+            open_ = dna.get(slug)
+            if not open_ or open_.get("date") != check.date:
+                continue
+            dna.pop(slug)
+            had = check.had.model_dump() if check.had else None
+            # The latest check per player: whether the DNA had overwritten
+            # 2K, and with what. The edit log keeps the history.
+            dna_done[slug] = {**open_, "checked_by": info.get("name"), "checked_at": _now(),
+                              "overwritten": bool(had), "had": had}
         rec["checked_at"] = _now()
         rec["checked_by"] = info.get("name")
         save_position_checks(data)
     log_write(info, f"POST position-checks/{team}/confirm — {', '.join(sorted(body.seen))}"
-                    + (f"; jerseys {', '.join(sorted(body.jerseys))}" if body.jerseys else ""))
+                    + (f"; jerseys {', '.join(sorted(body.jerseys))}" if body.jerseys else "")
+                    + (f"; dna {', '.join(sorted(body.dna))}" if body.dna else ""))
     view = team_positions_view(team)
     still = {i["slug"] for i in view["items"] if _waiting(i)}
     if before - still:

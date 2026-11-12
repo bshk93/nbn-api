@@ -102,6 +102,14 @@ def positions_changed(team: str, saved_by: Optional[str]) -> None:
     _tell_next_streamer(team, saved_by, "changed a player's position or jersey number", "it needs entering in 2K", "positions_changed")
 
 
+def dna_updated(team: str, updated_by: Optional[str]) -> None:
+    """Handoff 1, for a ratings update (the DNA) loaded into 2K: it can
+    overwrite the positions the team set. Call only when the team had nothing
+    waiting already."""
+    _tell_next_streamer(team, updated_by, "had a player's ratings updated in 2K",
+                        "check his position wasn't overwritten", "dna_updated")
+
+
 def note_left(team: str, saved_by: Optional[str], already_waiting: bool) -> None:
     """Handoff 1, for a note to the streamer. Quiet when the team already has
     changes waiting: the streamer will see the note on the same card."""

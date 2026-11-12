@@ -866,6 +866,20 @@ UFA/RFA hold for the current season still on a roster from opening night on
 can undo one. An RFA with an open offer sheet is skipped. `--dry-run` lists
 the holds. Pinned by `tests/test_fa_hold_sweep.py`.
 
+## DNA position checks (`note_dna_update` in `routers/coaching_settings.py`)
+
+Loading a player's new ratings (the DNA) into the league's 2K file can
+overwrite the positions his team set. So `PUT /api/ratings-changes/updated`
+(the updates committee's tick, which whoever loads the DNA must do) opens a
+check on his team for the streamer: `dna` in `position-checks.json`, shown as
+an item's `dna` on `GET /api/position-checks`, and counted as waiting, so the
+next streamer is told once (`game_day_notify.dna_updated`). Mark entered closes
+it with `dna: {slug: {date, had}}` on the confirm, and the latest result per
+player stays in `dna_done` (`overwritten`, `had`). Rostered players only; a
+check for a newer update than the one confirmed stays open; unticking closes
+an undone one. The rest is `nbn-today/docs/pages.md` § Roster Settings.
+Pinned by `tests/test_dna_position_check.py`.
+
 ## Trading block nudge (`routers/tradeblock_nudge.py`)
 
 A player on a team's trading block for 7+ days gets the team an inbox message

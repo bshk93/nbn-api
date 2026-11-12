@@ -42,6 +42,9 @@ auth.load_members = lambda: MEMBERS
 TMP = Path(tempfile.mkdtemp(prefix="nbn-ratings-updated-test-"))
 players.RATINGS_UPDATED_FILE = TMP / "ratings-updated.json"
 players.log_write = lambda info, msg: None
+# A tick opens a position check for a rostered player; keep it off the live
+# rosters. tests/test_dna_position_check.py covers that part.
+players._build_team_map = lambda: {}
 players.load_player_bios = lambda: {"doe-john": {"name": "DOE, JOHN"}}
 players.load_attributes = lambda: {"doe-john": [
     {"date": "2026-11-01", "2k_ovr": 80, "2k_pos": ["SF"], "attributes": {}, "badges": []},
