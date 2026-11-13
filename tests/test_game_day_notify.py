@@ -76,6 +76,18 @@ TMP = Path(tempfile.mkdtemp(prefix="nbn-gameday-test-"))
 cs.POSITION_CHECKS_FILE = TMP / "position-checks.json"
 cs._roster_slugs = lambda team: ["booker-devin", "beal-bradley"] if team == "PHX" else []
 cs.COACHING_SETTINGS_FILE = TMP / "coaching.json"
+# The roster above, as bios too. Left to the live file, a coaching save asked
+# whether positions were waiting and read the real bios: once Beal was traded
+# to SAS, his frozen position named SAS, PHX looked like it had a change
+# waiting, and the first save stayed quiet.
+import routers.players as pl  # noqa: E402
+BIOS = {"booker-devin": {"name": "BOOKER, DEVIN"}, "beal-bradley": {"name": "BEAL, BRADLEY"}}
+pl.load_player_bios = lambda: BIOS
+pl.save_player_bios = lambda data: None
+pl._build_team_map = lambda: {"booker-devin": "PHX", "beal-bradley": "PHX"}
+pl._check_secondary_pos = lambda slug, sec: None
+pl._primary_pos = lambda slug, attrs=None, bio=None: "SG"
+pl.log_write = lambda *a, **k: None
 sd.STREAMING_DAYS_FILE = TMP / "streaming-days.json"
 cs.log_write = sd.log_write = lambda *a, **k: None
 bx.DATA_DIR = TMP
@@ -128,14 +140,6 @@ check("an unclaimed game a week out pings nobody", SENT == [])
 # ── 1b. a position changed ────────────────────────────────────────────────────
 
 print("a team changes a player's position")
-import routers.players as pl  # noqa: E402
-BIOS = {"booker-devin": {"name": "BOOKER, DEVIN"}, "beal-bradley": {"name": "BEAL, BRADLEY"}}
-pl.load_player_bios = lambda: BIOS
-pl.save_player_bios = lambda data: None
-pl._build_team_map = lambda: {"booker-devin": "PHX", "beal-bradley": "PHX"}
-pl._check_secondary_pos = lambda slug, sec: None
-pl._primary_pos = lambda slug, attrs=None, bio=None: "SG"
-pl.log_write = lambda *a, **k: None
 app.include_router(pl.router)
 # Section 1 left PHX's coaching saved and not entered, which already pinged the
 # streamer (coaching and positions are entered from one card, so one message
