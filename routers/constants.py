@@ -144,6 +144,10 @@ IRL_DIR = DATA_DIR / "irl"
 # put into the league's 2K roster file: {"slug|date": {by, at}}. Hand-kept, so
 # backed up.
 RATINGS_UPDATED_FILE = DATA_DIR / "ratings-updated.json"
+# Which roster-changing transactions a streamer has put into the league's 2K
+# roster file (routers/roster_entry.py): {txn_id: {by, at}}. Hand-kept, so
+# backed up.
+ROSTER_ENTRY_FILE = DATA_DIR / "roster-entry.json"
 
 PICKS_HEADERS = ["YEAR", "ROUND", "ORIG", "OWNER", "PICK", "PLAYER", "PROTECTED", "SWAP_OWNER", "NOTES", "FROZEN", "FROZEN_REASON"]
 
@@ -153,6 +157,7 @@ _txn_lock           = threading.Lock()
 _manual_queue_lock  = threading.Lock()
 _ovr_lock      = threading.Lock()
 _ratings_updated_lock = threading.Lock()
+_roster_entry_lock = threading.Lock()
 _state_lock    = threading.Lock()
 _deadcap_lock  = threading.Lock()
 _trade_exc_lock = threading.Lock()
