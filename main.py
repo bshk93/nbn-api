@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from etag import ETagMiddleware
 
 from routers import audit as audit_ctx
-from routers import auth, players, roster_picks, picks_structure, transactions, boxscores, game_highs, player_insights, playoff_odds, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, og, discord, trade_finder, picks_preview, suggestions, google_sheets, free_agency, roster_log_relay, waivers, inbox, poext, themes, cap_history, poopoo, schedule, coaching_settings, streaming_days, donations, nbnfl, irl, trade_requests, nbyen, markets, lore, game_starters, on_this_day, fair_value, stream_live, game_day, stream_notify, pickem, youtube_vods, injuries, tetris, headshots, quadrants, tweets, arenas, bird_rights, home, stream_sim, stream_planner, years_of_service, tonight, tonight_card
+from routers import auth, players, roster_picks, picks_structure, transactions, boxscores, game_highs, player_insights, playoff_odds, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, og, discord, trade_finder, picks_preview, suggestions, google_sheets, free_agency, roster_log_relay, waivers, inbox, poext, themes, cap_history, poopoo, schedule, coaching_settings, streaming_days, donations, nbnfl, irl, trade_requests, nbyen, markets, lore, game_starters, on_this_day, fair_value, stream_live, game_day, stream_notify, pickem, youtube_vods, injuries, tetris, headshots, quadrants, tweets, arenas, bird_rights, home, stream_sim, stream_planner, years_of_service, tonight, tonight_card, parse_request
 from routers.picks_scheduler import start_picks_horizon_scheduler
 from routers.roster_log_relay import start_roster_log_relay
 from routers.youtube_vods import start_youtube_vods
@@ -87,6 +87,7 @@ app.include_router(picks_structure.router)   # rosters: checked band/swap correc
 app.include_router(picks_preview.router)   # additive: GET /api/picks-preview (conveyance model)
 app.include_router(transactions.router)
 app.include_router(boxscores.router)
+app.include_router(parse_request.router)   # POST /api/boxscores/parse-request — fire the /parse-boxscores cloud task
 app.include_router(game_highs.router)    # GET /api/game-highs, behind /stats/highs
 app.include_router(player_insights.router)  # GET /api/players/{slug}/insights — feats, streaks, teammates
 app.include_router(playoff_odds.router)     # GET /api/playoff-odds (+ /history), behind /standings; computed by nbn-playoff-odds.timer

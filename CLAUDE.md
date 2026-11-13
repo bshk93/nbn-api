@@ -580,6 +580,31 @@ imports at runtime, and numpy's float and NaN rendering would fight `csvio`,
 which reproduces `readr::write_csv` byte for byte (NA vs empty are different
 values; `-0` keeps its sign; a whole double loses its `.0`).
 
+## Parse now (`routers/parse_request.py`)
+
+`POST /api/boxscores/parse-request` (`stats`/`rosters`) is the **Uploads done:
+parse now** button on `/committees/stats`. It fires a Claude Code scheduled
+task (formerly a routine) with an API trigger, whose saved prompt runs
+`/parse-boxscores` in a fresh cloud session, and returns that session's URL.
+`GET` gives the last request and what's in the queue. The fire URL and token
+live in `.env` (`NBN_PARSE_ROUTINE_URL`, `NBN_PARSE_ROUTINE_TOKEN`), never in
+the browser; unset, POST is a 503 and the page hides the button.
+
+- **Nothing to parse, nothing fired**: no game with both sides up and no
+  pending injury report is a 409.
+- **A 20-minute window, not a lock** (`COOLDOWN_MINUTES`): a second request
+  inside it is a 409 naming the first run, unless `force`. Nothing tells us
+  when a run ends; the commit path refuses a game committed twice.
+- **The fire text is context only**: the date and counts, nothing a member
+  typed. The platform wraps it as untrusted; the task's own prompt is what
+  says to run the parse.
+
+Setting it up: create the task at claude.ai/code/routines (repo
+`bshk93/nbn-today`, an environment that can reach nbn.today with a `stats`
+token), add an API trigger, and put its Fire URL and token in `.env`, then
+restart. Requests are kept in `parse-requests.json`. Pinned by
+`tests/test_parse_request.py` (no network).
+
 ## Twitch live status (`routers/stream_live.py`)
 
 `GET /api/stream/live`, public, behind the homepage's live banner: whether
