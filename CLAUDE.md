@@ -839,6 +839,14 @@ applied). `TradeAsset.claim` ("protection removed") is server-set by
 lists picks where a team holds any band; the plain call doesn't, because `owner`
 names only the unprotected recipient. Tests: `tests/test_pick_protection_trades.py`.
 
+A **ladder** protection (keeper `from` keeps the pick if top N, else it goes to
+`to`; if protected, `to` gets the fallback picks) isn't bands and isn't a leaf,
+so the keeper names it with a plain pick asset sent to the ladder's `to`
+(`_ladder_keeper`). Removing deletes the ladder, fallback included; lowering
+is `registry.lower_ladder`. A re-trade of a ladder pick moves whichever side
+sends it: until 2026-11-13 only `from` moved, which left `sas_tor` owed to TOR
+after TOR traded the pick to NOP in Trade 44.
+
 ## The edit log (`routers/audit.py`)
 
 `POST /api/transactions` is audited to the dollar. The side doors that change

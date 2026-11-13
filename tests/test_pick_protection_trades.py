@@ -125,6 +125,41 @@ def test_claims():
                                    "claim": "protection removed"}, {}) == "AAA 2099 1st (protection removed)")
 
 
+def ladder(top=10):
+    registry.save_registry(registry._empty())
+    registry.add_ladder({"id": "lad", "from": "AAA", "to": "BBB",
+                         "steps": [{"year": 2099, "round": 1, "orig": "AAA", "protect_top": top}],
+                         "fallback": {"type": "fixed_asset",
+                                      "picks": [{"year": 2099, "round": 2, "orig": "AAA"}]}})
+
+
+def test_ladders():
+    print("\n-- a ladder protection: AAA keeps it if top 10, else BBB; else BBB gets a 2nd --")
+    settled = {"type": "settled", "team": "BBB"}
+    ladder()
+    registry.handle_retrade(KEY, "BBB", "CCC", settled, txn_id="t44", txn_date="2026-08-01")
+    lad = registry.load_registry()["ladders"][0]
+    check("the team owed the pick trading it moves the ladder's `to`", lad["to"] == "CCC", lad)
+    check("and leaves the keeper alone", lad["from"] == "AAA")
+
+    ladder()
+    check("the keeper sending to the team owed it is a ladder keeper asset",
+          tx._ladder_keeper(send().transfers[0].assets[0], "AAA", "BBB") is not None)
+    check("to anyone else it isn't", tx._ladder_keeper(send(taker="CCC").transfers[0].assets[0], "AAA", "CCC") is None)
+    t = send(); tx._describe_pick_claims(t)
+    check("claim on the asset: protection removed", t.transfers[0].assets[0].claim == "protection removed")
+    t = send(4); tx._describe_pick_claims(t)
+    check("claim with a threshold: lowered", t.transfers[0].assets[0].claim == "protection lowered to top 4")
+    check("lowering to 4: allowed", tx._pick_protection_problems(send(4)) == [])
+    p = tx._pick_protection_problems(send(10))
+    check("lowering to the same 10: refused", len(p) == 1 and "1 to 9" in p[0], p)
+
+    tx._trade_ladder_protection(KEY, "AAA", "BBB", 4, "t1", "2099-01-01")
+    check("lowered: protect_top is 4", registry.load_registry()["ladders"][0]["steps"][0]["protect_top"] == 4)
+    tx._trade_ladder_protection(KEY, "AAA", "BBB", None, "t2", "2099-01-02")
+    check("removed: the ladder is gone, fallback and all", registry.load_registry()["ladders"] == [])
+
+
 def test_team_picks_claims():
     print("\n-- GET /api/picks/{team}?claims=all lists a band the team keeps --")
     from routers import roster_picks as rp
@@ -137,6 +172,9 @@ def test_team_picks_claims():
         check("the protecting team doesn't see it by default", rp.get_team_picks("ATL") == [])
         check("with claims=all it does", len(rp.get_team_picks("ATL", claims="all")) == 1)
         check("the owner sees it either way", len(rp.get_team_picks("BOS")) == 1)
+        rp._all_picks_flat = lambda: [{"year": 2099, "round": 1, "orig": "ATL", "owner": "BOS",
+                                       "leaves": [], "ladder": {"from": "ATL", "to": "BOS", "protect_top": 10}}]
+        check("a ladder's keeper sees it with claims=all", len(rp.get_team_picks("ATL", claims="all")) == 1)
     finally:
         rp._all_picks_flat = real
 
@@ -151,6 +189,7 @@ def main():
         test_lower()
         test_stepien()
         test_claims()
+        test_ladders()
         test_team_picks_claims()
     finally:
         registry.REGISTRY_FILE = orig

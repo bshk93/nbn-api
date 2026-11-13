@@ -110,6 +110,46 @@ def _register_trade_ladder(pick_key: tuple, from_team: str, to_team: str,
                          f"for {pick_key} (fallback compensation not modeled)")
 
 
+def _trade_ladder_protection(pick_key: tuple, from_team: str, to_team: str,
+                             top: int | None, txn_id: str | None, txn_date: str | None) -> None:
+    """Write a ladder keeper's protection trade: removed (the ladder goes,
+    via `registry.handle_retrade`) or lowered (`registry.lower_ladder`).
+    Not fail-open: the ladder is the whole asset, so a trade that didn't
+    change it would record something that never happened."""
+    from picks_conveyance import registry
+    txn_entry = {"id": txn_id, "date": txn_date} if txn_id else None
+    try:
+        if top is None:
+            registry.handle_retrade(pick_key, from_team, to_team,
+                                    {"type": "settled", "team": to_team},
+                                    txn_id=txn_id, txn_date=txn_date)
+        else:
+            registry.lower_ladder(pick_key, top, txn_entry=txn_entry)
+    except Exception as e:
+        logger.exception(f"picks_conveyance: ladder protection trade failed for {pick_key}")
+        raise HTTPException(status_code=500,
+                            detail=f"Couldn't record the protection change on {pick_key}: {e}")
+
+
+def _ladder_keeper(asset, from_team: str, to_team: str):
+    """(ladder, step) when this pick asset is a ladder's keeper sending its
+    protection to the team owed the pick, else None. That removes the
+    protection, or lowers it when the asset carries a smaller `protection`.
+    The keeper holds no claim the ownership model sees (a ladder is not a
+    leaf), so this is how a trade names it."""
+    if getattr(asset, "type", None) != "pick" or not asset.orig:
+        return None
+    try:
+        from picks_conveyance import registry
+        found = registry.ladder_for((asset.year, asset.round, asset.orig.upper()))
+    except Exception:
+        logger.exception("ladder lookup failed")
+        return None
+    if found and found[0].get("from") == from_team.upper() and found[0].get("to") == to_team.upper():
+        return found
+    return None
+
+
 def _normalize_pick_bands(pick_key: tuple) -> bool:
     """Merge a pick's neighbouring bands held by one team, after a trade
     moved or split one (`registry.normalize_protected`). True when one team
@@ -2012,7 +2052,8 @@ def _trade_leg_ownership_problems(details: TradeIn, bios: dict, team_map: dict,
             if not pick_row:
                 problems.append(f"Pick {asset.year} R{asset.round} {asset.orig} not found")
                 continue
-            owned_by_from_team = _check_pick_ownership(
+            keeper = _ladder_keeper(asset, xfer.from_team, xfer.to_team)
+            owned_by_from_team = keeper is not None or _check_pick_ownership(
                 key, xfer.from_team, pick_row, conveyance_store, asset.leaf_id)
             if not owned_by_from_team:
                 problems.append(
@@ -2038,6 +2079,8 @@ def _trade_leg_ownership_problems(details: TradeIn, bios: dict, team_map: dict,
                 if reason:
                     detail += f": {reason}"
                 problems.append(detail)
+                continue
+            if keeper is not None:
                 continue
             try:
                 _check_retrade_allowed(key, asset, xfer.from_team, conveyance_store)
@@ -2135,6 +2178,15 @@ def _pick_protection_problems(details: TradeIn) -> list[str]:
             if asset.type != "pick" or asset.protection is None or not asset.orig:
                 continue
             key = (asset.year, asset.round, asset.orig.upper())
+            label = f"{asset.year} R{asset.round} {asset.orig.upper()}"
+            keeper = _ladder_keeper(asset, from_t, xfer.to_team)
+            if keeper is not None:
+                top = int(keeper[1].get("protect_top") or 0)
+                if not (1 <= asset.protection < top):
+                    problems.append(
+                        f"Pick {label} is top-{top} protected, so a lowered protection must be "
+                        f"from 1 to {top - 1}, not {asset.protection}")
+                continue
             try:
                 spec = registry.get_protected_spec(key)
             except Exception:
@@ -2142,7 +2194,6 @@ def _pick_protection_problems(details: TradeIn) -> list[str]:
                 continue
             if spec is None:
                 continue
-            label = f"{asset.year} R{asset.round} {asset.orig.upper()}"
             mine = [b for b in spec["bands"] if b.get("to") == from_t]
             if len(mine) != 1:
                 problems.append(
@@ -2176,6 +2227,11 @@ def _describe_pick_claims(details: TradeIn) -> None:
                 continue
             asset.claim = None
             if registry is None or not asset.orig:
+                continue
+            keeper = _ladder_keeper(asset, from_t, to_t)
+            if keeper is not None:
+                asset.claim = ("protection removed" if asset.protection is None
+                               else f"protection lowered to top {asset.protection}")
                 continue
             try:
                 spec = registry.get_protected_spec((asset.year, asset.round, asset.orig.upper()))
@@ -2323,6 +2379,14 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
                     if (int(p["YEAR"]) == asset.year and int(p["ROUND"]) == asset.round
                             and p["ORIG"].upper() == asset.orig):
                         pick_key = (asset.year, asset.round, asset.orig)
+                        if _ladder_keeper(asset, xfer.from_team, xfer.to_team) is not None:
+                            # The pick stays where it is; only its ladder changes.
+                            _trade_ladder_protection(pick_key, xfer.from_team, xfer.to_team,
+                                                     asset.protection, txn_id, txn_date)
+                            if asset.protection is None:
+                                p["PROTECTED"] = ""
+                                p["OWNER"] = xfer.to_team
+                            break
                         if asset.protection is not None:
                             p["PROTECTED"] = str(asset.protection)
                             _register_trade_protection(pick_key, xfer.from_team,

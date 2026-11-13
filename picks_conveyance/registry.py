@@ -664,10 +664,11 @@ def _retrade_ladders(reg: dict, pick_key: tuple, from_team: str, to_team: str,
     pick is a plain settled pick (the common case — `register_ladder` is
     only ever called alongside a plain, un-contingent pick trade) or one
     that separately also carries its own protected/swap/binary structure
-    from an unrelated trade. Only rewrites `from`: a ladder's `to` (the
-    fallback beneficiary) isn't reachable as a leaf on this pick at all
-    today (see `ownership.list_leaves` — no `ladder` case), so there's
-    nothing for a retrade of THIS pick to convey on that side.
+    from an unrelated trade. Either side moves: the keeper (`from`) or the
+    team owed the pick (`to`, which takes the fallback with it). Rewriting
+    only `from` left the 2029 SAS 1st owed to TOR after TOR traded it to NOP
+    (Trade 44), so the draft would have given TOR the pick or the fallback
+    2nds. The keeper sending it to `to` removes the ladder: no protection.
 
     A ladder with multiple steps (a manually-curated multi-year chain, not
     the single-step shape `register_ladder` writes) still shares one
@@ -688,20 +689,57 @@ def _retrade_ladders(reg: dict, pick_key: tuple, from_team: str, to_team: str,
     (`changed=False`) before this pin was added. `register_ladder`-created
     ladders already set `orig` explicitly and are unaffected."""
     changed = False
-    for ladder in reg.get("ladders", []):
-        if ladder.get("from") != from_team:
+    for ladder in list(reg.get("ladders", [])):
+        side = ("from" if ladder.get("from") == from_team
+                else "to" if ladder.get("to") == from_team else None)
+        if side is None:
             continue
         for step in ladder.get("steps", []):
             step_key = (step["year"], step["round"], step.get("orig") or ladder["from"])
             if step_key == pick_key:
                 if not step.get("orig"):
                     step["orig"] = pick_key[2]
-                ladder["from"] = to_team
-                if txn_entry:
-                    ladder.setdefault("txn_ids", []).append(txn_entry)
+                if side == "from" and ladder.get("to") == to_team:
+                    # The keeper sends its protection to the team owed the
+                    # pick: no protection, and no fallback, is left.
+                    reg["ladders"].remove(ladder)
+                else:
+                    ladder[side] = to_team
+                    if txn_entry:
+                        ladder.setdefault("txn_ids", []).append(txn_entry)
                 changed = True
                 break
     return changed
+
+
+def ladder_for(pick_key: tuple, reg: dict | None = None) -> tuple[dict, dict] | None:
+    """The ladder with a step governing this pick, and that step, or None."""
+    reg = reg if reg is not None else load_registry()
+    for ladder in reg.get("ladders", []):
+        for step in ladder.get("steps", []):
+            if (step["year"], step["round"], step.get("orig") or ladder["from"]) == pick_key:
+                return ladder, step
+    return None
+
+
+def lower_ladder(pick_key: tuple, top: int, txn_entry: dict | None = None) -> None:
+    """A ladder's keeper trades away part of its protection: the step
+    governing this pick now protects only the top `top`. The fallback is
+    unchanged. Raises ValueError unless `top` is below the current one."""
+    with _lock:
+        reg = load_registry()
+        found = ladder_for(pick_key, reg)
+        if found is None:
+            raise ValueError(f"{pick_key} has no protection ladder")
+        ladder, step = found
+        if not (1 <= top < int(step.get("protect_top") or 0)):
+            raise ValueError(f"{pick_key}: {top} doesn't lower top-{step.get('protect_top')}")
+        if not step.get("orig"):
+            step["orig"] = pick_key[2]
+        step["protect_top"] = top
+        if txn_entry:
+            ladder.setdefault("txn_ids", []).append(txn_entry)
+        save_registry(reg)
 
 
 def apply_registry(store: dict) -> dict:
