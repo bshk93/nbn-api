@@ -588,7 +588,9 @@ task (formerly a routine) with an API trigger, whose saved prompt runs
 `/parse-boxscores` in a fresh cloud session, and returns that session's URL.
 `GET` gives the last request and what's in the queue. The fire URL and token
 live in `.env` (`NBN_PARSE_ROUTINE_URL`, `NBN_PARSE_ROUTINE_TOKEN`), never in
-the browser; unset, POST is a 503 and the page hides the button.
+the browser; unset, POST is a 503 and the page hides the button. An optional
+backup task on a second account (`NBN_PARSE_ROUTINE_URL_2` / `_TOKEN_2`) is
+tried only when the first fire fails, so one press is still one run.
 
 - **Nothing to parse, nothing fired**: no game with both sides up and no
   pending injury report is a 409.

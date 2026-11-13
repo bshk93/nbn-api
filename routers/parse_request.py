@@ -8,10 +8,15 @@ whose token stays in `.env` so it never reaches a browser.
     POST /api/boxscores/parse-request   stats / rosters   fire the task
     GET  /api/boxscores/parse-request   stats / rosters   the last request
 
-Config (both in `.env`; unset, POST is a 503 and nothing else changes):
+Config, in `.env` (none set: POST is a 503 and nothing else changes):
 
     NBN_PARSE_ROUTINE_URL    the task's Fire URL, .../routines/trig_.../fire
     NBN_PARSE_ROUTINE_TOKEN  its API token, shown once when generated
+    NBN_PARSE_ROUTINE_URL_2, NBN_PARSE_ROUTINE_TOKEN_2   optional backup task
+
+The backup is the same task on a second member's Claude account. It is tried
+only when the first fire fails (its account out of usage, a revoked token);
+one press never starts two runs.
 
 Three rules:
 
@@ -106,6 +111,17 @@ def _fire_text(queue: dict, who: str) -> str:
     return "\n".join(lines)
 
 
+def _routines() -> list[tuple[str, str]]:
+    """The configured (url, token) pairs, primary first."""
+    out = []
+    for sfx in ("", "_2"):
+        url = os.environ.get(f"NBN_PARSE_ROUTINE_URL{sfx}")
+        token = os.environ.get(f"NBN_PARSE_ROUTINE_TOKEN{sfx}")
+        if url and token:
+            out.append((url, token))
+    return out
+
+
 def _post_fire(url: str, token: str, text: str) -> dict:
     r = httpx.post(
         url,
@@ -140,7 +156,8 @@ def _recent(rows: list) -> Optional[dict]:
 def last_parse_request(info: dict = Depends(require_any_role("stats", "rosters"))):
     rows = _load()
     return {
-        "configured": bool(os.environ.get("NBN_PARSE_ROUTINE_URL") and os.environ.get("NBN_PARSE_ROUTINE_TOKEN")),
+        "configured": bool(_routines()),
+        "routines": len(_routines()),
         "last": rows[-1] if rows else None,
         "queue": _queue(),
         "cooldown_minutes": COOLDOWN_MINUTES,
@@ -149,9 +166,8 @@ def last_parse_request(info: dict = Depends(require_any_role("stats", "rosters")
 
 @router.post("/api/boxscores/parse-request")
 def request_parse(body: ParseRequest = ParseRequest(), info: dict = Depends(require_any_role("stats", "rosters"))):
-    url = os.environ.get("NBN_PARSE_ROUTINE_URL")
-    token = os.environ.get("NBN_PARSE_ROUTINE_TOKEN")
-    if not (url and token):
+    routines = _routines()
+    if not routines:
         raise HTTPException(status_code=503, detail="The parse task isn't set up on the server (NBN_PARSE_ROUTINE_URL / _TOKEN).")
     who = info.get("name") or "?"
     with _lock:
@@ -166,11 +182,20 @@ def request_parse(body: ParseRequest = ParseRequest(), info: dict = Depends(requ
                 "session_url": recent.get("session_url"),
             })
         row = {"at": _now().isoformat(), "by": who, "queue": queue}
-        try:
-            out = _post_fire(url, token, _fire_text(queue, who))
-            row.update(ok=True, session_url=out.get("claude_code_session_url"), session_id=out.get("claude_code_session_id"))
-        except Exception as e:
-            row.update(ok=False, error=str(e)[:300])
+        errors = []
+        for n, (url, token) in enumerate(routines, 1):
+            try:
+                out = _post_fire(url, token, _fire_text(queue, who))
+            except Exception as e:
+                errors.append(f"task {n}: {str(e)[:200]}")
+                continue
+            row.update(ok=True, routine=n, session_url=out.get("claude_code_session_url"),
+                       session_id=out.get("claude_code_session_id"))
+            break
+        else:
+            row.update(ok=False, error="; ".join(errors))
+        if errors and row.get("ok"):
+            row["fallback_errors"] = errors
         rows.append(row)
         _save(rows)
     logger.info("[%s] POST boxscores/parse-request — ok=%s %s", who, row["ok"], row.get("session_url") or row.get("error"))

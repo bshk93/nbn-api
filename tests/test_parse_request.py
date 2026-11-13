@@ -6,6 +6,7 @@
   * a ready game fires once, with the date in the text, and returns the session URL
   * a second request inside the cooldown is a 409 naming the first run; force fires
   * a failed fire is a 502 and is recorded, and doesn't start the cooldown
+  * with a backup task, a failed first fire falls back to it; one press, one run
 
 Temp dirs only; the fire POST is stubbed, so no network.
 
@@ -49,13 +50,16 @@ pr.PENDING_BOXSCORES_DIR.mkdir()
 
 fired = []
 fail_next = [False]
+dead_urls = set()
 
 
 def fake_fire(url, token, text):
     if fail_next[0]:
         fail_next[0] = False
         raise RuntimeError("boom")
-    fired.append(text)
+    if url in dead_urls:
+        raise RuntimeError("usage limit")
+    fired.append((url, text))
     return {"claude_code_session_id": f"session_{len(fired)}",
             "claude_code_session_url": f"https://claude.ai/code/session_{len(fired)}"}
 
@@ -102,8 +106,8 @@ check("failure recorded", pr._load()[-1]["ok"] is False)
 r = c.post("/api/boxscores/parse-request", headers=S)
 check("ready game fires", r.status_code == 200 and len(fired) == 1)
 check("returns the session url", r.json().get("session_url") == "https://claude.ai/code/session_1")
-check("text names the date", "2026-11-12: 1 game(s)" in fired[0])
-check("text notes the half-uploaded game", "only one side" in fired[0])
+check("text names the date", "2026-11-12: 1 game(s)" in fired[0][1])
+check("text notes the half-uploaded game", "only one side" in fired[0][1])
 
 print("cooldown")
 r = c.post("/api/boxscores/parse-request", headers=S)
@@ -112,6 +116,24 @@ check("409 names the running session", r.json()["detail"]["session_url"] == "htt
 r = c.post("/api/boxscores/parse-request", headers=S, json={"force": True})
 check("force fires again", r.status_code == 200 and len(fired) == 2)
 check("GET shows the last run", c.get("/api/boxscores/parse-request", headers=S).json()["last"]["session_id"] == "session_2")
+
+print("backup task")
+os.environ["NBN_PARSE_ROUTINE_URL_2"] = "https://example.invalid/fire2"
+os.environ["NBN_PARSE_ROUTINE_TOKEN_2"] = "t2"
+check("GET counts two tasks", c.get("/api/boxscores/parse-request", headers=S).json()["routines"] == 2)
+r = c.post("/api/boxscores/parse-request", headers=S, json={"force": True})
+check("healthy primary: one run, on the primary", r.status_code == 200 and len(fired) == 3
+      and fired[-1][0] == "https://example.invalid/fire")
+dead_urls.add("https://example.invalid/fire")
+r = c.post("/api/boxscores/parse-request", headers=S, json={"force": True})
+check("dead primary falls back to the backup", r.status_code == 200 and len(fired) == 4
+      and fired[-1][0] == "https://example.invalid/fire2")
+last = pr._load()[-1]
+check("the fallback is recorded", last["routine"] == 2 and "usage limit" in last["fallback_errors"][0])
+dead_urls.add("https://example.invalid/fire2")
+r = c.post("/api/boxscores/parse-request", headers=S, json={"force": True})
+check("both dead is a 502 naming both", r.status_code == 502 and "task 1" in r.json()["detail"]
+      and "task 2" in r.json()["detail"])
 
 if FAILS:
     print(f"\n{len(FAILS)} FAILED")
