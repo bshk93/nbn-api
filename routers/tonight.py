@@ -391,6 +391,8 @@ def build(day: str) -> dict:
         out_games.append({
             "id": g.get("id"), "date": g["date"], "away": a, "home": h,
             "time_et": g.get("time_et") or "", "stream": g["stream"], "streamer": g["streamer"],
+            # An NBA Cup group game: the schedule is the NBA's, and tags them.
+            "cup": g.get("note") == "NBA Cup",
             "youtube_url": g.get("youtube_url"),
             "records": {"away": _rec(*recs.get(a, [0, 0])), "home": _rec(*recs.get(h, [0, 0]))},
             "odds": ({"away": odds.get(a), "home": odds.get(h)} if odds else None),
