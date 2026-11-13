@@ -657,8 +657,16 @@ def _all_allstats_paths() -> list:
 _GAME_INDEX_CACHE: dict[tuple, list[dict]] = {}
 
 
+def _ot_periods(minutes: int) -> int:
+    """Overtime periods from one side's summed minutes: 240 is regulation,
+    each overtime adds 25 (five players, five minutes). The box scores have
+    no period column, so this is the only place OT is visible."""
+    return max(0, round((minutes - 240) / 25))
+
+
 def _build_game_index(paths: list) -> list[dict]:
     seen: dict[tuple, dict] = {}
+    minutes: dict[tuple, dict[str, int]] = {}
     for path, gtype in paths:
         if not path.exists():
             continue
@@ -672,6 +680,12 @@ def _build_game_index(paths: list) -> list[dict]:
                 continue
             is_home = not opp_field.startswith("@")
             key = (date, team, opp_raw) if is_home else (date, opp_raw, team)
+            try:
+                mins = int(r.get("M", 0) or 0)
+            except ValueError:
+                mins = 0
+            side = minutes.setdefault(key, {})
+            side[team] = side.get(team, 0) + mins
             if key in seen:
                 continue
             try:
@@ -688,6 +702,8 @@ def _build_game_index(paths: list) -> list[dict]:
                 "gametype": r.get("gametype", gtype),
                 "season": r.get("SEASON", "").strip(),
             }
+    for key, g in seen.items():
+        g["ot"] = _ot_periods(max(minutes.get(key, {}).values(), default=0))
     return sorted(seen.values(), key=lambda g: g["date"], reverse=True)
 
 

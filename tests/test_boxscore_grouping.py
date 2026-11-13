@@ -79,6 +79,22 @@ finally:
 check("found whichever way round", g.get("attendance") == {"count": 18204, "sellout": False, "arena": "The Garden"})
 check("a game the ledger hasn't seen has none", "attendance" not in miss)
 
+print("the game index counts overtimes from minutes")
+check("regulation", b._ot_periods(240) == 0)
+check("one OT", b._ot_periods(265) == 1)
+check("double OT", b._ot_periods(290) == 2)
+check("short-handed box reads as regulation", b._ot_periods(236) == 0)
+with tempfile.TemporaryDirectory() as d:
+    f = Path(d) / "allstats-x.csv"
+    hdr = "TEAM,DATE,OPP,OPP_RAW,PLAYER,M,TEAM_PTS,OPP_TEAM_PTS,gametype\n"
+    lines = [f"NYK,2026-11-01,BOS,BOS,P{i},53,120,118,REG" for i in range(5)]
+    lines += [f"BOS,2026-11-01,@NYK,NYK,Q{i},53,118,120,REG" for i in range(5)]
+    lines += [f"MIA,2026-11-01,ATL,ATL,R{i},48,99,90,REG" for i in range(5)]
+    f.write_text(hdr + "\n".join(lines) + "\n")
+    idx = {(g["home_team"], g["away_team"]): g for g in b._build_game_index([(f, "REG")])}
+    check("265 team minutes is one OT", idx[("NYK", "BOS")]["ot"] == 1)
+    check("240 is none", idx[("MIA", "ATL")]["ot"] == 0)
+
 if FAILS:
     print(f"\n{len(FAILS)} FAILED")
     sys.exit(1)
