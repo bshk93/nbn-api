@@ -49,6 +49,7 @@ _LINK_KINDS: list[tuple[str, str]] = [
     ("/free-agency", "fa"),
     ("/extensions", "extensions"),
     ("/committees/trc", "trades"),
+    ("/trades/", "trades"),
     ("/tradeblock", "tradeblock"),
     ("/transactions", "transactions"),
     ("/api/transactions", "transactions"),

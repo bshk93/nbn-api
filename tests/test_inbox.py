@@ -106,6 +106,7 @@ ib.notify_member("bryn", "coaching", link="/teams/BOS/#coaching")
 ib.notify_member("bryn", "explicit", link="/teams/BOS/", kind="games")
 ib.notify_member("bryn", "bogus kind falls back", link="/suggestions", kind="nonsense")
 ib.notify_member("bryn", "no link")
+ib.notify_member("bryn", "trade page", link="/trades/view/?id=abc")
 kinds = {it["text"]: it["kind"] for it in STORE["bryn"]}
 check("/free-agency → fa", kinds["fa"] == "fa")
 check("/committees/pdc#poext → extensions", kinds["poext"] == "extensions")
@@ -115,6 +116,7 @@ check("/teams/X/#coaching → games", kinds["coaching"] == "games")
 check("explicit kind wins over the link", kinds["explicit"] == "games")
 check("unknown kind falls back to the link", kinds["bogus kind falls back"] == "suggestions")
 check("no link → other", kinds["no link"] == "other")
+check("/trades/view → trades", kinds["trade page"] == "trades")
 
 print("\nkind: entries stored before it existed are classified on read")
 STORE["bryn"] = [{"id": "legacy", "ts": datetime.now(timezone.utc).isoformat(),

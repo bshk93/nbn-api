@@ -40,7 +40,12 @@ DISCORD_TRADES_CHANNEL = os.environ.get("DISCORD_TRADES_CHANNEL", "").strip()
 TRC_MAX_BURST = 60
 TRC_BURST_WINDOW = 900
 
-DASHBOARD = f"{SITE}/committees/trc/"
+
+def trade_path(item: dict) -> str:
+    """The page one request lives on. Only its teams and the TRC can open it,
+    so it is safe in a party's inbox and in #trc-alerts."""
+    return f"/trades/view/?id={item['id']}"
+
 
 COLOR_ACTION = 0xFBBF24
 
@@ -134,7 +139,7 @@ def notify_ready_for_vote(item: dict, needed: int) -> None:
             "color": COLOR_ACTION,
             "fields": [{"name": "Trade", "value": _legs(item), "inline": False},
                        {"name": "Legality", "value": _legality(item), "inline": False}],
-            "url": DASHBOARD,
+            "url": SITE + trade_path(item),
         }], "components": vote_buttons(item["id"])}
     _alert(build)
 
@@ -146,7 +151,7 @@ def notify_ready_to_finalize(item: dict, needed: int) -> None:
             "description": f"{needed} approvals in. A TRC head can finalize or reject it.",
             "color": COLOR_ACTION,
             "fields": [{"name": "Legality", "value": _legality(item), "inline": False}],
-            "url": DASHBOARD,
+            "url": SITE + trade_path(item),
         }]}
     _alert(build)
 

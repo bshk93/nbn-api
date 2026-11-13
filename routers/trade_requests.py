@@ -170,7 +170,7 @@ def _tell_parties(item: dict, text: str) -> None:
     reports on, same as the Discord posts."""
     for p in item["parties"]:
         try:
-            inbox.notify_team(p, text, link="/committees/trc/")
+            inbox.notify_team(p, text, link=trc_notify.trade_path(item))
         except Exception:
             logger.exception("trade request inbox notice failed")
 
@@ -245,11 +245,11 @@ def create_trade_request(body: TradeValidateInput, info: dict = Depends(get_toke
     for p in parties:
         if has_role(info, p.lower()):
             text = (f"{info['name']} proposed a trade involving {', '.join(parties)}. "
-                    f"It still needs your team's consent on the TRC page.")
+                    f"It still needs your team's consent.")
         else:
             text = (f"A trade involving {', '.join(parties)} has been proposed "
                     f"— your team's consent is needed.")
-        inbox.notify_team(p, text, link="/committees/trc/")
+        inbox.notify_team(p, text, link=trc_notify.trade_path(item))
 
     return _public_view(item)
 
@@ -285,8 +285,8 @@ def consent_trade_request(request_id: str, info: dict = Depends(get_token_info))
         # Both roles, not just trc — notify_team/notify_role check a member's
         # literal roles list, not ROLE_IMPLIES, so a trc_head-only member
         # would otherwise never hear about it (see docs/trc-trade-pipeline.md).
-        inbox.notify_role("trc", text, link="/committees/trc/")
-        inbox.notify_role("trc_head", text, link="/committees/trc/")
+        inbox.notify_role("trc", text, link=trc_notify.trade_path(item))
+        inbox.notify_role("trc_head", text, link=trc_notify.trade_path(item))
         _tell_parties(item, f"Every team has consented to the {trc_notify.trade_name(item)}. "
                             "It's with the TRC for a vote.")
 

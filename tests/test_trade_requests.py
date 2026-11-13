@@ -79,8 +79,9 @@ tr._load_conveyance_store_for_shadow_check = lambda: None
 tr._trade_fact_sheet = lambda trade, ctx: {"season": "26-27", "teams": {"PHX": {"incoming_salary": 1}}}
 
 NOTIFICATIONS = []
-tr.inbox.notify_team = lambda team, text, link=None, **_: NOTIFICATIONS.append(("team", team, text))
-tr.inbox.notify_role = lambda role, text, link=None, **_: NOTIFICATIONS.append(("role", role, text))
+LINKS = []
+tr.inbox.notify_team = lambda team, text, link=None, **_: (NOTIFICATIONS.append(("team", team, text)), LINKS.append(link))
+tr.inbox.notify_role = lambda role, text, link=None, **_: (NOTIFICATIONS.append(("role", role, text)), LINKS.append(link))
 
 # trc-alerts: the real embed builders run, only the network send is captured.
 ALERTS = []
@@ -338,6 +339,11 @@ check("the ready-for-a-vote post lists each leg", "PHX → BOS" in agreed["field
       or "BOS → PHX" in agreed["fields"][0]["value"], agreed["fields"][0]["value"])
 check("rejected and withdrawn requests post nothing",
       not reject_alerts and not withdraw_alerts, (reject_alerts, withdraw_alerts))
+check("every inbox notice links to its trade's own page",
+      LINKS and all(l and l.startswith("/trades/view/?id=") for l in LINKS), set(LINKS))
+check("trc-alerts posts link to the trade's own page",
+      all(e["url"].startswith("https://") and "/trades/view/?id=" in e["url"] for _, e in ALERTS if "url" in e),
+      [e.get("url") for _, e in ALERTS])
 check("no inbox notice shows the request number",
       not any("#" in n[2] for n in NOTIFICATIONS), [n[2] for n in NOTIFICATIONS if "#" in n[2]])
 print("\na trade that carries a release")
