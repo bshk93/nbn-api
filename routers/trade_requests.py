@@ -31,6 +31,7 @@ from .transactions import (
     _validation_ctx, _require_trade_validatable, _validate_trade,
     _trade_leg_ownership_problems, _build_team_map, load_picks,
     _load_conveyance_store_for_shadow_check, apply_trade, _trade_fact_sheet,
+    _describe_pick_claims,
 )
 from .league_time import league_today_str
 
@@ -209,6 +210,9 @@ def create_trade_request(body: TradeValidateInput, info: dict = Depends(get_toke
             status_code=403,
             detail="Must hold a role for at least one team in this trade to propose it")
 
+    # What each band of a protected pick conveys, as it stands now: shown on
+    # the request, and re-set by apply_trade when it is finalized.
+    _describe_pick_claims(body)
     now = _now()
     with _trc_lock:
         store = _load_store()

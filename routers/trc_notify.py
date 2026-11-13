@@ -169,6 +169,8 @@ def _trade_asset(a: dict, bios: dict) -> str:
         return (f"the right to swap {a.get('year')} {_ordinal(a.get('round'))}s "
                 f"({a.get('swap_orig')} for {a.get('orig')})")
     label = f"{a.get('orig')} {a.get('year')} {_ordinal(a.get('round'))}"
+    if a.get("claim"):
+        return f"{label} ({a['claim']})"
     if a.get("protection"):
         label += f" (top-{a['protection']} protected)"
     if a.get("swap_with"):

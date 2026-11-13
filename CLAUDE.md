@@ -823,6 +823,22 @@ Two of its entries were wrong (2027 LAC 2nd, 2029 DET 1st): the seed predated
 or misread a trade the flat CSV had right. A band no trade ever gives a team
 is the sign of that; the Picks tab's per-pick history shows it.
 
+## Trading a protection away, or lowering it
+
+A protected pick is bands, one per team. Removing the protection by trade is
+the protecting team sending its band (a pick asset with that `leaf_id`) to the
+team holding the rest; lowering it is the same with a smaller `protection`,
+which splits the band (`registry.subdivide_protected_band`). After either,
+`registry.normalize_protected` merges a team's neighbouring bands and drops the
+entry once one team holds them all, so the pick is plainly owned again rather
+than two claims the next trade would refuse as ambiguous; the flat `PROTECTED`
+is cleared with it. `_pick_protection_problems` refuses a threshold outside the
+sender's band (otherwise the registration fails open after the trade is
+applied). `TradeAsset.claim` ("protection removed") is server-set by
+`_describe_pick_claims` and read by every display. `GET /api/picks/{team}?claims=all`
+lists picks where a team holds any band; the plain call doesn't, because `owner`
+names only the unprotected recipient. Tests: `tests/test_pick_protection_trades.py`.
+
 ## The edit log (`routers/audit.py`)
 
 `POST /api/transactions` is audited to the dollar. The side doors that change

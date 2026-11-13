@@ -299,6 +299,48 @@ def subdivide_protected_band(pick_key: tuple, from_team: str, to_team: str,
         save_registry(reg)
 
 
+def normalize_protected(pick_key: tuple) -> str | None:
+    """Tidy a pick's bands after a trade moved one of them: neighbouring
+    bands held by the same team merge into one, and a pick left with a
+    single band is no protected pick at all, so its entry is dropped and
+    the pick goes back to being plainly owned. Returns that owner when it
+    collapses, else None. Bands whose value is a nested node never merge.
+
+    This is what makes a protection removable by trade. The protecting team
+    trades its band to the team holding the rest (or, with a lower
+    threshold, part of it), and without this the receiver would hold two
+    claims on one pick: shown as two bands, and refused on its next trade
+    as ambiguous."""
+    from . import model
+    with _lock:
+        reg = load_registry()
+        key = _kstr(pick_key)
+        spec = reg["protected"].get(key)
+        if spec is None:
+            return None
+        merged: list[dict] = []
+        for b in sorted(spec["bands"], key=lambda b: b["min"]):
+            prev = merged[-1] if merged else None
+            if (prev is not None and isinstance(prev.get("to"), str)
+                    and prev.get("to") == b.get("to") and b["min"] == prev["max"] + 1):
+                prev["max"] = b["max"]
+                txns = prev.get("txn_ids", []) + [t for t in b.get("txn_ids", [])
+                                                  if t not in prev.get("txn_ids", [])]
+                if txns:
+                    prev["txn_ids"] = txns
+                continue
+            merged.append(dict(b))
+        if len(merged) == 1 and isinstance(merged[0].get("to"), str):
+            del reg["protected"][key]
+            save_registry(reg)
+            return merged[0]["to"]
+        if merged != spec["bands"]:
+            model.validate({"type": "protected", "id": "tmp", "on": spec["on"], "bands": merged})
+            spec["bands"] = merged
+            save_registry(reg)
+        return None
+
+
 def add_ladder(ladder: dict) -> None:
     """Register a new protection ladder (called by the write path when a
     trade sets a ladder-style protect_top + fixed-asset fallback). Validated

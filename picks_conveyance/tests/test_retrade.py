@@ -160,6 +160,49 @@ def main():
             blocked = True
         check("legacy retrade: raises RetradeBlocked", blocked)
 
+        # Lifting a protection: the keeper sends its band to the team holding
+        # the rest. The pick goes back to being plainly owned.
+        on = {"year": 2099, "round": 1, "orig": "OKC"}
+        registry.add_protected((2099, 1, "OKC"), on=on,
+                               bands=[{"min": 1, "max": 4, "to": "OKC"},
+                                      {"min": 5, "max": 60, "to": "UTA"}],
+                               txn_entry={"id": "orig_trade", "date": "2026-01-01"})
+        registry.handle_retrade((2099, 1, "OKC"), "OKC", "UTA", {"type": "protected", "id": "x"},
+                                leaf_id="2099-1-OKC:protected:0", txn_id="lift", txn_date="2026-11-13")
+        owner = registry.normalize_protected((2099, 1, "OKC"))
+        check("lift: one team holds every band, so the pick collapses to it", owner == "UTA")
+        check("lift: the protected entry is gone",
+              "2099|1|OKC" not in registry.load_registry()["protected"])
+        check("normalize on a pick with no protection is a no-op",
+              registry.normalize_protected((2099, 1, "OKC")) is None)
+
+        # Lowering a protection: top-10 down to top-5. The keeper's band
+        # splits, and the conveyed half merges into the receiver's band.
+        on = {"year": 2099, "round": 1, "orig": "POR"}
+        registry.add_protected((2099, 1, "POR"), on=on,
+                               bands=[{"min": 1, "max": 10, "to": "POR"},
+                                      {"min": 11, "max": 60, "to": "SAS",
+                                       "txn_ids": [{"id": "orig_trade", "date": "2026-01-01"}]}])
+        registry.subdivide_protected_band((2099, 1, "POR"), "POR", "SAS", 5,
+                                          txn_entry={"id": "lower", "date": "2026-11-13"})
+        check("lower: normalize doesn't collapse a pick still split two ways",
+              registry.normalize_protected((2099, 1, "POR")) is None)
+        bands = registry.load_registry()["protected"]["2099|1|POR"]["bands"]
+        check("lower: two bands, POR 1-5 and SAS 6-60",
+              [(b["min"], b["max"], b["to"]) for b in bands] == [(1, 5, "POR"), (6, 60, "SAS")])
+        check("lower: the merged band keeps both trades' txn_ids",
+              [t["id"] for t in bands[1]["txn_ids"]] == ["lower", "orig_trade"])
+
+        # Same team in two bands that aren't next to each other: no merge.
+        on = {"year": 2099, "round": 1, "orig": "MIA"}
+        registry.add_protected((2099, 1, "MIA"), on=on,
+                               bands=[{"min": 1, "max": 4, "to": "MIA"},
+                                      {"min": 5, "max": 14, "to": "NYK"},
+                                      {"min": 15, "max": 60, "to": "MIA"}])
+        registry.normalize_protected((2099, 1, "MIA"))
+        check("bands that aren't neighbours don't merge",
+              len(registry.load_registry()["protected"]["2099|1|MIA"]["bands"]) == 3)
+
     finally:
         registry.REGISTRY_FILE = orig_registry
 

@@ -247,12 +247,19 @@ def get_all_picks():
 
 
 @router.get("/api/picks/{team}")
-def get_team_picks(team: str):
+def get_team_picks(team: str, claims: Optional[str] = None):
+    """`claims=all` adds every pick where the team holds any leaf, such as
+    the top of its own protected pick. `owner` names only the team the pick
+    goes to unprotected, so without it a protecting team can't see, or
+    trade away, the band it keeps. The trade builder asks for it; other
+    pages keep the narrower list."""
     team = team.upper()
     if team not in VALID_TEAMS:
         raise HTTPException(status_code=404, detail="Unknown team")
     all_picks = _all_picks_flat()
-    return [p for p in all_picks if _pick_matches_team(p, team)]
+    every_leaf = claims == "all"
+    return [p for p in all_picks if _pick_matches_team(p, team)
+            or (every_leaf and any(l.get("team") == team for l in p.get("leaves") or []))]
 
 
 class PickUpsert(BaseModel):

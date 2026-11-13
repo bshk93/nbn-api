@@ -387,7 +387,9 @@ def _describe(txn: dict, bios: dict) -> str:
                 elif a.get("type") == "pick":
                     label = f"{a.get('year')} R{a.get('round')} {a.get('orig')}"
                     mods = []
-                    if a.get("protection"):
+                    if a.get("claim"):
+                        mods.append(a["claim"])
+                    elif a.get("protection"):
                         mods.append(f"top-{a['protection']} prot.")
                     if a.get("swap_with"):
                         mods.append(f"swap w/ {a['swap_with']}")

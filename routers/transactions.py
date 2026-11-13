@@ -110,6 +110,19 @@ def _register_trade_ladder(pick_key: tuple, from_team: str, to_team: str,
                          f"for {pick_key} (fallback compensation not modeled)")
 
 
+def _normalize_pick_bands(pick_key: tuple) -> bool:
+    """Merge a pick's neighbouring bands held by one team, after a trade
+    moved or split one (`registry.normalize_protected`). True when one team
+    now holds the whole pick, so the protection is gone: that is a
+    protection lifted by trade. Fails open like the registrations above."""
+    try:
+        from picks_conveyance import registry
+        return registry.normalize_protected(pick_key) is not None
+    except Exception:
+        logger.exception(f"picks_conveyance: failed to normalize bands for {pick_key}")
+        return False
+
+
 def _lookup_pick(pick_key: tuple, conveyance_store):
     if conveyance_store is None:
         return None
@@ -590,6 +603,11 @@ class TradeAsset(BaseModel):
     # year and round. to_team ends with the better of the two, from_team the
     # worse. Each team must hold its pick outright (_pick_swap_problems).
     swap_orig: Optional[str] = None
+    # Server-set, never trusted from a client (`_describe_pick_claims`
+    # overwrites it): what a pick asset conveys when it is one band of a
+    # protected pick, e.g. "protection removed". Read by every display of
+    # the trade, so none of them has to work it out from a leaf_id.
+    claim: Optional[str] = None
 
 
 class TradeTransfer(BaseModel):
@@ -2026,6 +2044,7 @@ def _trade_leg_ownership_problems(details: TradeIn, bios: dict, team_map: dict,
             except HTTPException as e:
                 problems.append(str(e.detail))
     problems.extend(_pick_swap_problems(details, pick_index, conveyance_store))
+    problems.extend(_pick_protection_problems(details))
     return problems
 
 
@@ -2094,6 +2113,98 @@ def _pick_swap_problems(details: TradeIn, pick_index: dict,
             if key in ladder_keys:
                 problems.append(f"Pick {pick_label} is tied to a protection ladder and can't be swapped")
     return problems
+
+
+def _pick_protection_problems(details: TradeIn) -> list[str]:
+    """Every reason a new protection on an already-protected pick can't be
+    written. That is how a protection is lowered by trade: the team holding
+    the protected band sends it with a smaller threshold, keeping the top of
+    the band and conveying the rest (`registry.subdivide_protected_band`).
+    The split needs that team to hold exactly one band, and the threshold to
+    fall inside it. Without this check the registration fails open after
+    the trade is applied, and the pick's owner moves with no band behind it.
+    A pick with no protection yet takes any threshold, as before."""
+    problems: list[str] = []
+    try:
+        from picks_conveyance import registry
+    except Exception:
+        return problems
+    for xfer in details.transfers:
+        from_t = xfer.from_team.upper()
+        for asset in xfer.assets:
+            if asset.type != "pick" or asset.protection is None or not asset.orig:
+                continue
+            key = (asset.year, asset.round, asset.orig.upper())
+            try:
+                spec = registry.get_protected_spec(key)
+            except Exception:
+                logger.exception(f"pick protection check: could not read {key}")
+                continue
+            if spec is None:
+                continue
+            label = f"{asset.year} R{asset.round} {asset.orig.upper()}"
+            mine = [b for b in spec["bands"] if b.get("to") == from_t]
+            if len(mine) != 1:
+                problems.append(
+                    f"{from_t} holds {len(mine)} bands of pick {label}, so it can't set a new "
+                    "protection on it. Send the band as it is instead")
+                continue
+            band = mine[0]
+            if not (band["min"] <= asset.protection < band["max"]):
+                problems.append(
+                    f"Pick {label}: {from_t}'s protection covers picks {band['min']}-{band['max']}, "
+                    f"so a new protection must be from {band['min']} to {band['max'] - 1}, "
+                    f"not {asset.protection}")
+    return problems
+
+
+def _describe_pick_claims(details: TradeIn) -> None:
+    """Set each pick asset's `claim` from the registry as it stands before
+    the trade: what the sending team gives up when it holds only one band of
+    a protected pick. The team the rest of the pick belongs to receiving the
+    band is a protection removed, or lowered when a smaller threshold is
+    sent. Anyone else receiving it gets those draft slots. Clears `claim` on
+    every other pick asset."""
+    try:
+        from picks_conveyance import registry
+    except Exception:
+        registry = None
+    for xfer in details.transfers:
+        from_t, to_t = xfer.from_team.upper(), xfer.to_team.upper()
+        for asset in xfer.assets:
+            if asset.type != "pick":
+                continue
+            asset.claim = None
+            if registry is None or not asset.orig:
+                continue
+            try:
+                spec = registry.get_protected_spec((asset.year, asset.round, asset.orig.upper()))
+            except Exception:
+                continue
+            if spec is None:
+                continue
+            mine = [b for b in spec["bands"] if b.get("to") == from_t]
+            if len(mine) != 1:
+                continue
+            band = mine[0]
+            rest = {b.get("to") for b in spec["bands"] if b is not band}
+            top = asset.protection
+            if rest == {to_t}:
+                if top is None:
+                    asset.claim = "protection removed"
+                elif band["min"] in (1, 31) and asset.round == 1:
+                    asset.claim = f"protection lowered to top {top}"
+                else:
+                    asset.claim = f"protection lowered to picks {band['min']}-{top}"
+            else:
+                lo = band["min"] if top is None else top + 1
+                asset.claim = f"picks {lo}-{band['max']}"
+
+
+def _check_pick_protections(details: TradeIn) -> list[CheckResult]:
+    """`_pick_protection_problems` as checks, for /api/validate/trade."""
+    return [CheckResult(check="pick_protection", passed=False, level="error", message=m)
+            for m in _pick_protection_problems(details)]
 
 
 def _check_pick_swaps(details: TradeIn) -> list[CheckResult]:
@@ -2227,6 +2338,9 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
                                                  xfer.to_team, conveyance_store,
                                                  leaf_id=asset.leaf_id,
                                                  txn_id=txn_id, txn_date=txn_date)
+                        if asset.swap_with is None and _normalize_pick_bands(pick_key):
+                            # One team now holds every band: no protection left.
+                            p["PROTECTED"] = ""
                         if asset.ladder_protect_top is not None:
                             fallback_tuples = [
                                 (fb["year"], fb["round"], fb["orig"].upper())
@@ -7660,6 +7774,7 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
 
     # ── Pick swaps: each side must hold its pick outright ─────────────────────
     checks.extend(_check_pick_swaps(details))
+    checks.extend(_check_pick_protections(details))
 
     # ── Extension trade freeze (§ 4.5 / § 6.2 rule 11) ──────────────────────────
     checks.extend(_check_extension_trade_restriction(details, ctx))
@@ -9614,6 +9729,7 @@ def apply_trade(details: TradeIn, txn_date: str, info: dict, *,
 
     txn_id = secrets.token_hex(8)
     with _txn_lock:
+        _describe_pick_claims(details)
         teams = _apply_trade(details, txn_date, info, txn_id=txn_id)
         stored_details = details.model_dump()
         stored_details["teams"] = teams
