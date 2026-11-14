@@ -107,6 +107,20 @@ try:
     check("no draft year: None", y.years_of_service({}, "26-27", "vet") is None)
     check("seasons not yet started count as served, so later years climb",
           y.years_of_service({"draft_year": 2024}, "28-29", "rookie") == 2)
+    stated = {"draft_year": 2023, "contracts": [
+        {"years_experience": 1, "salaries": {"26-27": "$1", "27-28": "$1"},
+         "cap_holds": {"28-29": "UFA"}}]}
+    SERVICE["tshiebwe"] = {"26-27"}
+    y.begun_seasons = lambda: {"20-21", "21-22", "22-23", "23-24", "24-25", "25-26", "26-27"}
+    check("a stated figure holds for the season it was stated in",
+          y.years_of_service(stated, "26-27", "tshiebwe") == 1)
+    check("and carries forward a year per season served after it",
+          y.years_of_service(stated, "27-28", "tshiebwe") == 2)
+    check("a stated figure never reaches back before its contract",
+          y.years_of_service(stated, "25-26", "tshiebwe") == 0)
+    check("a count above the stated floor wins",
+          y.years_of_service({"draft_year": 2007, "contracts": [
+              {"years_experience": 3, "salaries": {"24-25": "$1"}}]}, "26-27", "vet") == 19)
 finally:
     y.service_seasons, y.begun_seasons = real, real_begun
 

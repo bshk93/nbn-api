@@ -289,12 +289,42 @@ def years_of_service(bio: dict, season: str, slug: Optional[str] = None) -> Opti
     start = _start_year(season)
     pre = max(0, min(FIRST_NBN_YEAR, start) - int(dy))
     served, begun = service_seasons(slug), begun_seasons()
-    nbn = 0
-    for year in range(FIRST_NBN_YEAR, start):
-        s = f"{year % 100:02d}-{(year + 1) % 100:02d}"
-        if s in served or s not in begun:
-            nbn += 1
-    return pre + nbn
+
+    def counted(first: int) -> int:
+        n = 0
+        for year in range(first, start):
+            s = f"{year % 100:02d}-{(year + 1) % 100:02d}"
+            if s in served or s not in begun:
+                n += 1
+        return n
+
+    return max(pre + counted(FIRST_NBN_YEAR), _stated_floor(bio, start, counted) or 0)
+
+
+def _stated_floor(bio: dict, start: int, counted) -> Optional[int]:
+    """The most experience any earlier contract on the bio states, carried
+    forward a year for each season counted since that contract began.
+
+    A contract's `years_experience` is how the office corrects the count (the
+    backfilled ledger has no pick signings, releases or waivers before 25-26,
+    so a player who sat on a roster then without playing reads short). Without
+    this, the correction held for that one contract and the next signing read
+    the short count again (Oscar Tshiebwe: on SAS in 23-24, ruled 1 entering
+    26-27, still counted 0)."""
+    best = None
+    for c in (bio or {}).get("contracts") or []:
+        stated = c.get("years_experience")
+        holds = c.get("cap_holds") or {}
+        seasons = [k for k in (c.get("salaries") or {})
+                   if len(k) == 5 and holds.get(k) not in _FA_HOLDS]
+        if stated is None or not seasons:
+            continue
+        first = _start_year(min(seasons))
+        if first > start:
+            continue
+        n = int(stated) + counted(first)
+        best = n if best is None else max(best, n)
+    return best
 
 
 @router.get("/api/years-of-service")
