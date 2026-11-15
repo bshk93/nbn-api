@@ -11,9 +11,11 @@ FastAPI backend for the NBN fantasy basketball league. Runs as a systemd service
 ## This box: read before running anything heavy
 
 The production server (`hostname` is `pallet`) serves nbn.today, dev.nbn.today,
-pdc.nbn.today and other sites to real users, and it is small. These rules apply
-to any agent or person working **on that machine**. Keep this section the same
-in `nbn-today/CLAUDE.md`, `nbn-api/CLAUDE.md` and `~/.claude/CLAUDE.md`.
+pdc.nbn.today and other sites to real users, and it is small. This covers two
+things: **code you write that will run there** (the API, timers, build scripts,
+skills), wherever you write it, and **commands run on that machine**. Keep this
+section the same in `nbn-today/CLAUDE.md`, `nbn-api/CLAUDE.md` and
+`~/.claude/CLAUDE.md`.
 
 - **1 CPU core, 1.9 GB RAM, 2 GB swap.** Never assume more. No `-j N`, no
   worker counts from `nproc` or "cores minus one", no parallel test runners, no
@@ -25,7 +27,20 @@ in `nbn-today/CLAUDE.md`, `nbn-api/CLAUDE.md` and `~/.claude/CLAUDE.md`.
   everything in a login or Claude session at low CPU weight. So the OOM killer
   picks your job first.
 
-Rules:
+Writing code that runs there:
+
+- **Budget memory like it's scarce, because it is.** Everything the API keeps
+  in memory is held for as long as it runs. Before caching a whole data set,
+  measure it: one full copy of the raw box scores as `csv.DictReader` dicts is
+  about 250 MB. Keep compact forms (tuples, interned strings, only the columns
+  used), bound every cache, and keep one version of a rebuilt index, not two.
+- **Stream big files** instead of reading them whole when you only need a pass.
+- **One worker, one thread pool.** A script, skill or service that picks a
+  worker count picks 1. Never size anything from `nproc`.
+- **Timers stay light and spread out.** Don't schedule a new heavy job on the
+  hour next to the existing `nbn-*` timers (`systemctl list-timers`).
+
+Running commands there:
 
 - **Run heavy work through `lowprio`** (`~/.local/bin/lowprio <cmd>`): builds,
   test suites, image or asset conversion, backfills, scrapers. It caps the job

@@ -1,6 +1,6 @@
 """The gamelog index and GET /api/rosters/slugs.
 
-`get_player_gamelog` answers from a per-file index (`_rows_by_player`) instead
+`get_player_gamelog` answers from a per-file index (`_gamelog_index`) instead
 of parsing every raw box score file per request. It must return exactly what
 the scan did, and see a file that changed. Runs on a temp dir, no live data.
 

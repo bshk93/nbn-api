@@ -934,30 +934,47 @@ def _gamelog_row(r: dict, season: str) -> dict:
     }
 
 
-# path -> (mtime_ns, size, {PLAYER upper: [raw rows, file order]}). One entry
-# per raw file, rebuilt only when that file changes: a closed season is read
-# once per process, the current one once per commit. The gamelog used to parse
-# every file (157k rows) on each request, 1.4s with the GIL held.
+# path -> ((mtime_ns, size), headers, {PLAYER upper: [row tuples, file order]}).
+# One entry per raw file, rebuilt only when that file changes: a closed season
+# is read once per process, the current one once per commit. The gamelog used
+# to parse every file (157k rows) on each request, 1.4s with the GIL held.
+#
+# Rows are kept as tuples in header order with every cell interned per file,
+# not as the dicts DictReader returns: the dicts held every box score ever
+# played at ~1.6KB a row, 252 MB, the biggest single thing in the API on a
+# 2 GB box (2026-11-15). Interned tuples are 54 MB, since most cells are small
+# numbers, dates and team codes that repeat.
 _GAMELOG_INDEX: dict = {}
 _gamelog_index_lock = threading.Lock()
 
 
-def _rows_by_player(path) -> dict:
+def _player_rows(path, name: str) -> list[dict]:
+    """One player's rows from one raw file, without building anyone else's."""
+    headers, index = _gamelog_index(path)
+    return [dict(zip(headers, vals)) for vals in index.get(name, ())]
+
+
+def _gamelog_index(path) -> tuple[tuple, dict]:
     st = path.stat()
     sig = (st.st_mtime_ns, st.st_size)
     hit = _GAMELOG_INDEX.get(str(path))
     if hit is not None and hit[0] == sig:
-        return hit[1]
+        return hit[1], hit[2]
     with _gamelog_index_lock:
         hit = _GAMELOG_INDEX.get(str(path))
         if hit is not None and hit[0] == sig:
-            return hit[1]
+            return hit[1], hit[2]
+        headers, rows = read_csv(path)
+        headers = tuple(headers)
+        pool: dict = {}
         out: dict = {}
-        _, rows = read_csv(path)
         for r in rows:
-            out.setdefault(r.get("PLAYER", "").strip().upper(), []).append(r)
-        _GAMELOG_INDEX[str(path)] = (sig, out)
-        return out
+            vals = tuple(pool.setdefault(v, v) if isinstance(v, str) else v
+                         for v in (r.get(h) for h in headers))
+            out.setdefault(r.get("PLAYER", "").strip().upper(), []).append(vals)
+        del rows, pool
+        _GAMELOG_INDEX[str(path)] = (sig, headers, out)
+        return headers, out
 
 
 def _gamelog_files() -> list:
@@ -984,7 +1001,7 @@ def get_player_gamelog(slug: str):
 
     results = []
     for path, season in _gamelog_files():
-        for r in _rows_by_player(path).get(player_name, ()):
+        for r in _player_rows(path, player_name):
             results.append(_gamelog_row(r, season))
 
     results.sort(key=lambda r: r["date"], reverse=True)
