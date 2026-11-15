@@ -169,8 +169,9 @@ CHECK_SECTIONS: dict[str, tuple[str, ...]] = {
 # A section here is 🔒 because the system performs the rule rather than
 # validating it — there is nothing for a check to reject.
 SECTION_ENFORCED_BY: dict[str, str] = {
-    "2.3": "the primary is never entered: it is read from the 2K scrape "
-           "(`_primary_pos` in `routers/players.py`); a starter out of position is refused "
+    "2.3": "the primary is never entered: it is taken from the 2K scrape, "
+           "first automatically and after that only when his team chooses "
+           "(`take_2k_position` in `routers/players.py`); a starter out of position is refused "
            "(`_illegal_starters` in `routers/coaching_settings.py`)",
     "5.2": "dead cap is computed at release by `_dead_cap_from_schedule` / "
            "`_apply_release`, never entered by hand, so there is no submission "
