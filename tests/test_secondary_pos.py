@@ -1,4 +1,4 @@
-"""Rulebook § 2.3: a player's primary is 2K's, frozen until he changes teams;
+"""Rulebook § 2.3: a player's primary is 2K's today, whatever 2K last said;
 a secondary is one step from it or any position 2K has listed for him. A
 team may still save one outside that; it is flagged for the streamer."""
 import pytest
@@ -71,8 +71,8 @@ def test_options_are_one_step():
 
 def test_pool_adds_every_position_2k_has_listed(world):
     bio = frozen("SG", "SF")
-    # One step from SG is PG/SF; 2K has also listed PG, SG, SF. Never SG itself.
-    assert players.secondary_pool("guard", bio) == ["PG", "SF"]
+    # 2K has him at PG now: one step is SG; 2K has also listed SG, SF. Never PG.
+    assert players.secondary_pool("guard", bio) == ["SG", "SF"]
     bio = frozen("PF")
     assert players.secondary_pool("odd", bio) == ["PG", "SF", "C"]
 
@@ -86,17 +86,19 @@ def test_legal_is_in_the_pool(world):
     assert players.secondary_is_legal("odd", bio, "none")
 
 
-def test_frozen_primary_ignores_2k_today(world):
-    # 2K now says PG; he was frozen at SG.
-    assert players._primary_pos("guard", None, frozen("SG", "SF")) == "SG"
-    # Nothing frozen yet: 2K's today.
+def test_primary_is_2k_today(world):
+    # 2K now says PG; the stored record still says SG. 2K wins.
+    assert players._primary_pos("guard", None, frozen("SG", "SF")) == "PG"
     assert players._primary_pos("guard", None, {}) == "PG"
+    # 2K has never rated him: the record stands in.
+    assert players._primary_pos("rookie", None, frozen("SF", reason="bio")) == "SF"
 
 
-def test_unset_means_the_frozen_default(world):
-    assert players.effective_secondary("guard", frozen("SG", "SF")) == "SF"
-    assert players.effective_secondary("guard", frozen("SG", None)) is None
-    # Nothing frozen: 2K's secondary, even two steps away (2K listed it).
+def test_unset_means_2ks_secondary(world):
+    assert players.effective_secondary("wing", frozen("SF", "PF")) == "PF"
+    # A stale record's secondary doesn't outlive a 2K re-rating.
+    assert players.effective_secondary("guard", frozen("SG", "SF")) is None
+    # 2K's secondary, even two steps away (2K listed it).
     assert players.effective_secondary("odd", {}) == "PG"
     assert players.effective_secondary("solo", {}) is None
 
@@ -124,11 +126,21 @@ def test_first_run_freezes_from_2k_today(world):
     assert bios["wing"]["pos"] == ["SF", "PF"]
 
 
-def test_a_2k_change_does_not_move_him(world):
-    bios = {"guard": frozen("SG", "SF")}
+def test_a_2k_change_moves_him(world):
+    bios = {"guard": frozen("SG", "SF", secondary_pos="SF")}
+    assert players.reconcile_positions(bios, {"guard": "BOS"}, world, "2026-10-25") == ["guard"]
+    rec = bios["guard"]["position"]
+    assert (rec["primary"], rec["secondary"], rec["team"], rec["reason"]) == ("PG", None, "BOS", "2K update")
+    # The team's pick survives a re-rating, still on top of the new primary.
+    assert bios["guard"]["secondary_pos"] == "SF"
+    assert bios["guard"]["pos"] == ["PG", "SF"]
+
+
+def test_a_2k_change_onto_the_teams_pick_drops_the_pick(world):
+    bios = {"guard": frozen("SG", "SF", secondary_pos="PG")}
     players.reconcile_positions(bios, {"guard": "BOS"}, world, "2026-10-25")
-    assert bios["guard"]["position"]["primary"] == "SG"
-    assert bios["guard"]["pos"] == ["SG", "SF"]
+    assert bios["guard"]["secondary_pos"] is None
+    assert bios["guard"]["pos"] == ["PG"]
 
 
 def test_a_team_change_refreezes_and_drops_the_old_pick(world):
@@ -142,14 +154,13 @@ def test_a_team_change_refreezes_and_drops_the_old_pick(world):
 
 
 def test_free_agency_is_not_a_change(world):
-    bios = {"guard": frozen("SG", "SF", secondary_pos="PG")}
-    # Released: on no roster. Nothing moves.
-    assert players.reconcile_positions(bios, {}, world, "2026-10-25") == ["guard"]  # pos synced only
-    assert bios["guard"]["position"]["primary"] == "SG"
-    # Re-signed by the same team: still nothing.
-    players.reconcile_positions(bios, {"guard": "BOS"}, world, "2026-10-26")
-    assert bios["guard"]["position"]["primary"] == "SG"
-    assert bios["guard"]["secondary_pos"] == "PG"
+    bios = {"wing": frozen("SF", "PF", secondary_pos="SG")}
+    # Released: on no roster. The team's pick stays.
+    assert players.reconcile_positions(bios, {}, world, "2026-10-25") == ["wing"]  # pos synced only
+    assert bios["wing"]["position"]["team"] == "BOS"
+    # Re-signed by the same team: still kept.
+    players.reconcile_positions(bios, {"wing": "BOS"}, world, "2026-10-26")
+    assert bios["wing"]["secondary_pos"] == "SG"
 
 
 def test_frozen_with_no_team_then_signed_refreezes(world):
@@ -194,22 +205,22 @@ def test_streamer_sees_a_change_from_2ks(world):
     assert cs.position_items("MIL", rec, bios, ["wing", "odd"], "2026-10-20", world) == []
 
 
-def test_streamer_sets_a_primary_2k_moved(world):
+def test_a_primary_2k_moved_is_nothing_to_enter(world):
+    # 2K's primary is his primary, and 2K already shows it.
     from routers import coaching_settings as cs
     bios = {"guard": frozen("SG", None)}
-    items = cs.position_items("MIL", {}, bios, ["guard"], "2026-10-20", world)
-    assert [(i["primary_was"], i["primary"], i["primary_changed"]) for i in items] == [("PG", "SG", True)]
-    rec = {"entered": {"guard": None}, "entered_primary": {"guard": "SG"}, "entered_2k": {"guard": ["PG"]}}
+    assert cs.position_items("MIL", {}, bios, ["guard"], "2026-10-20", world) == []
+    # Entered when 2K still had him at SG/SF; the re-rating resets it to 2K's.
+    rec = {"entered": {"guard": None}, "entered_primary": {"guard": "SG"}, "entered_2k": {"guard": ["SG", "SF"]}}
     assert cs.position_items("MIL", rec, bios, ["guard"], "2026-10-20", world) == []
 
 
-def test_a_2k_rerating_resets_what_was_entered(world):
+def test_a_2k_rerating_resets_the_teams_secondary_in_2k(world):
     from routers import coaching_settings as cs
-    bios = {"guard": frozen("SG", None)}
-    # Entered when 2K still had him at SG/SF; 2K has re-rated him since.
-    rec = {"entered": {"guard": None}, "entered_primary": {"guard": "SG"}, "entered_2k": {"guard": ["SG", "SF"]}}
+    bios = {"guard": frozen("SG", None, secondary_pos="SG")}
+    rec = {"entered": {"guard": "SG"}, "entered_primary": {"guard": "SG"}, "entered_2k": {"guard": ["SG", "SF"]}}
     items = cs.position_items("MIL", rec, bios, ["guard"], "2026-10-20", world)
-    assert [(i["primary_was"], i["primary_changed"]) for i in items] == [("PG", True)]
+    assert [(i["primary"], i["secondary"], i["changed"], i["primary_changed"]) for i in items] == [("PG", "SG", True, False)]
 
 
 def test_a_2k_secondary_two_steps_away_counts_for_starting(world):
@@ -304,7 +315,7 @@ def test_a_jersey_save_records_what_2k_had(monkeypatch):
     monkeypatch.setattr(coaching_settings, "note_open", lambda team: False)
     monkeypatch.setattr(coaching_settings, "_roster_slugs", lambda team: ["p0"])
     monkeypatch.setattr(coaching_settings, "position_items",
-                        lambda team, rec, bios, roster, today, attrs=None: [{"changed": False, "primary_changed": False, "jersey_changed": bool(rec.get("jerseys"))}])
+                        lambda team, rec, bios, roster, today, attrs=None: [{"changed": False, "primary_changed": False, "jersey_changed": bool(rec.get("jerseys")), "dna": None}])
     sent = []
     monkeypatch.setattr(game_day_notify, "positions_changed", lambda team, by: sent.append(team))
     info = {"roles": ["mil"], "name": "owner"}

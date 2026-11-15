@@ -23,17 +23,16 @@ POSITION_ORDER = ["PG", "SG", "SF", "PF", "C"]
 
 # ── Positions ─────────────────────────────────────────────────────────────────
 #
-# A player's primary is 2K's primary as it was when we froze it, not 2K's
-# today: a 2K re-rating doesn't move a player off his position. It is frozen
-# again, from 2K as it is then, only when he joins a team other than the one
-# it was frozen on (a spell in free agency is not a change). The frozen record
-# is the bio's `position`:
+# A player's primary is 2K's primary today (§ 2.3), and moves whenever 2K
+# re-rates him. Teams can't change it. (From 2026-10-24 to 2026-11-15 it was
+# frozen until he changed teams; the league ruled that wrong.) The bio's
+# `position` is a copy of 2K's listing, kept in step by reconcile_positions:
 #
-#   {"primary": "SG", "secondary": "SF", "team": "BOS",
-#    "set": "2026-10-24", "reason": "initial" | "team change" | "bio"}
+#   {"primary": "SG", "secondary": "SF", "team": "BOS", "set": "2026-10-24",
+#    "reason": "initial" | "team change" | "2K update" | "bio"}
 #
-# `secondary` there is 2K's secondary at the same moment: the default, used
-# while the team hasn't chosen. "bio" marks a record seeded from the old
+# `secondary` there is 2K's secondary: the default, used while the team
+# hasn't chosen. "bio" marks a record seeded from the old
 # hand-kept `pos` list for a player 2K had no rating for; it is replaced from
 # 2K as soon as one exists.
 #
@@ -82,26 +81,27 @@ def twok_positions_seen(slug: str, attrs: Optional[dict] = None) -> list[str]:
 
 
 def _primary_pos(slug: str, attrs: Optional[dict] = None, bio: Optional[dict] = None) -> Optional[str]:
-    """The player's primary: the frozen one, or 2K's today if he has none
-    yet. Pass `attrs` (load_attributes()) and `bio` when asking about many
+    """The player's primary: 2K's today (§ 2.3). The stored record stands in
+    only for a player 2K hasn't rated. Pass `attrs` (load_attributes()) and `bio` when asking about many
     players: attributes is 2.7MB, and loading it per player made a 400-player
     slate take a minute."""
     if bio is None:
         bio = load_player_bios().get(slug) or {}
+    twok = _twok_primary(slug, attrs)
+    if twok:
+        return twok
     rec = bio.get("position") or {}
-    if rec.get("primary") in POSITION_ORDER:
-        return rec["primary"]
-    return _twok_primary(slug, attrs)
+    return rec["primary"] if rec.get("primary") in POSITION_ORDER else None
 
 
 def default_secondary(slug: str, bio: dict, attrs: Optional[dict] = None) -> Optional[str]:
-    """The secondary he has while his team hasn't chosen: the one frozen with
-    his primary, or 2K's today if nothing is frozen."""
+    """The secondary he has while his team hasn't chosen: 2K's today, or the
+    stored record's for a player 2K hasn't rated."""
+    if _twok_pos(slug, attrs):
+        return _twok_secondary(slug, attrs)
     rec = bio.get("position") or {}
-    if rec.get("primary") in POSITION_ORDER:
-        sec = rec.get("secondary")
-        return sec if sec in POSITION_ORDER and sec != rec["primary"] else None
-    return _twok_secondary(slug, attrs)
+    sec = rec.get("secondary")
+    return sec if sec in POSITION_ORDER and sec != rec.get("primary") else None
 
 
 def effective_secondary(slug: str, bio: dict, attrs: Optional[dict] = None) -> Optional[str]:
@@ -109,7 +109,7 @@ def effective_secondary(slug: str, bio: dict, attrs: Optional[dict] = None) -> O
     sec = bio.get("secondary_pos") or None
     if sec == NO_SECONDARY:
         return None
-    if sec:
+    if sec and sec != _primary_pos(slug, attrs, bio):
         return sec
     return default_secondary(slug, bio, attrs)
 
@@ -162,7 +162,7 @@ def _sync_pos(slug: str, bio: dict, attrs: Optional[dict]) -> bool:
 
 
 def _freeze(slug: str, bio: dict, team: Optional[str], attrs: Optional[dict], reason: str, today: str) -> bool:
-    """Freeze his positions from 2K as it is now (or, with no 2K rating, from
+    """Copy his positions from 2K as it is now (or, with no 2K rating, from
     the old `pos` list). True if anything on the bio changed."""
     twok = _twok_pos(slug, attrs)
     if twok:
@@ -181,12 +181,17 @@ def _freeze(slug: str, bio: dict, team: Optional[str], attrs: Optional[dict], re
 
 
 def reconcile_positions(bios: dict, team_map: dict, attrs: dict, today: str) -> list[str]:
-    """Freeze whoever needs it, in place. Returns the slugs changed.
+    """Keep each bio's `position` record in step with 2K, in place. Returns
+    the slugs changed. The primary is always 2K's today (§ 2.3); the record
+    is a copy, kept for players 2K hasn't rated and for readers that only
+    have the bio.
 
-    - no record yet: frozen from 2K now ("initial");
-    - a "bio" seed and 2K now rates him: frozen from 2K;
-    - on a team other than the one frozen on: frozen from 2K, and the old
-      team's chosen secondary is dropped ("team change");
+    - no record yet: taken from 2K now ("initial");
+    - a "bio" seed and 2K now rates him: taken from 2K;
+    - on a team other than the record's: taken from 2K, and the old team's
+      chosen secondary is dropped ("team change");
+    - 2K lists him differently from the record: taken from 2K ("2K update").
+      The team's secondary stays, unless 2K made it his primary;
     - otherwise only the derived `pos` is brought up to date."""
     changed = []
     for slug, bio in bios.items():
@@ -201,6 +206,12 @@ def reconcile_positions(bios: dict, team_map: dict, attrs: dict, today: str) -> 
         elif team and team != rec.get("team"):
             bio["secondary_pos"] = None
             hit = _freeze(slug, bio, team, attrs, "team change", today)
+        elif (twok := _twok_pos(slug, attrs)) and (
+                rec.get("primary") != twok[0]
+                or rec.get("secondary") != (twok[1] if len(twok) > 1 and twok[1] != twok[0] else None)):
+            if bio.get("secondary_pos") == twok[0]:
+                bio["secondary_pos"] = None
+            hit = _freeze(slug, bio, team or rec.get("team"), attrs, "2K update", today)
         else:
             hit = _sync_pos(slug, bio, attrs)
         if hit:
@@ -212,7 +223,13 @@ _roster_mtimes: Optional[tuple] = None
 
 
 def _roster_stamp() -> tuple:
+    """Every roster's mtime, plus the 2K scrape's: a re-rating moves the
+    primary as surely as a trade does."""
     out = []
+    try:
+        out.append(ATTRIBUTES_FILE.stat().st_mtime_ns)
+    except OSError:
+        out.append(0)
     for team in sorted(VALID_TEAMS):
         p = DATA_DIR / f"{team.lower()}-roster.csv"
         try:
