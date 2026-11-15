@@ -73,7 +73,9 @@ def api_latency() -> float | None:
 
 def api_memory_mb() -> tuple[int, int] | None:
     """The API's (resident, swapped) MB, or None if it isn't running."""
-    pid = subprocess.run(["pgrep", "-o", "-f", "uvicorn main:app"],
+    # systemd's own record, not `pgrep -f`, which also matches any shell whose
+    # command line happens to mention uvicorn.
+    pid = subprocess.run(["systemctl", "show", "-p", "MainPID", "--value", "nbn-api"],
                          capture_output=True, text=True).stdout.strip()
     try:
         status = Path(f"/proc/{pid}/status").read_text()
