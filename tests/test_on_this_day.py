@@ -91,6 +91,37 @@ try:
 except Exception as exc:
     check("a malformed date is refused", getattr(exc, "status_code", None) == 422)
 
+print("\ncache")
+import tempfile  # noqa: E402
+tmp = Path(tempfile.mkdtemp(prefix="nbn-otd-test-"))
+otd.BRACKETS_FILE, otd.TRANSACTIONS_FILE = tmp / "brackets.csv", tmp / "transactions.json"
+otd._answers.clear()
+calls = {"n": 0}
+
+
+def counting_trades():
+    calls["n"] += 1
+    return TR
+
+
+otd._load_trades = counting_trades
+otd.get_on_this_day("2026-12-25")
+otd.get_on_this_day("2026-12-25")
+check("no files on disk, no cache", calls["n"] == 2 and not otd._answers)
+otd.BRACKETS_FILE.write_text("SEASON\n")
+otd.TRANSACTIONS_FILE.write_text("[]")
+first = otd.get_on_this_day("2026-12-25")
+again = otd.get_on_this_day("2026-12-25")
+check("a repeat of the same date is answered from memory", calls["n"] == 3 and again == first)
+otd.get_on_this_day("2026-12-24")
+check("another date is its own answer", calls["n"] == 4)
+otd.TRANSACTIONS_FILE.write_text("[ ]")
+otd.get_on_this_day("2026-12-25")
+check("a ledger save is a miss", calls["n"] == 5)
+otd.gh.get_index = lambda: (index, ("new",))
+otd.get_on_this_day("2026-12-25")
+check("a new game index is a miss", calls["n"] == 6)
+
 if FAILS:
     print(f"\n{len(FAILS)} check(s) failed:")
     for f in FAILS:

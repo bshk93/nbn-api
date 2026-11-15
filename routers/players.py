@@ -755,30 +755,32 @@ def _diff_2k_snapshots(prev: dict, cur: dict) -> dict:
     return change
 
 
-@router.get("/api/ratings-changes")
-def get_ratings_changes(
-    slug: Optional[str] = None,
-    since: Optional[str] = None,
-    until: Optional[str] = None,
-    limit: int = Query(2000, ge=1, le=20000),
-):
-    history = load_attributes()
-    bios = load_player_bios()
-    updated = _load_json(RATINGS_UPDATED_FILE, {})
+# Every change in player-attributes.json, diffed once per change to it (or to
+# the bios, which name each change) and kept until then. Diffing every snapshot
+# of every player was most of what /api/ratings-changes cost, on every homepage
+# load. Keyed on each file's stat, like the gamelog index: an atomic write
+# replaces the inode, so any save is a miss. Only the diff is kept, never the
+# parsed attributes file, and the committee's ticks are applied per request,
+# since they change far more often than the scrape.
+_RATINGS_CHANGES: dict = {}
+
+
+def _file_stamp(path) -> Optional[tuple]:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_ino, st.st_mtime_ns, st.st_size)
+
+
+def _diff_all_ratings(history: dict, bios: dict) -> list[dict]:
     entries = []
     for player_slug, snapshots in history.items():
-        if slug and player_slug != slug:
-            continue
         for prev, cur in zip(snapshots, snapshots[1:]):
             change = _diff_2k_snapshots(prev, cur)
             if not change:
                 continue
-            date = cur.get("date", "")
-            if since and date < since:
-                continue
-            if until and date > until:
-                continue
-            change["date"] = date
+            change["date"] = cur.get("date", "")
             change["slug"] = player_slug
             change["name"] = bios.get(player_slug, {}).get("name") or cur.get("2k_name") or player_slug
             # Stamped by the scrape at the moment it ran (see scrape_2k_attributes.py's
@@ -791,11 +793,45 @@ def get_ratings_changes(
             # into the live OVR badge/roster tables. Absent (falsy) for any
             # snapshot taken before this field existed, same as "team" above.
             change["ovr_stub"] = bool(cur.get("ovr_stub"))
-            # Set once the updates committee has put this change into the
-            # league's 2K roster file; null until then.
-            change["updated"] = updated.get(f"{player_slug}|{date}")
             entries.append(change)
+    # Stable sort, so equal dates keep file order, as they always have.
     entries.sort(key=lambda e: e["date"], reverse=True)
+    return entries
+
+
+def all_ratings_changes() -> list[dict]:
+    """Every 2K ratings change, newest first, without the committee's ticks.
+    **Read-only**: the list is shared between requests. With either file
+    missing (a test's patched loaders) nothing is cached."""
+    key = (_file_stamp(ATTRIBUTES_FILE), _file_stamp(PLAYER_BIOS_FILE))
+    if None not in key and _RATINGS_CHANGES.get("key") == key:
+        return _RATINGS_CHANGES["entries"]
+    entries = _diff_all_ratings(load_attributes(), load_player_bios())
+    _RATINGS_CHANGES.clear()
+    if None not in key:
+        _RATINGS_CHANGES.update(key=key, entries=entries)
+    return entries
+
+
+@router.get("/api/ratings-changes")
+def get_ratings_changes(
+    slug: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    limit: int = Query(2000, ge=1, le=20000),
+    latest: bool = Query(False, description="only the newest scrape date's changes"),
+):
+    updated = _load_json(RATINGS_UPDATED_FILE, {})
+    picked = [e for e in all_ratings_changes()
+              if (not slug or e["slug"] == slug)
+              and (not since or e["date"] >= since)
+              and (not until or e["date"] <= until)]
+    if latest and picked:
+        picked = [e for e in picked if e["date"] == picked[0]["date"]]
+    # Set once the updates committee has put this change into the league's 2K
+    # roster file; null until then. A copy per entry, so the shared list
+    # never carries one request's ticks into the next.
+    entries = [{**e, "updated": updated.get(f"{e['slug']}|{e['date']}")} for e in picked]
     return {"count": len(entries), "entries": entries[:limit]}
 
 
