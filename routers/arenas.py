@@ -50,6 +50,7 @@ from .auth import get_token_info, has_role, require_role
 from .constants import DATA_DIR
 from .league_time import league_today_str
 from .storage import _load_json, _save_json, log_write
+from .constants import VALID_TEAMS
 
 router = APIRouter()
 log = logging.getLogger(__name__)
@@ -59,11 +60,7 @@ OPENING_BID = 100
 RAISE_PCT = 10
 NAME_MIN, NAME_MAX = 3, 40
 
-TEAMS = {
-    "ATL", "BKN", "BOS", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW",
-    "HOU", "IND", "LAC", "LAL", "MEM", "MIA", "MIL", "MIN", "NOP", "NYK",
-    "OKC", "ORL", "PHI", "PHX", "POR", "SAC", "SAS", "TOR", "UTA", "WAS",
-}
+TEAMS = VALID_TEAMS
 _LINK = "/finances/#arenas"
 _URLISH = re.compile(r"://|\bwww\.|\.(com|net|org|gg|tv|io|ly)\b", re.I)
 
