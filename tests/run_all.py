@@ -40,7 +40,7 @@ MODULES = [
     "test_two_way_release", "test_trade_releases", "test_signing_releases",
     "test_apply_extension", "test_extension_trade_freeze", "test_nbnfl",
     "test_signing_books", "test_split_players", "test_trc_discord", "test_injuries",
-    "test_tetris", "test_quadrants", "test_headshots", "test_tweets", "test_js_mirrors", "test_migrate_dead_type", "test_arenas",
+    "test_tetris", "test_quadrants", "test_headshots", "test_tweets", "test_js_mirrors", "test_tradeblock_names", "test_migrate_dead_type", "test_arenas",
     "test_box_health", "test_fa_hold_sweep", "test_game_day", "test_invest",
     "test_nbntv_schedule", "test_pick_swaps", "test_pickem", "test_picks_structure",
     "test_team_option_sweep"]
@@ -55,7 +55,7 @@ PYTEST_MODULES = ["test_secondary_pos"]
 # forgot to isolate itself should be fixed to use a temp dir instead.
 LIVE_DATA_MODULES = [
     "test_room_exception_july1", "test_bird_rights_tenure", "test_validate_endpoints",
-    "test_second_round_scale", "test_tradeblock_names", "test_sign_requires_salary",
+    "test_second_round_scale", "test_sign_requires_salary",
     "test_news_rankings_routes", "test_health", "test_stats_harness",
     "test_stats_cutover", "test_extensions", "test_qualifying_offers",
     "test_stats_pipeline", "test_data_paths", "test_advanced", "test_finances",

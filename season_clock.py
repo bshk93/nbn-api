@@ -49,8 +49,14 @@ def default_season_start(season: str) -> datetime:
 
 
 def season_shift(season: str, delta: int) -> str:
+    """'25-26' shifted by delta seasons: +1 -> '26-27', -1 -> '24-25'. Wraps at 99."""
     a, b = (int(x) for x in season.split("-"))
     return f"{(a + delta) % 100:02d}-{(b + delta) % 100:02d}"
+
+
+def season_starting(year: int) -> str:
+    """The season that starts in calendar year `year`: 2026 -> '26-27'."""
+    return f"{year % 100:02d}-{(year + 1) % 100:02d}"
 
 
 def season_start_date(season: str, rollovers: dict) -> datetime:

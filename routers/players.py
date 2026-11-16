@@ -12,6 +12,7 @@ from .constants import (
     _ovr_lock, _txn_lock, CURATOR_FIELDS, BIO_REWARD_FIELDS, BIO_REWARDS_FILE, _bio_rewards_lock, logger,
 )
 from .storage import _load_json, _load_json_shared, _save_json, read_csv, log_write, shared_json_response
+from .names import player_name
 from .auth import get_token_info, has_role, require_any_role, require_admin, require_role
 from .bets import _award_bio_reward, NBY_BIO_REWARD
 
@@ -297,13 +298,10 @@ def save_ovr(data: dict):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _display_name(canonical: str) -> str:
-    """Convert 'LAST, FIRST' bio name to title-case 'First Last', mirroring JS displayNameFromBio."""
-    if not canonical:
-        return ''
-    if ',' in canonical:
-        last, _, first = canonical.partition(',')
-        return f"{first.strip()} {last.strip()}".title()
-    return canonical.title()
+    """'LAST, FIRST' bio name -> 'First Last', the way the site shows it
+    (names.player_name, the mirror of names.js): "Jared McCain", "RJ Barrett",
+    "Royce O'Neale". Until 2026-11-16 this title-cased, giving "Jared Mccain"."""
+    return player_name(canonical) if canonical else ''
 
 
 def _build_team_map() -> dict[str, str]:
@@ -321,11 +319,13 @@ def _build_team_map() -> dict[str, str]:
 
 
 def _block_key(name: str) -> str:
-    """How trading-block names compare. The block stores display names, and
-    older entries carry a hand-cased spelling ("Jared McCain") where
-    `_display_name` now gives "Jared Mccain" — so a match must ignore case, or
-    the same player reads as absent and gets listed twice."""
-    return (name or "").strip().casefold()
+    """How trading-block names compare. The block stores display names written
+    by three casers over the years: hand-typed ("Jared McCain"), the old
+    title-case ("Jared Mccain", "Royce Oneale") and names.py ("Royce
+    O'Neale"). Ignoring case, apostrophes and periods makes them one name, or
+    the same player reads as absent and gets listed twice. Mirrors nameKey in
+    nbn-today/tradeblock/index.html."""
+    return " ".join(re.sub(r"['’.]", "", name or "").casefold().split())
 
 
 def _scrub_trading_block(removals: dict[str, set[str]], bios: dict) -> None:

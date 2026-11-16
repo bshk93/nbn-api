@@ -38,6 +38,7 @@ from .roster_picks import (
     DEFAULT_SEASON_STATE, _maybe_set_hard_cap, _bae_available,
     load_trade_exceptions, save_trade_exceptions,
 )
+from season_clock import season_shift, season_starting
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -931,11 +932,6 @@ def _apply_guarantee(details: GuaranteeDetails, info: dict) -> Optional[str]:
 
 def _dead_cap_from_schedule(schedule: list, salary: str, txn_date: str) -> Optional[str]:
     """Compute dead cap for a NON_GTD year given a multi-step guarantee schedule."""
-    def parse_dollar(s) -> float:
-        if not s:
-            return 0.0
-        return float(re.sub(r"[$,\s]", "", str(s)) or 0)
-
     cumulative = 0.0
     fully_gtd = False
     for step in schedule:
@@ -946,7 +942,7 @@ def _dead_cap_from_schedule(schedule: list, salary: str, txn_date: str) -> Optio
         if not step_amount:
             fully_gtd = True
             break
-        cumulative += parse_dollar(step_amount)
+        cumulative += _parse_dollar(step_amount)
 
     if fully_gtd:
         return salary
@@ -1099,8 +1095,7 @@ def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[
 
 def _season_after(season: str) -> str:
     """'25-26' -> '26-27'."""
-    a, b = season.split("-")
-    return f"{(int(a) + 1) % 100:02d}-{(int(b) + 1) % 100:02d}"
+    return season_shift(season, 1)
 
 
 def _renounce_eligibility(player: str, bios: dict, cur_season: str, txn_date: str) -> dict:
@@ -1665,8 +1660,7 @@ def _apply_convert_twoway(details: ConvertTwoWayDetails, txn_date: str, info: di
                 yr1 = 0
                 for yr in sorted(details.contract.salaries.keys()):
                     if yr >= cur_season:
-                        yr1 = int(str(details.contract.salaries[yr])
-                                  .replace("$", "").replace(",", "").strip() or 0)
+                        yr1 = _parse_dollar(details.contract.salaries[yr])
                         break
                 ts["mle_used"] = ts.get("mle_used", 0) + yr1
 
@@ -1894,8 +1888,7 @@ def _apply_sign(details: SignDetails, txn_date: str, info: dict, txn_id: Optiona
                 yr1 = 0
                 for yr in sorted(details.contract.salaries.keys()):
                     if yr >= cur:
-                        yr1 = int(str(details.contract.salaries[yr])
-                                  .replace("$", "").replace(",", "").strip() or 0)
+                        yr1 = _parse_dollar(details.contract.salaries[yr])
                         break
                 ts["mle_used"] = ts.get("mle_used", 0) + yr1
 
@@ -3897,8 +3890,7 @@ def _season_start_of(date: str) -> str:
     """The league-year season string a calendar date falls in. The league year
     turns over on July 1, so anything from July on belongs to YY-(YY+1)."""
     y, m = int(date[:4]), int(date[5:7])
-    s = y if m >= 7 else y - 1
-    return f"{s % 100:02d}-{(s + 1) % 100:02d}"
+    return season_starting(y if m >= 7 else y - 1)
 
 
 _BIRD_TIER_RANK = {"Non-QVFA": 0, "EQVFA": 1, "QVFA": 2}

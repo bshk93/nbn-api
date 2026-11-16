@@ -140,6 +140,7 @@ from .constants import DATA_DIR, DERIVED_DIR, VALID_TEAMS
 from .players import load_ovr, load_player_bios
 from .storage import _atomic_write, _load_json, _parse_dollar, read_csv
 from stats_build import finances as fin
+from season_clock import season_shift, season_starting
 
 router = APIRouter()
 
@@ -226,8 +227,7 @@ FINANCES_CSV = DERIVED_DIR / fin.FINANCES_FILE
 # ── Seasons ──────────────────────────────────────────────────────────────────
 
 def season_after(season: str, n: int = 1) -> str:
-    a, b = int(season[:2]), int(season[3:5])
-    return f"{a + n:02d}-{b + n:02d}"
+    return season_shift(season, n)
 
 
 def season_index(season: str) -> int:
@@ -361,7 +361,7 @@ def rookie_ovr(pick: float) -> float:
 
 def draft_after(year: int) -> str:
     """The season a draft follows: the 2027 draft comes after 26-27."""
-    return f"{(year - 1) % 100:02d}-{year % 100:02d}"
+    return season_starting(year - 1)
 
 
 def load_pick_store() -> Optional[dict]:
