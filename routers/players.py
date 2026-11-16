@@ -468,17 +468,20 @@ def create_player(body: PlayerCreate, info: dict = Depends(require_any_role("ros
     if invalid_pos:
         raise HTTPException(status_code=422, detail=f"Invalid positions: {invalid_pos}")
     _check_secondary_pos(slug, body.secondary_pos)
-    bios = load_player_bios()
-    if slug in bios:
-        raise HTTPException(status_code=409, detail="Player already exists")
-    data = body.model_dump()
-    data.pop("slug")
-    # `pos` on a new player is only the seed for his frozen positions, used
-    # until 2K rates him.
     from .league_time import league_today_str
-    _freeze(slug, data, _build_team_map().get(slug), None, "initial", league_today_str())
-    bios[slug] = data
-    save_player_bios(bios)
+    # Under the lock every other bios writer takes: without it, a transaction
+    # saving player-bios.json between this load and save was overwritten.
+    with _txn_lock:
+        bios = load_player_bios()
+        if slug in bios:
+            raise HTTPException(status_code=409, detail="Player already exists")
+        data = body.model_dump()
+        data.pop("slug")
+        # `pos` on a new player is only the seed for his frozen positions, used
+        # until 2K rates him.
+        _freeze(slug, data, _build_team_map().get(slug), None, "initial", league_today_str())
+        bios[slug] = data
+        save_player_bios(bios)
     log_write(info, f"POST players — created {slug!r} ({body.name})")
     return {"ok": True, "slug": slug}
 

@@ -18,13 +18,14 @@ from .storage import _load_json, _save_json, log_write
 from .auth import get_token_info, require_admin, load_members
 from .bets import DISCORD_BETS_WEBHOOK
 from . import wallet
+from .constants import SITE_DIR as _SITE_DIR
 
 router = APIRouter()
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 POELTL_STATE_FILE   = DATA_DIR / "poeltl-state.json"
 POELTL_ARCHIVE_FILE = DATA_DIR / "poeltl-archive.json"
-NBN_TODAY_DIR       = Path("/home/skim/projects/nbn-today")
+NBN_TODAY_DIR = _SITE_DIR  # constants.SITE_DIR
 PLAYER_SEASONS_CSV  = DERIVED_DIR / "players" / "player_seasons.csv"
 
 POELTL_SEASON      = "25-26"   # update each season

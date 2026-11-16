@@ -39,6 +39,7 @@ from .invest import compute_member_pnl  # per-stock P&L
 from .players import _display_name  # 'LAST, FIRST' bio name -> title-case 'First Last'
 from .players import player_bios_shared, ovr_shared
 from season_clock import season_starting
+from .constants import SITE_DIR as _SITE_DIR
 
 logger = logging.getLogger("nbn-api.discord")
 
@@ -50,7 +51,7 @@ DISCORD_PUBLIC_KEY = os.environ.get("DISCORD_PUBLIC_KEY", "")
 DISCORD_ADMIN_ID = os.environ.get("DISCORD_ADMIN_ID", "")
 
 # Stats CSVs live in the site repo (written by build/build.sh), not in DATA_DIR.
-SITE_DIR     = Path("/home/skim/projects/nbn-today")
+SITE_DIR = _SITE_DIR  # constants.SITE_DIR
 SEASONS_CSV  = DERIVED_DIR / "players" / "player_seasons.csv"
 PLAYOFFS_CSV = DERIVED_DIR / "players" / "player_seasons_playoffs.csv"
 AWARDS_CSV   = DERIVED_DIR / "players" / "player_awards.csv"
