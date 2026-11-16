@@ -5,7 +5,7 @@ prints, per month: all messages, messages by people (not bots), and
 "substantive" ones (by people, 5+ words). No message content is written to
 disk or printed. Used to size a channel before deciding whether to read it.
 
-    cd ~/projects/nbn-api && venv/bin/python ../nbn-api-dev/scripts/count_channel.py leaguetalk
+    cd ~/projects/nbn-api && venv/bin/python scripts/count_channel.py leaguetalk
 
 Needs DISCORD_BOT_TOKEN (and optionally DISCORD_GUILD_ID) in the environment
 or in ./.env, and Read Message History on the channel.

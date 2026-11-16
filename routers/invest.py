@@ -61,7 +61,7 @@ TICKER_CAP   = 2500.0
 TOTAL_CAP    = 10000.0
 FEE_RATE     = 0.01
 
-# When nbyen_reset.py emptied the holdings. Trades before it were made with
+# When the NB¥ reset (a one-off script, since removed) emptied the holdings. Trades before it were made with
 # pre-reset NB¥ and close no position that exists now.
 RESET_AT = "2026-09-25T17:59:20+00:00"
 

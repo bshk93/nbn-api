@@ -6673,6 +6673,11 @@ def _validate_offer_sheet_decision(details: OfferSheetDecisionDetails, ctx: dict
 
 
 def _validate_guarantee(details: GuaranteeDetails, ctx: dict) -> list[CheckResult]:
+    # Nothing to rule on. Guaranteeing a NON_GTD year moves no money: the
+    # year's salary already counts against the cap, and only its dead-cap
+    # exposure on a release changes. Whether there is such a year to
+    # guarantee is a fact, not a rule, and _apply_guarantee refuses (422)
+    # when there isn't, so the simulator and the submit path agree.
     return []
 
 
