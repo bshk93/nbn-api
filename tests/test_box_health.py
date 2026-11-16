@@ -11,8 +11,9 @@ def _mem(avail_mb, swap_used_mb, swap_total_mb=2048):
 
 
 class ReadingTest(unittest.TestCase):
-    def run_reading(self, mem, lat=0.05):
+    def run_reading(self, mem, lat=0.05, backup_age=0.2):
         with mock.patch.object(cbh, "meminfo", return_value=mem), \
+             mock.patch.object(cbh, "backup_age_hours", return_value=backup_age), \
              mock.patch.object(cbh, "api_latency", return_value=lat), \
              mock.patch.object(cbh, "api_memory_mb", return_value=(300, 600)):
             return cbh.reading()[0]
@@ -29,6 +30,11 @@ class ReadingTest(unittest.TestCase):
     def test_api_slow_or_down(self):
         self.assertIn("took", self.run_reading(_mem(800, 0), lat=9.0)[0])
         self.assertIn("did not answer", self.run_reading(_mem(800, 0), lat=None)[0])
+
+    def test_stale_or_unreadable_backup(self):
+        self.assertIn("no data backup for 300 hours", self.run_reading(_mem(800, 0), backup_age=300)[0])
+        self.assertIn("can't read", self.run_reading(_mem(800, 0), backup_age=None)[0])
+        self.assertEqual(self.run_reading(_mem(800, 0), backup_age=11), [])
 
 
 if __name__ == "__main__":
