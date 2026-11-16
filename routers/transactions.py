@@ -5650,6 +5650,10 @@ def _validate_sign(details: SignDetails, ctx: dict) -> list[CheckResult]:
     if r:
         checks.append(r)
 
+    r = _check_reacquisition(details.player, team, season, bios)
+    if r:
+        checks.append(r)
+
     r = _check_minimum_salary(details.contract, details.player, bios, season, ctx["cap_levels"],
                               txn_date=ctx.get("txn_date"), signing_method=details.signing_method)
     if r:
@@ -5702,6 +5706,71 @@ def _check_signing_eligibility(player: str, team: str, season: str,
                 ),
             )
     return None
+
+
+_TRADED_AWAY_CACHE: dict = {"key": None, "index": {}}
+
+
+def _traded_away_index() -> dict[str, list[tuple[str, str]]]:
+    """``{slug: [(date, from_team), ...]}`` — every trade leg that sent a player
+    away, for § 4.5's re-acquisition restriction. Historical trades count: the
+    rule is about the trade having happened, not about how it was entered.
+
+    Kept apart from `_player_acquisition_index`, whose consumers branch on its
+    `kind` values; a "traded away" kind there would be a new event every one of
+    them would have to learn to ignore. Cached on the ledger's (mtime, size)
+    the same way, since the simulator revalidates on every keystroke.
+    """
+    try:
+        st = TRANSACTIONS_FILE.stat()
+        key = (st.st_mtime, st.st_size)
+    except OSError:
+        key = None
+    if _TRADED_AWAY_CACHE["key"] == key and key is not None:
+        return _TRADED_AWAY_CACHE["index"]
+    index: dict[str, list[tuple[str, str]]] = {}
+    for txn in _load_transactions():
+        if txn.get("type") != "trade" or not txn.get("date"):
+            continue
+        for leg in (txn.get("details") or {}).get("transfers") or []:
+            from_team = (leg.get("from_team") or "").upper()
+            if not from_team:
+                continue
+            for asset in leg.get("assets") or []:
+                if asset.get("type") == "player" and asset.get("slug"):
+                    index.setdefault(asset["slug"], []).append((txn["date"], from_team))
+    _TRADED_AWAY_CACHE.update({"key": key, "index": index})
+    return index
+
+
+def _check_reacquisition(player: str, team: str, season: str,
+                         bios: dict) -> Optional[CheckResult]:
+    """§ 4.5: a team may not re-acquire a player it traded away until the
+    following free agency period.
+
+    The free agency period opens with the league year (July 1 by default,
+    `season_clock`), so "until the following one" is the same thing as "not in
+    the league year of the trade": a trade on 2026-02-03 (25-26) frees the
+    player for the team on 2026-07-01, and one on 2026-07-02 (26-27) not until
+    2027-07-01. A team that already rosters the player has got him back some
+    other way and is re-signing its own man, so it isn't blocked here.
+    """
+    team = team.upper()
+    if (_build_team_map().get(player) or "").upper() == team:
+        return None
+    blocking = [d for d, from_team in _traded_away_index().get(player, [])
+                if from_team == team and _season_for_date(d) == season]
+    if not blocking:
+        return None
+    name = (bios.get(player) or {}).get("name") or player
+    next_fa = _season_start_date(_season_shift(season, 1), _league_rollovers()).strftime("%Y-%m-%d")
+    return CheckResult(
+        check="reacquisition_restriction", passed=False, level="error",
+        message=(
+            f"{team} traded {name} away on {max(blocking)} and may not re-acquire him "
+            f"until the next free agency period opens ({next_fa}) (§ 4.5)."
+        ),
+    )
 
 
 def _min_scale_for_season(season: str, cap_levels: dict) -> dict:
