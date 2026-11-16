@@ -90,7 +90,7 @@ LOCK_WHY = {
     "day over": "the day ended",
 }
 
-_lock = threading.Lock()
+_pickem_lock = threading.Lock()
 
 
 def _file(season: str):
@@ -135,7 +135,7 @@ def _streaming_day(date: str) -> dict:
 def _record_lock(date: str, why: str, stream: Optional[dict] = None) -> dict:
     """Lock `date`, once. A day's record also keeps its reopen history, so
     "locked" is the presence of `why`, not of the record."""
-    with _lock:
+    with _pickem_lock:
         locks = _load_json(LOCKS_FILE, {})
         rec = locks.setdefault(date, {})
         if not rec.get("why"):
@@ -197,7 +197,7 @@ def reopen(date: str, by: str) -> dict:
     games. Only a stream lock: a box score, a VOD or the day ending means
     games were played. The stream that caused it is ignored from then on, so
     it can't relock the day; a later stream (the real games) still can."""
-    with _lock:
+    with _pickem_lock:
         locks = _load_json(LOCKS_FILE, {})
         rec = locks.get(date) or {}
         if rec.get("why") != "stream":
@@ -485,7 +485,7 @@ def put_entry(date: str, body: EntryIn, info: dict = Depends(get_token_info)):
     errs = check_lineup(lineup, pool)
     if errs:
         raise HTTPException(status_code=422, detail=" ".join(errs))
-    with _lock:
+    with _pickem_lock:
         data = _load(season)
         data.setdefault(date, {})[info["name"]] = {
             "lineup": {s: lineup[s] for s in SLOTS},
@@ -503,7 +503,7 @@ def delete_entry(date: str, info: dict = Depends(get_token_info)):
     season, games = slate_games(date)
     if games and lock_state(date, box_rows(season)):
         raise HTTPException(status_code=409, detail="Lineups for that day are locked.")
-    with _lock:
+    with _pickem_lock:
         data = _load(season)
         if data.get(date, {}).pop(info["name"], None) is not None:
             _save(season, data)

@@ -168,14 +168,14 @@ class Insights:
         return {"feats": feats, "streaks": streaks, "teammates": teammates}
 
 
-_lock = threading.Lock()
+_player_insights_lock = threading.Lock()
 _cache: tuple[Optional[tuple], Optional[Insights]] = (None, None)
 
 
 def get_insights() -> Insights:
     global _cache
     index, key = gh.get_index()
-    with _lock:
+    with _player_insights_lock:
         if _cache[0] != key:
             _cache = (key, Insights(index))
         return _cache[1]

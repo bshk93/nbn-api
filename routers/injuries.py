@@ -101,7 +101,7 @@ KEEP_DAYS = 14
 MAX_IMAGES = 6
 
 # Upload, remove, commit and sweep all read-modify-write the same files.
-_lock = threading.Lock()
+_injuries_lock = threading.Lock()
 
 _ID_RE = re.compile(r"^[0-9a-f]{8}$")
 _FILE_RE = re.compile(r"^shot-\d+\.(png|jpg|gif|webp)$")
@@ -159,7 +159,7 @@ def _public(meta: dict, status: str) -> dict:
 
 def _archive(item_id: str) -> None:
     """Move a committed report's screenshots to the kept folder as WebP, with a
-    14-day expiry. The caller holds `_lock`. Never raises: keeping a screenshot
+    14-day expiry. The caller holds `_injuries_lock`. Never raises: keeping a screenshot
     must never be why a commit fails."""
     try:
         src_dir = PENDING_DIR / item_id
@@ -188,7 +188,7 @@ def _archive(item_id: str) -> None:
 
 def _sweep_expired() -> None:
     """Delete kept screenshots past their expiry. Run on commit and on list.
-    The caller holds `_lock`. Never raises."""
+    The caller holds `_injuries_lock`. Never raises."""
     try:
         now = _now().isoformat()
         for d, meta in _items(KEPT_DIR):
@@ -407,7 +407,7 @@ async def upload_injury_report(
     if len(data) > MAX_IMAGE_BYTES:
         raise HTTPException(status_code=413, detail="The screenshot is over 15MB.")
     ext = _checked_image_ext(data, "injury report")
-    with _lock:
+    with _injuries_lock:
         found = _pending_for(date)
         if found:
             item_dir, meta = found
@@ -442,7 +442,7 @@ def delete_pending(item_id: str, info: dict = Depends(require_any_role("stats", 
     # otherwise rmtree the data directory.
     if not _ID_RE.match(item_id):
         raise HTTPException(status_code=404, detail="Pending report not found")
-    with _lock:
+    with _injuries_lock:
         item_dir = PENDING_DIR / item_id
         if not item_dir.is_dir():
             raise HTTPException(status_code=404, detail="Pending report not found")
@@ -456,7 +456,7 @@ def delete_pending_image(item_id: str, fname: str,
                          info: dict = Depends(require_any_role("stats", "rosters"))):
     if not _ID_RE.match(item_id) or not _FILE_RE.match(fname):
         raise HTTPException(status_code=404, detail="Screenshot not found")
-    with _lock:
+    with _injuries_lock:
         item_dir = PENDING_DIR / item_id
         meta = _read_meta(item_dir)
         if not meta or not any(i["file"] == fname for i in meta["images"]):
@@ -477,7 +477,7 @@ def delete_pending_image(item_id: str, fname: str,
 def list_screenshots(date: Optional[str] = Query(None)):
     """Every report with screenshots on file: pending and committed (kept 14
     days). Public — it is the same information the injury list shows."""
-    with _lock:
+    with _injuries_lock:
         _sweep_expired()
     out = []
     for root, status in ((PENDING_DIR, "pending"), (KEPT_DIR, "committed")):
@@ -559,7 +559,7 @@ def commit_injury_report(body: InjuryCommit, info: dict = Depends(require_any_ro
         raise HTTPException(status_code=422, detail=f"Injury report refused, {len(problems)} "
                             f"problem{'s' if len(problems) != 1 else ''}: " + "; ".join(problems))
 
-    with _lock:
+    with _injuries_lock:
         if body.report_id and not (PENDING_DIR / body.report_id).is_dir():
             raise HTTPException(status_code=404, detail="Pending report not found")
         state = load_injuries()

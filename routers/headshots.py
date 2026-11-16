@@ -43,14 +43,14 @@ FAIL_TTL = 3600             # seconds a failed fetch is remembered
 HOST_INTERVAL = 3.5         # seconds between fetches to one host (~17/min)
 USER_AGENT = "nbn.today-headshots/1.0"   # a plain token: some CDNs 403 a UA containing a URL
 
-_lock = threading.Lock()
+_headshots_lock = threading.Lock()
 _failed: dict[str, float] = {}   # cache path name → retry-after timestamp
 _last_fetch: dict[str, float] = {}   # host → when it was last fetched from
 
 
 def _pace(url: str):
     """Sleep until HOST_INTERVAL has passed since the last fetch to this host.
-    Called under _lock, so fetches are serial and the pacing is real; cache
+    Called under _headshots_lock, so fetches are serial and the pacing is real; cache
     hits never take the lock, so they don't wait behind it."""
     host = urlsplit(url).hostname or ""
     wait = _last_fetch.get(host, 0) + HOST_INTERVAL - time.time()
@@ -110,7 +110,7 @@ def headshot_path(slug: str):
     if path.exists():
         return path
 
-    with _lock:
+    with _headshots_lock:
         if path.exists():
             return path
         if _failed.get(name, 0) > time.time():

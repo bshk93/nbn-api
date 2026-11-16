@@ -92,7 +92,7 @@ SITE = "https://nbn.today"
 MAX_BURST = 30
 BURST_WINDOW = 900   # seconds
 
-_lock = threading.Lock()
+_tweets_lock = threading.Lock()
 
 TEAMS = VALID_TEAMS
 HANDLE_RE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
@@ -204,7 +204,7 @@ def _notify(items: list[dict]) -> None:
 def post_one(tweet: TweetIn, date: str, author: str, ref: str) -> dict:
     """Store one tweet written by the API itself, tagged with the event it is about."""
     now = datetime.now(timezone.utc).isoformat()
-    with _lock:
+    with _tweets_lock:
         store = _load_store()
         store["seq"] += 1
         item = {"id": store["seq"], "date": date, "created_at": now,
@@ -217,7 +217,7 @@ def post_one(tweet: TweetIn, date: str, author: str, ref: str) -> dict:
 
 def delete_by_ref(ref: str) -> int:
     """Remove every tweet tagged `ref`; returns how many went."""
-    with _lock:
+    with _tweets_lock:
         store = _load_store()
         keep = [t for t in store["items"] if t.get("ref") != ref]
         gone = len(store["items"]) - len(keep)
@@ -270,7 +270,7 @@ def list_tweets(limit: int = Query(20, ge=1, le=MAX_LIMIT),
 @router.post("/api/tweets")
 def post_tweets(body: TweetBatch, info: dict = Depends(require_any_role("stats", "rosters"))):
     now = datetime.now(timezone.utc).isoformat()
-    with _lock:
+    with _tweets_lock:
         store = _load_store()
         out = []
         for t in body.tweets:
@@ -286,7 +286,7 @@ def post_tweets(body: TweetBatch, info: dict = Depends(require_any_role("stats",
 
 @router.delete("/api/tweets/{tweet_id}")
 def delete_tweet(tweet_id: int, info: dict = Depends(get_token_info)):
-    with _lock:
+    with _tweets_lock:
         store = _load_store()
         idx = next((i for i, t in enumerate(store["items"]) if t["id"] == tweet_id), None)
         if idx is None:
@@ -414,7 +414,7 @@ def _add_profile(ident: Identity, me: str, tweets: list[dict], profiles: dict) -
 
 @router.post("/api/tweets/profiles")
 def save_profile(body: Identity, info: dict = Depends(get_token_info)):
-    with _lock:
+    with _tweets_lock:
         profiles = _load_profiles()
         p = _add_profile(body, info["name"], _load_store()["items"], profiles)
         _save_profiles(profiles)
@@ -426,7 +426,7 @@ def save_profile(body: Identity, info: dict = Depends(get_token_info)):
 def delete_profile(profile_id: int, info: dict = Depends(get_token_info)):
     """Forget a saved identity. Its handle stays taken by any tweets already
     posted under it, so nobody else can pick it up and pass as you."""
-    with _lock:
+    with _tweets_lock:
         profiles = _load_profiles()
         idx = next((i for i, p in enumerate(profiles["items"]) if p["id"] == profile_id), None)
         if idx is None:
@@ -466,7 +466,7 @@ async def set_profile_avatar(profile_id: int, file: UploadFile = File(...),
     except Exception:
         raise HTTPException(status_code=422, detail="Could not read that picture")
     key = secrets.token_hex(8)
-    with _lock:
+    with _tweets_lock:
         profiles = _load_profiles()
         p = next((p for p in profiles["items"] if p["id"] == profile_id), None)
         if p is None or p["owner"] != info["name"]:
@@ -482,7 +482,7 @@ async def set_profile_avatar(profile_id: int, file: UploadFile = File(...),
 
 @router.delete("/api/tweets/profiles/{profile_id}/avatar")
 def delete_profile_avatar(profile_id: int, info: dict = Depends(get_token_info)):
-    with _lock:
+    with _tweets_lock:
         profiles = _load_profiles()
         p = next((p for p in profiles["items"] if p["id"] == profile_id), None)
         if p is None:
@@ -511,7 +511,7 @@ def get_profile_avatar(name: str):
 def post_member_tweet(body: MemberTweet, info: dict = Depends(get_token_info)):
     me = info["name"]
     now = datetime.now(timezone.utc)
-    with _lock:
+    with _tweets_lock:
         store = _load_store()
         profiles = _load_profiles()
         day_ago = (now.timestamp() - 86400)

@@ -55,7 +55,7 @@ KEEP = 50
 BETA_HEADER = "experimental-cc-routine-2026-04-01"
 TIMEOUT = 20.0
 
-_lock = threading.Lock()
+_parse_request_lock = threading.Lock()
 
 
 class ParseRequest(BaseModel):
@@ -154,7 +154,7 @@ def request_parse(body: ParseRequest = ParseRequest(), info: dict = Depends(requ
     if not (url and token):
         raise HTTPException(status_code=503, detail="The parse task isn't set up on the server (NBN_PARSE_ROUTINE_URL / _TOKEN).")
     who = info.get("name") or "?"
-    with _lock:
+    with _parse_request_lock:
         queue = _queue()
         if not queue["ready"] and not queue["injury_reports"]:
             raise HTTPException(status_code=409, detail="Nothing to parse: no game has both sides uploaded, and no injury report is pending.")

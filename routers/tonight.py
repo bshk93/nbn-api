@@ -422,7 +422,7 @@ def build(day: str) -> dict:
 
 
 _cache: dict[tuple, dict] = {}
-_lock = threading.Lock()
+_tonight_lock = threading.Lock()
 
 
 def _mtime(p: Path) -> int:
@@ -454,12 +454,12 @@ def tonight(day: Optional[str] = None) -> dict:
             from .league_time import league_today_str
             day = league_today_str()
     key = _cache_key(day)
-    with _lock:
+    with _tonight_lock:
         hit = _cache.get(key)
     if hit is not None:
         return hit
     data = build(day)
-    with _lock:
+    with _tonight_lock:
         if len(_cache) > 16:
             _cache.clear()
         _cache[key] = data
