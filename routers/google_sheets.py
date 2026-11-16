@@ -18,6 +18,7 @@ into a real Google account otherwise, which is not something to leave open.
 """
 
 import json
+import os
 import secrets
 import time
 import urllib.parse
@@ -122,17 +123,28 @@ class GoogleSetupIn(BaseModel):
     folder_id: Optional[str] = None
 
 
+def _write_private(path, data) -> None:
+    """Write a credential file 0600 from the first byte, atomically. Both files
+    here hold the OAuth client secret; a plain write_text left them readable
+    by any local user until (for the setup file, forever) a chmod."""
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(json.dumps(data, indent=2))
+    os.replace(tmp, path)
+
+
 @router.post("/api/google-oauth/setup")
 def google_oauth_setup(body: GoogleSetupIn, info: dict = Depends(require_admin)):
     """Stage the client credentials and hand back a short link to finish in a browser."""
     nonce = secrets.token_urlsafe(9)
-    GOOGLE_SETUP_FILE.write_text(json.dumps({
+    _write_private(GOOGLE_SETUP_FILE, {
         "client_id": body.client_id.strip(),
         "client_secret": body.client_secret.strip(),
         "folder_id": (body.folder_id or "").strip() or None,
         "nonce": nonce,
         "created": time.time(),
-    }, indent=2))
+    })
     GOOGLE_SETUP_FILE.chmod(0o600)
     log_write(info, "Google OAuth setup staged")
     return {"start_url": f"https://nbn.today/api/google-oauth/start?k={nonce}"}
@@ -207,13 +219,12 @@ def google_oauth_callback(code: str = "", state: str = "", error: str = ""):
             False,
         )
 
-    GOOGLE_CREDS_FILE.write_text(json.dumps({
+    _write_private(GOOGLE_CREDS_FILE, {
         "client_id": setup["client_id"],
         "client_secret": setup["client_secret"],
         "refresh_token": body["refresh_token"],
         "folder_id": setup.get("folder_id"),
-    }, indent=2))
-    GOOGLE_CREDS_FILE.chmod(0o600)
+    })
     GOOGLE_SETUP_FILE.unlink(missing_ok=True)   # nonce is single-use
     global _access_token
     _access_token = None                        # drop any token from a previous credential

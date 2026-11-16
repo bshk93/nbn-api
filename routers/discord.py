@@ -38,6 +38,7 @@ from .tips import perform_tip, TipError
 from .invest import compute_member_pnl  # per-stock P&L
 from .players import _display_name  # 'LAST, FIRST' bio name -> title-case 'First Last'
 from .players import player_bios_shared, ovr_shared
+from season_clock import season_starting
 
 logger = logging.getLogger("nbn-api.discord")
 
@@ -1058,7 +1059,7 @@ def _norm_season(s: str) -> str:
     s = (s or "").strip()
     if re.fullmatch(r"\d{4}", s):
         y = int(s)
-        return f"{(y - 1) % 100:02d}-{y % 100:02d}"
+        return season_starting(y - 1)
     return s
 
 

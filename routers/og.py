@@ -52,6 +52,7 @@ from .proposals import load_proposals
 from .discord import TEAM_NAMES
 from .names import player_name
 from .league_time import league_today
+from season_clock import season_for_date
 
 router = APIRouter()
 
@@ -362,10 +363,9 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _season_for_date(d: str) -> str:
-    """The league year a game date falls in — July 1 rollover (season_clock)."""
-    y, m = int(d[:4]), int(d[5:7])
-    start = y if m >= 7 else y - 1
-    return f"{start % 100:02d}-{(start + 1) % 100:02d}"
+    """The league year a game date falls in: season_clock's rule, rollover
+    overrides included, the same one the box score commit files games by."""
+    return season_for_date(d)
 
 
 def _games_on(d: str) -> list[dict]:

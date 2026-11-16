@@ -23,7 +23,7 @@ from .constants import (
     BUILD_STATUS_FILE, BUILD_SCRIPT, DERIVED_DIR, VALID_TEAMS, _manual_queue_lock,
     _build_trigger_lock, logger,
 )
-from .storage import read_csv, log_write, _current_league_year, _atomic_write
+from .storage import read_csv, log_write, _current_league_year, _atomic_write, _save_json
 from .allstats_guard import write_allstats, AllstatsGuardError
 from .boxscore_provenance import record_commit
 from . import game_starters
@@ -374,7 +374,7 @@ def _remove_from_manual_queue(date: str, home_team: str, away_team: str):
             q.get("date") == date and
             _game_teams(q.get("home_team", ""), q.get("away_team", "")) == teams
         )]
-        MANUAL_QUEUE_FILE.write_text(json.dumps(queue))
+        _save_json(MANUAL_QUEUE_FILE, queue)
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
@@ -1284,7 +1284,7 @@ def register_boxscore_queue(body: BoxscoreQueueRequest, info: dict = Depends(req
             "queued_by": info.get("name"),
             "queued_at": datetime.now(timezone.utc).isoformat(),
         })
-        MANUAL_QUEUE_FILE.write_text(json.dumps(queue))
+        _save_json(MANUAL_QUEUE_FILE, queue)
 
     reward, new_bal = _award_submission_reward(info["name"])
     logger.info("[%s] POST boxscore/queue — %s vs %s on %s (id=%s, +NB¥%.2f)", info.get("name"), home_team, away_team, body.date, item_id, reward)
@@ -1308,7 +1308,7 @@ def delete_manual_queue_entry(item_id: str, info: dict = Depends(require_any_rol
         new_queue = [q for q in queue if q["id"] != item_id]
         if len(new_queue) == len(queue):
             raise HTTPException(status_code=404, detail="Queue entry not found")
-        MANUAL_QUEUE_FILE.write_text(json.dumps(new_queue))
+        _save_json(MANUAL_QUEUE_FILE, new_queue)
     logger.info("[%s] DELETE boxscore/queue/%s", info.get("name"), item_id)
     return {"ok": True}
 

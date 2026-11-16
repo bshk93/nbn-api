@@ -1159,7 +1159,7 @@ def load_owner_tenures(data_dir: Path, today: date | None = None) -> list[dict]:
     The file records only start dates, so an end date is the day before the
     next owner of that team took over, and the current owner runs to today.
     """
-    today = today or datetime.now(LEAGUE_TZ).date() if False else (today or date.today())
+    today = today or date.today()
     path = data_dir / "owners.csv"
     if not path.exists():
         return []

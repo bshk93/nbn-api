@@ -66,6 +66,7 @@ from .transactions import (
     release_under_lock, announce_release,
 )
 from .league_time import league_today_str
+from season_clock import season_shift
 
 router = APIRouter()
 
@@ -292,8 +293,7 @@ def _validate_waiver_claim(claim: dict, release_txn: dict, ctx: dict) -> list[Ch
 # ── priority resolution (spec § 5) ────────────────────────────────────────────
 
 def _season_before(season: str) -> str:
-    a, b = season.split("-")
-    return f"{(int(a) - 1) % 100:02d}-{(int(b) - 1) % 100:02d}"
+    return season_shift(season, -1)
 
 
 def _relevant_record_season(release_date: str) -> str:
