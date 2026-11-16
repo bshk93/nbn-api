@@ -7,7 +7,7 @@ should ever be published from it). Nothing is filtered here: short messages
 and replies are kept, since "lmao" under a trade is context. Filtering
 happens when the export is read.
 
-    cd ~/projects/nbn-api && venv/bin/python ../nbn-api-dev/scripts/fetch_channel.py leaguetalk 2020-01-01 2020-11-01
+    cd ~/projects/nbn-api && venv/bin/python scripts/fetch_channel.py leaguetalk 2020-01-01 2020-11-01
 
 The end date is exclusive. Output: ~/nbn-lore/raw/<channel>/<YYYY-MM>.jsonl.
 A month file is rewritten whole each run, so re-running a range is safe.
