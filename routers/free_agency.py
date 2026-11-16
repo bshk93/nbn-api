@@ -27,7 +27,7 @@ from typing import Optional
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 
-from . import fa_notify, inbox
+from . import fa_notify, inbox, years_of_service
 from .roster_move_notify import announce_fa_result
 from .auth import (get_token_info, has_role, load_members,
                    require_any_role, require_role)
@@ -122,31 +122,34 @@ def _fa_pool(bios: dict, team_map: dict, season: str, cap_levels: Optional[dict]
     renounced: list[str] = []
     unsigned: list[str] = []
 
-    for slug, bio in bios.items():
-        cap_map = bio.get("cap_holds") or {}
-        salaries = bio.get("salaries") or {}
+    # Each RFA check reads years of service; one cache check for the whole
+    # loop instead of two per player (`years_of_service.one_snapshot`).
+    with years_of_service.one_snapshot():
+        for slug, bio in bios.items():
+            cap_map = bio.get("cap_holds") or {}
+            salaries = bio.get("salaries") or {}
 
-        actionable = sorted(
-            (yr, t) for yr, t in cap_map.items() if t != "NON_GTD" and salaries.get(yr)
-        )
-        if actionable:
-            yr, hold_type = actionable[0]
-            years_seen.add(yr)
-            hold_amount = _parse_dollar(salaries.get(yr))
-            prior_salary = _parse_dollar(salaries.get(_season_shift(yr, -1)) or "")
-            rfa, _ = _rfa_eligibility(slug, bios, yr, as_of=season)
-            # A recorded QO is the real figure; an undecided one is the formula's.
-            qo_status = _qo_status(bio, yr, season) if rfa else None
-            recorded = _qo_record(bio, yr).get("amount") if qo_status == "extended" else None
-            qo = (recorded if recorded is not None else _qo_amount(bio, yr, cap_levels)) if rfa else None
-            pool[slug] = {
-                "class_year": yr, "hold_type": hold_type, "hold_amount": hold_amount,
-                "prior_salary": prior_salary, "rfa": rfa, "qo_amount": qo, "qo_status": qo_status,
-            }
-            continue
+            actionable = sorted(
+                (yr, t) for yr, t in cap_map.items() if t != "NON_GTD" and salaries.get(yr)
+            )
+            if actionable:
+                yr, hold_type = actionable[0]
+                years_seen.add(yr)
+                hold_amount = _parse_dollar(salaries.get(yr))
+                prior_salary = _parse_dollar(salaries.get(_season_shift(yr, -1)) or "")
+                rfa, _ = _rfa_eligibility(slug, bios, yr, as_of=season)
+                # A recorded QO is the real figure; an undecided one is the formula's.
+                qo_status = _qo_status(bio, yr, season) if rfa else None
+                recorded = _qo_record(bio, yr).get("amount") if qo_status == "extended" else None
+                qo = (recorded if recorded is not None else _qo_amount(bio, yr, cap_levels)) if rfa else None
+                pool[slug] = {
+                    "class_year": yr, "hold_type": hold_type, "hold_amount": hold_amount,
+                    "prior_salary": prior_salary, "rfa": rfa, "qo_amount": qo, "qo_status": qo_status,
+                }
+                continue
 
-        if not bio.get("type") and slug not in team_map and not cap_map and not bio.get("retired"):
-            (renounced if salaries else unsigned).append(slug)
+            if not bio.get("type") and slug not in team_map and not cap_map and not bio.get("retired"):
+                (renounced if salaries else unsigned).append(slug)
 
     target_year = min(years_seen) if years_seen else season
     for slug in renounced:

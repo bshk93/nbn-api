@@ -44,6 +44,8 @@ import json
 import re
 import threading
 from collections import defaultdict
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -242,9 +244,57 @@ def _games(index) -> list[tuple[str, str, str]]:
             for i in range(index.n) if not index.playoff[i]]
 
 
+# The snapshot `one_snapshot()` pins for the block it wraps: a one-item list,
+# filled with (service, begun) by the first lookup that needs it.
+_pinned: ContextVar = ContextVar("years_of_service_pinned", default=None)
+
+
+@contextmanager
+def one_snapshot():
+    """Check the cache once for a block of many lookups, not once per lookup.
+
+    Each `service_seasons` call checks the cache key, which stats every box
+    score file, all 30 rosters, the ledger, the bios and the deadcap files and
+    lists the data directory. That is cheap once and slow a thousand times:
+    `GET /api/years-of-service` asked twice per player for ~1,040 players and
+    took 10 to 20 seconds on the box (2026-11-16), holding the one CPU the
+    whole time. Inside this block `service_seasons` and `begun_seasons` read
+    one snapshot, taken by the first of them to run, so wrap only read paths
+    that make no writes the count depends on. A nested block reuses the outer
+    one's snapshot."""
+    if _pinned.get() is not None:
+        yield
+        return
+    token = _pinned.set([None])
+    try:
+        yield
+    finally:
+        _pinned.reset(token)
+
+
+def _snapshot() -> tuple[dict, set]:
+    """(service, begun): the pinned snapshot inside `one_snapshot()`, else
+    the cache checked afresh."""
+    pinned = _pinned.get()
+    if pinned is not None and pinned[0] is not None:
+        return pinned[0]
+    with _years_of_service_lock:
+        _refresh()
+        snap = (_cache["service"], _cache.get("begun", set()))
+    if pinned is not None:
+        pinned[0] = snap
+    return snap
+
+
 def service_seasons(slug: str) -> set[str]:
     """The NBN seasons `slug` spent a regular-season day on a roster. Rebuilt
     when a box score, the ledger, a roster or the date changes."""
+    return set(_snapshot()[0].get(slug, ()))
+
+
+def _refresh() -> None:
+    """Rebuild the cache if a box score, the ledger, a bio, a roster, a
+    deadcap file or the date has changed since it was built."""
     from .game_highs import get_index
 
     index, index_key = get_index()
@@ -252,26 +302,25 @@ def service_seasons(slug: str) -> set[str]:
     key = (index_key, _mtime(TRANSACTIONS_FILE), _mtime(DATA_DIR / "player-bios.json"),
            tuple(_mtime(p) for p in _roster_paths()),
            tuple(_mtime(p) for p in sorted(DATA_DIR.glob("*-deadcap.csv"))), today)
-    with _years_of_service_lock:
-        if _cache["key"] != key:
-            try:
-                txns = json.loads(TRANSACTIONS_FILE.read_text())
-            except (OSError, json.JSONDecodeError):
-                txns = []
-            rollovers = season_clock.load_rollovers()
-            _cache["service"] = build_service(
-                _games(index), txns, _rostered_today(), today,
-                season_for_date=lambda d: season_clock.season_for_date(d, rollovers),
-                contracted=_contracted())
-            _cache["begun"] = {season for _slug, season, _date in _games(index)}
-            _cache["key"] = key
-        return set(_cache["service"].get(slug, ()))
+    if _cache["key"] != key:
+        try:
+            txns = json.loads(TRANSACTIONS_FILE.read_text())
+        except (OSError, json.JSONDecodeError):
+            txns = []
+        rollovers = season_clock.load_rollovers()
+        games = _games(index)
+        # New objects, never mutated in place: a pinned snapshot holds the old ones.
+        _cache["service"] = build_service(
+            games, txns, _rostered_today(), today,
+            season_for_date=lambda d: season_clock.season_for_date(d, rollovers),
+            contracted=_contracted())
+        _cache["begun"] = {season for _slug, season, _date in games}
+        _cache["key"] = key
 
 
 def begun_seasons() -> set[str]:
     """Seasons whose regular season has started (a box score is on file)."""
-    service_seasons("")
-    return set(_cache.get("begun", ()))
+    return set(_snapshot()[1])
 
 
 def years_of_service(bio: dict, season: str, slug: Optional[str] = None) -> Optional[int]:
@@ -340,8 +389,9 @@ def get_years_of_service(season: Optional[str] = None):
     except (OSError, json.JSONDecodeError):
         bios = {}
     years = {}
-    for slug, bio in bios.items():
-        n = years_of_service(bio, season, slug)
-        if n is not None:
-            years[slug] = n
+    with one_snapshot():
+        for slug, bio in bios.items():
+            n = years_of_service(bio, season, slug)
+            if n is not None:
+                years[slug] = n
     return {"season": season, "years": years}
