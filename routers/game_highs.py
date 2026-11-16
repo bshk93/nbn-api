@@ -334,7 +334,7 @@ def game_highs_payload(index: GameIndex, *, gametype: str, season: str, team: st
 
 # ── Loading and caching ──────────────────────────────────────────────────────
 
-_lock = threading.Lock()
+_game_highs_lock = threading.Lock()
 _index: Optional[GameIndex] = None
 _index_key: Optional[tuple] = None
 _responses: dict[tuple, dict] = {}
@@ -347,7 +347,7 @@ def _files_key() -> tuple:
 def get_index() -> tuple[GameIndex, tuple]:
     global _index, _index_key
     key = _files_key()
-    with _lock:
+    with _game_highs_lock:
         if _index is None or _index_key != key:
             _index = GameIndex(iter_games(DATA_DIR))
             _index_key = key

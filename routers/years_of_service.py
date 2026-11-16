@@ -66,7 +66,7 @@ _ON_ROSTER_TYPES = {"player", "two-way"}
 
 router = APIRouter()
 
-_lock = threading.Lock()
+_years_of_service_lock = threading.Lock()
 _cache: dict = {"key": None, "service": {}}
 
 
@@ -252,7 +252,7 @@ def service_seasons(slug: str) -> set[str]:
     key = (index_key, _mtime(TRANSACTIONS_FILE), _mtime(DATA_DIR / "player-bios.json"),
            tuple(_mtime(p) for p in _roster_paths()),
            tuple(_mtime(p) for p in sorted(DATA_DIR.glob("*-deadcap.csv"))), today)
-    with _lock:
+    with _years_of_service_lock:
         if _cache["key"] != key:
             try:
                 txns = json.loads(TRANSACTIONS_FILE.read_text())

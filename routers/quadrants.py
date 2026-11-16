@@ -30,7 +30,7 @@ from .storage import _load_json, _save_json, log_write
 
 router = APIRouter()
 
-_lock = threading.Lock()
+_quadrants_lock = threading.Lock()
 
 # Mirrors AXIS_VARS in nbn-today/frivolities/index.html, plus "ovr". A key the
 # page doesn't know would load as a chart with no axis.
@@ -138,7 +138,7 @@ def create_quadrant(body: QuadrantCreate, info: dict = Depends(get_token_info)):
     title = body.title.strip()
     if not title:
         raise HTTPException(status_code=422, detail="title is required")
-    with _lock:
+    with _quadrants_lock:
         store = _load_store()
         store["seq"] += 1
         item = {
@@ -156,7 +156,7 @@ def create_quadrant(body: QuadrantCreate, info: dict = Depends(get_token_info)):
 
 @router.delete("/api/quadrants/{quadrant_id}")
 def delete_quadrant(quadrant_id: int, info: dict = Depends(get_token_info)):
-    with _lock:
+    with _quadrants_lock:
         store = _load_store()
         idx = _find(store, quadrant_id)
         if store["items"][idx]["author"] != info["name"] and not has_role(info, "admin"):

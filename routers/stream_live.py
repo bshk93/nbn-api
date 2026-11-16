@@ -39,7 +39,7 @@ TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 STREAMS_URL = "https://api.twitch.tv/helix/streams"
 CACHE_SECONDS = 60
 
-_lock = threading.Lock()
+_stream_live_lock = threading.Lock()
 _token: dict = {"value": None, "expires": 0.0}
 _cache: dict = {"body": None, "at": 0.0}
 
@@ -90,7 +90,7 @@ def fetch_status() -> dict:
 
 @router.get("/api/stream/live")
 def stream_live():
-    with _lock:
+    with _stream_live_lock:
         if _cache["body"] is not None and time.time() - _cache["at"] < CACHE_SECONDS:
             return _cache["body"]
         try:

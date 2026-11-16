@@ -64,7 +64,7 @@ TEAMS = VALID_TEAMS
 _LINK = "/finances/#arenas"
 _URLISH = re.compile(r"://|\bwww\.|\.(com|net|org|gg|tv|io|ly)\b", re.I)
 
-_lock = threading.Lock()
+_arenas_lock = threading.Lock()
 
 
 class BidIn(BaseModel):
@@ -199,7 +199,7 @@ def bid(team: str, body: BidIn, info: dict = Depends(get_token_info)):
         raise HTTPException(status_code=401, detail="Sign in to bid")
     t = _team(team)
     name = clean_name(body.name)
-    with _lock, wallet.lock:
+    with _arenas_lock, wallet.lock:
         data = _load()
         history = data.setdefault(t, [])
         need = to_beat(history)
@@ -233,7 +233,7 @@ def bid(team: str, body: BidIn, info: dict = Depends(get_token_info)):
 @router.delete("/api/arenas/{team}")
 def pull(team: str, body: PullIn, info: dict = Depends(require_role("admin"))):
     t = _team(team)
-    with _lock, wallet.lock:
+    with _arenas_lock, wallet.lock:
         data = _load()
         history = data.get(t, [])
         cur = standing(history)
