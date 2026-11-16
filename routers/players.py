@@ -804,12 +804,18 @@ def all_ratings_changes() -> list[dict]:
     **Read-only**: the list is shared between requests. With either file
     missing (a test's patched loaders) nothing is cached."""
     key = (_file_stamp(ATTRIBUTES_FILE), _file_stamp(PLAYER_BIOS_FILE))
-    if None not in key and _RATINGS_CHANGES.get("key") == key:
-        return _RATINGS_CHANGES["entries"]
+    # One read and one write of a single (key, entries) pair. It used to be
+    # two keys on a dict that a rebuild cleared and refilled: a request that
+    # had matched the key could look up "entries" in that gap and 500 (seen
+    # on /api/ratings-changes?latest=1, 2026-11-16).
+    hit = _RATINGS_CHANGES.get("v")
+    if None not in key and hit is not None and hit[0] == key:
+        return hit[1]
     entries = _diff_all_ratings(load_attributes(), load_player_bios())
-    _RATINGS_CHANGES.clear()
     if None not in key:
-        _RATINGS_CHANGES.update(key=key, entries=entries)
+        _RATINGS_CHANGES["v"] = (key, entries)
+    else:
+        _RATINGS_CHANGES.pop("v", None)
     return entries
 
 

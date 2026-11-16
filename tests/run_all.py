@@ -40,7 +40,7 @@ MODULES = [
     "test_two_way_release", "test_trade_releases", "test_signing_releases",
     "test_apply_extension", "test_extension_trade_freeze", "test_nbnfl",
     "test_signing_books", "test_split_players", "test_trc_discord", "test_injuries",
-    "test_tetris", "test_quadrants", "test_headshots", "test_tweets", "test_js_mirrors", "test_tradeblock_names", "test_private_writes", "test_migrate_dead_type", "test_arenas",
+    "test_tetris", "test_quadrants", "test_headshots", "test_tweets", "test_js_mirrors", "test_tradeblock_names", "test_private_writes", "test_ratings_changes_race", "test_migrate_dead_type", "test_arenas",
     "test_box_health", "test_fa_hold_sweep", "test_game_day", "test_invest",
     "test_nbntv_schedule", "test_pick_swaps", "test_pickem", "test_picks_structure",
     "test_team_option_sweep"]
