@@ -170,6 +170,12 @@ def test_differs_from_2k(world):
 def _settings_world(monkeypatch, bios):
     from routers import coaching_settings, game_day_notify
     disk = {"bios": bios}
+    # A jersey change is noted in position-checks.json. Keep that off the real
+    # data dir: run on the server, this test used to write live state.
+    checks = {}
+    monkeypatch.setattr(coaching_settings, "load_position_checks", lambda: checks)
+    monkeypatch.setattr(coaching_settings, "save_position_checks",
+                        lambda d: (checks.clear(), checks.update(d)))
     monkeypatch.setattr(players, "load_player_bios", lambda: disk["bios"])
     monkeypatch.setattr(players, "save_player_bios", lambda d: disk.update(bios=d))
     monkeypatch.setattr(players, "_build_team_map", lambda: {s: "MIL" for s in bios})

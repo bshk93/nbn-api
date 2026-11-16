@@ -69,7 +69,7 @@ command in this file genuinely means live and stays pointed there.
 
 ```bash
 cd ~/projects/nbn-api-dev            # edit on a branch, push, merge to main
-venv/bin/python -m tests.run_all     # 39 modules; nothing starts a server
+venv/bin/python -m tests.run_all     # nothing starts a server; off the box, live-data modules skip by name
 cd ~/projects/nbn-api && ./deploy.sh # ff-only, refuses a dirty tree, restarts, verifies
 ```
 

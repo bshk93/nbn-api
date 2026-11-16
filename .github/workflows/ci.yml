@@ -1,0 +1,36 @@
+# The test suite, as tests/run_all.py runs it. Modules that read the server's
+# real data directory are skipped by name (LIVE_DATA_MODULES); they still run
+# on the box. The JS mirror and contract-shorthand tests need the nbn-today
+# checkout beside this one: set a NBN_TODAY_TOKEN secret (a read-only token on
+# bshk93/nbn-today) and they run, without it they say so and skip.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    env:
+      NBN_TODAY_TOKEN: ${{ secrets.NBN_TODAY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: nbn-api }
+      - name: Check out nbn-today beside it
+        if: ${{ env.NBN_TODAY_TOKEN != '' }}
+        uses: actions/checkout@v4
+        with:
+          repository: bshk93/nbn-today
+          token: ${{ secrets.NBN_TODAY_TOKEN }}
+          path: nbn-today
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13", cache: pip, cache-dependency-path: nbn-api/requirements.txt }
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - name: Install
+        working-directory: nbn-api
+        run: python -m venv venv && venv/bin/pip install -r requirements.txt
+      - name: Test
+        working-directory: nbn-api
+        run: venv/bin/python -m tests.run_all

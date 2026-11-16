@@ -396,12 +396,15 @@ def sixth_man_status(season: str) -> dict:
     entries = load(season)
     known_by_team = _team_games_known(entries)
     starts = starts_by_player(entries)
-    out = {}
-    for slug, (games, teams) in _season_games(season).items():
-        known = min(games, sum(known_by_team.get(t, 0) for t in teams))
-        gs = (starts.get(slug) or {}).get("gs", 0)
-        out[slug] = {"gs": gs, "known": known, "eligible": not (known and 2 * gs >= known)}
-    return out
+    return {slug: sixth_man_row(games, teams, known_by_team, (starts.get(slug) or {}).get("gs", 0))
+            for slug, (games, teams) in _season_games(season).items()}
+
+
+def sixth_man_row(games: int, teams, known_by_team: dict, gs: int) -> dict:
+    """One player's 6MOY standing. The same count and threshold as the 6MOY
+    filter in nbn-today/award-race.js (tests/test_js_mirrors.py runs both)."""
+    known = min(games, sum(known_by_team.get(t, 0) for t in teams))
+    return {"gs": gs, "known": known, "eligible": not (known and 2 * gs >= known)}
 
 
 @router.get("/api/game-starters/sixth-man")

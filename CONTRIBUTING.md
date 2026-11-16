@@ -26,7 +26,9 @@ venv/bin/python -m tests.test_something
 ```
 
 Add a test for what you change. If it's a new module, add it to `MODULES` in
-`tests/run_all.py`. Run the tests for the code you touched. The whole suite
+`tests/run_all.py` (or `LIVE_DATA_MODULES` if it genuinely checks live data;
+those are skipped wherever the data directory is missing, such as CI). A
+`tests/test_*.py` in neither list fails the suite. Run the tests for the code you touched. The whole suite
 takes a long time and you don't need to run it.
 
 **A test must never touch the real league data.** Your pull request is tested
