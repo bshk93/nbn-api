@@ -60,6 +60,15 @@ def main():
     check("a pick only in the flat ledger is flagged",
           len(found) == 1 and "not in the conveyance store" in found[0], found)
 
+    # stale_labels(): a "protected" note on a plain pick outlived its structure.
+    labelled = [dict(rows[0], NOTES="protected"), dict(rows[1], NOTES="See the DET 1st")]
+    found = parity.stale_labels(labelled, store)
+    check("a structure label on a plain pick is flagged",
+          len(found) == 1 and "2027 R1 DAL" in found[0], found)
+    check("prose notes are not", all("SAC" not in f for f in found), found)
+    check("a label on a pick with structure is not",
+          not parity.has_structure({"leaves": []}) and parity.has_structure({"ladder_fallback_of": {"to": "TOR"}}))
+
     # claimants(): the served shape names parties in several places.
     check("pipe-joined owner", parity.claimants({"orig": "LAL", "owner": "DET|HOU"}) == {"DET", "HOU"})
     check("undetermined owner falls back to orig, like /api/picks/{team}",
