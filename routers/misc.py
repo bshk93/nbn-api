@@ -798,7 +798,8 @@ def _notify_join_discord(sub: dict):
             timeout=5,
         )
     except Exception:
-        pass
+        # A join notice is best effort, but a silent failure hid a dead token once.
+        logger.warning("could not post the join notice to Discord", exc_info=True)
 _FAST_SUBMIT_MS     = 5_000  # flag if form submitted in under 5 seconds
 
 def _join_ip(request: Request) -> Optional[str]:
