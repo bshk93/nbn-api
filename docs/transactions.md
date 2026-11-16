@@ -425,6 +425,87 @@ Promotes a two-way player to a full player contract. No dead cap, no roster move
 
 ---
 
+### `guarantee` — Fully guarantee a non-guaranteed year
+
+**Details:** `{"player": "slug", "year": "26-27"}`
+
+The year must carry a `NON_GTD` cap hold and a salary. No rule checks it
+(`_validate_guarantee` says why: it moves no money); `_apply_guarantee`
+refuses with a 422 when there is no such year.
+
+**Mutates:** `player-bios.json` → drops the `NON_GTD` tag for that year, sets
+`guaranteed[year]` to the full salary, and clears that year's
+`guarantee_dates` and `guarantee_schedule`.
+
+---
+
+### `sign_pick` — Sign a drafted player to his first contract (Article VII)
+
+**Details:** `{"player": "slug", "contract": {...ContractIn}, "bird_rights_type"?, "eaps_assumption"?}`
+
+The player must hold `type: "draft-rights"` on a roster; the team is read from
+the roster, never taken from the request. A first-rounder's contract is held to
+the rookie scale (§ 7.1, `_check_rookie_scale_terms`), a second-rounder's to
+the second-round scale. `GET /api/rookie-scale/contract/{slug}` prefills it.
+
+**Mutates:** `player-bios.json` → `type` becomes `player` (or `two-way`),
+salaries and holds written as a signing writes them.
+
+---
+
+### `extension` — Extend a player under contract (§ 6.2 / § 6.3)
+
+**Details:** `{"player", "team", "contract": {...ContractIn}, "kind": "veteran" | "rookie_scale" | "extend_and_trade", "bird_rights_type"?, "eaps_assumption"?, "announced_date"?, "submitted_date"?, "attested_contract_start"?}`
+
+`contract` is the extended term only. The live years stay as they are and the
+new years start the season after the existing deal's last guaranteed year
+(§ 6.2 rule 10). Only the incumbent team may extend. `submitted_date` is the day
+a PO-EXT proposal was first submitted, and § 6.3's windows are judged as of it.
+Design: nbn-today `docs/poext-extension-pipeline.md`.
+
+**Mutates:** `player-bios.json` → adds the extended years on top of the
+contract. No roster or team-state write: an extension holds no cap room and
+takes no roster spot (§ 2.10).
+
+---
+
+### `qualifying_offer` — Extend or withdraw a qualifying offer (§ 3.1)
+
+**Details:** `{"player", "action": "extend" | "withdraw", "season"?, "amount"?}`
+
+`season` is the hold season, derived when left out. `amount` overrides the
+formula and is for the office, for a player the formula can't price. Read
+nbn-today `docs/qualifying-offers.md` first.
+
+**Mutates:** `player-bios.json` → records the QO. Extending raises the § 3.10
+hold to the QO when the QO is larger (remembering the old figure).
+Withdrawing makes him a UFA (the tag flips; the hold and Bird Rights stay)
+and restores any hold the QO had raised.
+
+---
+
+### `accept_qo` — The player signs his qualifying offer (§ 3.1)
+
+**Details:** `{"player", "eaps_assumption"?}`
+
+Decided by the PDC ballot, not the team. Signs a one-year deal at the QO amount
+with his own team through the same path as `sign` (rolling into a UFA hold), then
+marks the QO accepted. Refused unless the current season's QO is extended.
+
+**Mutates:** as `sign`, plus the QO record.
+
+---
+
+## Validate endpoints (read-only)
+
+`POST /api/validate/{type}` runs the same validator as the submit path and
+returns `{legal, checks[], fact_sheet}` without writing anything. The table of
+types, validators and fact sheets is in nbn-today's CLAUDE.md § Validation
+endpoints. A team's owner submits a few types themselves under
+`/api/self/...` (renounce, options, releases, two-way conversion, pick
+signings, stashes, qualifying offers); each is the same validator and apply as
+the office's, with the team taken from the member's role.
+
 ## Deleting a transaction
 
 `DELETE /api/transactions/{id}` removes the record from `transactions.json` but **does not reverse the bio/roster mutations**. Use it only to clean up test entries or mistakes where you've already manually corrected the data.

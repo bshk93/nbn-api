@@ -30,8 +30,7 @@ The source of truth for all player identity and contract data. Keyed by slug (`"
       "26-27": "$6,628,352"
     },
     "guaranteed": {},
-    "guarantee_dates": {},
-    "dead_cap": {}
+    "guarantee_dates": {}
   }
 }
 ```
@@ -52,7 +51,6 @@ The source of truth for all player identity and contract data. Keyed by slug (`"
 | `salaries` | object | `{"YY-YY": "$N"}` — current contract years only |
 | `guaranteed` | object | `{"YY-YY": "$N"}` — guaranteed portion for NON_GTD years |
 | `guarantee_dates` | object | `{"YY-YY": "YYYY-MM-DD"}` — date salary becomes fully guaranteed |
-| `dead_cap` | object | `{"YY-YY": "$N"}` — accumulated dead cap from releases |
 
 ### cap_holds format
 
@@ -68,12 +66,17 @@ Valid types: `UFA`, `RFA`, `PLAYER_OPT`, `TEAM_OPT`, `NON_GTD`
 
 - `"player"` — standard contract, on a roster
 - `"two-way"` — two-way contract, on a roster
-- `"dead"` — released; `salaries` is empty, `dead_cap` holds the amounts
+- `"dead"` — **legacy**, nothing writes it; 27 bios still carry it and are read as roster-exempt (`migrate_dead_type.py` reports them)
 - `""` — prospect / unsigned player
 
-### Backward compat note
+### Dead cap
 
-Players released before the `dead_cap` field was introduced have their dead cap stored in `salaries` (with `type = "dead"`). The frontend handles both cases; if patching these manually, move the values from `salaries` to `dead_cap` and clear `salaries`.
+Dead cap is not on the bio. A release writes it to the team's
+`{team}-deadcap.csv` (one row per released player, a column per season), so a
+player can carry dead money on one team while playing for another, and the
+release's ledger entry records it as `details.dead_cap`. A released player's
+remaining salary is also kept in his bio's `salaries`. A release sets `type`
+back to `""`.
 
 ---
 
@@ -227,16 +230,11 @@ Keyed by season string. Used to display cap context on the site.
 
 ---
 
-## tokens.json
+## tokens.json (retired)
 
-```json
-{
-  "<64-char hex token>": {
-    "name": "Se-Ho Kim",
-    "roles": ["admin"]
-  }
-}
-```
+There is no tokens file. Each member's bearer token is the `token` field on
+their entry in `members.json`; `routers/auth.py` resolves a token by scanning
+members, and `load_tokens()` is a compatibility shim over the same data.
 
 ---
 

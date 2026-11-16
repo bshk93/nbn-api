@@ -1,5 +1,12 @@
 # Picks migration — Phase 3 reconciliation worksheet (WIP)
 
+> **Historical design record (banner added 2026-11-16).** Code comments cite this
+> file by section, so it stays at this path. It describes the model as designed and
+> cut over in July 2026, and has not been kept current: some functions and kinds it
+> names no longer exist (`_check_not_legacy`, `_shadow_check_ownership`). For how a pick reads today, use nbn-today's
+> CLAUDE.md § Draft pick; for how to correct one, `docs/picks.md`. When this file
+> and the code disagree, the code is right.
+
 Working record of the 41 under-specified `NOTES` rows as they get resolved with
 the owner. Companion to `picks-conveyance.md` (the spec) and the memory
 `project-picks-conveyance-model`. Each entry: the resolved structured node, the

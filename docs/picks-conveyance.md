@@ -1,5 +1,12 @@
 # Draft-pick conveyance model (design spec)
 
+> **Historical design record (banner added 2026-11-16).** Code comments cite this
+> file by section, so it stays at this path. It describes the model as designed and
+> cut over in July 2026, and has not been kept current: some functions and kinds it
+> names no longer exist (`current_owner()`, `retrade_contingent`). For how a pick reads today, use nbn-today's
+> CLAUDE.md § Draft pick; for how to correct one, `docs/picks.md`. When this file
+> and the code disagree, the code is right.
+
 **Status: LIVE since 2026-07-19.** This document was written as the up-front
 design spec (below), then the model described here was actually built and cut
 over to production the same day and in the days after — but this file was
