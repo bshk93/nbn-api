@@ -1,116 +1,43 @@
-# NBN API
+# nbn-api
 
-A lightweight backend that lets rosters members edit team rosters and draft picks directly on nbn.today — no more Google Sheets.
+The backend for [nbn.today](https://nbn.today), the NBN fantasy basketball GM
+league: a FastAPI app serving the league's rosters, contracts, transactions,
+picks, box scores, stats build, committees, NB¥ economy and Discord
+integrations.
 
-## How it works
+It runs as one systemd service (`nbn-api.service`, port 8001, behind nginx at
+`nbn.today/api/`) on a small shared box, and keeps all state as JSON and CSV
+files in `/var/lib/nothing-but-stats` (there is no database). The site is the
+sibling repo, `nbn-today`.
 
-The API runs as a systemd service on the same server as nbn.today. When a rosters member clicks the **Edit** button on any team page, the frontend sends their token to the API, which verifies it and writes the updated CSV back to `/var/lib/nothing-but-stats/`. Since the team pages read those same CSV files, the changes are live immediately.
+## Start here
 
-## Roles
+- **`CLAUDE.md`**: how the code is laid out, the rules for the production box,
+  dev vs live checkouts, auth, and an index of every subsystem.
+- **`CONTRIBUTING.md`**: how to make a change, and the rule that a test must
+  never touch real league data.
+- **`docs/`**: one file per area. `transactions.md` (every transaction type),
+  `data-model.md` (every data file), and the subsystem docs CLAUDE.md indexes.
 
-| Role | Can do |
-|------|--------|
-| `rosters` | Edit any team's roster and draft picks |
-| `admin` | Everything rosters can do + create/revoke tokens |
-
-There is one admin (you). Everyone else gets a `rosters` token.
-
----
-
-## Adding a new rosters member
-
-Run this command on the server, replacing the name:
-
-```bash
-curl -X POST https://nbn.today/api/tokens \
-  -H "Authorization: Bearer YOUR_ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"name": "Their Name", "role": "rosters"}'
-```
-
-The response looks like:
-
-```json
-{
-  "token": "a3f8c2d1e9b4...",
-  "name": "Their Name",
-  "role": "rosters"
-}
-```
-
-Send them the `token` value over Discord (DM only, not in a public channel). They paste it into the browser prompt the first time they click Edit on any team page. It gets saved in their browser and they never have to enter it again.
-
-## Listing all active tokens
+## Run the tests
 
 ```bash
-curl https://nbn.today/api/tokens \
-  -H "Authorization: Bearer YOUR_ADMIN_TOKEN"
+python3 -m venv venv && venv/bin/pip install -r requirements.txt
+venv/bin/python -m tests.run_all
 ```
 
-Returns a list of all tokens with their associated name and role. Token values are shown in full so you can identify and revoke specific ones.
+Nothing starts a server and nothing reads the real data directory. Tests that
+need it are listed in `tests/run_all.py` and skipped, by name, where it
+doesn't exist. CI (`.github/workflows/ci.yml`) runs the same suite on every push.
 
-## Revoking a token
+## Deploy
 
-If someone leaves the rosters or their token is compromised, revoke it by passing the token value:
+Edit in a dev checkout, merge to `main`, then on the box:
 
 ```bash
-curl -X DELETE https://nbn.today/api/tokens/TOKEN_TO_REVOKE \
-  -H "Authorization: Bearer YOUR_ADMIN_TOKEN"
+cd ~/projects/nbn-api && ./deploy.sh
 ```
 
-Revocation is instant — their next save attempt will fail and their browser will clear the stored token automatically, prompting them to enter a new one if they try again.
-
----
-
-## How rosters members use it
-
-1. Go to any team page on nbn.today (e.g. `/teams/GSW`)
-2. Click the small **Edit** button next to the **Roster** or **Draft Picks** heading
-3. The first time, a prompt appears asking for their token — they paste it in and click Continue
-4. The table becomes editable:
-   - Click any cell and type to change a value
-   - Click **×** on a row to delete it
-   - Click **+ Add row** at the bottom to add a new player or pick
-5. Click **Save** when done, or **Cancel** to discard changes
-
-The token is saved in their browser (localStorage), so they only ever enter it once per browser. If they switch computers or clear their browser data, they'll need to enter it again — just send the same token again, no need to create a new one.
-
----
-
-## Roster column reference
-
-The roster CSV (`{abbr}-roster.csv`) has a single column:
-
-| Column | Description | Example |
-|--------|-------------|---------|
-| `SLUG` | Player slug (key into `player-bios.json`) | `barnes-scottie` |
-
-Editing a roster just adds/removes players (via a searchable name picker) — it does not edit name, position, age, OVR, contract type, cap holds, or salary. Those all live in `player-bios.json` and `ovr-history.json` and are changed via player transactions (`POST /api/transactions`, `PUT /api/players/{slug}`, `PUT /api/ovr/{slug}`), not by editing the roster CSV directly.
-
-## Picks column reference
-
-| Column | Description | Example |
-|--------|-------------|---------|
-| `YEAR` | Draft year | `2026` |
-| `ROUND` | Round | `1st` or `2nd` |
-| `TEAM` | Team origin or destination | `Own`, `SAC/DAL`, `from NYK` |
-| `TYPE` | Pick direction | `own` or `acquired` |
-
----
-
-## Server details
-
-- **API process:** `systemctl status nbn-api`
-- **Logs:** `journalctl -u nbn-api -f`
-- **Restart:** `sudo systemctl restart nbn-api`
-- **API code:** `/home/skim/projects/nbn-api/main.py`
-- **Token file:** `/var/lib/nothing-but-stats/tokens.json` (JSON, human-readable)
-- **Port:** 8001 (internal only, proxied through nginx)
-
-## If something breaks
-
-**"Invalid token" error on save:** The token was rejected. Check that the token in `tokens.json` matches what was sent. Revoking and reissuing a fresh token is the easiest fix.
-
-**API not responding:** Check `systemctl status nbn-api`. If it's stopped, `sudo systemctl start nbn-api`. If it keeps crashing, check `journalctl -u nbn-api -n 50` for the error.
-
-**Changes not showing up:** The API writes directly to the CSV files in `/var/lib/nothing-but-stats/`, which are symlinked into the web root. If the write succeeded (Save showed "Saved!") the page should reflect the change on the next load. Hard refresh (Ctrl+Shift+R) if needed.
+`deploy.sh` fast-forwards, refuses a dirty tree, restarts the service and
+prints the rollback command. When a change spans both repos, the API ships
+first.
