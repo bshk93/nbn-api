@@ -124,6 +124,47 @@ try:
 finally:
     y.service_seasons, y.begun_seasons = real, real_begun
 
+print("one_snapshot")
+# GET /api/years-of-service asked for ~1,040 players and checked the cache key
+# (stats of every box score, roster and deadcap file) twice per player: 10 to
+# 20 seconds on the box. Inside one_snapshot the key is checked once.
+refreshes = []
+real_refresh, real_cache = y._refresh, dict(y._cache)
+
+
+def fake_refresh():
+    refreshes.append(1)
+    y._cache.update(key="k", service={"vet": {"24-25"}}, begun={"24-25", "25-26"})
+
+
+y._refresh = fake_refresh
+try:
+    with y.one_snapshot():
+        for _ in range(50):
+            y.years_of_service({"draft_year": 2007}, "26-27", "vet")
+        with y.one_snapshot():
+            y.service_seasons("vet")
+    check("one cache check for a whole block of lookups", len(refreshes) == 1, len(refreshes))
+    check("the snapshot answers the lookups", y.years_of_service({"draft_year": 2007}, "26-27", "vet") == 18)
+    refreshes.clear()
+    y.service_seasons("vet")
+    y.begun_seasons()
+    check("outside a block, every lookup checks the cache", len(refreshes) == 2, len(refreshes))
+    refreshes.clear()
+    with y.one_snapshot():
+        pass
+    check("a block that looks nothing up checks nothing", refreshes == [], len(refreshes))
+    y._cache.update(service={"vet": {"24-25"}})
+    with y.one_snapshot():
+        before = y.service_seasons("vet")
+        y._cache["service"] = {"vet": {"20-21", "24-25"}}
+        check("a rebuild mid-block doesn't change what the block reads",
+              y.service_seasons("vet") == before, y.service_seasons("vet"))
+finally:
+    y._refresh = real_refresh
+    y._cache.clear()
+    y._cache.update(real_cache)
+
 if FAILS:
     print(f"\n{len(FAILS)} failed")
     sys.exit(1)
