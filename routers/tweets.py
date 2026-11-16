@@ -78,6 +78,7 @@ from .auth import _resolve_token, get_token_info, has_role, load_members, requir
 from .constants import TWEET_AVATARS_DIR, TWEET_PROFILES_FILE, TWEETS_FILE
 from .league_time import league_today_str
 from .storage import _load_json, _save_json, log_write
+from .constants import VALID_TEAMS
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:  # Pillow loads lazily, only when a picture is cropped
     from PIL import Image
@@ -93,11 +94,7 @@ BURST_WINDOW = 900   # seconds
 
 _lock = threading.Lock()
 
-TEAMS = {
-    "ATL", "BKN", "BOS", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW",
-    "HOU", "IND", "LAC", "LAL", "MEM", "MIA", "MIL", "MIN", "NOP", "NYK",
-    "OKC", "ORL", "PHI", "PHX", "POR", "SAC", "SAS", "TOR", "UTA", "WAS",
-}
+TEAMS = VALID_TEAMS
 HANDLE_RE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 MAX_BATCH = 20

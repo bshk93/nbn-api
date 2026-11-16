@@ -44,6 +44,7 @@ from .discord_notify import (SITE, _contract_breakdown, _contract_str, _player_n
                              with_team_pings)
 from .fa_notify import _promises_str
 from .players import load_player_bios
+from .constants import VALID_TEAMS
 
 logger = logging.getLogger(__name__)
 
@@ -107,9 +108,7 @@ def _alert(embed_fn) -> bool:
         return False
 
 
-_TEAM_ABBRS = ["ATL", "BKN", "BOS", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW",
-              "HOU", "IND", "LAC", "LAL", "MEM", "MIA", "MIL", "MIN", "NOP", "NYK",
-              "OKC", "ORL", "PHI", "PHX", "POR", "SAC", "SAS", "TOR", "UTA", "WAS"]
+_TEAM_ABBRS = sorted(VALID_TEAMS)
 _ABBR_RE = re.compile(r"\b(" + "|".join(_TEAM_ABBRS) + r")\b")
 
 

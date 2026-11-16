@@ -16,6 +16,7 @@ from .storage import _load_json, _save_json, log_write
 from .auth import get_token_info, require_admin, load_members
 from .bets import DISCORD_BETS_WEBHOOK
 from . import wallet
+from .constants import TEAM_NAMES as _TEAM_NAMES
 
 router = APIRouter()
 
@@ -31,18 +32,7 @@ _perry_activity_lock = threading.Lock()
 SLOTS = ["PG", "SG", "SF", "PF", "C", "6MAN"]
 PRIZES = [10.0, 5.0, 2.5]   # paused at the 2026-09 reset; wallet.KINDS
 
-TEAM_NAMES = {
-    "ATL": "Atlanta Hawks",    "BKN": "Brooklyn Nets",       "BOS": "Boston Celtics",
-    "CHA": "Charlotte Hornets","CHI": "Chicago Bulls",        "CLE": "Cleveland Cavaliers",
-    "DAL": "Dallas Mavericks", "DEN": "Denver Nuggets",       "DET": "Detroit Pistons",
-    "GSW": "Golden State Warriors", "HOU": "Houston Rockets", "IND": "Indiana Pacers",
-    "LAC": "LA Clippers",      "LAL": "Los Angeles Lakers",   "MEM": "Memphis Grizzlies",
-    "MIA": "Miami Heat",       "MIL": "Milwaukee Bucks",      "MIN": "Minnesota Timberwolves",
-    "NOP": "New Orleans Pelicans", "NYK": "New York Knicks",  "OKC": "Oklahoma City Thunder",
-    "ORL": "Orlando Magic",    "PHI": "Philadelphia 76ers",   "PHX": "Phoenix Suns",
-    "POR": "Portland Trail Blazers", "SAC": "Sacramento Kings", "SAS": "San Antonio Spurs",
-    "TOR": "Toronto Raptors",  "UTA": "Utah Jazz",            "WAS": "Washington Wizards",
-}
+TEAM_NAMES = _TEAM_NAMES
 
 ALL_TEAMS = list(TEAM_NAMES.keys())
 
