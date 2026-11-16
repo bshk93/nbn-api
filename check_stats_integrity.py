@@ -230,7 +230,7 @@ def pick_violations(data_dir: Path) -> list[str]:
         store = json.loads(store_path.read_text())
     except (OSError, json.JSONDecodeError) as exc:
         return [f"picks: can't read the picks ledger or conveyance store: {exc}"]
-    return parity.owner_mismatches(rows, store)
+    return parity.owner_mismatches(rows, store) + parity.stale_labels(rows, store)
 
 
 def alert(violations: list[str], data_dir: Path) -> bool:

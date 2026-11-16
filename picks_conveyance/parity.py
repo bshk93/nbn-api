@@ -22,7 +22,15 @@ callable from the weekly integrity job.
 """
 from __future__ import annotations
 
+import re
+
 from . import projection
+
+# A NOTES value that only labels a structure ("protected", "conditional:
+# BOS/HOU"), as opposed to prose. The label means nothing once the structure is
+# gone, and nothing else in the flat row says so: the SAS 2029 and 2030 2nds
+# kept "protected" after Trade 54 removed the ladder they were the fallback of.
+STRUCTURE_LABEL = re.compile(r"^\s*(protected|conditional:\s*[A-Z|/ ]+)\s*$", re.I)
 
 
 def _key(year, rnd, orig) -> str:
@@ -44,6 +52,12 @@ def claimants(flat: dict) -> set[str]:
         lad = flat.get(field) or {}
         teams.update(t for t in (lad.get("from"), lad.get("to")) if t)
     return teams
+
+
+def has_structure(flat: dict) -> bool:
+    """True when a served pick carries any contingent structure."""
+    return bool(flat.get("leaves") or flat.get("ladder") or flat.get("ladder_fallback_of")
+                or flat.get("group_id") or flat.get("protected") or flat.get("legacy"))
 
 
 def owner_mismatches(csv_rows: list[dict], store: dict) -> list[str]:
@@ -72,4 +86,26 @@ def owner_mismatches(csv_rows: list[dict], store: dict) -> list[str]:
                 f"{flat['owner']}; {', '.join(missing)} has no claim on it")
     for key in sorted(set(served) - seen):
         out.append(f"picks: {key} is in the conveyance store but not in draft-picks.csv")
+    return out
+
+
+def stale_labels(csv_rows: list[dict], store: dict) -> list[str]:
+    """One message per flat row whose NOTES labels a structure the site no
+    longer serves. A trade that removes a protection clears the label it
+    knows about (`_clear_structure_labels` in routers/transactions.py); this
+    catches the rest, such as a label left from the league sheet."""
+    served = {}
+    for pick in store.get("picks", []):
+        flat = projection.project_to_flat(pick, store)
+        served[_key(flat["year"], flat["round"], flat["orig"])] = flat
+    out = []
+    for row in csv_rows:
+        note = row.get("NOTES") or ""
+        if not STRUCTURE_LABEL.match(note):
+            continue
+        key = _key(row["YEAR"], row["ROUND"], row["ORIG"])
+        flat = served.get(key)
+        if flat is not None and not has_structure(flat):
+            out.append(f"picks: {key} is labelled {note.strip()!r} but has no "
+                       "protection, swap or ladder; clear the note")
     return out

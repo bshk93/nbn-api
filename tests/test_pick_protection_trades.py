@@ -159,6 +159,19 @@ def test_ladders():
     tx._trade_ladder_protection(KEY, "AAA", "BBB", None, "t2", "2099-01-02")
     check("removed: the ladder is gone, fallback and all", registry.load_registry()["ladders"] == [])
 
+    def flat(rnd, orig, notes):
+        return {"YEAR": "2099", "ROUND": str(rnd), "ORIG": orig, "NOTES": notes}
+    rows = [flat(1, "AAA", "protected"), flat(2, "AAA", "protected"),
+            flat(2, "CCC", "protected"), flat(1, "DDD", "Conveyed to NYK in 2026")]
+    tx._clear_structure_labels(rows, [(2099, 1, "AAA"), (2099, 2, "AAA"), (2099, 1, "DDD")])
+    check("removing a ladder clears the label on the pick and its fallback",
+          rows[0]["NOTES"] == "" and rows[1]["NOTES"] == "", rows)
+    check("a pick outside the ladder keeps its label", rows[2]["NOTES"] == "protected")
+    check("prose is never cleared", rows[3]["NOTES"] == "Conveyed to NYK in 2026")
+    rows = [flat(1, "AAA", "conditional: AAA/BBB")]
+    tx._clear_structure_labels(rows, [(2099, 1, "AAA")], protection_only=True)
+    check("a merged protection leaves a swap's label", rows[0]["NOTES"] == "conditional: AAA/BBB")
+
 
 def test_team_picks_claims():
     print("\n-- GET /api/picks/{team}?claims=all lists a band the team keeps --")

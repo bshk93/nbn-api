@@ -150,6 +150,22 @@ def _ladder_keeper(asset, from_team: str, to_team: str):
     return None
 
 
+def _clear_structure_labels(picks: list[dict], keys, protection_only: bool = False) -> None:
+    """Blank the flat NOTES of these picks when it only labels a structure
+    ("protected", "conditional: …") that a trade just removed. Prose is left
+    alone. Without this the label outlives the structure: the SAS 2029 and
+    2030 2nds still read "protected" after Trade 54 removed the ladder they
+    were the fallback of. `protection_only` keeps a "conditional: …" label,
+    for a pick that lost its protection but may still be in a swap."""
+    from picks_conveyance.parity import STRUCTURE_LABEL
+    keys = set(keys)
+    for p in picks:
+        if ((int(p["YEAR"]), int(p["ROUND"]), p["ORIG"].upper()) in keys
+                and STRUCTURE_LABEL.match(p.get("NOTES") or "")
+                and not (protection_only and p["NOTES"].strip().lower() != "protected")):
+            p["NOTES"] = ""
+
+
 def _normalize_pick_bands(pick_key: tuple) -> bool:
     """Merge a pick's neighbouring bands held by one team, after a trade
     moved or split one (`registry.normalize_protected`). True when one team
@@ -2379,13 +2395,18 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
                     if (int(p["YEAR"]) == asset.year and int(p["ROUND"]) == asset.round
                             and p["ORIG"].upper() == asset.orig):
                         pick_key = (asset.year, asset.round, asset.orig)
-                        if _ladder_keeper(asset, xfer.from_team, xfer.to_team) is not None:
+                        keeper = _ladder_keeper(asset, xfer.from_team, xfer.to_team)
+                        if keeper is not None:
                             # The pick stays where it is; only its ladder changes.
                             _trade_ladder_protection(pick_key, xfer.from_team, xfer.to_team,
                                                      asset.protection, txn_id, txn_date)
                             if asset.protection is None:
                                 p["PROTECTED"] = ""
                                 p["OWNER"] = xfer.to_team
+                                # The fallback picks go back to being plain picks.
+                                fb = (keeper[0].get("fallback") or {}).get("picks") or []
+                                _clear_structure_labels(picks, [pick_key] + [
+                                    (f["year"], f["round"], f["orig"].upper()) for f in fb])
                             break
                         if asset.protection is not None:
                             p["PROTECTED"] = str(asset.protection)
@@ -2405,6 +2426,7 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
                         if asset.swap_with is None and _normalize_pick_bands(pick_key):
                             # One team now holds every band: no protection left.
                             p["PROTECTED"] = ""
+                            _clear_structure_labels(picks, [pick_key], protection_only=True)
                         if asset.ladder_protect_top is not None:
                             fallback_tuples = [
                                 (fb["year"], fb["round"], fb["orig"].upper())
