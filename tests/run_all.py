@@ -22,7 +22,7 @@ MODULES = [
     "test_roster_move_notify", "test_waivers", "test_one_year_min_cap_hit_consistency",
     "test_inbox", "test_inbox_wiring", "test_discord_lineups", "test_schedule",
     "test_stream_sim", "test_coaching_settings", "test_ratings_updated",
-    "test_ratings_changes_cache", "test_ratings_changes_race", "test_roster_entry", "test_dna_position_check",
+    "test_ratings_changes_cache", "test_roster_entry", "test_dna_position_check",
     "test_irl", "test_streaming_days", "test_stream_planner", "test_youtube_vods",
     "test_donations", "test_news_rankings", "test_tips", "test_nbyen", "test_markets",
     "test_news_credited", "test_lore", "test_og", "test_names", "test_tonight",
@@ -40,7 +40,7 @@ MODULES = [
     "test_two_way_release", "test_trade_releases", "test_signing_releases",
     "test_apply_extension", "test_extension_trade_freeze", "test_nbnfl",
     "test_signing_books", "test_split_players", "test_trc_discord", "test_injuries",
-    "test_tetris", "test_quadrants", "test_headshots", "test_tweets", "test_js_mirrors", "test_tradeblock_names", "test_private_writes", "test_migrate_dead_type", "test_arenas",
+    "test_tetris", "test_quadrants", "test_headshots", "test_tweets", "test_js_mirrors", "test_tradeblock_names", "test_private_writes", "test_ratings_changes_race", "test_txn_package", "test_create_player_lock", "test_migrate_dead_type", "test_arenas",
     "test_box_health", "test_fa_hold_sweep", "test_game_day", "test_invest",
     "test_nbntv_schedule", "test_pick_swaps", "test_pickem", "test_picks_structure",
     "test_team_option_sweep"]

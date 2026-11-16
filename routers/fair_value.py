@@ -124,6 +124,7 @@ its own day by the next run (`stale_days`), not counted on the day it arrived.
 """
 from __future__ import annotations
 
+import logging
 import json
 import math
 import re
@@ -370,6 +371,8 @@ def load_pick_store() -> Optional[dict]:
         from picks_conveyance.store import load_store
         return load_store()
     except Exception:
+        # Fair value carries on without picks; the journal should say why.
+        logging.getLogger(__name__).warning("conveyance store unreadable; fair value runs without picks", exc_info=True)
         return None
 
 

@@ -34,11 +34,12 @@ from . import season_calendar
 from . import game_starters
 from .names import player_name
 from .league_time import league_today_str
+from .constants import SITE_DIR as _SITE_DIR
 
 router = APIRouter()
 
 CLAUDE_BIN = Path("/home/skim/.local/bin/claude")
-NBN_TODAY_DIR = Path("/home/skim/projects/nbn-today")
+NBN_TODAY_DIR = _SITE_DIR  # constants.SITE_DIR
 
 DISCORD_STANDINGS_WEBHOOK = os.environ.get("DISCORD_STANDINGS_WEBHOOK", "")
 NBN_STANDINGS_CSV = DERIVED_DIR / "standings" / "standings-history.csv"
@@ -797,7 +798,8 @@ def _notify_join_discord(sub: dict):
             timeout=5,
         )
     except Exception:
-        pass
+        # A join notice is best effort, but a silent failure hid a dead token once.
+        logger.warning("could not post the join notice to Discord", exc_info=True)
 _FAST_SUBMIT_MS     = 5_000  # flag if form submitted in under 5 seconds
 
 def _join_ip(request: Request) -> Optional[str]:

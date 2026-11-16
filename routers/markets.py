@@ -80,7 +80,7 @@ MIN_TRADE       = 1.0       # NB¥
 # ranked below about 12th at the 1% floor.
 SEED_SPREAD     = 3.0
 
-_lock = threading.Lock()
+_markets_lock = threading.Lock()
 
 
 # ── LMSR ─────────────────────────────────────────────────────────────────────
@@ -523,7 +523,7 @@ def create_market(body: MarketCreate, info: dict = Depends(require_role("bookie"
         "closes_at": closes_at, "locked_at": None, "settled_at": None,
         "winner": None, "resolution": None,
     }
-    with _lock:
+    with _markets_lock:
         ms = _load()
         ms.append(m)
         _save(ms)
@@ -590,7 +590,7 @@ def _what(label: str, contract: str) -> str:
 def buy(mid: str, body: BuyIn, info: dict = Depends(get_token_info)):
     who = info["name"]
     c = _contract(body.contract)
-    with _lock:
+    with _markets_lock:
         ms = _load()
         m = _find(ms, mid)
         if not _is_trading(m):
@@ -624,7 +624,7 @@ def buy(mid: str, body: BuyIn, info: dict = Depends(get_token_info)):
 def sell(mid: str, body: SellIn, info: dict = Depends(get_token_info)):
     who = info["name"]
     c = _contract(body.contract)
-    with _lock:
+    with _markets_lock:
         ms = _load()
         m = _find(ms, mid)
         if not _is_trading(m):
@@ -655,7 +655,7 @@ def sell(mid: str, body: SellIn, info: dict = Depends(get_token_info)):
 @router.post("/api/markets/{mid}/lock")
 def lock_market(mid: str, info: dict = Depends(require_role("bookie"))):
     """Stop trading ahead of settlement. Reopening is `unlock`."""
-    with _lock:
+    with _markets_lock:
         ms = _load()
         m = _find(ms, mid)
         if m["status"] != "open":
@@ -669,7 +669,7 @@ def lock_market(mid: str, info: dict = Depends(require_role("bookie"))):
 
 @router.post("/api/markets/{mid}/unlock")
 def unlock_market(mid: str, info: dict = Depends(require_role("bookie"))):
-    with _lock:
+    with _markets_lock:
         ms = _load()
         m = _find(ms, mid)
         if m["status"] != "locked":
@@ -685,7 +685,7 @@ def unlock_market(mid: str, info: dict = Depends(require_role("bookie"))):
 def settle(mid: str, body: SettleIn, info: dict = Depends(require_role("bookie"))):
     """Pay PAYOUT NB¥ for every Yes on the winner and every No on anything
     else. Everything else is worth 0."""
-    with _lock:
+    with _markets_lock:
         ms = _load()
         m = _find(ms, mid)
         if m["status"] not in ("open", "locked"):
@@ -721,7 +721,7 @@ def void_market(mid: str, info: dict = Depends(require_role("bookie"))):
     """Call the market off. Everyone gets back what they put in, net of what
     they already took out by selling; nobody is charged for a sale that came
     out ahead. Fees are refunded with the rest."""
-    with _lock:
+    with _markets_lock:
         ms = _load()
         m = _find(ms, mid)
         if m["status"] not in ("open", "locked"):

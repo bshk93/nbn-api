@@ -105,7 +105,7 @@ TEAM_ALIASES = {"BRK": "BKN", "CHO": "CHA", "GS": "GSW", "NO": "NOP", "NOR": "NO
                 "PHO": "PHX", "SA": "SAS", "UTAH": "UTA", "WSH": "WAS"}
 CHANNELS_URL = "https://api.twitch.tv/helix/channels"
 
-_lock = threading.Lock()
+_stream_notify_lock = threading.Lock()
 _seen_ids: dict[str, float] = {}
 
 
@@ -131,7 +131,7 @@ def verify(secret: str, msg_id: str, ts: str, body: bytes, signature: str) -> bo
 
 def _first_sighting(msg_id: str) -> bool:
     now = time.time()
-    with _lock:
+    with _stream_notify_lock:
         for k in [k for k, t in _seen_ids.items() if now - t > SEEN_IDS_KEEP]:
             del _seen_ids[k]
         if msg_id in _seen_ids:
@@ -281,7 +281,7 @@ def note_offline(now: Optional[datetime] = None) -> None:
     """Stamp `stream.offline`, which is what tells a restart from a new stream."""
     try:
         now = now or datetime.now(timezone.utc)
-        with _lock:
+        with _stream_notify_lock:
             state = _load_json(STATE_FILE, {})
             state["offline_at"] = now.isoformat(timespec="seconds")
             _save_json(STATE_FILE, state)
@@ -340,7 +340,7 @@ def announce(event: dict, now: Optional[datetime] = None) -> bool:
             return False
         if not transport.configured(DISCORD_LEAGUETALK_CHANNEL):
             return False
-        with _lock:
+        with _stream_notify_lock:
             state = _load_json(STATE_FILE, {})
             title = fetch_title(event.get("broadcaster_user_id") or os.environ.get("TWITCH_BROADCASTER_ID", ""))
             try:

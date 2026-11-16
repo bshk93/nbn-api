@@ -191,7 +191,7 @@ def _load_build_status() -> dict:
         try:
             return json.loads(BUILD_STATUS_FILE.read_text())
         except Exception:
-            pass
+            logger.warning("unreadable %s; reporting no build status", BUILD_STATUS_FILE, exc_info=True)
     return {"status": "idle"}
 
 
@@ -353,6 +353,8 @@ def _game_in_manual_queue(date: str, home_team: str, away_team: str) -> bool:
         try:
             queue = json.loads(MANUAL_QUEUE_FILE.read_text())
         except Exception:
+            # A corrupt queue would hide every queued game; say so.
+            logger.warning("unreadable %s; treating as empty", MANUAL_QUEUE_FILE, exc_info=True)
             return False
     teams = _game_teams(home_team, away_team)
     return any(
@@ -368,6 +370,7 @@ def _remove_from_manual_queue(date: str, home_team: str, away_team: str):
         try:
             queue = json.loads(MANUAL_QUEUE_FILE.read_text())
         except Exception:
+            logger.warning("unreadable %s; nothing removed", MANUAL_QUEUE_FILE, exc_info=True)
             return
         teams = _game_teams(home_team, away_team)
         queue = [q for q in queue if not (

@@ -67,10 +67,11 @@ from .transactions import (
 )
 from .league_time import league_today_str
 from season_clock import season_shift
+from .constants import SITE_DIR as _SITE_DIR
 
 router = APIRouter()
 
-NBN_TODAY_DIR = Path("/home/skim/projects/nbn-today")
+NBN_TODAY_DIR = _SITE_DIR  # constants.SITE_DIR
 STANDINGS_CSV = DERIVED_DIR / "standings" / "standings-history.csv"
 
 WAIVER_WINDOW = timedelta(hours=48)

@@ -40,324 +40,58 @@ from .roster_picks import (
 )
 from season_clock import season_shift, season_starting
 
+# Moved to routers/txn/ (pure rules and models, nothing a test patches).
+# Re-imported so routers.transactions.<name> keeps working everywhere.
+from .txn.rules import (  # noqa: F401
+    _option_fa_tag, _eaps_unset, _dead_cap_from_schedule, _retained_history,
+    _season_after, _ROSTER_EXEMPT_TYPES, _is_standard_roster_slot, _check_signing_method_declared,
+    _two_way_slot_check, TWO_WAY_MAX_YEARS, TWO_WAY_MAX_EXPERIENCE, _is_two_way_contract_entry,
+    _check_two_way_terms, _roster_size_check, _rookie_min_salary, _SECOND_ROUND_SCALE_TIERS,
+    _SECOND_ROUND_SCALE_TAGS, _second_round_scale_contract, _check_second_round_scale_terms, _min_salary_scale_tier,
+    _contract_first_season, _contract_years_exp, _max_salary_pct, _max_salary,
+    _BIRD_HOLD_PCT, _rfa_eligibility, _ROOKIE_QO_RAISE, _ROOKIE_QO_BUMP_FROM_CLASS,
+    _ROOKIE_QO_BUMP, _finishes_rookie_scale, _last_contract_ns, _qo_years_exp,
+    _qo_amount, _qo_record, _qo_status, _qo_target_season,
+    _close_end, _offer_sheet_outcome_team, _offer_deadline, _offer_hold_amount,
+    _YEAR_RE_TXN, _season_start_of, _compute_fa_hold_amount, _minimum_contract_hold,
+    _one_year_min_cap_hit, _empty_roster_charge, _real_empty_roster_charge, _FA_HOLD_TYPES,
+    _hard_cap_check, _universal_hard_cap_check, _salary_match_limit, _check_contract_raises,
+    _tpe_bankable, _check_bae_eligibility, _mle_zone_from_salary, _resolve_mle_bucket,
+    _check_bae_absorption, _exception_absorption_split, _cap_room_absorbed, _check_trailing_hold,
+    _min_scale_for_season, _min_salary_floor, _minimum_year_ceiling, _prorate,
+    _check_declared_experience, _min_salary_for, _check_max_salary, _release_contract_years,
+    _released_counts, _is_exempt_minimum_contract, _trade_flows, _add_months,
+    _option_window_check, _extension_contract_years, _extension_year1_ceiling, _extension_is_rookie_scale,
+    _final_guaranteed_year, _extension_eligibility_check, _check_rookie_scale_terms, _qo_contract,
+    _current_two_way_deal, _self_convert_twoway_contract, SELF_CONVERT_YEAR2_TERMS, _self_convert_twoway_holds,
+    _self_convert_twoway_guarantee_dates,
+)
+from .txn.models import (  # noqa: F401
+    CheckResult, ContractIn, SignDetails, ExtensionDetails,
+    PickIn, PickDetails, TransactionIn, OptionDetails,
+    GuaranteeDetails, ReleaseDetails, RenounceDetails, RescindRenounceDetails,
+    QualifyingOfferDetails, AcceptQualifyingOfferDetails, OfferSheetDetails, OfferSheetDecisionDetails,
+    VoidPlayerDetails, StashDetails, SetHardCapDetails, ConvertTwoWayDetails,
+    SignPickDetails, TradeAsset, TradeTransfer, TradeIn,
+    TradeValidateInput, TransactionValidationResult, SigningBooks, TransactionPatch,
+    SelfQualifyingOfferIn, SelfRenounceIn, SelfOptionIn, SelfReleaseIn,
+    SelfConvertTwoWayIn, SelfSignPickIn, SelfStashIn,
+)
+from .txn.picks import (  # noqa: F401
+    _register_trade_protection, _register_trade_swap, _register_pick_swap, _register_trade_ladder,
+    _trade_ladder_protection, _ladder_keeper, _clear_structure_labels, _normalize_pick_bands, _lookup_pick,
+    _lookup_conveyance_node, _check_retrade_allowed, _handle_pick_retrade, _load_conveyance_store_for_shadow_check,
+    _flat_owns, _check_pick_ownership, _trade_leg_ownership_problems, _swap_assets,
+    _pick_swap_problems, _pick_protection_problems, _describe_pick_claims, _check_pick_protections,
+    _check_pick_swaps, _STEPIEN_MAX_SCENARIOS, _check_stepien_rule, _check_pick_advance_limit,
+    _trade_teams,
+)
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-def _register_trade_protection(pick_key: tuple, from_team: str, to_team: str,
-                               threshold: int, txn_id: str | None = None,
-                               txn_date: str | None = None) -> None:
-    """Build a real conveyance protected-node the moment a trade sets a
-    protection — see picks_conveyance/from_trade.py for the direction
-    convention. Fails open: this must never block or corrupt the real trade
-    write happening around it (save_picks(), just below, is the actual source
-    of truth and completes regardless). `txn_id`/`txn_date` let the resulting
-    band(s) link back to the real transaction record (teams/team.js's
-    tooltip otherwise shows "originating trade(s) not yet linked")."""
-    try:
-        from picks_conveyance import from_trade
-        from_trade.register_protection(pick_key, from_team, to_team, threshold,
-                                       txn_id=txn_id, txn_date=txn_date)
-    except Exception:
-        logger.exception("picks_conveyance: failed to register trade protection "
-                         f"for {pick_key} (flat PROTECTED field is unaffected)")
-
-
-def _register_trade_swap(pick_key: tuple, to_team: str, swap_with: str,
-                         picks_snapshot: list[dict], txn_id: str | None = None,
-                         txn_date: str | None = None) -> None:
-    """Build a real conveyance swap-group the moment a trade sets a swap
-    partner. Fails open, same guarantee as above."""
-    try:
-        from picks_conveyance import from_trade
-        from_trade.register_swap(pick_key, to_team, swap_with, picks_snapshot,
-                                 txn_id=txn_id, txn_date=txn_date)
-    except Exception:
-        logger.exception("picks_conveyance: failed to register trade swap "
-                         f"for {pick_key} (flat SWAP_OWNER field is unaffected)")
-
-
-def _register_pick_swap(asset, from_team: str, to_team: str,
-                        txn_id: str | None = None, txn_date: str | None = None) -> None:
-    """Write a trade's `swap` asset as a two-team swap group. Not fail-open
-    like the registrations above: the group is the whole of a swap asset, so
-    losing it would record a trade that did nothing. `_pick_swap_problems`
-    has already passed by the time this runs, so a failure here is a bug."""
-    from picks_conveyance import from_trade
-    try:
-        from_trade.register_pick_swap(asset.year, asset.round, from_team, asset.orig,
-                                      to_team, asset.swap_orig,
-                                      txn_id=txn_id, txn_date=txn_date)
-    except Exception as e:
-        logger.exception(f"picks_conveyance: failed to register pick swap {asset!r}")
-        raise HTTPException(status_code=500,
-                            detail=f"Couldn't record the {asset.year} R{asset.round} pick swap: {e}")
-
-
-def _register_trade_ladder(pick_key: tuple, from_team: str, to_team: str,
-                          protect_top: int, fallback_picks: list[tuple],
-                          txn_id: str | None = None, txn_date: str | None = None) -> None:
-    """Build a real protection-ladder compensation trigger the moment a trade
-    sets ladder_protect_top — see picks_conveyance/from_trade.py for the
-    layered-not-replacing convention. Fails open, same guarantee as the
-    protection/swap registrations above: the flat trade write completes
-    regardless."""
-    try:
-        from picks_conveyance import from_trade
-        from_trade.register_ladder(pick_key, from_team, to_team, protect_top,
-                                   fallback_picks, txn_id=txn_id, txn_date=txn_date)
-    except Exception:
-        logger.exception("picks_conveyance: failed to register trade ladder "
-                         f"for {pick_key} (fallback compensation not modeled)")
-
-
-def _trade_ladder_protection(pick_key: tuple, from_team: str, to_team: str,
-                             top: int | None, txn_id: str | None, txn_date: str | None) -> None:
-    """Write a ladder keeper's protection trade: removed (the ladder goes,
-    via `registry.handle_retrade`) or lowered (`registry.lower_ladder`).
-    Not fail-open: the ladder is the whole asset, so a trade that didn't
-    change it would record something that never happened."""
-    from picks_conveyance import registry
-    txn_entry = {"id": txn_id, "date": txn_date} if txn_id else None
-    try:
-        if top is None:
-            registry.handle_retrade(pick_key, from_team, to_team,
-                                    {"type": "settled", "team": to_team},
-                                    txn_id=txn_id, txn_date=txn_date)
-        else:
-            registry.lower_ladder(pick_key, top, txn_entry=txn_entry)
-    except Exception as e:
-        logger.exception(f"picks_conveyance: ladder protection trade failed for {pick_key}")
-        raise HTTPException(status_code=500,
-                            detail=f"Couldn't record the protection change on {pick_key}: {e}")
-
-
-def _ladder_keeper(asset, from_team: str, to_team: str):
-    """(ladder, step) when this pick asset is a ladder's keeper sending its
-    protection to the team owed the pick, else None. That removes the
-    protection, or lowers it when the asset carries a smaller `protection`.
-    The keeper holds no claim the ownership model sees (a ladder is not a
-    leaf), so this is how a trade names it."""
-    if getattr(asset, "type", None) != "pick" or not asset.orig:
-        return None
-    try:
-        from picks_conveyance import registry
-        found = registry.ladder_for((asset.year, asset.round, asset.orig.upper()))
-    except Exception:
-        logger.exception("ladder lookup failed")
-        return None
-    if found and found[0].get("from") == from_team.upper() and found[0].get("to") == to_team.upper():
-        return found
-    return None
-
-
-def _clear_structure_labels(picks: list[dict], keys, protection_only: bool = False) -> None:
-    """Blank the flat NOTES of these picks when it only labels a structure
-    ("protected", "conditional: …") that a trade just removed. Prose is left
-    alone. Without this the label outlives the structure: the SAS 2029 and
-    2030 2nds still read "protected" after Trade 54 removed the ladder they
-    were the fallback of. `protection_only` keeps a "conditional: …" label,
-    for a pick that lost its protection but may still be in a swap."""
-    from picks_conveyance.parity import STRUCTURE_LABEL
-    keys = set(keys)
-    for p in picks:
-        if ((int(p["YEAR"]), int(p["ROUND"]), p["ORIG"].upper()) in keys
-                and STRUCTURE_LABEL.match(p.get("NOTES") or "")
-                and not (protection_only and p["NOTES"].strip().lower() != "protected")):
-            p["NOTES"] = ""
-
-
-def _normalize_pick_bands(pick_key: tuple) -> bool:
-    """Merge a pick's neighbouring bands held by one team, after a trade
-    moved or split one (`registry.normalize_protected`). True when one team
-    now holds the whole pick, so the protection is gone: that is a
-    protection lifted by trade. Fails open like the registrations above."""
-    try:
-        from picks_conveyance import registry
-        return registry.normalize_protected(pick_key) is not None
-    except Exception:
-        logger.exception(f"picks_conveyance: failed to normalize bands for {pick_key}")
-        return False
-
-
-def _lookup_pick(pick_key: tuple, conveyance_store):
-    if conveyance_store is None:
-        return None
-    return next((p for p in conveyance_store.get("picks", [])
-                if (p["year"], p["round"], p["orig"]) == pick_key), None)
-
-
-def _lookup_conveyance_node(pick_key: tuple, conveyance_store):
-    pick = _lookup_pick(pick_key, conveyance_store)
-    return pick["conveyance"] if pick else None
-
-
-def _check_retrade_allowed(pick_key: tuple, asset, from_team: str,
-                           conveyance_store) -> None:
-    """Validation-pass gate for a pick with existing conveyance structure —
-    mirrors the existing flat FROZEN check's shape and placement (before any
-    writes happen). Two things can reject the trade here:
-
-    - `legacy`: frozen from re-trade by design (docs/picks-conveyance.md §5)
-      until someone manually converts it to real structure — it's tagged
-      legacy specifically because nothing here can confidently represent
-      what happens to it, so trading it further would just compound that.
-      Always checked, regardless of what this trade supplies.
-
-    - Ambiguous leaf: only relevant when this trade ISN'T creating new
-      structure (no protection/swap_with supplied) — from_team would be
-      conveying whatever claim it holds. If it holds more than one distinct
-      claim, `asset.leaf_id` must say which (CUTOVER STEP 9,
-      docs/picks-migration-worksheet.md — real leaf-node-id addressing, not
-      just the ambiguity-detection stand-in from Step 7). No `leaf_id` and
-      more than one claim → rejected with the available leaf_ids listed, so
-      the trade can be resubmitted precisely instead of guessed at. A
-      supplied `leaf_id` the team doesn't actually hold is rejected too.
-
-    Fails open only on genuine infra issues (store unavailable) — a real
-    legacy pick or a real ambiguity must actually block, the same way a real
-    FROZEN pick does."""
-    try:
-        pick = _lookup_pick(pick_key, conveyance_store)
-    except Exception:
-        logger.exception(f"picks_conveyance: retrade check failed for {pick_key}, "
-                         "allowing the trade to proceed (infra issue, not a real pick)")
-        return
-    if pick is None:
-        return
-    node = pick["conveyance"]
-    if node.get("type") == "legacy":
-        raise HTTPException(
-            status_code=422,
-            detail=f"Pick {asset.year} R{asset.round} {asset.orig} is a legacy "
-                   f"pick, frozen from re-trade until manually converted to "
-                   f"real structure: {node.get('reason')}",
-        )
-    if asset.protection is None and asset.swap_with is None:
-        try:
-            from picks_conveyance import ownership
-            leaves = ownership.team_leaves(pick, from_team, conveyance_store)
-        except Exception:
-            logger.exception(f"picks_conveyance: ambiguity check failed for "
-                             f"{pick_key}, allowing the trade to proceed")
-            return
-        if len(leaves) > 1:
-            leaf_id = getattr(asset, "leaf_id", None)
-            if leaf_id is None:
-                options = "; ".join(f"{l['leaf_id']} ({l['description']})" for l in leaves)
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"Pick {asset.year} R{asset.round} {asset.orig}: "
-                           f"{from_team} holds {len(leaves)} distinct claims — "
-                           f"specify which with asset.leaf_id. Options: {options}",
-                )
-            if leaf_id not in {l["leaf_id"] for l in leaves}:
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"Pick {asset.year} R{asset.round} {asset.orig}: "
-                           f"{from_team} does not hold leaf_id {leaf_id!r}",
-                )
-
-
-def _handle_pick_retrade(pick_key: tuple, from_team: str, to_team: str,
-                         conveyance_store, leaf_id: str | None = None,
-                         txn_id: str | None = None, txn_date: str | None = None) -> None:
-    """A pick with existing contingent structure (swap/protected/binary) is
-    being re-traded with no new protection/swap_with supplied — update the
-    registry so that structure reflects the new party instead of going stale
-    the way the flat model always did. Fails open: this is a best-effort sync
-    of the derived model, not a gate — `_check_retrade_allowed` above is what
-    actually blocks a trade when blocking is warranted; by the time this
-    runs, the trade has already been decided to proceed. `leaf_id`, when the
-    trade supplied one to disambiguate, is passed straight through so the
-    mutation targets that exact leaf. `txn_id`/`txn_date` get appended to the
-    mutated leaf's `txn_ids` (registry.handle_retrade) — otherwise a
-    re-traded leaf's tooltip would keep pointing at only its original
-    creating trade forever, silently wrong the moment it moves again."""
-    try:
-        node = _lookup_conveyance_node(pick_key, conveyance_store)
-        if node is None:
-            return
-        from picks_conveyance import registry
-        registry.handle_retrade(pick_key, from_team, to_team, node, leaf_id=leaf_id,
-                                txn_id=txn_id, txn_date=txn_date)
-    except Exception:
-        logger.exception(f"picks_conveyance: retrade sync failed for {pick_key} "
-                         "(flat OWNER write is unaffected; model may be stale "
-                         "until next manual resync)")
-
-
-def _load_conveyance_store_for_shadow_check():
-    """Best-effort load of the conveyance store for the ownership check below.
-    Never raises — a missing/broken store just falls back to the flat check
-    for this request; trading never goes fully dark over a file-read issue."""
-    try:
-        from picks_conveyance import store as conv_store
-        return conv_store.load_store()
-    except Exception:
-        return None
-
-
-def _flat_owns(pick_row: dict, from_team: str) -> bool:
-    owner_raw = pick_row["OWNER"].upper()
-    # "?" means unresolved -> falls back to orig team (mirrors GET /api/picks/{team});
-    # otherwise OWNER may be a single team or a pipe-separated compound of candidates.
-    if owner_raw == "?":
-        return pick_row["ORIG"].upper() == from_team
-    return from_team in owner_raw.split("|")
-
-
-def _check_pick_ownership(pick_key: tuple, from_team: str, pick_row: dict,
-                          conveyance_store, leaf_id: str | None = None) -> bool:
-    """The real ownership gate a trade must pass. CUTOVER STEP 5 (2026-07-19,
-    see docs/picks-migration-worksheet.md): the tree-based check is now
-    authoritative, replacing the flat OWNER check it superseded — this is the
-    whole point of the conveyance model, letting a team re-trade a contingent
-    share the flat OWNER field could never represent. Falls back to the flat
-    check only if the conveyance store can't be loaded or doesn't have this
-    pick — an infrastructure safety net, not a design hedge. Any disagreement
-    between the two is logged (not just failures) so real trades keep
-    providing evidence about the new check as they happen.
-
-    CUTOVER STEP 9: when `leaf_id` is supplied (a trade disambiguating which
-    of several claims it's conveying — see `_check_retrade_allowed`), checks
-    that specific leaf (`ownership.team_holds_leaf`) instead of the coarse
-    "any claim" check."""
-    flat_result = _flat_owns(pick_row, from_team)
-    # Explicit revert lever, separate from the infra-failure fallback below:
-    # set PICKS_OWNERSHIP_ENFORCE=flat in nbn-api/.env + restart to go back to
-    # the old flat-only check instantly, no code change, if this needs to be
-    # turned off in a hurry.
-    if conveyance_store is None or os.environ.get("PICKS_OWNERSHIP_ENFORCE") == "flat":
-        return flat_result
-    try:
-        from picks_conveyance import ownership
-        pick = _lookup_pick(pick_key, conveyance_store)
-        if pick is None:
-            return flat_result
-        if leaf_id is not None:
-            return ownership.team_holds_leaf(pick, from_team, leaf_id, conveyance_store)
-        tree_result = ownership.team_holds_claim(pick, from_team, conveyance_store)
-        if tree_result != flat_result:
-            logger.warning(
-                "picks_conveyance ownership check diverged from flat: pick=%s "
-                "from_team=%s flat_check=%s tree_check=%s (tree_check wins) "
-                "node_type=%s", pick_key, from_team, flat_result, tree_result,
-                pick["conveyance"].get("type"))
-        return tree_result
-    except Exception:
-        logger.exception(f"picks_conveyance: ownership check failed for "
-                         f"{pick_key}, falling back to the flat check")
-        return flat_result
-
-
 # ── CheckResult must come first — forward-referenced by validation helpers ────
-
-class CheckResult(BaseModel):
-    check: str
-    passed: bool
-    level: str = "error"   # "error" blocks; "warning" allows force-through
-    message: str
 
 
 # ── Transaction load/save ─────────────────────────────────────────────────────
@@ -393,359 +127,6 @@ def _append_transaction(txn: dict):
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
-
-class ContractIn(BaseModel):
-    type: str = "player"  # "player" or "two-way"
-    salaries: dict[str, str] = {}
-    # § 3.12: years of NBA experience **as of this contract's first salary
-    # year**, used to place each year on the Minimum Salary Scale. Declared on
-    # the contract because the scale is contract math and the bio can't supply
-    # it — `draft_year` is the NBN draft for identity purposes and is null for
-    # every player who entered the league before it (and forever, for UDFAs),
-    # which silently priced multi-year minimums flat at the rookie tier.
-    # Optional: absent, years of service (`years_of_service`) apply instead.
-    years_experience: Optional[int] = None
-    cap_holds: dict[str, str] = {}
-    guaranteed: dict[str, str] = {}
-    guarantee_dates: dict[str, str] = {}
-    guarantee_schedule: dict[str, list[dict]] = {}
-
-
-class SignDetails(BaseModel):
-    player: str
-    team: str
-    contract: ContractIn
-    signing_method: Optional[str] = None
-    bird_rights_type: Optional[str] = None
-    # § 3.10: only consulted when the contract's cap_holds imply a trailing
-    # UFA/RFA hold whose season needs a Full Bird (QVFA) EAPS comparison and
-    # that season has no real EAPS on file yet — see _compute_fa_hold_amount.
-    # "above" or "below" (the previous salary, relative to EAPS). Ignored
-    # otherwise.
-    eaps_assumption: Optional[str] = None
-    # Players this team releases (§ 5.1) only if the signing goes through,
-    # to make roster room for it. Counted in the roster check; released right
-    # after the signing is written, never before. See `_signing_release_checks`.
-    releases: list[str] = []
-
-
-class ExtensionDetails(BaseModel):
-    """§ 6.2 / § 6.3. `contract` is the EXTENDED TERM only — never the live
-    years still on the books; those are carried forward untouched and the
-    extension's own years are laid on top starting the season after the
-    existing deal's final guaranteed year (§ 6.2 rule 10). See
-    nbn-today/docs/poext-extension-pipeline.md for the full design."""
-    player: str
-    team: str
-    contract: ContractIn
-    kind: str = "veteran"  # "rookie_scale" | "veteran" | "extend_and_trade"
-    bird_rights_type: Optional[str] = None
-    eaps_assumption: Optional[str] = None
-    # § 4.5 six-month trade-freeze clock; defaults to the transaction date.
-    announced_date: Optional[str] = None
-    # The day a PO-EXT proposal was first submitted. § 6.3's windows are
-    # submission deadlines, so a proposal the committee decides after its
-    # window closed is still judged as of this day — the window, and the
-    # league year that says whether the player is an expiring veteran.
-    submitted_date: Optional[str] = None
-    # Season string. Required by the UI (not the schema) only when the player
-    # has no ledger acquisition record — see _extension_frame / D15
-    # (nbn-today/docs/poext-extension-pipeline.md § 2.3a). Never trusted as a
-    # definite basis: always warn-severity unless it contradicts other partial
-    # ledger history the player does have, which promotes to error. Not
-    # persisted anywhere — re-asked on every proposal, deliberately.
-    attested_contract_start: Optional[str] = None
-
-
-class PickIn(BaseModel):
-    year: int
-    round: int
-    orig: str
-    pick_number: Optional[int] = None
-
-
-class PickDetails(BaseModel):
-    player: str
-    team: str
-    pick: PickIn
-    # A draft pick conveys only the player's draft rights — no contract. The
-    # contract is attached later via a separate `sign` step once the cap is
-    # finalized. Kept optional for backward compatibility with old payloads.
-    contract: Optional[ContractIn] = None
-
-
-class TransactionIn(BaseModel):
-    type: str
-    date: str
-    description: str = ""
-    details: dict
-    force: bool = False
-    # Backfill a trade that predates this transaction log (or whose effects
-    # current roster/cap data already reflects) without re-applying it —
-    # skips _apply_trade and validation, just logs the record for display.
-    historical: bool = False
-    # Whether `roster_log_relay` should mirror this transaction's Discord post
-    # into #roster-log. Default False: most transactions are entered into
-    # #roster-log by hand as part of working the transaction, so mirroring by
-    # default would double it up — this opts in only the ones that aren't.
-    relay_to_roster_log: bool = False
-
-
-class OptionDetails(BaseModel):
-    player: str
-    decision: str       # "accept" or "decline"
-    option_type: str    # "PLAYER_OPT" or "TEAM_OPT"
-    year: str           # e.g. "26-27"
-    # Decline only. Left out, § 3.1 decides it from his experience
-    # (`_option_fa_tag`); given, it must agree with § 3.1 where that's known.
-    cap_hold_type: Optional[str] = None
-    # § 3.10: auto-computed from bird_tier + the last real salary when omitted
-    # — see _compute_fa_hold_amount. Pass explicitly only to override.
-    cap_hold_amount: Optional[str] = None
-    bird_tier: Optional[str] = None  # QVFA, EQVFA, Non-QVFA — only used on decline
-    eaps_assumption: Optional[str] = None  # "above" or "below" — see SignDetails
-    # Only used on the historical=true backfill path (see _create_historical_option)
-    # — the live path (_apply_option) always derives team itself from the current
-    # roster map and ignores this field.
-    team: Optional[str] = None
-
-
-class GuaranteeDetails(BaseModel):
-    player: str
-    year: str           # e.g. "26-27"
-
-
-class ReleaseDetails(BaseModel):
-    player: str
-    # Stretch provision (rulebook §5.1 method 2): spread the total remaining
-    # dead-cap obligation evenly across this many seasons starting at the
-    # release season, instead of the default original-payment-schedule method.
-    # The rulebook formula is (2 * remaining contract years) + 1, but this is
-    # taken as an explicit input rather than auto-derived, since "remaining
-    # years" is ambiguous across NON_GTD/option contracts — the submitter
-    # states the stretch length the team actually elected.
-    stretch_years: Optional[int] = None
-
-
-class RenounceDetails(BaseModel):
-    player: str
-
-
-class RescindRenounceDetails(BaseModel):
-    txn_id: str   # the renounce being undone; its stored snapshot is the restore source
-
-
-class QualifyingOfferDetails(BaseModel):
-    """§ 3.1: the team extends or withdraws a qualifying offer. `season` is the
-    hold season and is derived when omitted. `amount` overrides the formula —
-    office only, for a player the formula can't price."""
-    player: str
-    action: Literal["extend", "withdraw"] = "extend"
-    season: Optional[str] = None
-    amount: Optional[int] = None
-
-
-class AcceptQualifyingOfferDetails(BaseModel):
-    """§ 3.1: the player signs his qualifying offer — a one-year deal at the QO
-    amount with his own team. Decided by the PDC ballot, not the team."""
-    player: str
-    # "above" / "below" — see SignDetails. Needed only when the deal's trailing
-    # UFA hold is Full Bird and next season has no EAPS on file yet (§ 3.10).
-    eaps_assumption: Optional[str] = None
-
-
-class OfferSheetDetails(BaseModel):
-    """An offer sheet being *extended* (§ 3.15). Deliberately carries no
-    `outcome`: extending the offer and the incumbent's decision to match are two
-    separate acts by two different teams, and collapsing them into one record
-    attributed the incumbent's decision to whoever typed the transaction.
-    The outcome now lives on `offer_sheet_decision`.
-
-    Legacy ledger entries from the combined era still carry `outcome` in their
-    stored details. Those are read as raw dicts, never through this model, and
-    `_open_offer_sheets` treats the presence of `outcome` as "already resolved".
-    """
-    player: str
-    offering_team: str
-    contract: ContractIn
-    # What actually funds the contract for whichever team ends up signing the
-    # player (§ 3.1-3.6 methods; same vocabulary as SignDetails.signing_method).
-    # Threaded straight into the internal _apply_sign call so NTMLE/TMLE/BAE
-    # usage on an offer sheet gets the same mle_used/hard-cap bookkeeping and
-    # § 1.5/§ 1.6 funding-availability validation a plain `sign` gets — before
-    # this field existed, an offer sheet had no way to record its funding
-    # mechanism at all, so e.g. a Second-Apron team using the NTMLE to sign
-    # one went untracked and unvalidated.
-    signing_method: Optional[str] = None
-    bird_rights_type: Optional[str] = None
-    eaps_assumption: Optional[str] = None  # "above" or "below" — see SignDetails
-    # The offering team's releases if the player joins it (see SignDetails).
-    # Stored on the offer and carried out by an `offer_sheet_decision` of
-    # `not_matched`; a match releases nobody.
-    releases: list[str] = []
-
-
-class OfferSheetDecisionDetails(BaseModel):
-    offer_id: str    # the `offer_sheet` transaction being resolved
-    outcome: str     # "matched" (incumbent keeps) or "not_matched" (player leaves)
-
-
-class VoidPlayerDetails(BaseModel):
-    player: str
-    reason: str = ""
-    # § 7.4: a pick from the most recent draft who signed and then went
-    # overseas before opening night. The contract is voided, but the team keeps
-    # him as stashed draft rights instead of losing him. `reason` names the
-    # club and contract, as a § 7.4 stash's note does.
-    keep_rights: bool = False
-
-
-class StashDetails(BaseModel):
-    # Keeps an unsigned pick's rights past the § 7.1 signing deadline. "7.1":
-    # not in the current 2K and sitting out organized basketball; "7.4": under
-    # an active overseas contract. `note` is the evidence a reviewer reads.
-    player: str
-    basis: Literal["7.1", "7.4"]
-    note: str = ""
-
-
-class SetHardCapDetails(BaseModel):
-    team: str
-    level: str          # "first_apron" | "second_apron" | "default"
-    reason: str = ""
-
-
-class ConvertTwoWayDetails(BaseModel):
-    player: str
-    contract: ContractIn
-    signing_method: Optional[str] = None
-    bird_rights_type: Optional[str] = None
-    eaps_assumption: Optional[str] = None  # "above" or "below" — see SignDetails
-
-
-class SignPickDetails(BaseModel):
-    # Signs a player whose draft rights a team holds to their first contract.
-    player: str
-    contract: ContractIn
-    bird_rights_type: Optional[str] = None
-    eaps_assumption: Optional[str] = None  # "above" or "below" — see SignDetails
-
-
-class TradeAsset(BaseModel):
-    type: str                        # "player", "pick" or "swap"
-    slug: Optional[str] = None
-    year: Optional[int] = None
-    round: Optional[int] = None
-    orig: Optional[str] = None
-    protection: Optional[int] = None
-    swap_with: Optional[str] = None
-    # CUTOVER STEP 9 (docs/picks-migration-worksheet.md): disambiguates which
-    # of several contingent claims from_team is conveying, when it holds more
-    # than one on this pick. Get valid values from GET /api/picks/{team} (a
-    # contingent pick's response includes them) or the 422 error this asset
-    # would otherwise get, which lists them. Only needed in that ambiguous
-    # case — omit for every ordinary trade.
-    leaf_id: Optional[str] = None
-    # Protection ladder: a compensation trigger layered on top of this pick's
-    # own conveyance (which `protection`/`swap_with`/plain re-trade already
-    # decide) — not a replacement for it. If the pick doesn't convey to
-    # to_team because it lands within ladder_protect_top, to_team is instead
-    # owed ladder_fallback (a list of {year, round, orig} pick refs) as
-    # compensation. Only set these together; only needed for a "protected,
-    # else substitute pick(s)" clause explicitly stated in the trade.
-    ladder_protect_top: Optional[int] = None
-    ladder_fallback: Optional[list[dict]] = None
-    # A `swap` asset moves no pick. from_team gives to_team the right to swap
-    # picks: from_team's `orig` pick against to_team's `swap_orig` pick, same
-    # year and round. to_team ends with the better of the two, from_team the
-    # worse. Each team must hold its pick outright (_pick_swap_problems).
-    swap_orig: Optional[str] = None
-    # Server-set, never trusted from a client (`_describe_pick_claims`
-    # overwrites it): what a pick asset conveys when it is one band of a
-    # protected pick, e.g. "protection removed". Read by every display of
-    # the trade, so none of them has to work it out from a leaf_id.
-    claim: Optional[str] = None
-
-
-class TradeTransfer(BaseModel):
-    from_team: str
-    to_team: str
-    assets: list[TradeAsset]
-
-
-class TradeIn(BaseModel):
-    transfers: list[TradeTransfer]
-    legality: str = "tbd"
-    # Team abbr -> exception type ("ntmle" | "tmle" | "room_exception" | "bae")
-    # used to absorb that team's incoming salary in lieu of matching outgoing
-    # salary. Omit or null for teams matching normally. TPE absorption is a
-    # separate field (tpe_usage, below) since it needs to name a specific
-    # banked exception, not just a type.
-    exceptions: dict[str, Optional[str]] = {}
-    # Team abbr -> the specific incoming player slugs that team's exception is
-    # absorbing (§ 4.2a: "a team uses exactly one of the four for a given
-    # incoming player"). The named players are funded by the exception; every
-    # other incoming player still has to satisfy ordinary salary matching
-    # against outgoing salary. This is what makes a hybrid trade expressible —
-    # e.g. two players matched against an outgoing contract while a third is
-    # absorbed into the MLE.
-    #
-    # Omit (or leave a team out) to keep the original all-or-nothing behavior,
-    # where the exception is tested against that team's entire incoming total.
-    # Every slug must actually be incoming to that team in this trade.
-    exception_players: dict[str, list[str]] = {}
-    # Team abbr -> Trade Exception id (see GET /api/trade-exceptions/{team})
-    # used to absorb that team's incoming salary (§ 4.1a). Mutually exclusive
-    # with `exceptions[team]` for the same team, and with any outgoing salary
-    # from that team in this trade — both are rejected by the validator.
-    tpe_usage: dict[str, str] = {}
-    # Sign-and-trade: whoever submits the trade must know and declare this —
-    # nothing in the data lets us infer it (a team signing then trading a
-    # player days later can be a coincidence, not a sign-and-trade). When set,
-    # every team acquiring a player in this trade is hard-capped at First Apron
-    # (rulebook §1.4 row C). sign_and_trade_txn_id optionally links to the
-    # paired `sign` transaction's id for traceability from the log.
-    is_sign_and_trade: bool = False
-    sign_and_trade_txn_id: Optional[str] = None
-    # Player slugs whose acquisition is the sign-and-trade portion of this
-    # trade. When set, only the team(s) receiving these specific players are
-    # hard-capped — needed when a multi-team trade bundles an S&T together
-    # with unrelated player-for-player legs, so the cap doesn't spill onto
-    # teams that aren't party to the S&T. Omit to fall back to "every team
-    # acquiring any player is capped", which is correct for a plain two-team S&T.
-    sign_and_trade_players: list[str] = []
-    # The proposed new contract(s) being signed as part of the S&T, keyed by
-    # player slug. Reuses SignDetails verbatim (player/team/contract/
-    # signing_method/bird_rights_type) so the § 3.14 contract-requirement
-    # checks (length, raise cap, MLE exclusion, Bird-rights eligibility) can
-    # run here even though the real contract is applied via a separate `sign`
-    # transaction in practice (see .claude/commands/enter-transaction.md) —
-    # this only informs validation, it never itself writes a contract.
-    sign_and_trade_signings: list[SignDetails] = []
-    # Team abbr -> players that team releases right after the trade (§ 5.1,
-    # original payment schedule only). A slug must be on that team once the
-    # trade is done — a player it keeps, or one it receives here. Each is
-    # applied by `apply_trade` as its own ordinary release, after the trade.
-    releases: dict[str, list[str]] = {}
-
-
-class TradeValidateInput(BaseModel):
-    transfers: list[TradeTransfer]
-    is_sign_and_trade: bool = False
-    sign_and_trade_players: list[str] = []
-    sign_and_trade_signings: list[SignDetails] = []
-    exceptions: dict[str, Optional[str]] = {}
-    exception_players: dict[str, list[str]] = {}
-    tpe_usage: dict[str, str] = {}
-    releases: dict[str, list[str]] = {}
-
-
-class TransactionValidationResult(BaseModel):
-    """Shape returned by every `/api/validate/*` endpoint: the verdict, the
-    full check list (passes included), and a type-specific financial snapshot."""
-    legal: bool
-    checks: list[CheckResult]
-    fact_sheet: dict
 
 
 # Pre-simulator name, kept so existing callers/tests importing it still work.
@@ -816,28 +197,6 @@ def _apply_option(details: OptionDetails, info: dict) -> Optional[str]:
     return team
 
 
-def _option_fa_tag(bio: dict, hold_season: str) -> tuple[Optional[str], str]:
-    """The hold a declined option leaves. A declined rookie-scale option (the
-    3rd or 4th season of a first-round deal) is always UFA (§ 6.1, as in the
-    NBA CBA): only a pick who plays out all four years gets a QO. Otherwise
-    § 3.1: RFA (RFA-*eligible*: the QO still decides) for a player under 4
-    years of experience entering `hold_season`, or finishing a first-round
-    rookie-scale deal; UFA for anyone else. Returns (tag, why); tag is None
-    when his experience isn't on file, which § 3.1 leaves to be judged by
-    hand. Read before the decline is applied, while the year is still tagged
-    TEAM_OPT."""
-    if ((bio.get("cap_holds") or {}).get(hold_season) == "TEAM_OPT"
-            and season_calendar.is_rookie_scale_option(bio, hold_season)):
-        return "UFA", "it is a rookie-scale option, and declining one leaves him unrestricted (§ 6.1)"
-    if _finishes_rookie_scale(bio, hold_season):
-        return "RFA", "he is finishing his first-round rookie-scale deal"
-    exp = _qo_years_exp(bio, hold_season)
-    if exp is None:
-        return None, "his NBA experience isn't on file"
-    yrs = f"he will have {exp} year{'s' if exp != 1 else ''} of experience entering {hold_season}"
-    return ("RFA", yrs) if exp < 4 else ("UFA", yrs)
-
-
 def _declined_option_hold(bio: dict, team: str, details: "OptionDetails",
                           cap_levels: dict) -> Optional[tuple[int, Optional[str]]]:
     """§ 3.10 "Declined option": the hold a declined option leaves, priced off
@@ -857,10 +216,6 @@ def _declined_option_hold(bio: dict, team: str, details: "OptionDetails",
     return _compute_fa_hold_amount(
         prev_salary, tier, details.year, cap_levels, details.eaps_assumption, min_amt, max_amt,
     )
-
-
-def _eaps_unset(hold_season: str, cap_levels: dict) -> bool:
-    return not (cap_levels.get(hold_season, {}) or {}).get("eaps")
 
 
 def _eaps_estimate(bios: dict) -> Optional[int]:
@@ -944,43 +299,6 @@ def _apply_guarantee(details: GuaranteeDetails, info: dict) -> Optional[str]:
     save_player_bios(bios)
     log_write(info, f"TXN guarantee — {details.player} {details.year} ({team})")
     return team
-
-
-def _dead_cap_from_schedule(schedule: list, salary: str, txn_date: str) -> Optional[str]:
-    """Compute dead cap for a NON_GTD year given a multi-step guarantee schedule."""
-    cumulative = 0.0
-    fully_gtd = False
-    for step in schedule:
-        step_date = step.get("date") or ""
-        if step_date and txn_date < step_date:
-            continue
-        step_amount = step.get("amount")
-        if not step_amount:
-            fully_gtd = True
-            break
-        cumulative += _parse_dollar(step_amount)
-
-    if fully_gtd:
-        return salary
-    if cumulative > 0:
-        return f"${round(cumulative):,}"
-    return None
-
-
-def _retained_history(bio: dict, cur_season: str):
-    """Entries to keep when a new contract is applied to a player: every season
-    already played (<= cur_season) plus any future season still guaranteed from a
-    prior deal. Earnings history is never silently dropped — only unplayed,
-    non-guaranteed future years are released. Returns
-    (salaries, guaranteed, guarantee_dates, guarantee_schedule)."""
-    prior_gtd = bio.get("guaranteed", {})
-    keep = lambda s: s <= cur_season or s in prior_gtd
-    return (
-        {k: v for k, v in bio.get("salaries", {}).items() if keep(k)},
-        {k: v for k, v in bio.get("guaranteed", {}).items() if keep(k)},
-        {k: v for k, v in bio.get("guarantee_dates", {}).items() if keep(k)},
-        {k: v for k, v in bio.get("guarantee_schedule", {}).items() if keep(k)},
-    )
 
 
 def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[str, dict, str, dict]:
@@ -1107,11 +425,6 @@ def _apply_release(details: ReleaseDetails, txn_date: str, info: dict) -> tuple[
     _scrub_trading_block({team: {details.player}}, bios)
     log_write(info, f"TXN release — {details.player} from {team}")
     return team, dead_cap, terminated_salary, snapshot
-
-
-def _season_after(season: str) -> str:
-    """'25-26' -> '26-27'."""
-    return season_shift(season, 1)
 
 
 def _renounce_eligibility(player: str, bios: dict, cur_season: str, txn_date: str) -> dict:
@@ -2029,270 +1342,6 @@ def _apply_pick(details: PickDetails, txn_date: str, info: dict):
     log_write(info, f"TXN pick — {details.player} → {team} ({pick.year} R{pick.round} {orig} — new row)")
 
 
-def _trade_leg_ownership_problems(details: TradeIn, bios: dict, team_map: dict,
-                                  pick_index: dict, conveyance_store) -> list[str]:
-    """Every reason a leg in `details.transfers` can't actually be conveyed by
-    its stated `from_team` right now: an unknown/moved player, a pick no
-    longer owned by that team, already drafted, frozen, or blocked by
-    conveyance structure (`_check_retrade_allowed`). Pure — raises nothing, so
-    both `_apply_trade` (fail on the first entry) and TRC's live staleness
-    check (report all of them) can use it. This is deliberately NOT part of
-    `_validate_trade`/`/api/validate/trade` — that endpoint has never checked
-    current asset ownership, only cap/roster legality, and a trade whose
-    named player has since left that roster still comes back "legal" there.
-    Order matches what `_apply_trade` used to check inline before this call
-    replaced it."""
-    problems: list[str] = []
-    for xfer in details.transfers:
-        for asset in xfer.assets:
-            if asset.type == "player":
-                if asset.slug not in bios:
-                    problems.append(f"Unknown player: {asset.slug!r}")
-                    continue
-                actual_team = team_map.get(asset.slug)
-                if actual_team != xfer.from_team:
-                    problems.append(
-                        f"Player {asset.slug!r} is on {actual_team or 'no team'}, not {xfer.from_team}")
-                continue
-            if asset.type == "swap":
-                continue
-            key = (asset.year, asset.round, asset.orig)
-            pick_row = pick_index.get(key)
-            if not pick_row:
-                problems.append(f"Pick {asset.year} R{asset.round} {asset.orig} not found")
-                continue
-            keeper = _ladder_keeper(asset, xfer.from_team, xfer.to_team)
-            owned_by_from_team = keeper is not None or _check_pick_ownership(
-                key, xfer.from_team, pick_row, conveyance_store, asset.leaf_id)
-            if not owned_by_from_team:
-                problems.append(
-                    f"Pick {asset.year} R{asset.round} {asset.orig} is owned by "
-                    f"{pick_row['OWNER']}, not {xfer.from_team}")
-                continue
-            # Once a pick has been used to draft a player it's historical
-            # record, not a live asset — nothing upstream (ownership, frozen,
-            # legacy/leaf checks) inspects PLAYER, so without this a trade
-            # could "convey" an already-drafted pick: it'd pass every other
-            # check (a drafted pick still resolves to a `settled` node some
-            # team technically "owns") and write a transaction for an asset
-            # that no longer exists to trade.
-            drafted_player = (pick_row.get("PLAYER") or "").strip()
-            if drafted_player:
-                problems.append(
-                    f"Pick {asset.year} R{asset.round} {asset.orig} was already used "
-                    f"to draft {drafted_player} and can no longer be traded")
-                continue
-            if pick_row.get("FROZEN", "").strip().upper() == "TRUE":
-                reason = pick_row.get("FROZEN_REASON", "").strip()
-                detail = f"Pick {asset.year} R{asset.round} {asset.orig} is frozen and cannot be traded"
-                if reason:
-                    detail += f": {reason}"
-                problems.append(detail)
-                continue
-            if keeper is not None:
-                continue
-            try:
-                _check_retrade_allowed(key, asset, xfer.from_team, conveyance_store)
-            except HTTPException as e:
-                problems.append(str(e.detail))
-    problems.extend(_pick_swap_problems(details, pick_index, conveyance_store))
-    problems.extend(_pick_protection_problems(details))
-    return problems
-
-
-def _swap_assets(details: TradeIn):
-    """(from_team, to_team, asset) for every `swap` asset in the trade."""
-    for xfer in details.transfers:
-        for asset in xfer.assets:
-            if asset.type == "swap":
-                yield xfer.from_team.upper(), xfer.to_team.upper(), asset
-
-
-def _pick_swap_problems(details: TradeIn, pick_index: dict,
-                        conveyance_store) -> list[str]:
-    """Every reason a `swap` asset can't be written. Each team must hold its
-    own pick outright: one owner, not drafted, not frozen, and no structure on
-    it already (another swap, a protection, a ladder). A swap layered on a
-    contingent pick has no single meaning, so it is refused rather than
-    guessed at. Pure, like `_trade_leg_ownership_problems`, which calls it."""
-    problems: list[str] = []
-    ladder_keys: set[tuple] = set()
-    try:
-        from picks_conveyance import registry
-        for ladder in registry.load_registry().get("ladders", []):
-            ladder_keys |= registry._ladder_keys(ladder)
-    except Exception:
-        logger.exception("pick swap check: could not read ladders")
-    for from_t, to_t, asset in _swap_assets(details):
-        if not (asset.year and asset.round and asset.orig and asset.swap_orig):
-            problems.append("A pick swap needs a year, a round and both picks")
-            continue
-        a_orig, b_orig = asset.orig.upper(), asset.swap_orig.upper()
-        label = f"the {asset.year} R{asset.round} swap ({a_orig} / {b_orig})"
-        if a_orig == b_orig:
-            problems.append(f"{label} names the same pick twice")
-            continue
-        for team, orig in ((from_t, a_orig), (to_t, b_orig)):
-            key = (asset.year, asset.round, orig)
-            row = pick_index.get(key)
-            pick_label = f"{asset.year} R{asset.round} {orig}"
-            if not row:
-                problems.append(f"Pick {pick_label} not found")
-                continue
-            if (row.get("PLAYER") or "").strip():
-                problems.append(f"Pick {pick_label} was already used and can't be swapped")
-                continue
-            if row.get("FROZEN", "").strip().upper() == "TRUE":
-                problems.append(f"Pick {pick_label} is frozen and can't be swapped")
-                continue
-            node = None
-            if conveyance_store is not None:
-                try:
-                    node = _lookup_conveyance_node(key, conveyance_store)
-                except Exception:
-                    node = None
-            if node is not None:
-                outright = node.get("type") == "settled" and node.get("team") == team
-            else:
-                outright = row.get("OWNER", "").upper() == team or (
-                    row.get("OWNER", "") == "?" and orig == team)
-            if not outright:
-                problems.append(
-                    f"{team} doesn't hold pick {pick_label} outright, so it can't be part "
-                    f"of {label}. A swap can only be made between two picks that each have "
-                    "one owner and no protection or swap on them already")
-                continue
-            if key in ladder_keys:
-                problems.append(f"Pick {pick_label} is tied to a protection ladder and can't be swapped")
-    return problems
-
-
-def _pick_protection_problems(details: TradeIn) -> list[str]:
-    """Every reason a new protection on an already-protected pick can't be
-    written. That is how a protection is lowered by trade: the team holding
-    the protected band sends it with a smaller threshold, keeping the top of
-    the band and conveying the rest (`registry.subdivide_protected_band`).
-    The split needs that team to hold exactly one band, and the threshold to
-    fall inside it. Without this check the registration fails open after
-    the trade is applied, and the pick's owner moves with no band behind it.
-    A pick with no protection yet takes any threshold, as before."""
-    problems: list[str] = []
-    try:
-        from picks_conveyance import registry
-    except Exception:
-        return problems
-    for xfer in details.transfers:
-        from_t = xfer.from_team.upper()
-        for asset in xfer.assets:
-            if asset.type != "pick" or asset.protection is None or not asset.orig:
-                continue
-            key = (asset.year, asset.round, asset.orig.upper())
-            label = f"{asset.year} R{asset.round} {asset.orig.upper()}"
-            keeper = _ladder_keeper(asset, from_t, xfer.to_team)
-            if keeper is not None:
-                top = int(keeper[1].get("protect_top") or 0)
-                if not (1 <= asset.protection < top):
-                    problems.append(
-                        f"Pick {label} is top-{top} protected, so a lowered protection must be "
-                        f"from 1 to {top - 1}, not {asset.protection}")
-                continue
-            try:
-                spec = registry.get_protected_spec(key)
-            except Exception:
-                logger.exception(f"pick protection check: could not read {key}")
-                continue
-            if spec is None:
-                continue
-            mine = [b for b in spec["bands"] if b.get("to") == from_t]
-            if len(mine) != 1:
-                problems.append(
-                    f"{from_t} holds {len(mine)} bands of pick {label}, so it can't set a new "
-                    "protection on it. Send the band as it is instead")
-                continue
-            band = mine[0]
-            if not (band["min"] <= asset.protection < band["max"]):
-                problems.append(
-                    f"Pick {label}: {from_t}'s protection covers picks {band['min']}-{band['max']}, "
-                    f"so a new protection must be from {band['min']} to {band['max'] - 1}, "
-                    f"not {asset.protection}")
-    return problems
-
-
-def _describe_pick_claims(details: TradeIn) -> None:
-    """Set each pick asset's `claim` from the registry as it stands before
-    the trade: what the sending team gives up when it holds only one band of
-    a protected pick. The team the rest of the pick belongs to receiving the
-    band is a protection removed, or lowered when a smaller threshold is
-    sent. Anyone else receiving it gets those draft slots. Clears `claim` on
-    every other pick asset."""
-    try:
-        from picks_conveyance import registry
-    except Exception:
-        registry = None
-    for xfer in details.transfers:
-        from_t, to_t = xfer.from_team.upper(), xfer.to_team.upper()
-        for asset in xfer.assets:
-            if asset.type != "pick":
-                continue
-            asset.claim = None
-            if registry is None or not asset.orig:
-                continue
-            keeper = _ladder_keeper(asset, from_t, to_t)
-            if keeper is not None:
-                asset.claim = ("protection removed" if asset.protection is None
-                               else f"protection lowered to top {asset.protection}")
-                continue
-            try:
-                spec = registry.get_protected_spec((asset.year, asset.round, asset.orig.upper()))
-            except Exception:
-                continue
-            if spec is None:
-                continue
-            mine = [b for b in spec["bands"] if b.get("to") == from_t]
-            if len(mine) != 1:
-                continue
-            band = mine[0]
-            rest = {b.get("to") for b in spec["bands"] if b is not band}
-            top = asset.protection
-            if rest == {to_t}:
-                if top is None:
-                    asset.claim = "protection removed"
-                elif band["min"] in (1, 31) and asset.round == 1:
-                    asset.claim = f"protection lowered to top {top}"
-                else:
-                    asset.claim = f"protection lowered to picks {band['min']}-{top}"
-            else:
-                lo = band["min"] if top is None else top + 1
-                asset.claim = f"picks {lo}-{band['max']}"
-
-
-def _check_pick_protections(details: TradeIn) -> list[CheckResult]:
-    """`_pick_protection_problems` as checks, for /api/validate/trade."""
-    return [CheckResult(check="pick_protection", passed=False, level="error", message=m)
-            for m in _pick_protection_problems(details)]
-
-
-def _check_pick_swaps(details: TradeIn) -> list[CheckResult]:
-    """`_pick_swap_problems` as checks, so /api/validate/trade (and the trade
-    builder behind it) reports a swap that can't be written before anyone
-    submits it. Ownership is otherwise left out of that endpoint, but a swap
-    means nothing unless each side holds its pick."""
-    swaps = list(_swap_assets(details))
-    if not swaps:
-        return []
-    picks = load_picks()
-    pick_index = {(int(p["YEAR"]), int(p["ROUND"]), p["ORIG"].upper()): p for p in picks}
-    problems = _pick_swap_problems(details, pick_index, _load_conveyance_store_for_shadow_check())
-    if problems:
-        return [CheckResult(check="pick_swap", passed=False, level="error", message=m)
-                for m in problems]
-    return [CheckResult(
-        check="pick_swap", passed=True,
-        message=(f"{to_t} can swap its {a.year} R{a.round} pick ({a.swap_orig.upper()}) for "
-                 f"{from_t}'s ({a.orig.upper()}): {to_t} gets the better pick, {from_t} the worse."))
-        for from_t, to_t, a in swaps]
-
-
 def _apply_trade(details: TradeIn, txn_date: str, info: dict,
                  txn_id: str | None = None) -> list[str]:
     if len(details.transfers) < 1:
@@ -2687,15 +1736,6 @@ def _apply_trade(details: TradeIn, txn_date: str, info: dict,
 
 # ── Validation helpers ────────────────────────────────────────────────────────
 
-# Roster-count-exempt bio types: two-way (own cap slot rules), draft-rights (no
-# contract yet — just held rights, not a roster spot), dead (a cap hit with no
-# active player). Only "player" (and unset "") occupy a standard roster spot.
-_ROSTER_EXEMPT_TYPES = {"two-way", "draft-rights", "dead"}
-
-
-def _is_standard_roster_slot(bio_type: str) -> bool:
-    return bio_type not in _ROSTER_EXEMPT_TYPES
-
 
 def _count_standard_roster(team: str, excluding: Optional[str] = None,
                            bios: Optional[dict] = None) -> int:
@@ -2761,187 +1801,6 @@ def _count_two_way_roster(team: str, excluding: Optional[str] = None) -> int:
     )
 
 
-def _check_signing_method_declared(
-    team: str, method: Optional[str], contract_type: str
-) -> "CheckResult | None":
-    """§ 3.1–§ 3.6 must be funded by *something*, and a blank method was silently
-    exempt from proving it.
-
-    `_check_signing_method_funding` returns early for any method outside the
-    cap-space/MLE family — and `None` is outside it — so declaring nothing
-    skipped funding validation altogether rather than failing it. Nine live FA
-    offers reached the committee that way (2026-08-10), five of them for real
-    money from teams over the Cap.
-
-    Two-ways are exempt for real, not by omission: they carry $0 and sit outside
-    Team Salary (§ 2.2), so there is no exception for them to be funded from.
-    """
-    if contract_type == "two-way" or method:
-        return None
-    return CheckResult(
-        check=f"signing_method_declared_{team.lower()}", passed=False, level="error",
-        message=(f"{team} must declare how this signing is funded — cap space, Bird "
-                 f"Rights, an exception, or the minimum (§ 3.1–§ 3.6). Without a method "
-                 f"nothing checks that the money is actually available."),
-    )
-
-
-def _two_way_slot_check(team: str, after: int, verb: str) -> "CheckResult | None":
-    """§ 2.2: at most TWO_WAY_MAX two-way players, in G-League slots outside the
-    standard limit.
-
-    A hard error with no warning band, unlike `_roster_size_check`'s 16–20 — the
-    offseason ceiling in § 2.1 is written into the rules, and § 2.2 grants no
-    equivalent, so a fourth two-way is not a "trim it later" situation.
-
-    Nothing enforced this before: `_validate_sign` skips the standard roster
-    check for a two-way contract (correctly — they sit outside the 15), and every
-    other check no-ops on the $0 salary a two-way carries, so a two-way signing
-    was reaching `_apply_sign` having passed *zero* checks. The verdict was not
-    "legal", it was unexamined.
-    """
-    if after > TWO_WAY_MAX:
-        return CheckResult(
-            check="two_way_slots", passed=False, level="error",
-            message=(f"{team} would carry {after} two-way players, over the "
-                     f"{TWO_WAY_MAX}-slot limit (§ 2.2) — convert or release a two-way "
-                     f"before {verb}."),
-        )
-    return None
-
-
-TWO_WAY_MAX_YEARS = 2         # § 2.2: maximum length, and maximum consecutive years with one team
-TWO_WAY_MAX_EXPERIENCE = 3    # § 2.2: "3 or fewer years of NBA experience"
-
-
-def _is_two_way_contract_entry(entry: dict) -> bool:
-    """Whether a `contracts` history entry was a two-way deal. The entries don't
-    record a type, but § 2.2 fixes a two-way at $0, and no standard deal is $0 in
-    every year — so every real (non-hold) year being $0 identifies one."""
-    holds = entry.get("cap_holds") or {}
-    years = [y for y in (entry.get("salaries") or {}) if holds.get(y) not in _FA_HOLD_TYPES]
-    return bool(years) and all(_parse_dollar(entry["salaries"][y]) == 0 for y in years)
-
-
-def _check_two_way_terms(contract: "ContractIn", player: str, team: Optional[str],
-                         bio: dict, season: str) -> list[CheckResult]:
-    """§ 2.2's contract terms for a two-way, on both the `sign` and `sign_pick`
-    paths. `two_way_slots` was the only § 2.2 check until 2026-09-25, and
-    passing checks return nothing, so a two-way validated to an empty list: a
-    5-year two-way for a veteran at $3M would have gone straight through.
-
-    Salary and length are exact and are errors. Experience is **not** enforced:
-    the only proxy on file is the draft-year one § 3.12 prices minimums with,
-    and years since the draft is not NBA service. 10 of the 71 two-ways on the
-    books when this was written read over 3 on it (Duop Reath reads 8) — real
-    two-way deals the league mirrors, for players who spent those years overseas
-    or in the G League. So it reports, and a human decides (§ 2.2 is 👁 for it).
-    """
-    checks = []
-    holds = contract.cap_holds or {}
-    years = sorted((y for y in (contract.salaries or {}) if holds.get(y) not in _FA_HOLD_TYPES),
-                   key=_season_start)
-
-    paid = [f"{y}: {contract.salaries[y]}" for y in years if _parse_dollar(contract.salaries[y]) != 0]
-    if paid:
-        checks.append(CheckResult(
-            check="two_way_salary", passed=False, level="error",
-            message=(f"A two-way contract carries $0 salary (§ 2.2) — this one pays "
-                     f"{', '.join(paid)}. Sign a standard contract instead."),
-        ))
-
-    if len(years) > TWO_WAY_MAX_YEARS:
-        checks.append(CheckResult(
-            check="two_way_length", passed=False, level="error",
-            message=(f"A two-way contract runs at most {TWO_WAY_MAX_YEARS} years (§ 2.2) — "
-                     f"this one runs {len(years)} ({years[0]} to {years[-1]})."),
-        ))
-
-    name = bio.get("name") or player
-    declared = getattr(contract, "years_experience", None)
-    if declared is not None:
-        exp, basis = int(declared), "declared on the contract"
-    else:
-        exp = years_of_service.years_of_service(bio, season, player)
-        basis = "NBN years of service" if exp is not None else None
-    if exp is None:
-        msg = (f"{name}'s experience isn't on file — confirm by hand that it's "
-               f"{TWO_WAY_MAX_EXPERIENCE} years or fewer (§ 2.2).")
-    elif exp > TWO_WAY_MAX_EXPERIENCE:
-        msg = (f"{name} reads {exp} years of experience ({basis}), over § 2.2's "
-               f"{TWO_WAY_MAX_EXPERIENCE}. Confirm by hand: a season he was rostered "
-               f"without playing may be missing, or one may be counted that shouldn't be.")
-    else:
-        msg = f"{name} reads {exp} years of experience ({basis}), within § 2.2's {TWO_WAY_MAX_EXPERIENCE}."
-    checks.append(CheckResult(check="two_way_experience", passed=True, level="info", message=msg))
-
-    # § 2.2: "the same player in a Two-Way spot for up to 2 consecutive years".
-    # Built from `contracts`, which only exists for signings since the write
-    # path began recording them, so a hit is real but a miss proves nothing —
-    # and a standard deal in between could be missing too. Forceable.
-    if team and years:
-        prior = set()
-        for entry in bio.get("contracts") or []:
-            if (entry.get("team") or "").upper() == team.upper() and _is_two_way_contract_entry(entry):
-                eh = entry.get("cap_holds") or {}
-                prior |= {_season_start(y) for y in entry["salaries"] if eh.get(y) not in _FA_HOLD_TYPES}
-        run, start = 0, _season_start(years[0]) - 1
-        while start - run in prior:
-            run += 1
-        # run == 0 is a deal that's merely too long, which two_way_length already says.
-        if run and run + len(years) > TWO_WAY_MAX_YEARS:
-            checks.append(CheckResult(
-                check="two_way_consecutive", passed=False, level="warning",
-                message=(f"{name} has already spent {run} straight year(s) in a {team} two-way "
-                         f"spot; this deal would make {run + len(years)}, over § 2.2's "
-                         f"{TWO_WAY_MAX_YEARS} consecutive. Convert them to a standard "
-                         f"contract, or force if the history is wrong."),
-            ))
-    return checks
-
-
-def _roster_size_check(team: str, after: int, verb: str,
-                       txn_date: Optional[str] = None) -> "CheckResult | None":
-    """§ 2.1 roster-size ceiling, in the same shape the trade validator uses
-    (`_validate_trade`'s "Roster size" block).
-
-    During the regular season (opening night through the last regular-season
-    game, `season_calendar.is_regular_season`) anything over 15 is a hard
-    block. The rest of the year ≤15 passes, 16-20 is a warning (legal, but
-    flagged to trim before the season), and only >20 is a hard block.
-    Signing-side validators used to hard-block at 15 unconditionally, which
-    meant a team at exactly 15 couldn't even make an offseason FA offer; then,
-    until 2026-09-30, they never blocked at 15 at all, because nothing knew
-    when the season started. `txn_date` is what tells them.
-    """
-    if txn_date and season_calendar.is_regular_season(txn_date) and after > ROSTER_MAX:
-        return CheckResult(
-            check="roster_size", passed=False, level="error",
-            message=(f"{team} would carry {after} standard players, over the {ROSTER_MAX}-man "
-                     f"regular-season limit (§ 2.1) — release a player before {verb}."),
-        )
-    if after > ROSTER_OFFSEASON_MAX:
-        return CheckResult(
-            check="roster_size", passed=False, level="error",
-            message=(f"{team} would carry {after} standard players, over the "
-                     f"{ROSTER_OFFSEASON_MAX}-player offseason maximum — release a player before {verb}."),
-        )
-    if after > ROSTER_MAX:
-        return CheckResult(
-            check="roster_size", passed=False, level="warning",
-            message=(f"{team} would carry {after} standard players — over the {ROSTER_MAX}-man "
-                     f"regular-season limit (offseason ceiling {ROSTER_OFFSEASON_MAX}); trim to "
-                     f"{ROSTER_MAX} before the season."),
-        )
-    return None
-
-
-def _rookie_min_salary(season: str, cap_levels: dict) -> int:
-    """The 0-years-experience tier of that season's minimum salary scale
-    (§ 1.7) — the figure an Empty Roster Charge (§ 2.1a) uses per open slot."""
-    return (cap_levels.get(season, {}).get("min_salary_scale") or {}).get("0", 0)
-
-
 def _rookie_scale_contract(draft_year: Optional[int], draft_round: Optional[int],
                            draft_pick: Optional[int]) -> Optional[dict]:
     """§ 7.1's prescribed first-round rookie deal for one draft slot, or None
@@ -2984,245 +1843,6 @@ def _rookie_scale_contract(draft_year: Optional[int], draft_round: Optional[int]
     }
 
 
-# § 7.1 second-round minimum-scale structures: the tier (years-of-experience
-# key into that season's min_salary_scale) for each year of the deal.
-#
-# Each deal starts on a fixed tier and **climbs one tier per contract year**,
-# priced on each season's own scale -- the same rule § 3.12 states for every
-# multi-year minimum. The 3-year (2+1) deal starts at tier 1, the 4-year (3+1)
-# at tier 2. This is the league office's own published table (the "2026
-# Rookie Contracts" tab of the league sheet):
-#   2+1: $2,185,116 / $2,571,895 / $2,791,275            (tiers 1, 2, 3)
-#   3+1: $2,449,421 / $2,664,401 / $2,888,193 / $3,272,766 (tiers 2, 3, 4, 5)
-# and the commissioner's rulings in #fa-news (2026-07-17, 2026-08-28): "3+1 ...
-# starts at the 2yr vet min", "2+1 ... starts at the 1yr vet min".
-#
-# Until 2026-09-24 this table was flat ([1, 1, 1] and [2, 1, 1, 1]), on a
-# reading of Otega Oweh's deal that took $2,571,895 for a tier-1 figure. It is
-# the tier-2 figure for 27-28 ($2,294,372 is tier 1), so Oweh's deal climbs.
-_SECOND_ROUND_SCALE_TIERS = {
-    3: [1, 2, 3],
-    4: [2, 3, 4, 5],
-}
-# 1-based year index -> cap_holds tag. Year 1 (and, on the 4-year deal, Year 2)
-# carry no tag at all — they're plain guaranteed money.
-_SECOND_ROUND_SCALE_TAGS = {
-    3: {2: "NON_GTD", 3: "TEAM_OPT"},
-    4: {3: "NON_GTD", 4: "TEAM_OPT"},
-}
-
-
-def _second_round_scale_contract(contract: "ContractIn", cap_levels: dict) -> Optional[dict]:
-    """§ 7.1's prescribed second-round minimum-scale deal for the seasons the
-    contract actually declares, or None when it isn't a recognizable 3- or
-    4-year second-round shape.
-
-    Anchored on the contract's own earliest declared season rather than the
-    player's draft year, so a pick signed after their draft season (a
-    holdover unsigned draft-rights case) is still scored correctly. Mirrors
-    `_rookie_scale_contract`'s one-reader shape: the validator scores a
-    submitted contract against this, so the schedule is stated once.
-
-    Deliberately **not** run through `_check_contract_raises` (§ 3.9's 5%
-    ladder) — same reasoning as the first-round scale: the steps between
-    tiers here are routinely far bigger than 5%, and the 4-year option's
-    Year 1 -> Year 2 step isn't even a raise.
-
-    A trailing UFA/RFA season — the § 3.10 hold the deal rolls into once it
-    ends — is not a contract year (same convention `contract.js`'s
-    `isFaHold` enforces everywhere else). Counting it inflated a 3-year deal
-    to 4 salary entries, which picked the wrong tier sequence entirely and
-    scored a correctly-priced 3-year deal against the 4-year table.
-    """
-    fa_hold_seasons = {
-        yr for yr, ht in (contract.cap_holds or {}).items() if ht in _FA_HOLD_TYPES
-    }
-    salary_seasons = sorted(
-        (yr for yr in (contract.salaries or {}) if yr not in fa_hold_seasons),
-        key=lambda y: (_season_start(y), y),
-    )
-    num_years = len(salary_seasons)
-    tiers = _SECOND_ROUND_SCALE_TIERS.get(num_years)
-    if not tiers:
-        return None
-    first = salary_seasons[0]
-    seasons = [first] + [_season_shift(first, i) for i in range(1, num_years)]
-    salaries = {}
-    for season, tier in zip(seasons, tiers):
-        scale = _min_scale_for_season(season, cap_levels)
-        amt = scale.get(str(tier))
-        if not amt:
-            return None  # no scale configured that far out — can't score it
-        salaries[season] = f"${amt:,}"
-    cap_holds = {
-        seasons[idx - 1]: tag
-        for idx, tag in _SECOND_ROUND_SCALE_TAGS.get(num_years, {}).items()
-    }
-    return {"salaries": salaries, "cap_holds": cap_holds, "seasons": seasons}
-
-
-def _check_second_round_scale_terms(contract: "ContractIn", bio: dict,
-                                    cap_levels: dict) -> Optional[CheckResult]:
-    """§ 7.1: score a second-round pick's deal against whichever fixed
-    structure (3-year or 4-year) matches how many salary years it declares.
-
-    Returns None (nothing to check) rather than a passing result when the
-    year count doesn't match either structure — that isn't necessarily an
-    off-scale deal, it might be a two-way or a shape this function can't
-    recognize, and callers fall back to the generic minimum/ladder checks in
-    that case.
-    """
-    scale = _second_round_scale_contract(contract, cap_levels)
-    if not scale:
-        return None
-    num_years = len(scale["salaries"])
-    fa_hold_seasons = {
-        yr for yr, ht in (contract.cap_holds or {}).items() if ht in _FA_HOLD_TYPES
-    }
-    label = f"pick {bio.get('draft_pick')} of {bio.get('draft_year')} (2nd round)"
-    problems = []
-    for season, expected in scale["salaries"].items():
-        got = contract.salaries.get(season)
-        if got is None:
-            problems.append(f"{season}: missing (scale: {expected})")
-        elif _parse_dollar(got) != _parse_dollar(expected):
-            problems.append(f"{season}: {got} (scale: {expected})")
-    extra = sorted(set(contract.salaries) - set(scale["salaries"]) - fa_hold_seasons)
-    for season in extra:
-        problems.append(f"{season}: not a year of the § 7.1 second-round scale")
-
-    wrong_tags = []
-    for season, want in scale["cap_holds"].items():
-        got = (contract.cap_holds or {}).get(season)
-        if got != want:
-            wrong_tags.append(f"{season} should be {want}, got {got or 'guaranteed'}")
-
-    if not problems and not wrong_tags:
-        return CheckResult(
-            check="second_round_scale", passed=True, level="info",
-            message=f"Terms match the § 7.1 {num_years}-year second-round scale for {label}.",
-        )
-    detail = "; ".join(problems + wrong_tags)
-    return CheckResult(
-        check="second_round_scale", passed=False, level="error",
-        message=f"§ 7.1 sets the {num_years}-year second-round scale for {label} — {detail}.",
-    )
-
-
-def _min_salary_scale_tier(years_exp: int) -> str:
-    """Maps a raw years-of-NBA-experience count to a min_salary_scale key
-    ("0".."9","10+")."""
-    return "10+" if years_exp >= 10 else str(max(0, years_exp))
-
-
-def _contract_first_season(contract) -> Optional[str]:
-    """The first real season of a contract: its earliest salary year that
-    isn't a trailing UFA/RFA hold. None when the contract declares no years."""
-    salaries = getattr(contract, "salaries", None) or {}
-    holds = getattr(contract, "cap_holds", None) or {}
-    years = [yr for yr in salaries if holds.get(yr) not in _FA_HOLD_TYPES]
-    return min(years, key=_season_start) if years else None
-
-
-def _contract_years_exp(contract, season: str) -> Optional[int]:
-    """Years of NBA experience for pricing `season` of a contract that declares
-    its experience. `ContractIn.years_experience` is the player's experience in
-    the contract's **first** season, and the tier climbs one row per contract
-    year after that (§ 3.12: "the tier then steps up one row per contract
-    year"). A 1-year deal never climbs.
-
-    This was flat from 2026-08-13 to 2026-09-24, on a reading of Jamison
-    Battle's deal that took $2,664,401 for his tier-2 figure in 27-28. It is
-    the tier-3 figure ($2,571,892 is tier 2), so the league sheet climbs, and
-    so does the league office's own table for minimum and second-round deals
-    (the "2026 Rookie Contracts" tab). See `_SECOND_ROUND_SCALE_TIERS`.
-
-    Returns None when nothing is declared, which callers must read as "fall
-    back to years of service" (`years_of_service`), not
-    as zero experience.
-    """
-    declared = getattr(contract, "years_experience", None) if contract else None
-    if declared is None:
-        return None
-    first = _contract_first_season(contract)
-    offset = max(0, _season_start(season) - _season_start(first)) if first else 0
-    return max(0, int(declared)) + offset
-
-
-def _max_salary_pct(years_exp: int) -> float:
-    """§ 3.11 tier: max Year 1 salary as a fraction of that season's Salary Cap,
-    by years of NBA experience. Unlike the minimum scale, this is a clean
-    percentage of the cap rather than its own negotiated table, so it needs
-    no separate per-season entry in cap-levels.json."""
-    if years_exp >= 10:
-        return 0.35
-    if years_exp >= 7:
-        return 0.30
-    return 0.25
-
-
-def _max_salary(bio: dict, season: str, cap_levels: dict) -> Optional[int]:
-    """§ 3.11: the player's maximum Year 1 salary for `season`, derived from
-    the season's cap and the player's years of service
-    (`years_of_service`). Returns None if experience or the season's cap
-    can't be determined (undrafted player, cap not configured yet) — callers
-    should treat that as "can't check," not "no cap applies."
-    """
-    cap = (cap_levels.get(season, {}) or {}).get("cap")
-    years_exp = years_of_service.years_of_service(bio, season) if cap else None
-    if years_exp is None:
-        return None
-    return int(cap * _max_salary_pct(years_exp))
-
-
-_BIRD_HOLD_PCT = {"EQVFA": 1.3, "Non-QVFA": 1.2}
-
-
-def _rfa_eligibility(player: str, bios: dict, cur_season: str,
-                     as_of: Optional[str] = None) -> tuple[bool, str]:
-    """Whether `player` is a restricted free agent who can receive an offer sheet
-    (§ 3.15), as ``(ok, reason)``.
-
-    One rule, shared by `_apply_offer_sheet` and `_validate_offer_sheet`, which
-    used to test different things: the apply path asked whether the player's
-    *earliest* cap hold was an RFA no later than the upcoming season, while the
-    validator asked about `cap_holds[current_season]`.
-
-    The current-season test is the correct one, because an offer sheet is only
-    worth extending if it can actually be executed — and `_apply_sign` refuses a
-    cross-team signing unless the player carries a UFA/RFA hold **for the current
-    season** (anything else means they're still under contract). An "earliest
-    hold" reading accepts a player whose deal runs through this season and whose
-    RFA year is still ahead of them; the offer would validate, sit on the books
-    holding real cap room, and then fail at the decision with "already on ATL".
-    """
-    holds = ((bios.get(player) or {}).get("cap_holds") or {})
-    if not holds:
-        return False, "no cap hold on file"
-    current = holds.get(cur_season)
-    if current == "RFA":
-        # The tag only makes him RFA-*eligible*; the qualifying offer is what
-        # makes him an RFA (§ 3.1). `as_of` is today's league year when the
-        # caller is asking about a later class (the FA pool), where an
-        # undecided QO is still pending rather than lapsed.
-        status = _qo_status(bios[player], cur_season, as_of or cur_season)
-        if status in ("extended", "pending"):
-            return True, ""
-        if status == "withdrawn":
-            return False, f"{cur_season} qualifying offer was withdrawn — he is a UFA (§ 3.1)"
-        if status == "accepted":
-            return False, f"he accepted his {cur_season} qualifying offer"
-        return False, (f"no qualifying offer was extended for {cur_season} by the July 1 "
-                       f"deadline — he is a UFA (§ 3.1)")
-    if current:
-        return False, f"cap hold for {cur_season} is {current}, not RFA"
-    upcoming = sorted(y for y, t in holds.items() if t == "RFA" and y > cur_season)
-    if upcoming:
-        return False, (f"still under contract for {cur_season}; becomes an RFA in "
-                       f"{upcoming[0]}, so an offer sheet has to wait for that league year")
-    return False, f"no cap hold for {cur_season}"
-
-
 # ── § 3.1 qualifying offers ───────────────────────────────────────────────────
 #
 # A contract's trailing `RFA` tag only says the player *can* be made a
@@ -3237,93 +1857,6 @@ def _rfa_eligibility(player: str, bios: dict, cur_season: str,
 # begins — July 1, the deadline — and "lapsed" from then on, whether or not the
 # daily sweep has written that down yet. Reads derive it, so nothing depends
 # on the sweep having run. docs/qualifying-offers.md.
-
-# NBA rookie-scale QO: the raise over the 4th-year salary, by draft slot (2017
-# CBA Exhibit B). The 2023 CBA added 10 points from the 2023 draft class on.
-_ROOKIE_QO_RAISE = (
-    0.300, 0.305, 0.312, 0.319, 0.326, 0.334, 0.341, 0.348, 0.355, 0.362,
-    0.369, 0.376, 0.383, 0.391, 0.398, 0.405, 0.412, 0.419, 0.426, 0.433,
-    0.441, 0.448, 0.455, 0.462, 0.469, 0.476, 0.483, 0.490, 0.500, 0.500,
-)
-_ROOKIE_QO_BUMP_FROM_CLASS = 2023
-_ROOKIE_QO_BUMP = 0.10
-
-
-def _finishes_rookie_scale(bio: dict, hold_season: str) -> bool:
-    """§ 3.1's carve-out: a first-round pick whose four-year rookie-scale deal
-    (§ 7.1) ends right before `hold_season`. He is RFA-eligible even though he
-    has four years of experience by then."""
-    dy, pick = bio.get("draft_year"), bio.get("draft_pick")
-    if bio.get("draft_round") != 1 or not dy or not pick or not 1 <= int(pick) <= 30:
-        return False
-    return _season_start(hold_season) + 2000 == int(dy) + 4
-
-
-def _last_contract_ns(bio: dict):
-    """The contract a hold follows, shaped for `_contract_years_exp`, or None
-    when it declared no experience (callers fall back to the draft year)."""
-    last = (bio.get("contracts") or [None])[-1] or {}
-    if last.get("years_experience") is None:
-        return None
-    return SimpleNamespace(years_experience=last["years_experience"],
-                           salaries=last.get("salaries") or {},
-                           cap_holds=last.get("cap_holds") or {})
-
-
-def _qo_years_exp(bio: dict, hold_season: str) -> Optional[int]:
-    """Years of NBA experience entering `hold_season` (§ 3.1): the experience
-    declared on the contract, climbing a row a year, else years of service
-    (`years_of_service`). None when neither exists — an undrafted player is
-    judged by hand."""
-    declared = _contract_years_exp(_last_contract_ns(bio), hold_season)
-    if declared is not None:
-        return declared
-    return years_of_service.years_of_service(bio, hold_season)
-
-
-def _qo_amount(bio: dict, hold_season: str, cap_levels: dict) -> Optional[int]:
-    """§ 3.1 qualifying offer amount, or None when it can't be priced.
-
-    - Two-way player: a one-year two-way contract, so no cap figure (0).
-    - First-round pick finishing his rookie scale: the 4th-year salary plus the
-      slot's raise (`_ROOKIE_QO_RAISE`).
-    - Everyone else: the greater of the player's minimum (§ 3.12) and 125% of
-      his prior salary.
-
-    The prior salary is the season before the hold — never the hold season's
-    own `salaries` entry, which *is* the hold (that mistake priced Jaden
-    Hardy's QO off his $12.3M hold instead of his $4.1M salary)."""
-    if bio.get("type") == "two-way":
-        return 0
-    prior = _parse_dollar((bio.get("salaries") or {}).get(_season_shift(hold_season, -1)) or "")
-    if _finishes_rookie_scale(bio, hold_season):
-        if not prior:
-            return None
-        pct = _ROOKIE_QO_RAISE[int(bio["draft_pick"]) - 1]
-        if int(bio["draft_year"]) >= _ROOKIE_QO_BUMP_FROM_CLASS:
-            pct += _ROOKIE_QO_BUMP
-        return round(prior * (1 + pct))
-    min_amt = _min_salary_for(bio, hold_season, cap_levels, _last_contract_ns(bio))
-    raise_amt = round(prior * 1.25) if prior else None
-    candidates = [v for v in (min_amt, raise_amt) if v]
-    return max(candidates) if candidates else None
-
-
-def _qo_record(bio: dict, season: str) -> dict:
-    return (bio.get("qualifying_offers") or {}).get(season) or {}
-
-
-def _qo_status(bio: dict, season: str, as_of: str) -> Optional[str]:
-    """The QO decision for `season`'s hold, as of league year `as_of`:
-    a recorded status, or "pending" (RFA-tagged, deadline still ahead), or
-    "lapsed" (RFA-tagged, deadline passed, nothing extended). None when the
-    hold isn't RFA-eligible at all."""
-    status = _qo_record(bio, season).get("status")
-    if status:
-        return status
-    if (bio.get("cap_holds") or {}).get(season) != "RFA":
-        return None
-    return "pending" if _season_start(season) > _season_start(as_of) else "lapsed"
 
 
 def _qo_round_opened(slug: str, season: str) -> Optional[str]:
@@ -3340,18 +1873,6 @@ def _qo_round_opened(slug: str, season: str) -> Optional[str]:
     start = _season_start_date(season, _league_rollovers())
     when = datetime.fromisoformat(opened).replace(tzinfo=None)
     return opened[:10] if when >= start else None
-
-
-def _qo_target_season(bio: dict, action: str) -> Optional[str]:
-    """The hold season a QO action is about: the earliest UFA/RFA hold for an
-    extension, the extended QO for a withdrawal or acceptance."""
-    if action == "extend":
-        fa = sorted((y for y, t in (bio.get("cap_holds") or {}).items() if t in _FA_HOLD_TYPES),
-                    key=_season_start)
-        return fa[0] if fa else None
-    live = sorted((s for s, r in (bio.get("qualifying_offers") or {}).items()
-                   if r.get("status") == "extended"), key=_season_start)
-    return live[0] if live else None
 
 
 def sweep_lapsed_qualifying_offers(as_of: Optional[str] = None) -> list[str]:
@@ -3401,11 +1922,6 @@ def _undecided_team_options(bios: dict) -> list[dict]:
             w = season_calendar.team_option_window(bio, year)
             out.append({"slug": slug, "team": team, "year": year, "kind": w["kind"], "closes": w["closes"]})
     return out
-
-
-def _close_end(closes: str) -> datetime:
-    """The moment a window closes: the end of its last day, league time."""
-    return datetime.strptime(closes, "%Y-%m-%d").replace(tzinfo=LEAGUE_TZ) + timedelta(days=1)
 
 
 def sweep_team_options(now: Optional[datetime] = None) -> dict:
@@ -3596,25 +2112,6 @@ def sweep_fa_holds(today: Optional[str] = None) -> dict:
     return done
 
 
-def _offer_sheet_outcome_team(details: dict) -> Optional[str]:
-    """Which team ends up with the player, from a resolved offer sheet's details.
-
-    `teams` is stored ``[offering, retaining]``. A match leaves the player with
-    the retaining (incumbent) team; an unmatched offer sends them to the offering
-    team. Works on both the legacy combined entry and the split decision, since
-    both carry `outcome` plus the same team fields.
-    """
-    outcome = details.get("outcome")
-    if outcome not in ("matched", "not_matched"):
-        return None
-    teams = [t.upper() for t in (details.get("teams") or []) if t]
-    offering = (details.get("offering_team") or (teams[0] if teams else "")).upper()
-    retaining = (details.get("retaining_team") or "").upper() or \
-        next((t for t in teams if t != offering), "")
-    team = retaining if outcome == "matched" else offering
-    return team if team in VALID_TEAMS else None
-
-
 _BIRD_LEDGER_CACHE: dict = {"key": None, "index": {}}
 _OPEN_OFFERS_CACHE: dict = {"key": None, "offers": []}
 
@@ -3672,37 +2169,6 @@ def _open_offer_sheets() -> list[dict]:
     open_offers.sort(key=lambda o: o["date"] or "", reverse=True)
     _OPEN_OFFERS_CACHE.update({"key": key, "offers": open_offers})
     return open_offers
-
-
-def _offer_deadline(date_str: Optional[str]) -> Optional[str]:
-    """§ 3.15 gives the retaining team 48 hours to match. Recorded and displayed,
-    but never acted on automatically — an offer past its deadline nags rather
-    than resolving itself, because silently moving a real player on a timer is
-    worse than a late decision."""
-    if not date_str:
-        return None
-    try:
-        return (datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=2)).strftime("%Y-%m-%d")
-    except ValueError:
-        return None
-
-
-def _offer_hold_amount(contract: dict) -> int:
-    """§ 3.15's "cap hold equal to the offer sheet value" — read as the offer's
-    **Year 1** salary.
-
-    A cap hold is a single-season charge against a single season's cap, so the
-    total across all years can't be the figure meant: a 4yr/$200M offer would
-    otherwise put a $200M hold on a $165M cap. Year 1 is also what every other
-    hold in the system charges, and what the contract's Year 1 would cost if the
-    offer converts.
-    """
-    salaries = (contract or {}).get("salaries") or {}
-    years = sorted(y for y in salaries if _YEAR_RE_TXN.match(y))
-    return _parse_dollar(salaries[years[0]]) if years else 0
-
-
-_YEAR_RE_TXN = re.compile(r"^\d{2}-\d{2}$")
 
 
 def _player_acquisition_index() -> dict[str, list[tuple]]:
@@ -3908,13 +2374,6 @@ def _bird_tenure(slug: str, team: str, season: str, bio: dict) -> dict:
             "evidence": evidence, "terminal_team": terminal}
 
 
-def _season_start_of(date: str) -> str:
-    """The league-year season string a calendar date falls in. The league year
-    turns over on July 1, so anything from July on belongs to YY-(YY+1)."""
-    y, m = int(date[:4]), int(date[5:7])
-    return season_starting(y if m >= 7 else y - 1)
-
-
 _BIRD_TIER_RANK = {"Non-QVFA": 0, "EQVFA": 1, "QVFA": 2}
 
 
@@ -4052,56 +2511,6 @@ def _derive_bird_tier(bio: dict, team: str, hold_season: str, slug: Optional[str
     return "Non-QVFA"
 
 
-def _compute_fa_hold_amount(
-    prev_salary: str,
-    bird_tier: str,
-    hold_season: str,
-    cap_levels: dict,
-    eaps_assumption: Optional[str] = None,
-    min_amt: Optional[int] = None,
-    max_amt: Optional[int] = None,
-) -> tuple[int, Optional[str]]:
-    """§ 3.10 veteran free-agent hold: `bird_tier`'s percentage of
-    `prev_salary` (the last real salary before the hold season), clamped to
-    [min_amt, max_amt]. Returns (amount, note) — note is set only when the
-    figure rests on an eaps_assumption rather than a real cap number, so
-    callers can flag the result as a placeholder pending real EAPS data.
-
-    Doesn't implement § 3.10's rookie-scale-final-year (250%/300%) carve-out,
-    which still needs a manually-entered cap_hold_amount. The
-    coming-off-a-minimum-contract carve-out isn't a percentage at all, so it
-    lives in `_autofill_fa_hold_amounts` (`_minimum_contract_hold`).
-    """
-    prev = _parse_dollar(prev_salary)
-    note = None
-    if bird_tier == "QVFA":
-        eaps = (cap_levels.get(hold_season, {}) or {}).get("eaps") or None
-        if eaps:
-            pct = 1.5 if prev > eaps else 1.9
-        else:
-            if eaps_assumption not in ("above", "below"):
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"Full Bird (QVFA) hold for {hold_season} needs to know whether the "
-                        f"previous salary (${prev:,}) is above or below that season's EAPS to "
-                        f"pick 150% vs 190% (§ 3.10), and {hold_season} has no EAPS on file yet. "
-                        f'Pass eaps_assumption: "above" or "below" to compute a placeholder.'
-                    ),
-                )
-            pct = 1.5 if eaps_assumption == "above" else 1.9
-            note = (f"placeholder — {hold_season} EAPS not yet set; assumed previous salary is "
-                    f"{eaps_assumption} EAPS ({int(pct * 100)}% of ${prev:,})")
-    else:
-        pct = _BIRD_HOLD_PCT.get(bird_tier, 1.2)
-    amount = round(prev * pct)
-    if max_amt:
-        amount = min(amount, max_amt)
-    if min_amt:
-        amount = max(amount, min_amt)
-    return amount, note
-
-
 def _hold_bird_tier(bio: dict, team: str, season: str, slug: Optional[str],
                     signing_tier: Optional[str]) -> str:
     """§ 3.8 tier a trailing § 3.10 hold carries in `season`, the offseason
@@ -4190,22 +2599,6 @@ def _autofill_fa_hold_amounts(
     return notes
 
 
-def _minimum_contract_hold(bio: dict, season: str, cap_levels: dict) -> Optional[int]:
-    """§ 3.10: a player coming off a minimum contract carries a hold of the
-    minimum salary, capped at the 2-year veteran minimum — the same figure
-    § 3.12 charges for a 1-year minimum deal, so it is that helper's answer
-    for the hold season. Experience comes from the contract the hold follows
-    when it declared one (climbing a row per year, `_contract_years_exp`),
-    else years of service (`years_of_service`). None when the season has no scale yet."""
-    last = (bio.get("contracts") or [None])[-1] or {}
-    contract = None
-    if last.get("years_experience") is not None:
-        contract = SimpleNamespace(years_experience=last["years_experience"],
-                                   salaries=last.get("salaries") or {},
-                                   cap_holds=last.get("cap_holds") or {})
-    return _one_year_min_cap_hit(bio, season, cap_levels, contract=contract)
-
-
 def _preview_fa_hold(
     bio: dict,
     team: str,
@@ -4282,81 +2675,6 @@ def _preview_fa_hold(
     return out
 
 
-def _one_year_min_cap_hit(bio: dict, season: str, cap_levels: dict,
-                          contract=None) -> Optional[int]:
-    """§ 3.12: a 1-year minimum contract's cap hit is capped at the 2-year
-    veteran minimum, regardless of the player's actual NBA experience tier —
-    the league reimburses the difference, mirroring the NBA's veteran-minimum
-    hardship exception. Experience is the contract's declared figure, else
-    the player's years of service (`years_of_service`). Returns None if experience or the season's scale
-    can't be determined (e.g. undrafted player, scale not configured yet) —
-    callers should treat that as "can't check," not "no cap applies."
-    """
-    scale = (cap_levels.get(season, {}) or {}).get("min_salary_scale") or {}
-    if not scale:
-        return None
-    years_exp = _contract_years_exp(contract, season)
-    if years_exp is None:
-        years_exp = years_of_service.years_of_service(bio, season)
-        if years_exp is None:
-            return None
-    tier_amt = scale.get(_min_salary_scale_tier(years_exp), 0)
-    two_yr_amt = scale.get("2", 0)
-    if tier_amt <= 0:
-        return None
-    # Only 2+ year tiers get capped down — the 0/1-yr tiers already sit at or
-    # below the 2-yr number, so there's nothing to reimburse for them.
-    if _min_salary_scale_tier(years_exp) in ("0", "1") or not two_yr_amt:
-        return tier_amt
-    return min(tier_amt, two_yr_amt)
-
-
-def _empty_roster_charge(standard_count_after: int, season: str, cap_levels: dict) -> tuple[int, int]:
-    """Returns (deficiency, charge) for a team projected below the ROSTER_MIN
-    (14) standard-roster minimum, for TRADE-LEGALITY purposes only — § 2.1a.
-    This is a wider floor than ROSTER_CHARGE_MIN (12), which is where a real,
-    persisted Empty Roster Charge actually posts to a team's roster/guaranteed
-    salary (see team.js's computeEmptyRosterCharge for that one — it isn't
-    computed here, since it isn't specific to trades). This function's charge
-    applies immediately and year-round for the hard-cap comparison (not gated
-    on the § 2.1 one-week grace period, which separately governs when activity
-    strikes escalate for a team that stays non-compliant): a team can't use a
-    trade to duck under a hard cap by shedding headcount, since the league
-    treats the empty slot(s) up to 14 as costing at least that season's
-    rookie minimum, whether or not the team is actually below 12 yet."""
-    deficiency = max(0, ROSTER_MIN - standard_count_after)
-    if deficiency == 0:
-        return 0, 0
-    return deficiency, deficiency * _rookie_min_salary(season, cap_levels)
-
-
-def _real_empty_roster_charge(standard_count: int, season: str, cap_levels: dict) -> tuple[int, int]:
-    """Returns (deficiency, charge) for the REAL Empty Roster Charge a team is
-    carrying right now — § 2.1a's narrow 12-player floor, not the 14-player
-    trade-legality mock in `_empty_roster_charge` above.
-
-    The difference between the two matters and they are not interchangeable:
-    this one is a team's actual books ("what does this roster cost today"), the
-    other is a hypothetical the trade validator folds into a *projection*
-    ("what would this roster cost if every slot up to 14 were filled"). A team
-    at 13 carries a mock of one slot and a real charge of zero.
-
-    `standard_count` is the caller's own count so this does not re-read the
-    roster CSV — every caller already has it. It is the count as the books
-    stand, never a post-transaction one: the charge on a projection has to be
-    recomputed from the count *after* the move, since a signing that fills the
-    slot erases the charge it was carrying.
-
-    This is the Python twin of `computeEmptyRosterCharge` in team.js, which is
-    what puts the same charge on the team page as a roster line item and into
-    the Cap Health card's Team Salary. Keep the two in step.
-    """
-    deficiency = max(0, ROSTER_CHARGE_MIN - standard_count)
-    if deficiency == 0:
-        return 0, 0
-    return deficiency, deficiency * _rookie_min_salary(season, cap_levels)
-
-
 def _pending_offer_hold(team: str, season: str) -> int:
     """§ 3.15: "The offering team has a cap hold equal to the offer sheet value
     placed on their books until the matching period concludes."
@@ -4403,9 +2721,6 @@ def _compute_team_salary(team: str, bios: dict, season: str) -> int:
         for row in dc_rows:
             total += _parse_dollar(row.get(season, ""))
     return total + _pending_offer_hold(team, season)
-
-
-_FA_HOLD_TYPES = {"UFA", "RFA"}
 
 
 def _compute_team_salary_ex_holds(team: str, bios: dict, season: str) -> int:
@@ -4610,184 +2925,12 @@ def _room_exception_july1_eligible(
     return with_holds < room_ceiling
 
 
-def _hard_cap_check(team: str, projected: int, season: str,
-                    team_state: dict, cap_levels: dict) -> Optional[CheckResult]:
-    ts  = get_season_state(team_state, team, season)
-    hc  = ts.get("hard_cap")
-    if not hc:
-        return None
-    cl  = cap_levels.get(season, {})
-    limit = cl.get("apron1") if hc == "first_apron" else cl.get("apron2")
-    if limit is None or projected <= limit:
-        return None
-    label = "First Apron" if hc == "first_apron" else "Second Apron"
-    over  = projected - limit
-    return CheckResult(
-        check=f"hard_cap_{team.lower()}",
-        passed=False,
-        level="error",
-        message=(
-            f"{team} would be ${over:,.0f} over their hard cap ({label}: ${limit:,}) "
-            f"— projected salary ${projected:,}."
-        ),
-    )
-
-
-def _universal_hard_cap_check(team: str, projected: int, season: str,
-                               cap_levels: dict) -> Optional[CheckResult]:
-    cl    = cap_levels.get(season, {})
-    limit = cl.get("hard_cap") or 0
-    if not limit or projected <= limit:
-        return None
-    over = projected - limit
-    return CheckResult(
-        check=f"hard_cap_league_{team.lower()}",
-        passed=False,
-        level="error",
-        message=(
-            f"{team} would be ${over:,.0f} over the league Hard Cap (${limit:,}) "
-            f"— projected salary ${projected:,}."
-        ),
-    )
-
-
-def _salary_match_limit(outgoing: int) -> int:
-    """Max incoming salary allowed under standard (below First Apron) tiered matching (§ 4.2)."""
-    if outgoing <= SALARY_MATCH_TIER1_CAP:
-        return 2 * outgoing + 250_000
-    elif outgoing <= SALARY_MATCH_TIER2_CAP:
-        return outgoing + 8_527_000
-    else:
-        return round(1.25 * outgoing) + 250_000
-
-
-def _check_contract_raises(
-    contract: ContractIn, bird_pct: bool, cur_season: str,
-    bio: Optional[dict] = None, cap_levels: Optional[dict] = None,
-    pct: Optional[float] = None,
-) -> Optional[CheckResult]:
-    """§ 3.9 / § 3.13: no year-over-year change above 5% (8% with Full or
-    Early Bird) of Year 1.
-
-    **Minimum-scale years are exempt.** § 3.12 says a multi-year minimum deal
-    pays "the scale for the player's years of experience that season," and the
-    scale's own steps are far bigger than 5% at the bottom — a 26-27 rookie
-    minimum rising to the 1-year tier is a 61% raise. Applying the ladder to it
-    rejected a contract the rulebook explicitly prescribes. Pass `bio` and
-    `cap_levels` to enable the exemption; without them the ladder applies to
-    every year (the old behaviour), since there is no scale to compare against.
-
-    `pct` overrides the `bird_pct`-derived figure outright — § 6.2 rule 8 uses
-    the same ladder but with its own ceilings (8% normal, 5% extend-and-trade),
-    the inverse of a signing's 5%/8% split, so `bird_pct` alone can't express
-    it. Leave unset for the signing path's existing behaviour.
-    """
-    if contract.type == "two-way":
-        return None
-
-    if pct is None:
-        pct = 0.08 if bird_pct else 0.05
-    pct_label = f"{pct * 100:.0f}%"
-
-    _HOLD_TYPES = {"UFA", "RFA", "PLAYER_OPT", "TEAM_OPT"}
-    hold_years = {yr for yr, ht in (contract.cap_holds or {}).items() if ht in _HOLD_TYPES}
-
-    years = sorted(
-        (yr for yr in contract.salaries if yr >= cur_season and yr not in hold_years),
-        key=lambda y: (_season_start(y), y),
-    )
-    if len(years) < 2:
-        return None
-
-    yr1_sal = _parse_dollar(contract.salaries[years[0]])
-    if yr1_sal == 0:
-        return None
-
-    def _at_minimum(yr: str, salary: int) -> bool:
-        # 5% of grace above the scale figure — the same margin the ladder
-        # itself allows — because the alternative is failing a rules check
-        # over a rounded entry: a team that types "$1,400,000" for a
-        # $1,357,763 rookie minimum has still written a minimum deal. It
-        # can't disguise a real raise, since both ends of the step must sit
-        # on their own season's minimum before anything is exempted.
-        if not cap_levels or (bio is None and _contract_years_exp(contract, yr) is None):
-            return False
-        ceiling = _minimum_year_ceiling(bio or {}, yr, cap_levels, contract)
-        return ceiling is not None and salary <= round(ceiling * 1.05) + 1
-
-    max_step = round(pct * yr1_sal)
-    violations, exempt = [], []
-    for i in range(1, len(years)):
-        prev_sal = _parse_dollar(contract.salaries[years[i - 1]])
-        this_sal = _parse_dollar(contract.salaries[years[i]])
-        diff = abs(this_sal - prev_sal)
-        if diff <= max_step + 1:
-            continue
-        if _at_minimum(years[i - 1], prev_sal) and _at_minimum(years[i], this_sal):
-            exempt.append(years[i])
-            continue
-        violations.append(
-            f"{years[i]}: ${prev_sal:,} → ${this_sal:,} "
-            f"(Δ${diff:,}, max ${max_step:,})"
-        )
-
-    if violations:
-        return CheckResult(
-            check="raise_limit",
-            passed=False,
-            level="error",
-            message=(
-                f"Raise/decrease limit violated ({pct_label} of Year 1 = ${max_step:,}/yr): "
-                + "; ".join(violations)
-            ),
-        )
-    if exempt:
-        return CheckResult(
-            check="raise_limit",
-            passed=True,
-            message=(
-                f"Every year is at the § 3.12 minimum salary scale, so the {pct_label} "
-                f"raise ladder doesn't apply to the step into "
-                + ", ".join(exempt) + "."
-            ),
-        )
-    return None
-
-
 _MLE_EXCEPTION_LABELS = {
     "ntmle": "Non-Taxpayer MLE",
     "tmle": "Taxpayer MLE",
     "room_exception": "Room Exception",
     "bae": "Bi-Annual Exception",
 }
-
-
-def _tpe_bankable(
-    outgoing: int,
-    incoming: int,
-    team_salary_after: int,
-    cap: Optional[int],
-    used_exception: bool,
-) -> Optional[int]:
-    """§ 4.1a: the Trade Exception this team banks out of a trade, or None.
-
-    Three independent gates, all of which must pass:
-      * it sent out more salary than it took back (there is a difference);
-      * it did not absorb incoming salary through an exception or another TPE
-        in this same trade (can't absorb via one and bank another);
-      * it is over the Salary Cap after the trade — a team under the Cap
-        absorbs the difference into cap room instead (§ 4.2), and handing it an
-        exception on top would let the same space be spent twice.
-
-    `team_salary_after` is the full post-trade team salary *including* cap
-    holds, matching how cap-room absorption measures room."""
-    if cap is None or used_exception:
-        return None
-    if outgoing <= incoming:
-        return None
-    if team_salary_after <= cap:
-        return None
-    return outgoing - incoming
 
 
 def _buyout_salary_above_ntmle(
@@ -4833,109 +2976,6 @@ def _buyout_salary_above_ntmle(
         if salary > ntmle:
             return salary
     return None
-
-
-def _check_bae_eligibility(
-    team: str,
-    team_salary_ex_holds_before: int,
-    cl: dict,
-    team_state: Optional[dict],
-    season: str,
-) -> Optional[CheckResult]:
-    """Shared BAE eligibility gate (§ 3.5), used by both the free-agent
-    signing path and the trade-absorption path: below the First Apron, not
-    already used this season, not used in the immediately prior season
-    (`_bae_available`), and not already used alongside cap space or the Room
-    Exception this same season. Returns None when eligible."""
-    check_name = f"salary_matching_{team.lower()}"
-    apron1 = cl.get("apron1")
-    ts = get_season_state(team_state or {}, team, season)
-
-    if apron1 is None or team_salary_ex_holds_before >= apron1:
-        return CheckResult(
-            check=check_name, passed=False, level="error",
-            message=(f"{team} is not eligible for the Bi-Annual Exception — Team Salary "
-                      f"(${team_salary_ex_holds_before:,}) is at/above the First Apron "
-                      f"({'$' + format(apron1, ',') if apron1 is not None else 'unset'}) — § 3.5."),
-        )
-    if ts.get("bae_used"):
-        return CheckResult(
-            check=check_name, passed=False, level="error",
-            message=f"{team} has already used the Bi-Annual Exception this season (§ 3.5).",
-        )
-    if ts.get("mle_type") in ("room", "room_exception"):
-        return CheckResult(
-            check=check_name, passed=False, level="error",
-            message=(f"{team} has already used cap space or the Room Exception this season — "
-                      "the BAE cannot also be used the same season (§ 3.5)."),
-        )
-    if not _bae_available(team_state or {}, team, season):
-        return CheckResult(
-            check=check_name, passed=False, level="error",
-            message=f"{team} used the Bi-Annual Exception last season — unavailable in consecutive years (§ 3.5).",
-        )
-    return None
-
-
-def _mle_zone_from_salary(
-    team_salary_full: Optional[int], team_salary_ex_holds: Optional[int], cl: dict
-) -> Optional[str]:
-    """§ 3.2 zone table (room / ntmle / tmle) off live Team Salary — the same
-    rule `computeMleType` in teams/team.js uses to decide what a team's page
-    shows it holds. `_resolve_mle_bucket` falls through to this so an
-    unassigned generic "mle" resolves to whichever bucket the team page
-    already displays, rather than a hardcoded default.
-
-    Returns None (not a guess) when the inputs aren't available — an
-    unconfigured cap-levels season, or a caller that only has scalar figures
-    (this module's own test suite exercising the pre-existing scalar path).
-    """
-    if team_salary_full is None or team_salary_ex_holds is None:
-        return None
-    cap, apron1, ntmle = cl.get("cap"), cl.get("apron1"), cl.get("ntmle_amount")
-    if cap is None or apron1 is None or ntmle is None:
-        return None
-    if cap - team_salary_full > ntmle:
-        return "room"
-    if apron1 - team_salary_ex_holds >= ntmle:
-        return "ntmle"
-    return "tmle"
-
-
-def _resolve_mle_bucket(
-    method: Optional[str], ts: dict,
-    team_salary_full: Optional[int] = None,
-    team_salary_ex_holds: Optional[int] = None,
-    cl: Optional[dict] = None,
-) -> Optional[tuple[str, str, str]]:
-    """Which exception bucket an exception-funded `signing_method` actually
-    draws on, as ``(resolved_method, cap_levels_amount_key, display_label)``.
-
-    A generic "mle" resolves against whatever bucket the team is already
-    locked into this season (`mle_type`). If nothing is locked yet, it falls
-    to `_mle_zone_from_salary` — the § 3.2 zone table off live Team Salary —
-    rather than a hardcoded default, so this can't disagree with what the
-    team page shows the team holds. Only degrades to "ntmle" when the zone
-    genuinely can't be computed (no salary figures supplied). Returns None
-    for methods that aren't a running dollar balance (cap space, Bird Rights,
-    minimum, BAE, sign-and-trade) — those have dedicated checks.
-
-    Shared by `_check_signing_method_funding` and the simulator's fact sheet so
-    the balance shown is the balance the validator charged against.
-    """
-    resolved = method
-    if resolved == "mle":
-        resolved = (ts.get("mle_type")
-                    or _mle_zone_from_salary(team_salary_full, team_salary_ex_holds, cl or {})
-                    or "ntmle")
-    if resolved == "room":          # mle_type stores the short form
-        resolved = "room_exception"
-    meta = {
-        "ntmle":          ("ntmle_amount", "Non-Taxpayer MLE"),
-        "tmle":           ("tmle_amount",  "Taxpayer MLE"),
-        "room_exception": ("room_amount",  "Room Exception"),
-    }.get(resolved)
-    return (resolved, meta[0], meta[1]) if meta else None
 
 
 def _check_signing_method_funding(
@@ -5064,37 +3104,6 @@ def _check_signing_method_funding(
     return None
 
 
-def _check_bae_absorption(
-    team: str,
-    incoming: int,
-    team_salary_ex_holds_before: int,
-    cl: dict,
-    team_state: Optional[dict],
-    season: str,
-) -> CheckResult:
-    """BAE trade absorption (§ 4.2a, extended to include the BAE alongside
-    NTMLE/TMLE/Room Exception). Unlike those three, the BAE isn't a running
-    dollar balance — it's a once-per-season boolean (`bae_used`), so it can't
-    share `_check_exception_absorption`'s amount-key/`mle_used` bookkeeping."""
-    check_name = f"salary_matching_{team.lower()}"
-    if (r := _check_bae_eligibility(team, team_salary_ex_holds_before, cl, team_state, season)):
-        return r
-
-    total = cl.get("bae_amount", 0) or 0
-    if incoming > total:
-        over = incoming - total
-        return CheckResult(
-            check=check_name, passed=False, level="error",
-            message=(f"{team}: Bi-Annual Exception absorption failed — incoming salary ${incoming:,} "
-                      f"exceeds the BAE amount of ${total:,} by ${over:,}."),
-        )
-    return CheckResult(
-        check=check_name, passed=True,
-        message=(f"{team}: incoming salary ${incoming:,} absorbed via the Bi-Annual Exception "
-                  f"(${total:,} available this season) — no salary match required."),
-    )
-
-
 def _check_tpe_absorption(
     team: str,
     incoming: int,
@@ -5143,50 +3152,6 @@ def _check_tpe_absorption(
                   f"(${remaining:,} of ${record['amount']:,} remaining before this trade, "
                   f"expires {record['expires_date']}) — no salary match required."),
     )
-
-
-def _exception_absorption_split(
-    details,
-    team: str,
-    incoming_total: int,
-    in_players: dict,
-    bios: dict,
-    season: str,
-) -> tuple[int, int, Optional[str]]:
-    """How a team's incoming salary divides between its exception and ordinary
-    salary matching.
-
-    § 4.2a is per-player — "a team uses exactly one of the four for a given
-    incoming player" — so a trade can legitimately match some incoming players
-    against outgoing salary while funding another out of an exception. When
-    `exception_players[team]` names slugs, only those are absorbed and the rest
-    still has to match. When it doesn't, the whole incoming total is treated as
-    absorbed, which is the original all-or-nothing behavior.
-
-    Returns (absorbed, matched, error). `error` is a message when the named
-    slugs don't correspond to players this team is actually receiving — the
-    caller turns that into a failed check rather than silently mis-splitting.
-
-    Shared by the validator and _apply_trade so the amount that gets checked is
-    always the amount that gets billed to the exception's balance.
-    """
-    slugs = [s for s in (getattr(details, "exception_players", None) or {}).get(team, []) if s]
-    if not slugs:
-        return incoming_total, 0, None
-
-    received = in_players.get(team, [])
-    unknown = [s for s in slugs if s not in received]
-    if unknown:
-        return 0, 0, (
-            f"{team}: exception_players names {', '.join(sorted(unknown))}, "
-            f"which {'is' if len(unknown) == 1 else 'are'} not incoming to {team} in this trade."
-        )
-
-    absorbed = sum(
-        _parse_dollar((bios.get(s, {}).get("salaries") or {}).get(season, ""))
-        for s in set(slugs)
-    )
-    return absorbed, max(incoming_total - absorbed, 0), None
 
 
 def _check_exception_absorption(
@@ -5303,20 +3268,6 @@ def _check_exception_absorption(
     )
 
 
-def _cap_room_absorbed(team_salary_before: int, outgoing: int, incoming: int, cap: Optional[int]) -> bool:
-    """§ 4.2 cap-room absorption: true when `incoming` can be covered purely by
-    the team's own room under the Salary Cap, with no salary match required.
-
-    Shared by `_check_salary_matching` and the § 4.3/§ 4.3 contagion checks —
-    a trade genuinely funded this way carries no apron consequence, matching
-    real NBA behavior: a cap-room acquisition never touches the apron, only
-    the named exceptions (NTMLE/TMLE/BAE) and over-the-cap tiered matching do.
-    """
-    if cap is None or team_salary_before >= cap:
-        return False
-    return team_salary_before - outgoing + incoming <= cap
-
-
 def _check_salary_matching(
     team: str,
     outgoing: int,
@@ -5423,21 +3374,6 @@ def _signee_existing_hold(team: str, player: str, bios: dict, season: str) -> tu
     )
 
 
-class SigningBooks(NamedTuple):
-    """A team's books for one signing, before and after. See `_signing_books`."""
-    current: int             # Team Salary, holds included (§ 3.10)
-    current_ex_holds: int    # Team Salary without UFA/RFA holds
-    existing_hold: int       # the signee's own figure already on the books
-    is_fa_hold: bool         # ...and whether it's a UFA/RFA hold (so not in ex-holds)
-    new_sal: int             # the contract's figure for this season
-    other_holds: int         # UFA/RFA holds left for *other* players
-    standard_after: int      # standard roster count after the signing
-    erc_after: int           # § 2.1a charge on the slots still empty after it
-    funding_base: int        # what the cap-room test starts from (holds in)
-    funding_base_ex_holds: int  # ...and the apron/exception tests (holds out)
-    projected_ex_holds: int  # ex-holds Team Salary after the signing
-
-
 def _signing_books(team: str, player: str, salaries: Optional[dict],
                    bios: dict, season: str, cap_levels: dict, *,
                    two_way: bool = False) -> SigningBooks:
@@ -5484,34 +3420,6 @@ def _signing_books(team: str, player: str, salaries: Optional[dict],
         funding_base_ex_holds=current_ex_holds + erc_after,
         projected_ex_holds=(current_ex_holds - (0 if is_fa_hold else existing_hold)
                             + new_sal + erc_after),
-    )
-
-
-def _check_trailing_hold(contract) -> Optional[CheckResult]:
-    """§ 3.10: a contract rolls into a free-agent hold the season after it
-    ends, carried as a UFA/RFA tag on that season. Nothing adds the tag for
-    the office — its contract helpers default to one, but a hand-built deal
-    can leave it off, and 24 of the 2026 FA wave went in that way, each
-    silently dropping a hold from its team's out-year books (2026-09-24).
-    A warning, not an error: a deal that truly ends with no hold (a
-    retirement) can be forced through."""
-    salaries = contract.salaries or {}
-    holds = contract.cap_holds or {}
-    if not salaries or contract.type == "two-way":
-        return None
-    years = [yr for yr in salaries if holds.get(yr) not in _FA_HOLD_TYPES]
-    if not years:
-        return None
-    last = max(years, key=_season_start)
-    after = _season_shift(last, 1)
-    if holds.get(after) in _FA_HOLD_TYPES:
-        return CheckResult(check="trailing_hold", passed=True, level="warning",
-                           message=f"Rolls into a {holds[after]} hold for {after} (§ 3.10).")
-    return CheckResult(
-        check="trailing_hold", passed=False, level="warning",
-        message=(f"This contract ends in {last} with no UFA or RFA hold for {after}. An expiring "
-                 f"contract rolls into a free-agent hold (§ 3.10). Add a trailing hold row, or "
-                 f"force this through only if the player won't carry one."),
     )
 
 
@@ -5765,53 +3673,6 @@ def _check_reacquisition(player: str, team: str, season: str,
     )
 
 
-def _min_scale_for_season(season: str, cap_levels: dict) -> dict:
-    """`season`'s minimum salary scale, falling back to the latest configured
-    season at or before it. Later league years routinely have no scale on file
-    yet — a contract signed today can easily run past the last season the
-    office has set figures for."""
-    scale = (cap_levels.get(season, {}) or {}).get("min_salary_scale") or {}
-    if scale:
-        return scale
-    for yr in sorted(cap_levels, key=_season_start, reverse=True):
-        if _season_start(yr) <= _season_start(season):
-            older = (cap_levels.get(yr) or {}).get("min_salary_scale") or {}
-            if older:
-                return older
-    return {}
-
-
-def _min_salary_floor(season: str, cap_levels: dict) -> int:
-    """The 0-years tier for `season`, falling back to the latest configured
-    season when that one has no scale yet. Minimum scales only ever rise, so
-    an older season's figure is a conservative floor for a later one — it can
-    under-flag, never produce a false positive."""
-    return _min_scale_for_season(season, cap_levels).get("0", 0)
-
-
-def _minimum_year_ceiling(bio: dict, season: str, cap_levels: dict,
-                          contract=None) -> Optional[int]:
-    """The most a § 3.12 minimum contract can pay this player in `season` — the
-    figure that decides whether a contract year is a minimum year at all.
-
-    The contract's own declared experience when it has one, else their tier by
-    the draft year, else the top (10+) row, since nothing above the veteran
-    minimum is a minimum contract for anyone. Returns None when no scale is
-    configured at or before `season`, which callers must read as "can't tell",
-    not "not a minimum"."""
-    scale = _min_scale_for_season(season, cap_levels)
-    if not scale:
-        return None
-    years_exp = _contract_years_exp(contract, season)
-    if years_exp is None:
-        years_exp = years_of_service.years_of_service(bio or {}, season)
-    if years_exp is not None:
-        amt = scale.get(_min_salary_scale_tier(years_exp))
-        if amt:
-            return amt
-    return max(scale.values())
-
-
 def _signed_after_opening_night(txn_date: Optional[str]) -> bool:
     """Whether a signing on `txn_date` came after its league year's opening
     night, so a Year 1 salary could be prorated (§ 3.12).
@@ -5843,14 +3704,6 @@ def _minimum_proration(txn_date: Optional[str]) -> Optional[dict]:
     if not d or d[0] >= d[1]:
         return None
     return {"season": _season_for_date(txn_date), "days": d[0], "of": d[1]}
-
-
-def _prorate(amount: int, proration: Optional[dict]) -> int:
-    """`amount` scaled by a `_minimum_proration` result, rounded to the
-    dollar (half up, so the transactions form's Math.round agrees)."""
-    if not proration:
-        return amount
-    return int(amount * proration["days"] / proration["of"] + 0.5)
 
 
 def _proration_record(salaries: dict, txn_date: Optional[str]) -> dict:
@@ -5998,58 +3851,6 @@ def _check_minimum_salary(contract, player: str, bios: dict, season: str,
     )
 
 
-def _check_declared_experience(contract, player: str, bios: dict) -> Optional[CheckResult]:
-    """§ 3.12: a contract's declared years of experience, against the
-    player's years of service on file (`years_of_service`). Declaring fewer
-    prices a minimum on a cheaper tier, and can read a player as two-way
-    eligible (§ 2.2) when he isn't, so it is a warning a person has to confirm.
-
-    Not an error: the count on file can miss a season he sat on a roster
-    without playing. Declaring more only costs the team, so that passes.
-    Added after Blake Hinson's ORL minimum (2026-10-08), which declared 0
-    against a draft-year count of 2. Under the 2026-11-10 ruling (NBN years,
-    not NBA) his 0 was right: he hadn't been on an NBN roster.
-
-    None when the contract declares nothing or the count can't be made."""
-    declared = getattr(contract, "years_experience", None)
-    bio = bios.get(player) or {}
-    first = _contract_first_season(contract)
-    if declared is None or not first:
-        return None
-    expected = years_of_service.years_of_service(bio, first, player)
-    if expected is None:
-        return None
-    name = _display_name(bio.get("name") or "") or player
-    if int(declared) < expected:
-        return CheckResult(
-            check="declared_experience", passed=False, level="warning",
-            message=(f"The contract gives {name} {int(declared)} years of experience in {first}, "
-                     f"but his years of service on file give {expected} (§ 3.12). Fewer years "
-                     f"means a cheaper minimum tier. Use {expected} unless the count is wrong."),
-        )
-    return CheckResult(
-        check="declared_experience", passed=True, level="info",
-        message=(f"Declared experience ({int(declared)} in {first}) is not below his "
-                 f"{expected} years of service on file (§ 3.12)."),
-    )
-
-
-def _min_salary_for(bio: dict, season: str, cap_levels: dict,
-                    contract=None) -> Optional[int]:
-    """That season's minimum for this player's experience tier, or None when
-    experience can't be established (nothing declared on the contract, no
-    draft year, or scale not configured)."""
-    scale = (cap_levels.get(season, {}) or {}).get("min_salary_scale") or {}
-    if not scale:
-        return None
-    years_exp = _contract_years_exp(contract, season)
-    if years_exp is None:
-        years_exp = years_of_service.years_of_service(bio, season)
-        if years_exp is None:
-            return None
-    return scale.get(_min_salary_scale_tier(years_exp)) or None
-
-
 def _check_minimum_contract_cap_hit(details: SignDetails, bios: dict, season: str,
                                      cap_levels: dict,
                                      txn_date: Optional[str] = None) -> Optional[CheckResult]:
@@ -6105,59 +3906,6 @@ def _check_minimum_contract_cap_hit(details: SignDetails, bios: dict, season: st
         message=(f"Submitted salary (${submitted:,}) doesn't match the § 3.12 1-yr minimum. "
                  f"A 1-year minimum counts at {basis}. His experience was {source}."),
     )
-
-
-def _check_max_salary(details: SignDetails, bios: dict, season: str,
-                       cap_levels: dict) -> Optional[CheckResult]:
-    """§ 3.11: a signed player's current-season salary shouldn't exceed their
-    experience-tier maximum (25/30/35% of that season's Salary Cap). Skipped
-    for two-way contracts (no cap salary) and undrafted players (no
-    draft_year experience proxy). Advisory only — § 3.11 is manual review,
-    not system-enforced, and years of NBA experience is inferred from
-    draft_year, not independently verified.
-    """
-    if details.contract.type == "two-way":
-        return None
-    salaries = details.contract.salaries or {}
-    if season not in salaries:
-        return None
-    expected = _max_salary(bios.get(details.player, {}), season, cap_levels)
-    if expected is None:
-        return None
-    submitted = _parse_dollar(salaries[season])
-    if submitted <= expected:
-        return CheckResult(
-            check="max_salary", passed=True,
-            message=f"Year 1 salary (${submitted:,}) is within the § 3.11 max of ${expected:,}.",
-        )
-    return CheckResult(
-        check="max_salary",
-        passed=False,
-        level="warning",
-        message=(f"Submitted Year 1 salary (${submitted:,}) exceeds the § 3.11 max of ${expected:,} "
-                 f"for this player's years of service — double check before submitting."),
-    )
-
-
-def _release_contract_years(bio: dict, cur_season: str) -> list[str]:
-    """The seasons from `cur_season` on that carry a real contract to release.
-    A player whose every remaining season is a bare UFA/RFA/TEAM_OPT hold (or
-    who has no salaries at all) has none — they're renounceable instead
-    (§ 3.10), and releasing them would just ceremonially reproduce a renounce
-    through the wrong transaction.
-
-    A two-way's contract years count even though they pay $0 (§ 2.2). Testing
-    for salary alone left a two-way with no way off a roster: release said
-    "nothing to release, renounce instead", and renounce said "under contract,
-    release instead"."""
-    holds = bio.get("cap_holds") or {}
-    salaries = bio.get("salaries") or {}
-    two_way = bio.get("type") == "two-way"
-    return [
-        s for s, sal in salaries.items()
-        if s >= cur_season and holds.get(s) not in ("UFA", "RFA", "TEAM_OPT")
-        and (two_way or _parse_dollar(sal))
-    ]
 
 
 def _post_trade_teams(details) -> dict[str, str]:
@@ -6280,13 +4028,6 @@ def _signing_release_checks(team: str, releases: list[str], signee: str,
                                            f"under contract through {max(years)}, dead cap on the "
                                            "original payment schedule.")))
     return checks, valid
-
-
-def _released_counts(slugs: list[str], bios: dict) -> tuple[int, int]:
-    """(standard, two-way) bodies among `slugs` — which pool each release frees."""
-    tw = sum(1 for s in slugs if (bios.get(s) or {}).get("type") == "two-way")
-    std = sum(1 for s in slugs if _is_standard_roster_slot((bios.get(s) or {}).get("type", "")))
-    return std, tw
 
 
 def _apply_signing_releases(slugs: list[str], txn_date: str, info: dict, *,
@@ -6764,401 +4505,6 @@ def _validate_guarantee(details: GuaranteeDetails, ctx: dict) -> list[CheckResul
     return []
 
 
-def _is_exempt_minimum_contract(slug: str, season: str, bios: dict) -> bool:
-    """§ 4.2: a player on a minimum contract of 2 seasons or fewer doesn't
-    count as incoming salary for trade matching purposes. A minimum contract
-    of more than 2 seasons does count.
-
-    Derived from the player's own `contracts` ledger entry (signing_method +
-    the count of salaried years on that specific deal) rather than a stored
-    tag, so it can never drift from the deal that was actually signed — the
-    same "denormalized copy" trap this repo already got burned by once (the
-    old roster-CSV OVR column, never kept in sync and always empty). Only
-    available for players signed through this system — a historical/
-    backfilled deal has no `contracts` entry, so it's conservatively treated
-    as non-exempt (no regression from before this existed).
-    """
-    for entry in (bios.get(slug, {}).get("contracts") or []):
-        salaries = entry.get("salaries") or {}
-        if season in salaries and entry.get("signing_method") == "minimum":
-            return len(salaries) <= 2
-    return False
-
-
-def _trade_flows(details, bios: dict, season: str) -> tuple[dict, dict, dict, dict]:
-    """Per-team salary and player-slug flows for a trade.
-
-    Returns (outgoing_salary, incoming_salary, out_players, in_players), each
-    keyed by team abbreviation. Pick assets carry no salary or roster slot, so
-    only player assets are accumulated. Shared by the validator and fact sheet
-    so the two never diverge on what "this trade moves" means.
-    """
-    outgoing: dict[str, int] = {}
-    incoming: dict[str, int] = {}
-    out_players: dict[str, list[str]] = {}
-    in_players: dict[str, list[str]] = {}
-    for xfer in details.transfers:
-        from_t = xfer.from_team.upper()
-        to_t   = xfer.to_team.upper()
-        for asset in xfer.assets:
-            if asset.type != "player" or not asset.slug:
-                continue
-            sal = _parse_dollar((bios.get(asset.slug, {}).get("salaries") or {}).get(season, ""))
-            outgoing[from_t] = outgoing.get(from_t, 0) + sal
-            incoming[to_t]   = incoming.get(to_t, 0)   + sal
-            out_players.setdefault(from_t, []).append(asset.slug)
-            in_players.setdefault(to_t, []).append(asset.slug)
-    return outgoing, incoming, out_players, in_players
-
-
-_STEPIEN_MAX_SCENARIOS = 4096
-
-
-def _check_stepien_rule(details: TradeIn, all_picks: list[dict] | None = None) -> list[CheckResult]:
-    """§ 7.2 Stepien Rule: a trade is illegal if, after it, a team could end
-    up with no first-round pick in two consecutive draft years. "Could" is
-    the point: the rule has to hold however every protection resolves, so a
-    claim only counts in the outcomes where the team actually gets the pick.
-    Any first-round pick counts, own or acquired.
-
-    Ownership is what `GET /api/picks` serves (`_all_picks_flat`), modeled
-    per pick as one of:
-
-      - "bands": the pick goes to exactly one team, chosen by where it lands.
-        A settled pick is one band (1-60). A protected pick's bands come from
-        its `leaves`. A pipe-joined owner with no leaves to say how it splits
-        (the flat-CSV fallback) is a band per team at unknown positions.
-      - "group": a row with a `group_id` (a swap group or binary chain). Every
-        team holding a leaf gets exactly one of the group's picks that year,
-        whatever the order, so each counts as certain. Every row of a group is
-        the SAME claim (see `registry.handle_retrade`): trading one row conveys
-        the team's whole interest in all of them, never "one leg, keeping the
-        other".
-
-    A pick with `ladder_fallback_of` goes to `to` when its governing pick
-    lands inside `protect_top`, and to its own owner otherwise. Both picks
-    resolve from the governing pick's one landing spot, so they are scored as
-    one outcome, not independently: a team that either keeps the protected
-    pick or keeps the fallback is never charged with losing both.
-
-    The trade is simulated on that model: a plain retrade moves the team's
-    claim (or just the `leaf_id` band); `protection` splits the team's band
-    at the threshold, the way `from_trade.register_protection` does;
-    `swap_with` turns the pick and its counterpart into a two-team group, as
-    `register_swap` does; `ladder_fallback` links the fallback picks to this
-    one. Then each team in the trade is checked against every combination of
-    outcomes that touches it. Past `_STEPIEN_MAX_SCENARIOS` combinations it
-    falls back to counting only certain claims, which can only be stricter.
-
-    `all_picks` is injectable (defaults to the real `_all_picks_flat()`)
-    so tests can run against synthetic picks — see `tests/test_stepien_rule.py`.
-    """
-    import itertools
-    import re
-
-    if not any(a.type in ("pick", "swap") and a.round == 1
-               for x in details.transfers for a in x.assets):
-        return []
-    if all_picks is None:
-        all_picks = _all_picks_flat()
-
-    # key -> {"kind": "bands", "bands": [[lo, hi, team], ...]}
-    #      | {"kind": "group", "gid": gid}
-    picks: dict[tuple[int, str], dict] = {}
-    groups: dict[str, set[str]] = {}          # gid -> teams certain of one pick
-    group_members: dict[str, list[tuple[int, str]]] = {}
-    fallbacks: dict[tuple[int, str], dict] = {}  # key -> {gov, top, to}
-    band_re = re.compile(r"^protected band (\d+)-(\d+)$")
-
-    for p in all_picks:
-        if p.get("round") != 1 or p.get("player"):
-            continue
-        key = (p["year"], p["orig"].upper())
-        owner = p.get("owner") or "?"
-        teams = [p["orig"].upper()] if owner == "?" else owner.split("|")
-        leaves = p.get("leaves") or []
-        gid = p.get("group_id")
-        if gid:
-            leaf_teams = {l["team"] for l in leaves}
-            groups.setdefault(gid, set()).update(leaf_teams or teams)
-            group_members.setdefault(gid, []).append(key)
-            picks[key] = {"kind": "group", "gid": gid}
-        else:
-            bands = []
-            for l in leaves:
-                m = band_re.match(l.get("description") or "")
-                if m:
-                    bands.append([int(m[1]), int(m[2]), l["team"]])
-            if not bands:
-                if len(teams) == 1:
-                    bands = [[1, 60, teams[0]]]
-                else:
-                    # Who gets which band is unknown: give each its own
-                    # made-up slice, so no two can both be counted at once.
-                    n = len(teams)
-                    bands = [[i * 60 // n + 1, (i + 1) * 60 // n, t] for i, t in enumerate(teams)]
-            picks[key] = {"kind": "bands", "bands": sorted(bands)}
-        fb = p.get("ladder_fallback_of")
-        if fb and fb.get("to"):
-            gov = fb.get("governing_pick") or {}
-            gov_key = (gov["year"], gov["orig"].upper()) if gov.get("year") else None
-            fallbacks[key] = {"gov": gov_key, "top": int(fb.get("protect_top") or 0),
-                              "to": fb["to"]}
-
-    def holders(key):
-        node = picks[key]
-        if node["kind"] == "group":
-            return set(groups[node["gid"]])
-        return {t for _lo, _hi, t in node["bands"]}
-
-    def retrade(key, from_t, to_t, leaf_id):
-        node = picks[key]
-        if node["kind"] == "group":
-            g = groups[node["gid"]]
-            if from_t in g:
-                g.discard(from_t)
-                g.add(to_t)
-            return
-        band_idx = None
-        if leaf_id:
-            m = re.search(r":protected:(\d+)$", leaf_id)
-            band_idx = int(m[1]) if m else None
-        for i, band in enumerate(node["bands"]):
-            if band[2] == from_t and (band_idx is None or i == band_idx):
-                band[2] = to_t
-
-    def protect(key, from_t, to_t, top):
-        node = picks[key]
-        if node["kind"] == "group":
-            # A protection on a swap leg: neither side is certain of anything
-            # from it any more. Drop from_t's certainty; to_t gains nothing.
-            groups[node["gid"]].discard(from_t)
-            return
-        out = []
-        for lo, hi, t in node["bands"]:
-            if t != from_t or not (lo <= top < hi):
-                out.append([lo, hi, to_t if t == from_t and lo > top else t])
-                continue
-            out += [[lo, top, from_t], [top + 1, hi, to_t]]
-        node["bands"] = out
-
-    def swap(key, from_t, to_t, named):
-        counterpart = next((k for k, n in picks.items()
-                            if k[0] == key[0] and k[1] != key[1] and n["kind"] == "bands"
-                            and [t for _lo, _hi, t in n["bands"]] == [named]), None)
-        if counterpart is None or picks[key]["kind"] != "bands":
-            retrade(key, from_t, to_t, None)     # apply passes it through flat
-            return
-        gid = f"_sim_{key[0]}_{key[1]}_{counterpart[1]}"
-        groups[gid] = {named, to_t}
-        group_members[gid] = [key, counterpart]
-        picks[key] = picks[counterpart] = {"kind": "group", "gid": gid}
-
-    def pick_swap(asset, from_t, to_t):
-        # Each team is certain of exactly one of the two picks, as in any
-        # two-team group. `_pick_swap_problems` refuses anything but two
-        # outright picks, so both are plain bands here.
-        a = (asset.year, (asset.orig or "").upper())
-        b = (asset.year, (asset.swap_orig or "").upper())
-        if a not in picks or b not in picks:
-            return
-        gid = f"_sim_pickswap_{a[0]}_{a[1]}_{b[1]}"
-        groups[gid] = {from_t, to_t}
-        group_members[gid] = [a, b]
-        picks[a] = picks[b] = {"kind": "group", "gid": gid}
-
-    trade_keys = set()
-    affected: set[str] = set()
-    for xfer in details.transfers:
-        from_t, to_t = xfer.from_team.upper(), xfer.to_team.upper()
-        for asset in xfer.assets:
-            if asset.type == "swap" and asset.round == 1:
-                affected |= {from_t, to_t}
-                pick_swap(asset, from_t, to_t)
-                continue
-            if asset.type != "pick" or asset.round != 1:
-                continue
-            affected |= {from_t, to_t}
-            key = (asset.year, (asset.orig or "").upper())
-            if key not in picks:
-                continue
-            trade_keys.add(key)
-            if asset.swap_with:
-                affected.add(asset.swap_with.upper())
-                swap(key, from_t, to_t, asset.swap_with.upper())
-            elif asset.protection:
-                protect(key, from_t, to_t, asset.protection)
-            else:
-                retrade(key, from_t, to_t, asset.leaf_id)
-            for ref in asset.ladder_fallback or []:
-                if ref.get("round", 1) != 1:
-                    continue
-                fkey = (ref["year"], ref["orig"].upper())
-                fallbacks[fkey] = {"gov": key, "top": int(asset.ladder_protect_top or 0),
-                                   "to": to_t}
-
-    if not affected or not picks:
-        return []
-
-    years = sorted({y for (y, _o) in picks})
-    lo_y, hi_y = years[0], years[-1]
-
-    def outcomes_for(team):
-        """(certain years, [[set of years per outcome], ...]) for one team."""
-        certain: set[int] = set()
-        # One outcome space per governing pick: its own bands plus every
-        # fallback that hangs off it.
-        spaces: dict[tuple, list] = {}
-        for key, node in picks.items():
-            if key in fallbacks:
-                continue
-            if node["kind"] == "group":
-                if team in groups[node["gid"]]:
-                    certain.add(key[0])
-                continue
-            if team in holders(key):
-                spaces.setdefault(key, [])
-        for fkey, fb in fallbacks.items():
-            if fb["to"] == team or team in holders(fkey):
-                spaces.setdefault(fb["gov"] or ("fallback", fkey), []).append(fkey)
-
-        variable = []
-        for gov, fkeys in spaces.items():
-            gov_node = picks.get(gov) if isinstance(gov, tuple) and gov and gov[0] != "fallback" else None
-            cuts = {1, 61}
-            if gov_node and gov_node["kind"] == "bands":
-                for lo, hi, _t in gov_node["bands"]:
-                    cuts |= {lo, hi + 1}
-            for fk in fkeys:
-                cuts.add(fallbacks[fk]["top"] + 1)
-            cuts = sorted(c for c in cuts if 1 <= c <= 61)
-            spots = cuts[:-1] if gov_node else [None]
-            if not gov_node:
-                # Governing pick unknown: the fallback could go either way.
-                outs = []
-                for fk in fkeys:
-                    fb = fallbacks[fk]
-                    owner = holders(fk)
-                    outs.append([{fk[0]} if fb["to"] == team else set(),
-                                 {fk[0]} if team in owner else set()])
-                variable.extend(outs)
-                continue
-            outs = []
-            for spot in spots:
-                got = set()
-                if gov_node["kind"] == "bands" and any(
-                        lo <= spot <= hi and t == team for lo, hi, t in gov_node["bands"]):
-                    if gov not in fallbacks:
-                        got.add(gov[0])
-                for fk in fkeys:
-                    fb = fallbacks[fk]
-                    if spot <= fb["top"]:
-                        if fb["to"] == team:
-                            got.add(fk[0])
-                    elif team in holders(fk):
-                        got.add(fk[0])
-                outs.append(got)
-            variable.append(outs)
-        return certain, variable
-
-    def first_gap(have):
-        for y in range(lo_y, hi_y):
-            if y not in have and y + 1 not in have:
-                return (y, y + 1)
-        return None
-
-    checks: list[CheckResult] = []
-    for team in sorted(affected):
-        certain, variable = outcomes_for(team)
-        n = 1
-        for outs in variable:
-            n *= max(len(outs), 1)
-        gap = None
-        if n > _STEPIEN_MAX_SCENARIOS:
-            gap = first_gap(certain)
-        else:
-            for combo in itertools.product(*variable):
-                gap = first_gap(certain.union(*combo))
-                if gap:
-                    break
-        if gap:
-            best_case = certain.union(*[set().union(*o) for o in variable])
-            why = " if its protections fall the wrong way" if first_gap(best_case) is None else ""
-            checks.append(CheckResult(
-                check=f"stepien_rule_{team.lower()}", passed=False, level="error",
-                message=(f"{team} could have no first-round pick in {gap[0]} and {gap[1]} after this "
-                         f"trade{why} — violates the Stepien Rule (§ 7.2): a team must keep a "
-                         "first-round pick at least once every two draft years, however its "
-                         "protections resolve."),
-            ))
-        else:
-            checks.append(CheckResult(
-                check=f"stepien_rule_{team.lower()}", passed=True,
-                message=f"{team}: keeps a first-round pick at least once every two draft years (§ 7.2).",
-            ))
-    return checks
-
-
-def _check_pick_advance_limit(details: TradeIn, cur_season: str) -> list[CheckResult]:
-    """§ 7.2 seven-year advance limit: a draft pick may only be traded up to
-    7 years ahead of the current league year. Same horizon the picks ledger
-    itself is kept populated through (`roster_picks._pick_year_horizon`) — a
-    pick further out than that has no real conveyance row to trade in the
-    first place, so this is really "the horizon, stated as a rule" rather
-    than an independent number that could drift from it.
-
-    Every pick asset in the trade is checked, any round — unlike the Stepien
-    Rule this isn't limited to first-rounders. A pick offered only as ladder
-    compensation (`ladder_fallback`) is left to manual review, same as the
-    Stepien Rule leaves it (see that function's docstring): it's a
-    contingent claim, not a pick this trade is itself conveying.
-    """
-    horizon = _pick_year_horizon(cur_season)
-    checks: list[CheckResult] = []
-    seen: set[tuple] = set()
-    for xfer in details.transfers:
-        for asset in xfer.assets:
-            if asset.type not in ("pick", "swap") or asset.year is None:
-                continue
-            key = (asset.year, asset.round, (asset.orig or "").upper())
-            if key in seen:
-                continue
-            seen.add(key)
-            label = f"{asset.year} round {asset.round} ({asset.orig or '?'})"
-            check_id = f"pick_advance_limit_{asset.year}_{(asset.orig or '?').lower()}"
-            if asset.year > horizon:
-                checks.append(CheckResult(
-                    check=check_id, passed=False, level="error",
-                    message=(f"The {label} pick is {asset.year - horizon} year(s) beyond the 7-year "
-                             f"advance limit (§ 7.2) — picks may only be traded through {horizon}."),
-                ))
-            else:
-                checks.append(CheckResult(
-                    check=check_id, passed=True,
-                    message=f"The {label} pick is within the 7-year advance limit (§ 7.2, through {horizon}).",
-                ))
-    if not checks:
-        checks.append(CheckResult(
-            check="pick_advance_limit", passed=True,
-            message="No draft picks in this trade — § 7.2's 7-year advance limit doesn't apply.",
-        ))
-    return checks
-
-
-def _add_months(d: datetime, months: int) -> datetime:
-    """Calendar-correct month addition — no `dateutil` in this project, and
-    a fixed day-count (182/183?) is exactly the kind of rounding a real
-    six-month legal deadline shouldn't run on. Clamps the day for a target
-    month shorter than the source (Aug 31 + 6mo -> Feb 28/29, not Mar 3)."""
-    month_index = d.month - 1 + months
-    year = d.year + month_index // 12
-    month = month_index % 12 + 1
-    days_in_month = [31, 29 if (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)) else 28,
-                     31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    day = min(d.day, days_in_month[month - 1])
-    return d.replace(year=year, month=month, day=day)
-
-
 def _check_extension_trade_restriction(details: TradeIn, ctx: dict) -> list[CheckResult]:
     """§ 4.5 / § 6.2 rule 11: a player may not be traded for six months from
     the announcement date of an extension they signed. A trade-side check by
@@ -7306,15 +4652,6 @@ _TRADE_NUMBER_RE = re.compile(r"^\s*Trade\s+(\d+)\b")
 _TRADE_NUMBER_BY_TXN = {
     "a5389b095048afa5": "42",   # 2026-07-22 BKN/DEN/HOU, the original Trade 42 entry
 }
-
-
-def _trade_teams(details: dict) -> set[str]:
-    teams = {t.upper() for t in (details.get("teams") or []) if t}
-    for leg in details.get("transfers") or []:
-        for side in ("from_team", "to_team"):
-            if leg.get(side):
-                teams.add(leg[side].upper())
-    return teams
 
 
 def _trade_limit_counts(season: str, draft_days: set[str],
@@ -7943,46 +5280,6 @@ def _validate_trade(details: TradeIn, ctx: dict) -> list[CheckResult]:
     return checks
 
 
-def _option_window_check(bio: dict, year: str, date: str, name: str) -> CheckResult:
-    """§ 6.1's decision windows (league office, 2026-10-19). A rookie-scale
-    option opens with the league year before it (2026-11-02), is due by the
-    deadline and is declined automatically after it; any
-    other team option is decided between the end of the previous regular
-    season and June 30. An error, so an owner can't decide outside it; the
-    office can still force one through for a correction."""
-    w = season_calendar.team_option_window(bio, year)
-    when = lambda d: datetime.strptime(d, "%Y-%m-%d").strftime("%b %-d, %Y")
-    if w["kind"] == "rookie":
-        if w["opens"] and date < w["opens"]:
-            return CheckResult(check="option_window", passed=False, level="error",
-                               message=f"{name}'s {year} option is a rookie-scale option, decided from "
-                                       f"{when(w['opens'])} through {when(w['closes'])}. Only next "
-                                       f"season's options can be decided now (§ 6.1).")
-        if w["closes"] and date > w["closes"]:
-            return CheckResult(check="option_window", passed=False, level="error",
-                               message=f"{name}'s {year} option is a rookie-scale option, due by "
-                                       f"{when(w['closes'])}. That deadline has passed, and an option "
-                                       f"not exercised by then is declined automatically (§ 6.1).")
-        return CheckResult(check="option_window", passed=True,
-                           message=f"Rookie-scale option, due by {when(w['closes'])} (§ 6.1)."
-                                   if w["closes"] else "Rookie-scale option (§ 6.1).")
-    if w["closes"] and date > w["closes"]:
-        return CheckResult(check="option_window", passed=False, level="error",
-                           message=f"The window for {name}'s {year} option closed on {when(w['closes'])}, "
-                                   f"before that league year began (§ 6.1).")
-    if not w["opens"]:
-        return CheckResult(check="option_window", passed=False, level="warning",
-                           message=f"{name}'s {year} option can only be decided after the regular season "
-                                   f"ends, and that season's schedule isn't on file to check (§ 6.1).")
-    if date < w["opens"]:
-        return CheckResult(check="option_window", passed=False, level="error",
-                           message=f"{name}'s {year} option isn't a rookie-scale option, so it can only be "
-                                   f"decided once the regular season ends: from {when(w['opens'])} "
-                                   f"through {when(w['closes'])} (§ 6.1).")
-    return CheckResult(check="option_window", passed=True,
-                       message=f"Inside the option window, open through {when(w['closes'])} (§ 6.1).")
-
-
 def _validate_option(details: OptionDetails, ctx: dict) -> list[CheckResult]:
     """§ 6.1 option decisions. Real content is TEAM_OPT-only — a PLAYER_OPT
     decision is PDC's own judgment call (the team never even initiates it;
@@ -8171,19 +5468,6 @@ def _validate_convert_twoway(details: ConvertTwoWayDetails, ctx: dict) -> list[C
     return checks
 
 
-def _extension_contract_years(bio: dict) -> list[str]:
-    """Real contract years on the bio, sorted — the trailing UFA/RFA hold
-    season is not a contract year (§ 6.2 step 0 in extensions.md § 4): it
-    carries a salary figure (auto-filled by _autofill_fa_hold_amounts) that
-    would otherwise read as one more year of the deal."""
-    salaries = bio.get("salaries") or {}
-    cap_holds = bio.get("cap_holds") or {}
-    return sorted(
-        (s for s in salaries if _YEAR_RE_TXN.match(s) and cap_holds.get(s) not in _FA_HOLD_TYPES),
-        key=_season_start,
-    )
-
-
 def _player_awards(slug: str) -> dict[str, set]:
     """{season: {award, ...}} from the build's players/player_awards.csv."""
     path = DERIVED_DIR / "players" / "player_awards.csv"
@@ -8248,64 +5532,6 @@ def _extension_max_salary(slug: str, bio: dict, first_season: Optional[str], cur
         "cap_basis": cap_basis, "rose": rose,
         "rose_amount": int(cap * 0.30) if rose else None,
     }
-
-
-def _extension_year1_ceiling(prior_salary: int, cl: dict) -> dict:
-    """§ 6.2's Year 1 ceiling for a veteran extension: the greater of 140% of
-    prior salary and 140% of the first extended season's EAPS. One helper so
-    the validator and the fact sheet can't disagree. `ceiling` is None when
-    neither half can be priced."""
-    eaps = cl.get("eaps") or None
-    halves = []
-    if prior_salary:
-        halves.append((round(prior_salary * 1.4), "prior_salary",
-                       f"140% of prior salary ${prior_salary:,}"))
-    if eaps:
-        halves.append((round(eaps * 1.4), "eaps", f"140% of EAPS ${eaps:,}"))
-    best = max(halves, key=lambda h: h[0]) if halves else (None, None, None)
-    return {"ceiling": best[0], "basis": best[1], "label": best[2],
-            "eaps_set": bool(eaps), "eaps_estimate": bool(eaps and cl.get("is_estimate"))}
-
-
-def _extension_is_rookie_scale(bio: dict, frame: dict) -> bool:
-    """§ 6.3's rookie-scale bucket, read off the bio rather than taken from
-    the proposal: a first-round pick whose four-year rookie deal is the
-    contract being extended — the same test § 3.1 uses for RFA eligibility,
-    asked about the season after the deal ends."""
-    end = frame.get("contract_end")
-    return bool(end) and _finishes_rookie_scale(bio, _season_shift(end, 1))
-
-
-def _final_guaranteed_year(bio: dict) -> Optional[str]:
-    """§ 6.2 rule 10 / extensions.md § 4: the last season of the existing
-    contract the extension's new money starts after.
-
-    Rule 1: where `guaranteed` explicitly marks a season as fully guaranteed
-    (guaranteed[s] >= salaries[s]), the last such season wins.
-    Rule 2 (the one that actually fires — `guaranteed` is populated for a
-    sliver of bios): every remaining contract year is treated as guaranteed
-    **except** NON_GTD/PLAYER_OPT/TEAM_OPT years, ratified 2026-08-18
-    (poext-extension-pipeline.md D11/D2 in extensions.md § 9) — an option
-    year is treated as declined outright by the act of extending, so it never
-    counts as "guaranteed" and the extension supersedes it rather than
-    colliding with it.
-    """
-    contract_years = _extension_contract_years(bio)
-    if not contract_years:
-        return None
-    guaranteed = bio.get("guaranteed") or {}
-    fully_gtd = [
-        s for s in contract_years
-        if guaranteed.get(s) and _parse_dollar(guaranteed[s]) >= _parse_dollar((bio.get("salaries") or {}).get(s))
-    ]
-    if fully_gtd:
-        return max(fully_gtd, key=_season_start)
-    cap_holds = bio.get("cap_holds") or {}
-    non_gtd_types = {"NON_GTD", "PLAYER_OPT", "TEAM_OPT"}
-    candidate = [s for s in contract_years if cap_holds.get(s) not in non_gtd_types]
-    if candidate:
-        return max(candidate, key=_season_start)
-    return None
 
 
 def _extension_frame(slug: str, team: str, bio: dict, cur_season: str,
@@ -8373,83 +5599,6 @@ def _extension_frame(slug: str, team: str, bio: dict, cur_season: str,
         "first_extended_season": first_extended_season,
         "prior_salary": prior_salary,
     }
-
-
-def _extension_eligibility_check(player: str, frame: dict, cur_season: str,
-                                 attested_contract_start: Optional[str] = None) -> CheckResult:
-    """§ 6.2 rules 1-2, split out of `_validate_extension` so `GET
-    /api/poext/eligible` (routers/poext.py) can answer "who can we extend?"
-    off the exact same logic the validator runs — two copies of this is
-    precisely the kind of drift that made the ledger-vs-bio confusion in § 3.8
-    Bird tenure real in the first place."""
-    if frame["attestation_contradicted"]:
-        return CheckResult(
-            check="extension_eligibility", passed=False, level="error",
-            message=(
-                f"The attested start ({attested_contract_start}) is earlier than a "
-                f"real event on file for {player} with a different team — the attestation "
-                f"can't be right."
-            ),
-        )
-    if frame["contract_start"] is None or frame["contract_end"] is None:
-        return CheckResult(
-            check="extension_eligibility", passed=True, level="warning",
-            message=(
-                f"No acquisition record on file for {player} and no attested start date — "
-                f"contract length and position in the deal can't be verified (§ 6.2 rules 1-2). "
-                f"A gap here can only make a legal extension look ineligible, never the reverse."
-            ),
-        )
-    length_ok = frame["contract_length"] is not None and frame["contract_length"] >= 3
-    is_final_year = cur_season == frame["contract_end"]
-    is_year4_of_5 = frame["contract_length"] == 5 and frame["position_in_deal"] == 4
-    position_ok = is_final_year or is_year4_of_5
-    definite = frame["start_basis"] in ("ledger", "draft")
-    if length_ok and position_ok:
-        return CheckResult(
-            check="extension_eligibility", passed=True,
-            message=(
-                f"{frame['contract_length']}-year contract ({frame['contract_start']}–"
-                f"{frame['contract_end']}), extending from "
-                f"{'the final year' if is_final_year else 'Year 4 of 5'} "
-                f"(basis: {frame['start_basis']})."
-            ),
-        )
-    reason = []
-    if not length_ok:
-        reason.append(f"contract length is {frame['contract_length']} years, needs ≥ 3")
-    if not position_ok:
-        reason.append(
-            f"currently Year {frame['position_in_deal']} of {frame['contract_length']}, "
-            f"not the final year or Year 4 of a 5-year deal"
-        )
-    if definite:
-        return CheckResult(
-            check="extension_eligibility", passed=False, level="error",
-            message=f"§ 6.2 rules 1-2: {'; '.join(reason)} (basis: {frame['start_basis']}).",
-        )
-    # `trade_floor` (or any other non-definite basis): `contract_start` is a
-    # LOWER BOUND — the real start can only be the same or earlier, never
-    # later, since the acquiring team inherits accrual from before the
-    # earliest event on file. A longer real start means a longer real
-    # contract_length and a later real position_in_deal than what was just
-    # computed, so a *failing* derived check here is not evidence of
-    # ineligibility, only of a floor that isn't long enough to prove
-    # eligibility either. Must warn-and-allow, matching § 3.8's identical
-    # asymmetry for the same basis (nbn-api/CLAUDE.md, "Only over-declaration
-    # errors, and only from a definite basis") — this was the actual bug
-    # behind Tyler Herro (and 31 other real rostered players, checked
-    # 2026-08-21) reading as ineligible off a 2-year floor that was really
-    # "at least 2 years, true length unknown."
-    return CheckResult(
-        check="extension_eligibility", passed=True, level="warning",
-        message=(
-            f"§ 6.2 rules 1-2: can't confirm — {'; '.join(reason)}, but the start season "
-            f"is a lower bound (basis: {frame['start_basis']}), so the real contract could "
-            f"be longer and further along than what's visible. A floor here can only make "
-            f"a legal extension look ineligible, never the reverse."
-        ),
-    )
 
 
 def _extension_season(details: ExtensionDetails, ctx: dict) -> str:
@@ -9191,46 +6340,6 @@ def _validate_void_player(details: VoidPlayerDetails, ctx: dict) -> list[CheckRe
     return checks
 
 
-def _check_rookie_scale_terms(contract: ContractIn, scale: dict,
-                              bio: dict) -> CheckResult:
-    """§ 7.1: a first-rounder's deal is the scale — every year, to the dollar.
-
-    Deliberately **not** run through `_check_contract_raises`: the scale's own
-    Year 1 → Year 2 step lands a few hundred dollars either side of exactly 5%
-    (pick 1 of 2026 rises 5.0024%), so the § 3.9 ladder rejects roughly half of
-    the contracts § 7.1 prescribes. The scale comparison below is both stricter
-    and more useful — it names the year and the difference.
-    """
-    label = f"pick {bio.get('draft_pick')} of {bio.get('draft_year')}"
-    problems = []
-    for season, expected in scale["salaries"].items():
-        got = contract.salaries.get(season)
-        if got is None:
-            problems.append(f"{season}: missing (scale: {expected})")
-        elif _parse_dollar(got) != _parse_dollar(expected):
-            problems.append(f"{season}: {got} (scale: {expected})")
-    extra = sorted(set(contract.salaries) - set(scale["salaries"]))
-    for season in extra:
-        problems.append(f"{season}: not a year of the rookie scale")
-
-    wrong_tags = []
-    for season, want in scale["cap_holds"].items():
-        got = (contract.cap_holds or {}).get(season)
-        if got != want:
-            wrong_tags.append(f"{season} should be {want}, got {got or 'guaranteed'}")
-
-    if not problems and not wrong_tags:
-        return CheckResult(
-            check="rookie_scale", passed=True, level="info",
-            message=f"Terms match the § 7.1 rookie scale for {label}.",
-        )
-    detail = "; ".join(problems + wrong_tags)
-    return CheckResult(
-        check="rookie_scale", passed=False, level="error",
-        message=f"§ 7.1 sets this contract for {label} — {detail}.",
-    )
-
-
 def _qo_subject(details, bios: dict) -> tuple[Optional[dict], Optional[str], list[CheckResult]]:
     """(bio, team, failures) — the player must exist and be on a roster."""
     bio = bios.get(details.player)
@@ -9409,16 +6518,6 @@ def _validate_accept_qo(details: AcceptQualifyingOfferDetails, ctx: dict) -> lis
                      f"isn't set yet (§ 3.10). Say whether ${rec['amount']:,} is above or "
                      f"below it; the hold is a placeholder until the EAPS is set.")))
     return checks
-
-
-def _qo_contract(rec: dict, cur: str) -> ContractIn:
-    """The contract a qualifying offer signs: one year at its amount (or a
-    one-year two-way), rolling into a UFA hold."""
-    nxt = _season_after(cur)
-    if rec.get("two_way"):
-        # Two-way deals carry "$1" on the trailing hold so the FA pool sees it.
-        return ContractIn(type="two-way", salaries={cur: "$0", nxt: "$1"}, cap_holds={nxt: "UFA"})
-    return ContractIn(type="player", salaries={cur: f"${rec['amount']:,}"}, cap_holds={nxt: "UFA"})
 
 
 def _apply_qualifying_offer(details: QualifyingOfferDetails, txn_date: str, info: dict,
@@ -10248,10 +7347,6 @@ def delete_transaction(txn_id: str, info: dict = Depends(require_role("rosters")
     return {"deleted": txn_id}
 
 
-class TransactionPatch(BaseModel):
-    description: str
-
-
 @router.patch("/api/transactions/{txn_id}")
 def patch_transaction(txn_id: str, body: TransactionPatch, info: dict = Depends(require_role("rosters"))):
     with _txn_lock:
@@ -10782,12 +7877,6 @@ def validate_qualifying_offer(body: QualifyingOfferDetails):
                               _qualifying_offer_fact_sheet(body, ctx))
 
 
-class SelfQualifyingOfferIn(BaseModel):
-    player: str
-    action: Literal["extend", "withdraw"]
-    description: str = ""
-
-
 @router.post("/api/self/qualifying-offer")
 def self_qualifying_offer(body: SelfQualifyingOfferIn, info: dict = Depends(get_token_info)):
     """Owner extends or withdraws a qualifying offer from their own roster page
@@ -10840,11 +7929,6 @@ def self_qualifying_offer(body: SelfQualifyingOfferIn, info: dict = Depends(get_
         _append_transaction(txn)
     _notify_self_serve(txn)
     return {"ok": True, "transaction": txn, "checks": [c.model_dump() for c in checks]}
-
-
-class SelfRenounceIn(BaseModel):
-    player: str
-    description: str = ""
 
 
 def _notify_self_serve(txn: dict) -> None:
@@ -10931,14 +8015,6 @@ def self_renounce(body: SelfRenounceIn, info: dict = Depends(get_token_info)):
         _append_transaction(txn)
     _notify_self_serve(txn)
     return {"ok": True, "transaction": txn, "checks": [c.model_dump() for c in checks]}
-
-
-class SelfOptionIn(BaseModel):
-    player: str
-    decision: str            # "accept" or "decline"
-    cap_hold_type: Optional[str] = None  # decline only; left out, § 3.1 decides it
-    eaps_assumption: Optional[str] = None  # decline only, when the hold needs it (§ 3.10)
-    description: str = ""
 
 
 @router.post("/api/self/option")
@@ -11038,12 +8114,6 @@ def validate_release(body: ReleaseDetails):
     return _validation_result(_validate_release(body, ctx), {})
 
 
-class SelfReleaseIn(BaseModel):
-    player: str
-    stretch_years: Optional[int] = None
-    description: str = ""
-
-
 @router.post("/api/self/release")
 def self_release(body: SelfReleaseIn, info: dict = Depends(get_token_info)):
     """Owner-initiated release from their own team's roster page (§ 5.1).
@@ -11120,130 +8190,6 @@ def self_release(body: SelfReleaseIn, info: dict = Depends(get_token_info)):
     return {"ok": True, "transaction": txn, "checks": [c.model_dump() for c in checks]}
 
 
-def _current_two_way_deal(bio: dict) -> Optional[dict]:
-    """The two-way deal a player is on now, as ``{salaries, cap_holds}``.
-
-    The last `contracts` entry when there is one. About half the league's
-    two-ways were signed before the write path recorded `contracts`, so for
-    those the deal is read off the bio's own lines instead: the trailing
-    UFA/RFA hold, plus the unbroken run of $0 seasons just before it (a
-    two-way pays $0, § 2.2, so the first season with real money is an older
-    deal). Two back-to-back two-ways read as one long deal this way; the
-    caller's 2-year cap refuses that rather than guessing. None when there
-    is nothing to read.
-    """
-    contracts = bio.get("contracts") or []
-    if contracts:
-        last = contracts[-1]
-        return {"salaries": last.get("salaries") or {}, "cap_holds": last.get("cap_holds") or {}}
-    salaries = bio.get("salaries") or {}
-    holds = bio.get("cap_holds") or {}
-    seasons = sorted(salaries)
-    while seasons and holds.get(seasons[-1]) in _FA_HOLD_TYPES:
-        seasons.pop()
-    trailing = sorted(set(salaries) - set(seasons))
-    deal = []
-    while seasons and _parse_dollar(salaries[seasons[-1]]) == 0:
-        deal.insert(0, seasons.pop())
-    if not deal:
-        return None
-    return {"salaries": {y: salaries[y] for y in deal + trailing},
-            "cap_holds": {y: holds[y] for y in deal + trailing if y in holds}}
-
-
-def _self_convert_twoway_contract(bio: dict, player: str, cap_levels: dict, cur_season: str) -> dict[str, str]:
-    """Builds the minimum-scale standard contract a self-serve two-way
-    conversion would submit — N years (N = the player's existing two-way
-    deal's own length, § 2.2-capped at 2) at the minimum for their tier.
-    Raises HTTPException on anything that makes this player ineligible for
-    the self-serve path at all. Shared by the endpoint and its own preview,
-    so the roster page can show the exact figures that would be submitted
-    rather than a client-side re-derivation.
-
-    Each season is priced via `_min_salary_for` with no `years_experience`
-    declared on the built contract, so the figure comes from the
-    draft-year-inferred tier for *that* season specifically, which climbs
-    with the calendar the same way a declared tier climbs per contract year
-    (`_contract_years_exp`).
-    """
-    if bio.get("type") != "two-way":
-        raise HTTPException(status_code=422, detail=f"{player!r} is not on a two-way contract.")
-
-    prior = _current_two_way_deal(bio)
-    if not prior:
-        raise HTTPException(
-            status_code=422,
-            detail=(f"Can't tell how long {player!r}'s two-way deal is, so there's no length to "
-                    "match. Ask the rosters committee to enter the conversion."),
-        )
-    # A trailing UFA/RFA line is the hold the deal rolls into, not a contract
-    # year — a 2-year two-way with its RFA hold has three salary entries.
-    prior_holds = prior["cap_holds"]
-    prior_length = sum(1 for y in prior["salaries"] if prior_holds.get(y) not in _FA_HOLD_TYPES)
-    if prior_length not in (1, 2):
-        raise HTTPException(
-            status_code=422,
-            detail=(f"{player!r}'s two-way deal reads as {prior_length} years — § 2.2 caps a "
-                    "two-way at 2, so there's no real length to match. Ask the rosters committee "
-                    "to enter the conversion."),
-        )
-
-    seasons = [cur_season] if prior_length == 1 else [cur_season, _season_after(cur_season)]
-    salaries: dict[str, str] = {}
-    for season in seasons:
-        expected = _min_salary_for(bio, season, cap_levels, contract=None)
-        if expected is None:
-            raise HTTPException(
-                status_code=422,
-                detail=(f"Can't confirm the minimum salary for {season} — {player}'s years of NBA "
-                        "experience can't be established (no draft year on file). Ask the rosters "
-                        "committee to enter it, or use the PDC pitch-and-bid process (§ 2.2)."),
-            )
-        salaries[season] = f"${expected:,}"
-    return salaries
-
-
-# § 2.2: the second year of a converted 2-year deal may be fully guaranteed,
-# a team option or non-guaranteed. The key is what the owner picks; the value
-# is the year's cap_holds tag (None for plain guaranteed money).
-SELF_CONVERT_YEAR2_TERMS = {"guaranteed": None, "team_option": "TEAM_OPT", "non_guaranteed": "NON_GTD"}
-
-
-def _self_convert_twoway_holds(bio: dict, salaries: dict[str, str],
-                               year2: str = "guaranteed") -> dict[str, str]:
-    """The new deal's cap_holds: the Year 2 term (§ 2.2), plus the trailing
-    UFA/RFA hold the converted deal rolls into — the same tag the two-way deal
-    ended in, moved to the season after the new deal's last year.
-    `_apply_convert_twoway` replaces the bio's `cap_holds` with the new
-    contract's, so a deal built without the trailing hold drops it entirely.
-    Its amount is left to `_autofill_fa_hold_amounts`, which prices a hold
-    coming off a minimum contract at the minimum (§ 3.10)."""
-    if year2 not in SELF_CONVERT_YEAR2_TERMS:
-        raise HTTPException(status_code=422, detail=f"Unknown Year 2 term {year2!r}.")
-    holds: dict[str, str] = {}
-    tag = SELF_CONVERT_YEAR2_TERMS[year2]
-    if tag:
-        if len(salaries) != 2:
-            raise HTTPException(
-                status_code=422,
-                detail="Only the second year of a 2-year conversion can be a team option or non-guaranteed (§ 2.2).",
-            )
-        holds[max(salaries)] = tag
-    prior_holds = (_current_two_way_deal(bio) or {}).get("cap_holds") or {}
-    trailing = [t for _, t in sorted(prior_holds.items()) if t in _FA_HOLD_TYPES]
-    if trailing:
-        holds[_season_after(max(salaries))] = trailing[-1]
-    return holds
-
-
-def _self_convert_twoway_guarantee_dates(cap_holds: dict[str, str]) -> dict[str, str]:
-    """A non-guaranteed Year 2 (§ 2.2) becomes guaranteed on January 10 of
-    that season at the latest. The team can guarantee it sooner with a
-    `guarantee` transaction; a release before the date leaves no dead cap
-    for that year (§ 5.1)."""
-    return {season: f"20{season[3:]}-01-10" for season, tag in cap_holds.items() if tag == "NON_GTD"}
-
-
 @router.get("/api/self/convert_twoway/preview/{slug}")
 def preview_self_convert_twoway(slug: str, year2: str = "guaranteed"):
     """Read-only preview of what `POST /api/self/convert_twoway` would
@@ -11282,12 +8228,6 @@ def preview_self_convert_twoway(slug: str, year2: str = "guaranteed"):
         "cap_holds": cap_holds,
         "guarantee_dates": guarantee_dates,
     }
-
-
-class SelfConvertTwoWayIn(BaseModel):
-    player: str
-    description: str = ""
-    year2: str = "guaranteed"   # a SELF_CONVERT_YEAR2_TERMS key
 
 
 @router.post("/api/self/convert_twoway")
@@ -11436,11 +8376,6 @@ def preview_self_sign_pick(slug: str):
     }
 
 
-class SelfSignPickIn(BaseModel):
-    player: str
-    description: str = ""
-
-
 @router.post("/api/self/sign_pick")
 def self_sign_pick(body: SelfSignPickIn, info: dict = Depends(get_token_info)):
     """Owner-initiated Article VII rookie-scale signing from their own
@@ -11518,13 +8453,6 @@ def validate_stash(body: StashDetails):
     if body.player not in ctx["bios"]:
         raise HTTPException(400, f"Unknown player '{body.player}'.")
     return _validation_result(_validate_stash(body, ctx), {})
-
-
-class SelfStashIn(BaseModel):
-    player: str
-    basis: Literal["7.1", "7.4"]
-    note: str = ""
-    description: str = ""
 
 
 @router.post("/api/self/stash")

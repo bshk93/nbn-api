@@ -53,6 +53,7 @@ from . import game_highs as gh
 from .constants import DATA_DIR, VALID_TEAMS
 from .names import player_name
 from .storage import read_csv
+from .constants import SITE_DIR as _SITE_DIR
 
 router = APIRouter()
 
@@ -63,7 +64,7 @@ ODDS_LO, ODDS_HI = 0.25, 0.75   # playoff odds this uncertain are a story
 MAX_STORIES = 3
 LAST_NIGHT_LOOKBACK = 7          # days back to look for the latest box scores
 
-SITE_DIR = Path(os.environ.get("NBN_SITE_DIR", "/var/www/nbn.today"))
+SITE_DIR = _SITE_DIR  # constants.SITE_DIR
 TEAM_COLORS_FILE = SITE_DIR / "build" / "team-colors.json"
 
 
@@ -421,7 +422,7 @@ def build(day: str) -> dict:
 
 
 _cache: dict[tuple, dict] = {}
-_lock = threading.Lock()
+_tonight_lock = threading.Lock()
 
 
 def _mtime(p: Path) -> int:
@@ -453,12 +454,12 @@ def tonight(day: Optional[str] = None) -> dict:
             from .league_time import league_today_str
             day = league_today_str()
     key = _cache_key(day)
-    with _lock:
+    with _tonight_lock:
         hit = _cache.get(key)
     if hit is not None:
         return hit
     data = build(day)
-    with _lock:
+    with _tonight_lock:
         if len(_cache) > 16:
             _cache.clear()
         _cache[key] = data

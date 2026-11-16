@@ -87,7 +87,7 @@ _PAID_THEMES = [
     for abbr in LIVE_TEAM_THEMES
 ]
 
-_lock = threading.Lock()
+_themes_lock = threading.Lock()
 
 
 def _catalog() -> list[dict]:
@@ -159,7 +159,7 @@ def unlock_theme(theme_id: str, info: dict = Depends(get_token_info)):
     # One lock across the whole operation: the check for "already owned" and
     # the charge have to be atomic, or a double-clicked button pays twice for
     # the same theme.
-    with _lock:
+    with _themes_lock:
         members = load_members()
         if name not in members:
             raise HTTPException(status_code=404, detail="Member not found")
