@@ -1,9 +1,10 @@
-"""Trading-block names match without regard to case.
+"""Trading-block names match without regard to case, apostrophes or periods.
 
-The block stores display names. Older entries carry a hand-cased spelling
-("Jared McCain") where `_display_name` now gives "Jared Mccain", and an exact
-match treated them as two players: GSW ended up with McCain listed twice, and a
-trade would have scrubbed only one of them.
+The block stores display names, written over the years by three casers:
+hand-typed ("Jared McCain"), the old title-case ("Jared Mccain", "Royce
+Oneale") and names.py, which `_display_name` uses since 2026-11-16 ("Royce
+O'Neale"). An exact match treated them as two players: GSW ended up with McCain
+listed twice, and a trade would have scrubbed only one of them.
 
 Every read and write goes through patched loaders, so nothing touches the live
 data directory.
@@ -28,7 +29,8 @@ def check(name, cond, extra=""):
         FAILS.append(name)
 
 
-BIOS = {"mccain-jared": {"name": "MCCAIN, JARED"}, "okoro-isaac": {"name": "OKORO, ISAAC"}}
+BIOS = {"mccain-jared": {"name": "MCCAIN, JARED"}, "okoro-isaac": {"name": "OKORO, ISAAC"},
+        "oneale-royce": {"name": "ONEALE, ROYCE"}}
 STORE: dict = {}
 INFO = {"name": "Tester", "roles": ["admin"]}
 
@@ -36,6 +38,12 @@ rp.load_trading_block = lambda: {t: rp._normalize_team_block(v) for t, v in STOR
 rp.save_trading_block = lambda data: STORE.update(data)
 rp.log_write = lambda *a, **k: None
 rp.read_csv = lambda path: (["SLUG"], [{"SLUG": s} for s in BIOS])
+# _block_player_name checks the roster file exists before reading it: give it
+# one in a temp dir, never the real data dir.
+import tempfile  # noqa: E402
+_tmp = Path(tempfile.mkdtemp())
+(_tmp / "gsw-roster.csv").write_text("SLUG\n")
+rp.DATA_DIR = _tmp
 pl.load_player_bios = lambda: BIOS
 
 
@@ -52,7 +60,15 @@ print("\nper-player add")
 reset("Jared McCain")
 rp.put_trading_block_player("GSW", "mccain-jared", rp.TradingBlockPlayerIn(notes="new"), INFO)
 check("re-adding updates the old entry, not a second one", len(gsw_names()) == 1, gsw_names())
-check("the entry takes the current spelling", gsw_names() == ["Jared Mccain"], gsw_names())
+check("the entry takes the current spelling", gsw_names() == ["Jared McCain"], gsw_names())
+
+reset("Jared Mccain")
+rp.put_trading_block_player("GSW", "mccain-jared", rp.TradingBlockPlayerIn(notes="new"), INFO)
+check("an old title-cased entry is the same player", gsw_names() == ["Jared McCain"], gsw_names())
+
+reset("Royce Oneale")
+rp.put_trading_block_player("GSW", "oneale-royce", rp.TradingBlockPlayerIn(notes="new"), INFO)
+check("an entry without the apostrophe is the same player", gsw_names() == ["Royce O'Neale"], gsw_names())
 
 print("\nper-player remove")
 reset("Jared McCain", "Isaac Okoro")

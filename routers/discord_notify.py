@@ -34,7 +34,7 @@ from typing import Optional
 from . import discord_transport as transport
 from .players import load_player_bios, _display_name
 from .roster_picks import load_team_state, get_season_state
-from .storage import _season_for_date
+from .storage import _season_for_date, _parse_dollar
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +90,7 @@ LEVEL_LABELS = {
 
 
 def _dollars(v) -> int:
-    return int("".join(c for c in str(v) if c.isdigit()) or 0)
+    return _parse_dollar(v)
 
 
 # Mirrors teams/team.js `CONTRACT_TAGS` / `summarizeContract` so a deal reads the

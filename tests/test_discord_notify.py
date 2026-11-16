@@ -220,7 +220,7 @@ dn.notify_transaction(txn(
 e = SENT[0]
 check("trade title lists both teams", e["title"] == "GSW · LAL — Trade", e["title"])
 check("trade groups by receiving team", "**GSW** receives:" in e["description"] and "**LAL** receives:" in e["description"])
-check("trade resolves player names", "Stephen Curry" in e["description"] and "Lebron James" in e["description"])
+check("trade resolves player names", "Stephen Curry" in e["description"] and "LeBron James" in e["description"])
 check("trade shows pick protection", "top-4 prot." in e["description"], e["description"])
 check("no Player field on a trade", not any(f["name"] == "Player" for f in e["fields"]))
 

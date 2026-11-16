@@ -54,6 +54,7 @@ from stats_build.pipeline import player_slug
 from . import season_calendar
 from .constants import DATA_DIR, TRANSACTIONS_FILE, VALID_TEAMS
 from .league_time import league_today_str
+from season_clock import season_shift
 
 FIRST_NBN_YEAR = 2020
 
@@ -99,8 +100,7 @@ def _described_length(description: Optional[str]) -> Optional[int]:
 
 
 def _shift(season: str, n: int) -> str:
-    a = int(season[:2]) + n
-    return f"{a % 100:02d}-{(a + 1) % 100:02d}"
+    return season_shift(season, n)
 
 
 def _mtime(path) -> int:
