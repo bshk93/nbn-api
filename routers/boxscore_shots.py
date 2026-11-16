@@ -82,6 +82,7 @@ def _read_meta(item_dir: Path) -> Optional[dict]:
     try:
         return json.loads((item_dir / "meta.json").read_text())
     except Exception:
+        logger.warning("unreadable %s; skipping this upload", item_dir / "meta.json", exc_info=True)
         return None
 
 
