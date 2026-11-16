@@ -389,7 +389,7 @@ def _refuse_unlock_over_txn(txn_id: Optional[str]):
 def _append_transaction(txn: dict):
     txns = _load_transactions()
     txns.append(txn)
-    TRANSACTIONS_FILE.write_text(json.dumps(txns, indent=2))
+    _save_json(TRANSACTIONS_FILE, txns)
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
@@ -1314,7 +1314,7 @@ def _apply_rescind_renounce(details: "RescindRenounceDetails", txn_date: str, in
     # state the player has picked up since). The transactions page reads this
     # to drop the undo button.
     src["details"]["_rescinded"] = True
-    TRANSACTIONS_FILE.write_text(json.dumps(txns, indent=2))
+    _save_json(TRANSACTIONS_FILE, txns)
 
     log_write(info, f"TXN rescind_renounce — {player} restored to {team} (undoes {details.txn_id})")
     return team, player
@@ -4443,7 +4443,7 @@ def load_room_zone_baseline() -> dict:
 
 
 def save_room_zone_baseline(data: dict):
-    ROOM_ZONE_BASELINE_FILE.write_text(json.dumps(data, indent=2))
+    _save_json(ROOM_ZONE_BASELINE_FILE, data)
 
 
 def snapshot_room_zone_baseline(season: str, within_days: int = 7) -> list[str]:
@@ -10174,7 +10174,7 @@ def delete_transaction(txn_id: str, info: dict = Depends(require_role("rosters")
         filtered = [t for t in txns if t.get("id") != txn_id]
         if len(filtered) == len(txns):
             raise HTTPException(status_code=404, detail="Transaction not found")
-        TRANSACTIONS_FILE.write_text(json.dumps(filtered, indent=2))
+        _save_json(TRANSACTIONS_FILE, filtered)
     log_write(info, f"TXN delete — {txn_id}")
     return {"deleted": txn_id}
 
@@ -10190,7 +10190,7 @@ def patch_transaction(txn_id: str, body: TransactionPatch, info: dict = Depends(
         for t in txns:
             if t.get("id") == txn_id:
                 t["description"] = body.description
-                TRANSACTIONS_FILE.write_text(json.dumps(txns, indent=2))
+                _save_json(TRANSACTIONS_FILE, txns)
                 log_write(info, f"TXN note edit — {txn_id}")
                 return t
         raise HTTPException(status_code=404, detail="Transaction not found")

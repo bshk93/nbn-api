@@ -127,7 +127,7 @@ def _read_meta(item_dir: Path) -> Optional[dict]:
 
 
 def _write_meta(item_dir: Path, meta: dict) -> None:
-    (item_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+    _save_json(item_dir / "meta.json", meta)
 
 
 def _items(root: Path) -> list[tuple[Path, dict]]:
