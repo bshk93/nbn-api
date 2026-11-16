@@ -641,6 +641,12 @@ def _player_line(p: dict, bold: bool) -> str:
 
 
 def _compute_starting_five(players: list[dict]) -> list[dict | None]:
+    """Port of computeStartingFive in nbn-today/teams/lineup.js, which is the
+    rule: most slots filled, then highest total OVR, then fewest steps off each
+    player's primary position (`primary`, else the first of `pos_list`), then
+    OVR slot by slot. tests/test_js_mirrors.py runs both on the same rosters.
+    Until 2026-11-16 this compared slot by slot straight after the fill count,
+    so Discord could start a different five from the team page."""
     def ovr_of(p):
         try:
             return float(p.get("ovr") or 0)
@@ -650,12 +656,18 @@ def _compute_starting_five(players: list[dict]) -> list[dict | None]:
     candidates = []
     for slot in DEPTH_SLOTS:
         elig = [p for p in players if slot in (p.get("pos_list") or [])]
-        elig.sort(key=lambda p: -ovr_of(p))
+        elig.sort(key=lambda p: -ovr_of(p))   # stable, like Array.sort
         candidates.append(elig[:len(DEPTH_SLOTS)])
+
+    def off_pos(p, i):
+        primary = p.get("primary") or ((p.get("pos_list") or [None])[0])
+        return abs(DEPTH_SLOTS.index(primary) - i) if primary in DEPTH_SLOTS else 0
 
     def score_of(assign):
         return (sum(1 for p in assign if p is not None),
-                tuple(ovr_of(p) if p is not None else -1 for p in assign))
+                sum(ovr_of(p) for p in assign if p is not None),
+                -sum(off_pos(p, i) for i, p in enumerate(assign) if p is not None),
+                *(ovr_of(p) if p is not None else -1 for p in assign))
 
     used: set[int] = set()
     cur: list[dict | None] = [None] * len(DEPTH_SLOTS)
