@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import Optional
 
 from .constants import PENDING_BOXSCORES_DIR, KEPT_BOXSCORES_DIR, logger
+from .storage import _save_json
 
 KEEP_DAYS = 14
 MAX_IMAGES_PER_SIDE = 4
@@ -85,7 +86,7 @@ def _read_meta(item_dir: Path) -> Optional[dict]:
 
 
 def _write_meta(item_dir: Path, meta: dict) -> None:
-    (item_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+    _save_json(item_dir / "meta.json", meta)
 
 
 def images_of(meta: dict) -> dict:

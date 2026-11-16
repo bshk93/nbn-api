@@ -31,6 +31,15 @@ jobs:
       - name: Install
         working-directory: nbn-api
         run: python -m venv venv && venv/bin/pip install -r requirements.txt
+      - name: No undefined names
+        # A name used only inside a function fails when the function runs, not
+        # on import, so nothing else catches it: google_sheets.py once called
+        # os.open without importing os. pyflakes is a CI tool only, not a
+        # requirement of the service.
+        working-directory: nbn-api
+        run: |
+          pip install -q pyflakes
+          ! python -m pyflakes routers stats_build picks_conveyance tests *.py | grep -E "undefined name|referenced before assignment"
       - name: Test
         working-directory: nbn-api
         run: venv/bin/python -m tests.run_all

@@ -145,7 +145,7 @@ def put_cap_level(season: str, body: CapLevel, info: dict = Depends(require_role
     levels = json.loads(CAP_LEVELS_FILE.read_text()) if CAP_LEVELS_FILE.exists() else {}
     was_estimate = bool((levels.get(season) or {}).get("is_estimate"))
     levels[season] = body.model_dump()
-    CAP_LEVELS_FILE.write_text(json.dumps(levels, indent=2))
+    _save_json(CAP_LEVELS_FILE, levels)
     log_write(info, f"PUT cap-levels/{season} — cap={body.cap} apron1={body.apron1} apron2={body.apron2} hard_cap={body.hard_cap} ntmle={body.ntmle_amount} tmle={body.tmle_amount} bae={body.bae_amount} room={body.room_amount} eaps={body.eaps} is_estimate={body.is_estimate}")
 
     result = dict(levels[season])
@@ -331,11 +331,11 @@ def put_awards_config(season: str, body: AwardsSeasonConfig, info: dict = Depend
             raise HTTPException(status_code=422, detail=str(e))
         history = json.loads(AWARDS_HISTORY_FILE.read_text()) if AWARDS_HISTORY_FILE.exists() else {}
         history[season] = season_awards
-        AWARDS_HISTORY_FILE.write_text(json.dumps(history, indent=2))
+        _save_json(AWARDS_HISTORY_FILE, history)
 
     config = json.loads(AWARDS_CONFIG_FILE.read_text()) if AWARDS_CONFIG_FILE.exists() else {}
     config[season] = body.model_dump()
-    AWARDS_CONFIG_FILE.write_text(json.dumps(config, indent=2))
+    _save_json(AWARDS_CONFIG_FILE, config)
     log_write(info, f"PUT awards-config/{season} — revealed={body.revealed}")
     return config[season]
 
@@ -371,7 +371,7 @@ def get_awards_ballots(season: str, info: Optional[dict] = None, authorization: 
 @router.put("/api/awards-ballots/{season}")
 def put_awards_ballots(season: str, body: dict, info: dict = Depends(require_role("rosters"))):
     path = _awards_ballots_path(season)
-    path.write_text(json.dumps(body, indent=2))
+    _save_json(path, body)
     log_write(info, f"PUT awards-ballots/{season}")
     return {"ok": True}
 
@@ -436,7 +436,7 @@ def put_team_ballot(season: str, team: str, body: dict, authorization: Optional[
     _check_sixth_men(season, body)
     ballots = json.loads(path.read_text()) if path.exists() else {}
     ballots[team] = body
-    path.write_text(json.dumps(ballots, indent=2))
+    _save_json(path, ballots)
     log_write(info, f"PUT awards-ballots/{season}/{team}")
     return {"ok": True, "team": team}
 
@@ -453,7 +453,7 @@ def delete_team_ballot(season: str, team: str, info: dict = Depends(require_role
     if team not in ballots:
         raise HTTPException(status_code=404, detail=f"No ballot for {team}")
     del ballots[team]
-    path.write_text(json.dumps(ballots, indent=2))
+    _save_json(path, ballots)
     log_write(info, f"DELETE awards-ballots/{season}/{team}")
     return {"ok": True}
 
@@ -471,7 +471,7 @@ def get_rookie_scale():
 def put_rookie_scale(year: int, body: list[list[int]], info: dict = Depends(require_role("rosters"))):
     scale = json.loads(ROOKIE_SCALE_FILE.read_text()) if ROOKIE_SCALE_FILE.exists() else {}
     scale[str(year)] = body
-    ROOKIE_SCALE_FILE.write_text(json.dumps(scale, indent=2))
+    _save_json(ROOKIE_SCALE_FILE, scale)
     log_write(info, f"PUT rookie-scale/{year} — {len(body)} picks")
     return scale[str(year)]
 

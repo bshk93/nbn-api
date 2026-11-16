@@ -96,11 +96,12 @@ from .bets import DISCORD_BETS_WEBHOOK
 from . import wallet
 
 import httpx
+from pathlib import Path
 
 from .game_highs import iter_raw_files
 
 
-def _raw_files() -> list[tuple[str, bool, "Path"]]:
+def _raw_files() -> list[tuple[str, bool, Path]]:
     """(season, is_playoff, path) for every raw box score file on disk."""
     return list(iter_raw_files(DATA_DIR))
 
@@ -825,7 +826,6 @@ def _compute_invest_stats(member: str, all_trades: list) -> dict:
 @router.get("/api/invest/stats")
 def get_all_invest_stats():
     """Investment stats for every member in one pass (used by the members list)."""
-    from .auth import load_members
     all_members = load_members()
     all_trades = _load_trades()
     return {m: _compute_invest_stats(m, all_trades) for m in all_members}
@@ -833,7 +833,6 @@ def get_all_invest_stats():
 
 @router.get("/api/invest/stats/{member}")
 def get_member_invest_stats(member: str):
-    from .auth import load_members
     all_members = load_members()
     if member not in all_members:
         raise HTTPException(status_code=404, detail=f"Member '{member}' not found")
