@@ -14,6 +14,10 @@ Three signals, each read straight from the kernel or the API:
     get parked there and the site stays fast. It only matters once RAM is
     short too, because then the next spike has nowhere to go.
   * the API taking longer than ``SLOW_SECS`` to answer (or not answering)
+  * the data backup (``nbs-snapshot``) making no commit for ``BACKUP_STALE_HOURS``.
+    The data dir changes every few minutes, so a quiet backup is a stuck one.
+    It stalled for 13 days once (2026-11-03 to 2026-11-16, the mass-delete
+    guard tripping on every run) and only its own journal said so.
 
 One bad reading is noise (a build spikes and recovers), so it alerts only after
 ``STRIKES`` checks in a row, posts at most once per ``COOLDOWN``, and posts once
@@ -48,6 +52,8 @@ SWAP_AVAIL_MB = 300
 SLOW_SECS = 5.0
 STRIKES = 2
 COOLDOWN = 3600
+BACKUP_STALE_HOURS = 12
+BACKUP_GIT_DIR = "/var/lib/nbs-backup.git"
 API_URL = "http://127.0.0.1:8001/api/build/status"
 STATE = Path.home() / ".local/state/nbn/box-health.json"
 
@@ -86,6 +92,16 @@ def api_memory_mb() -> tuple[int, int] | None:
     return vals.get("VmRSS", 0), vals.get("VmSwap", 0)
 
 
+def backup_age_hours() -> float | None:
+    """Hours since the newest data backup commit, or None if unreadable."""
+    try:
+        out = subprocess.run(["git", "--git-dir", BACKUP_GIT_DIR, "log", "-1", "--format=%ct"],
+                             capture_output=True, text=True, timeout=10).stdout.strip()
+        return (time.time() - int(out)) / 3600
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
 def top_processes(n: int = 5) -> list[str]:
     out = subprocess.run(["ps", "-eo", "rss,comm,args", "--sort=-rss", "--no-headers"],
                          capture_output=True, text=True).stdout.splitlines()
@@ -113,6 +129,11 @@ def reading() -> tuple[list[str], str]:
         problems.append("the API did not answer")
     elif lat > SLOW_SECS:
         problems.append(f"the API took {lat:.1f}s to answer")
+    age = backup_age_hours()
+    if age is None:
+        problems.append("can't read the data backup's history")
+    elif age > BACKUP_STALE_HOURS:
+        problems.append(f"no data backup for {age:.0f} hours: see `journalctl -u nbs-snapshot`")
 
     api_mem = api_memory_mb()
     summary = (f"swap {swap_pct:.0f}%, RAM available {avail_mb} MB, API "
@@ -155,11 +176,11 @@ def main() -> int:
         mention = f"<@{DISCORD_ADMIN_ID}> " if DISCORD_ADMIN_ID else ""
         body = "\n".join(f"• {p}" for p in problems)
         procs = "\n".join(top_processes())
-        if post(f"{mention}**Server is low on resources** ({summary})\n{body}\n"
+        if post(f"{mention}**Server check failed** ({summary})\n{body}\n"
                 f"Biggest processes:\n```\n{procs}\n```"):
             last, alerting = now, True
     elif not problems and alerting:
-        if post(f"Server resources are back to normal ({summary})."):
+        if post(f"Server checks are back to normal ({summary})."):
             alerting = False
 
     STATE.parent.mkdir(parents=True, exist_ok=True)
