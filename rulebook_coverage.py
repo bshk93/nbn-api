@@ -53,8 +53,14 @@ _ROUTERS = Path(__file__).resolve().parent / "routers"
 # the only one with a `_VALIDATORS` table to walk; `waivers.py` carries the one
 # § 1.5 claim restriction, and scanning it is what stops that check from being
 # invisible here purely because it lives next door.
-SOURCES = [_ROUTERS / "transactions.py", _ROUTERS / "waivers.py"]
-TRANSACTIONS_PY = SOURCES[0]
+#
+# transactions.py and the routers/txn/ package it was split into (2026-11-16)
+# are scanned as ONE call graph: a validator in transactions.py reaches the
+# checks it calls in txn/rules.py or txn/picks.py. Scanned file by file, those
+# checks would still be found, but no transaction type would reach them.
+TRANSACTIONS_PY = _ROUTERS / "transactions.py"
+TRANSACTION_GROUP = [TRANSACTIONS_PY, *sorted((_ROUTERS / "txn").glob("*.py"))]
+SOURCES = [TRANSACTION_GROUP, _ROUTERS / "waivers.py"]
 
 _SECTION_RE = re.compile(r"§\s*([0-9]+\.[0-9]+[a-z]?)")
 
@@ -304,12 +310,19 @@ def extract(sources: list[Path] | None = None) -> dict:
 
 
 def _scan(source, cited, origin, by_type, validators, unresolved) -> None:
-    tree = ast.parse(source.read_text())
-    module = f"{source.parent.name}/{source.name}"
-
+    """`source` is one file, or a list of files scanned as one call graph."""
+    group = source if isinstance(source, (list, tuple)) else [source]
     emits: dict[str, set[str]] = collections.defaultdict(set)   # func -> ids
     calls: dict[str, set[str]] = collections.defaultdict(set)   # func -> callees
+    trees = []
+    for path in group:
+        trees.append(ast.parse(path.read_text()))
+        _scan_file(path, trees[-1], emits, calls, cited, origin, unresolved)
+    _reach(trees, emits, calls, by_type, validators)
 
+
+def _scan_file(source, tree, emits, calls, cited, origin, unresolved) -> None:
+    module = str(source.relative_to(_ROUTERS.parent))
     for fn in [n for n in ast.walk(tree)
                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
         # `check=check_name` where check_name was assigned a literal (or one
@@ -348,11 +361,15 @@ def _scan(source, cited, origin, by_type, validators, unresolved) -> None:
                 cited[cid] |= sections
                 origin[cid].add(module)
 
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and any(
-                isinstance(t, ast.Name) and t.id == "_VALIDATORS" for t in node.targets):
-            for k, v in zip(node.value.keys, node.value.values):
-                validators[k.value] = v.id
+
+
+def _reach(trees, emits, calls, by_type, validators) -> None:
+    for tree in trees:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and any(
+                    isinstance(t, ast.Name) and t.id == "_VALIDATORS" for t in node.targets):
+                for k, v in zip(node.value.keys, node.value.values):
+                    validators[k.value] = v.id
 
     known = set(calls) | set(emits)
 
