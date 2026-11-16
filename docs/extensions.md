@@ -266,7 +266,7 @@ These are real, and two of them gate correctness rather than polish:
    but it's no longer an open-question risk, just a case where rule 2 fires far
    more often than rule 1.
 3. ~~`/api/rookie-scale` returns `{}`~~ **CLOSED.** Populated for 2025 and 2026
-   via `build/load_rookie_scale.py`. This item was stale — see
+   via `nbn-today/build/load_rookie_scale.py`. This item was stale — see
    `nbn-today/docs/poext-extension-pipeline.md` § 9 blocker 5.
 4. **No regular-season start date** anywhere in the system. Blocks § 6.3
    windows; identical gap to the proration item.

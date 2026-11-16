@@ -1,5 +1,12 @@
 # Picks conveyance — overwrite/collision hardening (spec)
 
+> **Historical design record (banner added 2026-11-16).** Code comments cite this
+> file by section, so it stays at this path. It describes the model as designed and
+> cut over in July 2026, and has not been kept current: some functions and kinds it
+> names no longer exist (`register_binary_chain`). For how a pick reads today, use nbn-today's
+> CLAUDE.md § Draft pick; for how to correct one, `docs/picks.md`. When this file
+> and the code disagree, the code is right.
+
 **Status: fully built, 2026-07-23** — all items A–F shipped the same day this
 spec was written (commits: A `beadddf`-and-earlier, B `1979329`, C/D `ee71add`,
 E `c8bfde2`, F `45b85dc`). Companion to `picks-conveyance.md` (the model) and
