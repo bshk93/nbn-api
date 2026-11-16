@@ -1,6 +1,7 @@
 import logging
 import sys
 import threading
+import os
 from pathlib import Path
 
 logging.basicConfig(
@@ -27,7 +28,10 @@ PENDING_BOXSCORES_DIR  = DATA_DIR / "pending-boxscores"
 KEPT_BOXSCORES_DIR     = DATA_DIR / "boxscore-screenshots"
 MANUAL_QUEUE_FILE      = DATA_DIR / "pending-manual-queue.json"
 BUILD_STATUS_FILE  = DATA_DIR / "build-status.json"
-BUILD_SCRIPT       = Path("/home/skim/projects/nbn-today/build/build.sh")
+# The live site checkout (nbn-today). /var/www/nbn.today is a symlink to it.
+# NBN_SITE_DIR overrides it, for every module that reads site files.
+SITE_DIR           = Path(os.environ.get("NBN_SITE_DIR", "/home/skim/projects/nbn-today"))
+BUILD_SCRIPT       = SITE_DIR / "build" / "build.sh"
 TOKENS_FILE        = DATA_DIR / "tokens.json"
 MEMBERS_FILE       = DATA_DIR / "members.json"
 TRADING_BLOCK_FILE = DATA_DIR / "trading-block.json"

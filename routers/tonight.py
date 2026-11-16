@@ -53,6 +53,7 @@ from . import game_highs as gh
 from .constants import DATA_DIR, VALID_TEAMS
 from .names import player_name
 from .storage import read_csv
+from .constants import SITE_DIR as _SITE_DIR
 
 router = APIRouter()
 
@@ -63,7 +64,7 @@ ODDS_LO, ODDS_HI = 0.25, 0.75   # playoff odds this uncertain are a story
 MAX_STORIES = 3
 LAST_NIGHT_LOOKBACK = 7          # days back to look for the latest box scores
 
-SITE_DIR = Path(os.environ.get("NBN_SITE_DIR", "/var/www/nbn.today"))
+SITE_DIR = _SITE_DIR  # constants.SITE_DIR
 TEAM_COLORS_FILE = SITE_DIR / "build" / "team-colors.json"
 
 

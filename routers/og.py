@@ -53,13 +53,14 @@ from .discord import TEAM_NAMES
 from .names import player_name
 from .league_time import league_today
 from season_clock import season_for_date
+from .constants import SITE_DIR as _SITE_DIR
 
 router = APIRouter()
 
 SITE = "https://nbn.today"
 # The docroot is a symlink to the live checkout; _static_head reads the shells
 # out of it so the fallback card is whatever og_tags.py last wrote.
-SITE_DIR = Path(os.environ.get("NBN_SITE_DIR", "/var/www/nbn.today"))
+SITE_DIR = _SITE_DIR  # constants.SITE_DIR
 DEFAULT_IMAGE = f"{SITE}/og-default.png"
 TAGLINE = "Nothing But Net — fantasy basketball GM simulation league"
 

@@ -34,11 +34,12 @@ from . import season_calendar
 from . import game_starters
 from .names import player_name
 from .league_time import league_today_str
+from .constants import SITE_DIR as _SITE_DIR
 
 router = APIRouter()
 
 CLAUDE_BIN = Path("/home/skim/.local/bin/claude")
-NBN_TODAY_DIR = Path("/home/skim/projects/nbn-today")
+NBN_TODAY_DIR = _SITE_DIR  # constants.SITE_DIR
 
 DISCORD_STANDINGS_WEBHOOK = os.environ.get("DISCORD_STANDINGS_WEBHOOK", "")
 NBN_STANDINGS_CSV = DERIVED_DIR / "standings" / "standings-history.csv"
