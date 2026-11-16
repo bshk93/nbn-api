@@ -15,7 +15,9 @@ sources the site already keeps:
     headline the way its feed does (`FeedTypes.headline`).
 
 Only days before `date` count, so tonight's games never show up as history.
-Nothing here is stored: the index and ledger are read per request.
+Nothing here is stored on disk. Each date's answer is kept in memory until the
+game index, the brackets file or the ledger changes (`_answers`), since the
+homepage asks for the same date on every load and the ledger is the slow part.
 
     venv/bin/python -m tests.test_on_this_day
 """
@@ -28,7 +30,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 
 from . import game_highs as gh
-from .constants import DERIVED_DIR
+from .constants import DERIVED_DIR, TRANSACTIONS_FILE
 from .league_time import league_today_str
 
 router = APIRouter()
@@ -115,15 +117,46 @@ def trades(date: str, all_trades: list[dict]) -> list[dict]:
     return hits[:MAX_TRADES]
 
 
+# date -> (sources key, answer). A handful of dates at most (today, and the
+# odd one asked for by hand), cleared rather than evicted when it fills.
+_answers: dict[str, tuple] = {}
+_MAX_ANSWERS = 8
+
+
+def _stamp(path) -> Optional[tuple]:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_ino, st.st_mtime_ns, st.st_size)
+
+
+def _sources_key(index_key) -> Optional[tuple]:
+    """What an answer depends on: the game index's own key, the brackets
+    file and the ledger. None when a file is missing (a test, or a data dir
+    without a build), which means don't cache."""
+    files = (_stamp(BRACKETS_FILE), _stamp(TRANSACTIONS_FILE))
+    return None if None in files else (index_key, files)
+
+
 @router.get("/api/on-this-day")
 def get_on_this_day(date: Optional[str] = Query(None, description="YYYY-MM-DD; defaults to today")):
     date = date or league_today_str()
     if len(date) != 10 or date[4] != "-" or date[7] != "-":
         raise HTTPException(status_code=422, detail="date must be YYYY-MM-DD")
-    index, _ = gh.get_index()
-    return {
+    index, index_key = gh.get_index()
+    key = _sources_key(index_key)
+    hit = _answers.get(date)
+    if key is not None and hit and hit[0] == key:
+        return hit[1]
+    answer = {
         "date": date,
         "games": best_games(index, date),
         "clinches": clinches(index, date, _load_brackets()),
         "trades": trades(date, _load_trades()),
     }
+    if key is not None:
+        if len(_answers) >= _MAX_ANSWERS:
+            _answers.clear()
+        _answers[date] = (key, answer)
+    return answer
