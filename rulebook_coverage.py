@@ -111,6 +111,7 @@ CHECK_SECTIONS: dict[str, tuple[str, ...]] = {
     # cites § 3.12 only to name the minimum-scale exemption; the rule is § 3.9,
     # and § 3.13 is where the 8% Full Bird ceiling lives.
     "raise_limit":                ("3.9", "3.13"),
+    "reacquisition_restriction":  ("4.5",),
     # § 3.1's UFA/RFA test and the qualifying offer that decides it.
     "qo_player":                  ("3.1",),
     "qo_rfa_eligible":            ("3.1",),
@@ -222,8 +223,9 @@ SECTION_REVIEW: dict[str, str] = {
             "still goes through committee review",
     "3.15": "the offer sheet and the match decision are checked; the funding "
             "the match consumes is not linked back to the holds",
-    "4.5":  "only the extension trade freeze is checked; the rest of § 4.5 is "
-            "read by a human",
+    "4.5":  "the trade limit, the post-signing and extension trade freezes, and "
+            "re-acquisition on a signing are checked; re-acquisition by trade "
+            "and the rest of § 4.5 are read by a human",
     "4.6":  "the Touch Rule is not modeled — multi-team trades are reviewed",
     "5.1":  "the apron restriction on a claim is checked, as is a release's own "
             "eligibility and roster-count consequence; the buyout-with-cap-space "
