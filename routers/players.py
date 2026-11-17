@@ -607,7 +607,10 @@ def update_team_settings(slug: str, body: TeamSettingsUpdate, info: dict = Depen
 
 @router.get("/api/ovr")
 def get_ovr():
-    return load_ovr()
+    # Encoded once per change to the file. Every player page load asks for
+    # the whole history, and a scraper walking the player pages fires it
+    # hundreds of times a minute.
+    return shared_json_response("ovr", [OVR_FILE], ovr_shared)
 
 
 @router.get("/api/ovr/current")
@@ -680,7 +683,12 @@ def load_attributes() -> dict:
 
 @router.get("/api/attributes")
 def get_attributes():
-    return load_attributes()
+    # The whole 2.7 MB history, parsed and re-encoded on every player page
+    # load until 2026-11-17, when a scraper walking the player pages ran 40
+    # of these at once and froze the API for six minutes. Shared now, like
+    # /api/attributes/current.
+    return shared_json_response("attributes", [ATTRIBUTES_FILE],
+                                lambda: _load_json_shared(ATTRIBUTES_FILE, {}))
 
 
 @router.get("/api/attributes/current")
