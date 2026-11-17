@@ -14,6 +14,14 @@ Three signals, each read straight from the kernel or the API:
     get parked there and the site stays fast. It only matters once RAM is
     short too, because then the next spike has nowhere to go.
   * the API taking longer than ``SLOW_SECS`` to answer (or not answering)
+  * scraper traffic, read from ``TRAFFIC_LOG`` (one line per nbn.today request,
+    written by nginx: ``msec status scraper ip``). Two notices, each on its own
+    cooldown and neither a strike: ``BLOCKED_MIN`` refused requests in the last
+    ``TRAFFIC_WINDOW`` (the scraper ran and the nginx block held), and
+    ``SURGE_IPS`` distinct IPs among the requests that got through (it changed
+    disguise). A daily scraper walked every player page through ~1,000 proxy
+    IPs per burst from 2026-11-11 and froze the API on 2026-11-17; normal
+    traffic peaked at 158 IPs in five minutes that week, its bursts at 777-1,366.
   * the data backup (``nbs-snapshot``) making no commit for ``BACKUP_STALE_HOURS``.
     The data dir changes every few minutes, so a quiet backup is a stuck one.
     It stalled for 13 days once (2026-11-03 to 2026-11-16, the mass-delete
@@ -56,6 +64,13 @@ BACKUP_STALE_HOURS = 12
 BACKUP_GIT_DIR = "/var/lib/nbs-backup.git"
 API_URL = "http://127.0.0.1:8001/api/build/status"
 STATE = Path.home() / ".local/state/nbn/box-health.json"
+TRAFFIC_LOG = Path("/var/log/nbn/traffic.log")
+TRAFFIC_WINDOW = 300
+TRAFFIC_TAIL_BYTES = 4 * 1024 * 1024
+BLOCKED_MIN = 200
+SURGE_IPS = 400
+BLOCKED_COOLDOWN = 3 * 3600   # a burst runs about an hour: one notice per burst
+SURGE_COOLDOWN = COOLDOWN
 
 
 def meminfo() -> dict[str, int]:
@@ -112,6 +127,54 @@ def top_processes(n: int = 5) -> list[str]:
     return rows
 
 
+def traffic(now: float, path: Path = TRAFFIC_LOG) -> tuple[int, int, int] | None:
+    """(requests, blocked, distinct IPs that got through) in the last
+    ``TRAFFIC_WINDOW``, or None if the log can't be read. Reads only the tail:
+    a burst is ~15,000 lines in five minutes, well inside it."""
+    try:
+        with path.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - TRAFFIC_TAIL_BYTES))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    since = now - TRAFFIC_WINDOW
+    total = blocked = 0
+    ips = set()
+    for line in lines:
+        parts = line.split()
+        if len(parts) != 4:
+            continue
+        try:
+            if float(parts[0]) < since:
+                continue
+        except ValueError:
+            continue
+        total += 1
+        if parts[2] == "1" and parts[1] == "403":
+            blocked += 1
+        else:
+            ips.add(parts[3])
+    return total, blocked, len(ips)
+
+
+def traffic_notices(t: tuple[int, int, int] | None) -> dict[str, str]:
+    """Which scraper notices this reading calls for, keyed by kind."""
+    if t is None:
+        return {}
+    total, blocked, ips = t
+    out = {}
+    if blocked >= BLOCKED_MIN:
+        out["blocked"] = (f"Scraper ran and the nginx block held: {blocked} requests refused "
+                          f"in the last {TRAFFIC_WINDOW // 60} minutes.")
+    if ips >= SURGE_IPS:
+        out["surge"] = (f"Possible scraper getting through: {ips} different IPs in the last "
+                        f"{TRAFFIC_WINDOW // 60} minutes (normal is under 160), {total} requests, "
+                        f"{blocked} blocked. It may have changed user agent; see "
+                        f"/etc/nginx/conf.d/nbn-scrapers.conf.")
+    return out
+
+
 def reading() -> tuple[list[str], str]:
     m = meminfo()
     swap_total = m.get("SwapTotal", 0)
@@ -159,6 +222,9 @@ def main() -> int:
     print(summary)
     for p in problems:
         print(f"  PROBLEM  {p}")
+    t = traffic(time.time())
+    print("traffic: log unreadable" if t is None
+          else f"traffic: {t[0]} requests, {t[1]} blocked, {t[2]} IPs through, last {TRAFFIC_WINDOW // 60} min")
     if args.no_alert:
         return 1 if problems else 0
 
@@ -182,9 +248,18 @@ def main() -> int:
         if post(f"Server checks are back to normal ({summary})."):
             alerting = False
 
+    traffic_last = state.get("traffic_last", {})
+    for kind, text in traffic_notices(traffic(now)).items():
+        cooldown = SURGE_COOLDOWN if kind == "surge" else BLOCKED_COOLDOWN
+        if now - traffic_last.get(kind, 0) < cooldown:
+            continue
+        mention = f"<@{DISCORD_ADMIN_ID}> " if kind == "surge" and DISCORD_ADMIN_ID else ""
+        if post(mention + text):
+            traffic_last[kind] = now
+
     STATE.parent.mkdir(parents=True, exist_ok=True)
     STATE.write_text(json.dumps({"strikes": strikes, "alerting": alerting,
-                                 "last_alert": last}))
+                                 "last_alert": last, "traffic_last": traffic_last}))
     return 1 if problems else 0
 
 

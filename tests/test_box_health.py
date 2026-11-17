@@ -68,3 +68,51 @@ class AlertCooldownTest(unittest.TestCase):
             out = self.run_main(True, state)
             self.assertGreater(out["last_alert"], 0)
             self.assertTrue(out["alerting"])
+
+
+class TrafficTest(unittest.TestCase):
+    """The scraper notices, read from nginx's one-line-per-request log."""
+
+    def log(self, lines):
+        import tempfile
+        from pathlib import Path
+        d = tempfile.mkdtemp()
+        p = Path(d) / "traffic.log"
+        p.write_text("".join(f"{l}\n" for l in lines))
+        return p
+
+    def test_counts_only_the_window(self):
+        now = 1_000_000.0
+        p = self.log([f"{now - 400:.3f} 200 0 1.1.1.1",          # too old
+                      f"{now - 10:.3f} 403 1 2.2.2.2",
+                      f"{now - 5:.3f} 200 0 3.3.3.3",
+                      f"{now - 4:.3f} 200 0 3.3.3.3",
+                      f"{now - 3:.3f} 403 0 4.4.4.4",             # a 403 nginx didn't flag
+                      "garbage"])
+        self.assertEqual(cbh.traffic(now, p), (4, 1, 2))
+
+    def test_missing_log(self):
+        from pathlib import Path
+        self.assertIsNone(cbh.traffic(0, Path("/nonexistent/traffic.log")))
+        self.assertEqual(cbh.traffic_notices(None), {})
+
+    def test_notices(self):
+        self.assertEqual(cbh.traffic_notices((300, 10, 100)), {})
+        self.assertEqual(set(cbh.traffic_notices((5000, 4800, 20))), {"blocked"})
+        self.assertEqual(set(cbh.traffic_notices((5000, 50, 900))), {"surge"})
+
+    def test_notice_cooldown(self):
+        import json, tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            state = Path(d) / "s.json"
+            sent = []
+            with mock.patch.object(cbh, "reading", return_value=([], "s")), \
+                 mock.patch.object(cbh, "traffic", return_value=(5000, 4800, 20)), \
+                 mock.patch.object(cbh, "STATE", state), \
+                 mock.patch.object(cbh, "post", side_effect=lambda t: sent.append(t) or True), \
+                 mock.patch("sys.argv", ["check_box_health.py"]):
+                cbh.main()
+                cbh.main()
+            self.assertEqual(len(sent), 1)
+            self.assertIn("blocked", json.loads(state.read_text())["traffic_last"])
