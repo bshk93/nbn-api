@@ -145,10 +145,9 @@ def reading() -> tuple[list[str], str]:
 def post(text: str) -> bool:
     if not transport.configured(DISCORD_ALERT_CHANNEL):
         return False
-    sent = transport.send(DISCORD_ALERT_CHANNEL, {"content": text[:1990]},
-                          max_burst=3, burst_window=3600)
-    transport.flush()
-    return sent
+    # send_now, not send + flush: only a delivered alert may start the cooldown.
+    return transport.send_now(DISCORD_ALERT_CHANNEL, {"content": text[:1990]},
+                              max_burst=3, burst_window=3600)
 
 
 def main() -> int:

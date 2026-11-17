@@ -39,3 +39,32 @@ class ReadingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AlertCooldownTest(unittest.TestCase):
+    """A refused Discord post must not start the cooldown (2026-11-17: the
+    bot lost access to the alert channel and every alert counted as sent)."""
+
+    def run_main(self, delivered, tmp_state):
+        with mock.patch.object(cbh, "reading", return_value=(["swap 99% used"], "s")), \
+             mock.patch.object(cbh, "top_processes", return_value=[]), \
+             mock.patch.object(cbh, "STATE", tmp_state), \
+             mock.patch.object(cbh.transport, "configured", return_value=True), \
+             mock.patch.object(cbh.transport, "send_now", return_value=delivered), \
+             mock.patch("sys.argv", ["check_box_health.py"]):
+            cbh.main()
+        import json
+        return json.loads(tmp_state.read_text())
+
+    def test_refused_post_keeps_retrying(self):
+        import tempfile, json
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            state = Path(d) / "s.json"
+            state.write_text(json.dumps({"strikes": 1, "alerting": False, "last_alert": 0}))
+            out = self.run_main(False, state)
+            self.assertEqual(out["last_alert"], 0)
+            self.assertFalse(out["alerting"])
+            out = self.run_main(True, state)
+            self.assertGreater(out["last_alert"], 0)
+            self.assertTrue(out["alerting"])
