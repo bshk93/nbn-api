@@ -190,6 +190,18 @@ def send(channel: str, payload, *, max_burst: int, burst_window: int) -> bool:
     return True
 
 
+def send_now(channel: str, payload: dict, *, max_burst: int, burst_window: int) -> bool:
+    """Post one message on the caller's thread and return whether Discord took it.
+
+    For a one-shot script that needs the verdict. `send` + `flush` only says the
+    queue drained, and a 403 drains it too: the box health check counted every
+    refused alert as sent and went quiet for its cooldown.
+    """
+    if not configured(channel) or not _burst_ok(channel, max_burst, burst_window):
+        return False
+    return _post({"channel": channel, "payload": payload})
+
+
 def flush(timeout: float = 30.0) -> bool:
     """Block until the queue drains, for a caller that is about to exit.
 
