@@ -251,6 +251,23 @@ gdn.maybe_day_ready("2026-10-22", "26-27", [frozenset({"CHI", "MIL"}), frozenset
 check("every game entered: the message is marked read", INBOX["kim"][0]["read"])
 check("and nobody is told to parse", SENT == [], SENT)
 
+print("a day is parsed")
+CHI_MIL, DAL_HOU = frozenset({"CHI", "MIL"}), frozenset({"DAL", "HOU"})
+INBOX.clear()
+INBOX["kim"] = [stats_msg("Thu Oct 22 is ready to parse — 2 games, both sides uploaded",
+                          ref="parse-ready:2026-10-22"),
+                stats_msg("Fri Oct 23 is ready to parse — 2 games, both sides uploaded",
+                          ref="parse-ready:2026-10-23")]
+# sent before messages carried a ref: matched by its text
+INBOX["admin2"] = [stats_msg("Thu Oct 22 is ready to parse — 2 games, both sides uploaded")]
+SENT.clear()
+gdn.maybe_day_ready("2026-10-22", "26-27", [CHI_MIL], [CHI_MIL, DAL_HOU])
+check("one game still to parse: ready-to-parse stays unread", not INBOX["kim"][0]["read"])
+gdn.maybe_day_ready("2026-10-22", "26-27", [CHI_MIL, DAL_HOU], [])
+check("every game entered: ready-to-parse is marked read", INBOX["kim"][0]["read"])
+check("a copy sent before refs existed is marked read too", INBOX["admin2"][0]["read"])
+check("another day's ready-to-parse is left alone", not INBOX["kim"][1]["read"])
+
 # ── 5. running behind ─────────────────────────────────────────────────────────
 
 print("the league is a day behind")

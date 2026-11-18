@@ -391,7 +391,8 @@ Per-member messages in `inboxes.json`; mutes in `inbox_prefs.json` (both NBS_DAT
   the owning module calls `mark_read_where(match)` and every copy, in every
   inbox, is marked read. Used by `game_day_notify`: a day's "needs box score
   screenshots" message (ref `screenshots-needed:{date}`) clears once every game
-  that date has both sides uploaded or a box score entered. A test that drives
+  that date has both sides uploaded or a box score entered, and its "ready to
+  parse" message (ref `parse-ready:{date}`) once every game has a box score. A test that drives
   that path stubs the inbox store, or it writes the live `inboxes.json`.
 - `GET /api/inbox` also returns `kinds` (id + label, in display order) and
   `muted`. The page's weekly digest is computed in the page, so it stays live.
