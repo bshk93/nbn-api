@@ -621,6 +621,9 @@ def commit_boxscore(body: BoxscoreCommitRequest, info: dict = Depends(require_an
 
     # A day's last box score makes its Pick'em winner payable. Never raises.
     _settle_pickem(body.season)
+    # A day finished by typed-in box scores (no screenshots) still clears its
+    # "needs screenshots" inbox messages. Never raises.
+    _notify_if_day_ready(body.date, body.season)
 
     logger.info("[%s] POST boxscore/commit — %s vs %s on %s (%d rows, +NB¥%.2f)", info.get("name"), home_team, away_team, body.date, len(new_rows), reward)
     building = False if body.skip_build else _trigger_build()

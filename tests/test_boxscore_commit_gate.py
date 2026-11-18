@@ -32,6 +32,7 @@ from fastapi import HTTPException  # noqa: E402
 from routers import boxscores as bs  # noqa: E402
 
 bs._settle_pickem = lambda season: None   # pays real NB¥
+bs._notify_if_day_ready = lambda date, season: None   # reads the live schedule and inboxes
 
 FAILS = []
 

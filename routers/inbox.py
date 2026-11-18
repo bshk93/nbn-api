@@ -116,7 +116,7 @@ def _prune(items: list[dict]) -> list[dict]:
 
 def notify_member(username: str, text: str, link: Optional[str] = None,
                   actions: Optional[list[dict]] = None, batch: Optional[str] = None,
-                  kind: Optional[str] = None) -> None:
+                  kind: Optional[str] = None, ref: Optional[str] = None) -> None:
     """Append one notification to a member's inbox. Called in-process from
     wherever an event already exists (remand, void, a suggestion's status
     change, ...) — there is no HTTP path that fires this on its own, the same
@@ -132,6 +132,10 @@ def notify_member(username: str, text: str, link: Optional[str] = None,
     hand to several members, so an action taken from one copy reads as done
     on all of them.
 
+    `ref` names the thing the message asks someone to do, so the code that
+    sees it done can mark every copy read (`mark_read_where`) — a to-do that
+    is finished shouldn't sit unread in the inbox.
+
     Pruning happens here, on write, rather than on a timer: an inbox only
     grows when something is appended to it, so checking the bound at that
     moment keeps the file bounded without a scheduled job."""
@@ -145,6 +149,8 @@ def notify_member(username: str, text: str, link: Optional[str] = None,
         entry["actions"] = [dict(a) for a in actions]
     if batch:
         entry["batch"] = batch
+    if ref:
+        entry["ref"] = ref
     with _inbox_lock:
         store = _load_store()
         items = store.get(username, [])
@@ -169,16 +175,16 @@ def notify_team(team: str, text: str, link: Optional[str] = None,
 
 
 def notify_role(role: str, text: str, link: Optional[str] = None,
-                kind: Optional[str] = None) -> None:
+                kind: Optional[str] = None, ref: Optional[str] = None) -> None:
     """Same as notify_team, generalized to any role — a committee-wide event
     (e.g. an extension proposal reaching the queue, scoped to `poext` holders
     per nbn-today/docs/poext-extension-pipeline.md D13) that's every holder of
     that role's business, not one team's or one member's."""
-    notify_roles([role], text, link, kind=kind)
+    notify_roles([role], text, link, kind=kind, ref=ref)
 
 
 def notify_roles(roles: list[str], text: str, link: Optional[str] = None,
-                 kind: Optional[str] = None) -> None:
+                 kind: Optional[str] = None, ref: Optional[str] = None) -> None:
     """notify_role for several roles at once, delivered once per member — a
     member holding two of them gets one notification, not two. Roles are
     matched literally, not through ROLE_IMPLIES, so name every role that
@@ -186,7 +192,26 @@ def notify_roles(roles: list[str], text: str, link: Optional[str] = None,
     wanted = set(roles)
     for name, m in load_members().items():
         if wanted & set(m.get("roles") or []):
-            notify_member(name, text, link, kind=kind)
+            notify_member(name, text, link, kind=kind, ref=ref)
+
+
+def mark_read_where(match: Callable[[dict], bool]) -> int:
+    """Mark read every unread message, in every member's inbox, that `match`
+    accepts — for when the thing a message asked for has been done (by
+    anyone), so it stops reading as a to-do. Returns how many changed; writes
+    nothing when none did. Archived, read and actioned state is otherwise
+    left alone."""
+    changed = 0
+    with _inbox_lock:
+        store = _load_store()
+        for items in store.values():
+            for it in items:
+                if not it.get("read") and match(it):
+                    it["read"] = True
+                    changed += 1
+        if changed:
+            _save_store(store)
+    return changed
 
 
 # ── Message actions ───────────────────────────────────────────────────────────
