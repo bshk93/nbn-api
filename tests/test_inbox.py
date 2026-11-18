@@ -182,6 +182,18 @@ check("someone else's mutes don't apply", (ib.notify_member("cara", "hi", link="
 raises("muting an unknown kind", 400, lambda: ib.put_prefs(ib.PrefsBody(muted=["zzz"]), BRYN))
 PREFS.clear()
 
+print("\nmark_read_where: a finished to-do is read in every inbox")
+STORE.clear()
+ib.notify_member("bryn", "Oct 23 needs screenshots", link="/committees/stats/", ref="shots:23")
+ib.notify_member("cara", "Oct 23 needs screenshots", link="/committees/stats/", ref="shots:23")
+ib.notify_member("cara", "Oct 24 needs screenshots", link="/committees/stats/", ref="shots:24")
+check("ref is stored on the entry", STORE["bryn"][0].get("ref") == "shots:23")
+n = ib.mark_read_where(lambda it: it.get("ref") == "shots:23")
+check("both copies marked read", n == 2 and STORE["bryn"][0]["read"] and STORE["cara"][0]["read"])
+check("another day's message is left unread", not STORE["cara"][1]["read"])
+check("already-read messages aren't counted again",
+      ib.mark_read_where(lambda it: it.get("ref") == "shots:23") == 0)
+
 if FAILS:
     print(f"\n{len(FAILS)} check(s) failed:")
     for f in FAILS:

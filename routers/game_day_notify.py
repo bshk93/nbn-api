@@ -14,7 +14,11 @@ each step instead:
    ready for screenshots. Only the games still without them are counted, and a
    day Stats has already finished sends nothing.
 4. **Every game on a day has both sides uploaded** → whoever parses, which is
-   the `admin` role for now.
+   the `admin` role for now. The same moment marks step 3's "needs
+   screenshots" message read in every Stats inbox: the to-do is done. A day
+   whose last games are entered by hand (no screenshots) clears it too. And
+   once every game on the day has a box score, the "ready to parse" message
+   is marked read the same way.
 
 Two rules keep this quiet. A coaching save only notifies when the team goes
 *from* not-pending *to* pending, so five saves in a row send one message. And
@@ -187,6 +191,36 @@ def streamer_assigned(name: str, date: str, games: list, by: Optional[str],
         logger.warning("streamer_assigned notify failed for %s: %s", date, exc)
 
 
+STATS_LINK = "/committees/stats/"
+
+
+def _shots_ref(date: str) -> str:
+    return f"screenshots-needed:{date}"
+
+
+def _parse_ref(date: str) -> str:
+    return f"parse-ready:{date}"
+
+
+def _clear_done(date: str, ref: str, legacy: str, what: str) -> None:
+    """Mark the date's messages tagged `ref` read. Messages sent before they
+    carried a `ref` are matched by their text, which starts with `legacy`."""
+    n = inbox.mark_read_where(
+        lambda it: it.get("ref") == ref
+        or (not it.get("ref") and it.get("link") == STATS_LINK
+            and (it.get("text") or "").startswith(legacy)))
+    if n:
+        logger.info("%s for %s: marked %d inbox message%s read", what, date, n, "" if n == 1 else "s")
+
+
+def _clear_shots_needed(date: str) -> None:
+    _clear_done(date, _shots_ref(date), f"{_fmt_date(date)} is streamed — ", "screenshots in")
+
+
+def _clear_parse_ready(date: str) -> None:
+    _clear_done(date, _parse_ref(date), f"{_fmt_date(date)} is ready to parse — ", "day parsed")
+
+
 def day_done(date: str, done_by: Optional[str]) -> None:
     """Handoff 3. Call only when the date goes from not-done to done.
 
@@ -216,17 +250,20 @@ def day_done(date: str, done_by: Optional[str]) -> None:
             n = 0  # a date the schedule doesn't carry (a playoff game)
         games = f"{n} game{'' if n == 1 else 's'}" if n else "The games"
         inbox.notify_role("stats", f"{_fmt_date(date)} is streamed — {games} need{'s' if n == 1 else ''} box score screenshots",
-                          link="/committees/stats/")
+                          link=STATS_LINK, ref=_shots_ref(date))
     except Exception as exc:
         logger.warning("day_done notify failed for %s: %s", date, exc)
 
 
 def maybe_day_ready(date: str, season: str, entered_keys: Iterable[frozenset],
                     ready_keys: Iterable[frozenset]) -> None:
-    """Handoff 4. Call after an upload. `entered_keys` / `ready_keys` are the
-    {team, team} pairs on `date` that already have a box score / have both
-    sides uploaded. Notifies once per date, when every scheduled game on it is
-    one or the other and at least one is waiting to be parsed."""
+    """Handoff 4. Call after an upload or a commit. `entered_keys` /
+    `ready_keys` are the {team, team} pairs on `date` that already have a box
+    score / have both sides uploaded. Once every scheduled game on it is one or
+    the other, the date's "needs screenshots" messages are marked read; and
+    the parser is notified, once per date, if at least one is waiting to be
+    parsed. Once every game has a box score, that "ready to parse" message is
+    marked read."""
     try:
         from .schedule import _load
         from .streaming_days import load_streaming_days, save_streaming_days
@@ -238,7 +275,11 @@ def maybe_day_ready(date: str, season: str, entered_keys: Iterable[frozenset],
         # was uploaded for it.
         needed = fixtures or ready
         waiting = needed - entered
-        if not waiting or not waiting <= ready:
+        if not needed or not waiting <= ready:
+            return
+        _clear_shots_needed(date)
+        if not waiting:
+            _clear_parse_ready(date)
             return
         with _streaming_days_lock:
             days = load_streaming_days()
@@ -250,6 +291,6 @@ def maybe_day_ready(date: str, season: str, entered_keys: Iterable[frozenset],
             save_streaming_days(days)
         n = len(waiting)
         inbox.notify_role("admin", f"{_fmt_date(date)} is ready to parse — {n} game{'' if n == 1 else 's'}, "
-                                   f"both sides uploaded", link="/committees/stats/")
+                                   f"both sides uploaded", link=STATS_LINK, ref=_parse_ref(date))
     except Exception as exc:
         logger.warning("day_ready notify failed for %s: %s", date, exc)

@@ -56,6 +56,18 @@ SENT = []  # (kind, to, text)
 inbox.notify_member = lambda to, text, link=None, **_: SENT.append(("member", to, text))
 inbox.notify_role = lambda role, text, link=None, **_: SENT.append(("role", role, text))
 inbox.notify_team = lambda team, text, link=None, **_: SENT.append(("team", team, text))
+# The real mark_read_where, over an in-memory inbox — never the live file.
+INBOX = {}
+inbox._load_store = lambda: INBOX
+inbox._save_store = lambda store: None
+
+
+def stats_msg(text, ref=None, read=False):
+    it = {"id": text, "ts": "2026-10-24T00:00:00+00:00", "text": text,
+          "link": "/committees/stats/", "read": read, "kind": "committees"}
+    if ref:
+        it["ref"] = ref
+    return it
 
 TODAY = date(2026, 10, 24)
 gdn.league_today = lambda: TODAY
@@ -188,12 +200,24 @@ def up(team, home, away):
 
 
 SENT.clear()
+INBOX.update({
+    "kim": [stats_msg("Fri Oct 23 is streamed — 2 games need box score screenshots",
+                      ref="screenshots-needed:2026-10-23")],
+    # sent before messages carried a ref: matched by its text
+    "statsy": [stats_msg("Fri Oct 23 is streamed — The games need box score screenshots"),
+               stats_msg("Sat Oct 24 is streamed — 1 game needs box score screenshots",
+                         ref="screenshots-needed:2026-10-24")],
+})
 up("POR", "POR", "LAL"); up("LAL", "POR", "LAL")
 check("one of two games ready: nothing yet", SENT == [])
+check("…and the needs-screenshots message stays unread", not INBOX["kim"][0]["read"])
 up("BOS", "NYK", "BOS")
 check("half of the last game: nothing yet", SENT == [])
 up("NYK", "NYK", "BOS")
 check("the whole day ready: the parser hears", SENT and SENT[0][:2] == ("role", "admin"), SENT)
+check("the day's needs-screenshots message is marked read", INBOX["kim"][0]["read"])
+check("a copy sent before refs existed is marked read too", INBOX["statsy"][0]["read"])
+check("another day's message is left alone", not INBOX["statsy"][1]["read"])
 check("naming the day and count", SENT and "Fri Oct 23" in SENT[0][2] and "2 games" in SENT[0][2])
 up("NYK", "NYK", "BOS")
 check("a further upload that day sends nothing", len(SENT) == 1)
@@ -215,6 +239,34 @@ SENT.clear()
 c.post("/api/streaming-days/2026-10-22/done", headers=H["streamy"])
 check("only the game still missing is counted", SENT and "1 game needs box score" in SENT[0][2], SENT)
 gdn._boxed_games = real_boxed
+
+print("a day finished by typed-in box scores")
+INBOX.clear()
+INBOX["kim"] = [stats_msg("Thu Oct 22 is streamed — 1 game needs box score screenshots",
+                          ref="screenshots-needed:2026-10-22")]
+SENT.clear()
+gdn.maybe_day_ready("2026-10-22", "26-27", [frozenset({"CHI", "MIL"})], [])
+check("one game still missing: the message stays unread", not INBOX["kim"][0]["read"])
+gdn.maybe_day_ready("2026-10-22", "26-27", [frozenset({"CHI", "MIL"}), frozenset({"DAL", "HOU"})], [])
+check("every game entered: the message is marked read", INBOX["kim"][0]["read"])
+check("and nobody is told to parse", SENT == [], SENT)
+
+print("a day is parsed")
+CHI_MIL, DAL_HOU = frozenset({"CHI", "MIL"}), frozenset({"DAL", "HOU"})
+INBOX.clear()
+INBOX["kim"] = [stats_msg("Thu Oct 22 is ready to parse — 2 games, both sides uploaded",
+                          ref="parse-ready:2026-10-22"),
+                stats_msg("Fri Oct 23 is ready to parse — 2 games, both sides uploaded",
+                          ref="parse-ready:2026-10-23")]
+# sent before messages carried a ref: matched by its text
+INBOX["admin2"] = [stats_msg("Thu Oct 22 is ready to parse — 2 games, both sides uploaded")]
+SENT.clear()
+gdn.maybe_day_ready("2026-10-22", "26-27", [CHI_MIL], [CHI_MIL, DAL_HOU])
+check("one game still to parse: ready-to-parse stays unread", not INBOX["kim"][0]["read"])
+gdn.maybe_day_ready("2026-10-22", "26-27", [CHI_MIL, DAL_HOU], [])
+check("every game entered: ready-to-parse is marked read", INBOX["kim"][0]["read"])
+check("a copy sent before refs existed is marked read too", INBOX["admin2"][0]["read"])
+check("another day's ready-to-parse is left alone", not INBOX["kim"][1]["read"])
 
 # ── 5. running behind ─────────────────────────────────────────────────────────
 

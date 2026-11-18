@@ -161,6 +161,7 @@ def check_commit_path():
 
     from routers import boxscores as bs
     bs._settle_pickem = lambda season: None   # pays real NB¥
+    bs._notify_if_day_ready = lambda date, season: None   # reads the live schedule and inboxes
 
     # A legal game: five 48-minute players a side, every line adding up, so
     # the commit route's checks pass and this test is about the file alone.
