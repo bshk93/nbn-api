@@ -67,8 +67,10 @@ def _font(kind: str, size: int) -> ImageFont.FreeTypeFont:
         try:
             font = ImageFont.truetype(str(FONT_DIR / f), size)
             if kind == "text":
+                # Inter's axes are (opsz, wght), in that order: a lone value
+                # would set optical size and leave the weight at 400.
                 try:
-                    font.set_variation_by_axes([650])
+                    font.set_variation_by_axes([22, 650])
                 except Exception:  # noqa: BLE001 — not variable: use as is
                     pass
             break
