@@ -265,7 +265,24 @@ OPTION_LIST_LINE_RE = re.compile(
     r"""(?im)^[A-Za-z][A-Za-z.'’\-\s]{2,40}\s*-\s*(Accept|Decline|Opt(?:ed)?\s?(?:In|Out)|Retired?)\s*(?:\$?\d[,\d]*)?\s*$"""
 )
 
+# ── Two-way conversions ────────────────────────────────────────────────────
+# Team-first: "The Toronto Raptors convert Ryan Nembhard to a 2yr min",
+# "The Sacramento Kings convert Johnny Furphy and Jamal Shead to 3yr mins",
+# "The Miami Heat converted Haywood Highsmith to a 3yr $15mil standard deal".
+CONVERT_TEAM_FIRST_RE = re.compile(
+    rf"(?i)^(?:The\s+)?(?P<team>{_TEAM_PATTERN})\s+convert(?:s|ed)?\s+"
+    rf"(?P<player>[A-Za-zÀ-ɏ][A-Za-zÀ-ɏ.'’\- ]*?)(?=\s+to\b)"
+)
+
+# Player-first: "Vit Krejci has been converted from a two way contract to a
+# $7,898,151 2+1 TO contract with the New York Knicks".
+CONVERT_PLAYER_FIRST_RE = re.compile(
+    rf"(?i)^(?P<player>[A-Za-zÀ-ɏ][A-Za-zÀ-ɏ.'’\- ]*?)\s+(?:has|have)\s+been\s+converted\b"
+    rf".*?\bwith\s+(?:the\s+)?(?P<team>{_TEAM_PATTERN})\b"
+)
+
 SIGN_STEM_RE = re.compile(r"(?i)\bsign\w*\b")
+CONVERT_STEM_RE = re.compile(r"(?i)\bconvert(?:s|ed)?\b")
 OPTION_STEM_RE = re.compile(r"(?i)\b(option|opted)\b")
 
 # Splits on newlines as before, plus double-space-separated sentences on the
@@ -368,6 +385,23 @@ def resolve_signings(content: str, name_map: dict, by_last: dict) -> list[dict]:
             slug, note = resolve_player(raw_player, name_map, by_last)
             out.append({
                 "kind": "sign", "team": team, "slug": slug, "note": note,
+                "raw_player": raw_player,
+            })
+    return out
+
+
+def resolve_conversions(content: str, name_map: dict, by_last: dict) -> list[dict]:
+    out = []
+    for line in _SENTENCE_SPLIT_RE.split(content):
+        line = line.strip()
+        m = line and (CONVERT_TEAM_FIRST_RE.search(line) or CONVERT_PLAYER_FIRST_RE.search(line))
+        if not m:
+            continue
+        team = _alias_to_abbr[m.group("team").lower()]
+        for raw_player in _split_players(m.group("player")):
+            slug, note = resolve_player(raw_player, name_map, by_last)
+            out.append({
+                "kind": "convert", "team": team, "slug": slug, "note": note,
                 "raw_player": raw_player,
             })
     return out
@@ -526,6 +560,20 @@ def parse_message(msg: dict, name_map: dict, by_last: dict) -> dict:
 
     has_sign = bool(SIGN_STEM_RE.search(content))
     has_option = bool(OPTION_STEM_RE.search(content))
+    has_convert = bool(CONVERT_STEM_RE.search(content))
+    if has_convert and (has_sign or has_option):
+        return {"bucket": "flagged", "reasons": ["message mixes a two-way conversion with a "
+                                                  "signing or an option decision"]}
+
+    if has_convert:
+        candidates = resolve_conversions(content, name_map, by_last)
+        if not candidates:
+            return {"bucket": "skipped", "reasons": ["convert-mentioning but no template matched"]}
+        reasons = [f"unresolved player: {c['raw_player']!r}" for c in candidates if not c["slug"]]
+        reasons += [f"low-confidence player match: {c['note']} -> {c['slug']}"
+                    for c in candidates if c["note"].startswith(("fuzzy:", "lastname:"))]
+        return {"bucket": "flagged" if reasons else "resolved", "reasons": reasons, "candidates": candidates}
+
     if has_sign and has_option:
         return {"bucket": "flagged", "reasons": ["message mixes a signing and an option "
                                                   "decision (e.g. decline PO to sign an extension)"]}

@@ -414,6 +414,27 @@ any other side — not derivable from text alone (`resolve_discord_trades.py:172
    Note `resolve_discord_trades.py`'s bug fixes from this session are also
    uncommitted — worth bundling into the same commit.
 
+## Session 4 (2026-11-20): two-way conversions
+
+Session 3 left conversions out, and that showed: Ryan Nembhard's ledger read
+as a two-way traded to LAC, when TOR had converted him to a 2yr min on
+2026-02-15 (the bio was right, only the history was missing). The fa-news
+channels hold 25 conversion posts before `LIVE_SIGN_CUTOFF`.
+
+- `historical: true` now also takes `type=convert_twoway`
+  (`_create_historical_convert_twoway`). Unlike a live conversion, it needs
+  `team` in the body, since the player has usually moved on.
+- The resolver's `resolve_conversions` matches `"TEAM convert(s|ed) PLAYER
+  to…"` and `"PLAYER has been converted … with the TEAM"`, as kind
+  `convert`. A post mixing a conversion with a signing or option is flagged.
+- The submitter skips a conversion the office already entered (same player
+  and team within a week): Barlow's was.
+- The streamer's Roster Moves queue now skips every backfilled entry, not
+  just trades. A backfill posted today has a `created_at` inside its window.
+
+"Pelle Larson" resolved only by fuzzy match (to `larsson-pelle`, correct) and
+was submitted by hand after review.
+
 ## Open item unrelated to the backfill itself
 
 `NBN_ADMIN_TOKEN` got printed in plaintext into this session's transcript on

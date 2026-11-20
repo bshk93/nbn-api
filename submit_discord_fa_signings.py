@@ -1,7 +1,7 @@
 """
 Submit resolved historical Discord fa-news signings/options to nbn-api's
-transaction log via POST /api/transactions (historical=true, type=sign or
-type=option). See docs/discord-transaction-backfill.md for full context and
+transaction log via POST /api/transactions (historical=true, type=sign,
+option or convert_twoway). See docs/discord-transaction-backfill.md for full context and
 resolve_discord_fa_signings.py for how candidates are produced.
 
 Unlike submit_discord_trades.py, one Discord message can yield several
@@ -31,6 +31,7 @@ DATA = Path("/var/lib/nothing-but-stats")
 DEFAULT_INPUT = DATA / "discord-fa-signings-resolved.json"
 DEFAULT_PROMOTED = DATA / "discord-fa-signings-promoted.json"
 DEFAULT_STATE = DATA / "discord-fa-signings-submitted.json"
+LEDGER = DATA / "transactions.json"
 API_BASE = os.environ.get("NBN_API_BASE", "http://127.0.0.1:8001")
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
 
@@ -76,7 +77,34 @@ def build_payload(e: dict) -> dict:
                 "year": e["year"],
             },
         }
+    if e["kind"] == "convert":
+        return {
+            "type": "convert_twoway",
+            "date": e["date"],
+            "description": e["description"],
+            "historical": True,
+            "details": {
+                "player": e["slug"],
+                "team": e["team"],
+                "contract": {},
+            },
+        }
     raise ValueError(f"unknown candidate kind: {e['kind']!r}")
+
+
+def already_converted(e: dict, ledger: list[dict]) -> bool:
+    """A conversion the office already entered by hand (Barlow, Jenkins):
+    the same player and team converted within a week of the Discord post."""
+    if e["kind"] != "convert":
+        return False
+    posted = datetime.strptime(e["date"], "%Y-%m-%d")
+    for t in ledger:
+        d = t.get("details") or {}
+        if (t.get("type") == "convert_twoway" and d.get("player") == e["slug"]
+                and (d.get("team") or "").upper() == e["team"]
+                and abs((datetime.strptime(t["date"], "%Y-%m-%d") - posted).days) <= 7):
+            return True
+    return False
 
 
 def submit_one(client: httpx.Client, token: str, entry: dict) -> dict:
@@ -99,7 +127,7 @@ def main():
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     parser.add_argument("--limit", type=int, default=None,
                          help="submit at most N new records (for spot-testing)")
-    parser.add_argument("--kind", choices=["sign", "option"], default=None,
+    parser.add_argument("--kind", choices=["sign", "option", "convert"], default=None,
                          help="only submit this candidate kind")
     args = parser.parse_args()
 
@@ -118,6 +146,12 @@ def main():
     if args.kind:
         resolved = [e for e in resolved if e["kind"] == args.kind]
     pending = [e for e in resolved if candidate_key(e) not in state]
+    ledger = json.loads(LEDGER.read_text())
+    dupes = [e for e in pending if already_converted(e, ledger)]
+    if dupes:
+        print(f"skipping {len(dupes)} conversion(s) already in the ledger: "
+              + ", ".join(e["slug"] for e in dupes))
+        pending = [e for e in pending if not already_converted(e, ledger)]
     print(f"{len(resolved)} total candidates, {len(state)} already recorded in "
           f"{args.state}, {len(pending)} pending")
 
