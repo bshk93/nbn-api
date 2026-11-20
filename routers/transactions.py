@@ -3718,6 +3718,43 @@ def _proration_record(salaries: dict, txn_date: Optional[str]) -> dict:
 _PRORATION_SLACK = 1
 
 
+def _prorate_minimum_year1(details: SignDetails, bios: dict, cap_levels: dict,
+                           txn_date: Optional[str]) -> Optional[int]:
+    """§ 3.12: set Year 1 of an in-season minimum signing to its prorated
+    figure for the day it goes through. Returns the new figure, or None when
+    nothing changed.
+
+    The salary written on an offer is the full-season minimum, or a figure
+    prorated on the day it was filed; either way it is wrong by the time a
+    PDC head declares the winner days later. Ayton's LAC deal (2026-11-19)
+    went through at the full $2,449,421 because the mismatch was only a
+    warning, and a warning can be confirmed. Year 1 of a minimum is not a
+    judgment call, so this writes it rather than asking.
+
+    Only a figure between the prorated and the full minimum is rewritten. A
+    figure above the full minimum isn't a minimum and is left for the
+    checks; one below the prorated floor stays an error."""
+    if details.signing_method != "minimum" or details.contract.type == "two-way":
+        return None
+    salaries = details.contract.salaries or {}
+    proration = _minimum_proration(txn_date)
+    if not proration or proration["season"] not in salaries:
+        return None
+    yr = proration["season"]
+    bio = bios.get(details.player) or {}
+    full = (_one_year_min_cap_hit(bio, yr, cap_levels, details.contract)
+            if len(salaries) == 1 else
+            _min_salary_for(bio, yr, cap_levels, details.contract))
+    if not full:
+        return None
+    prorated = _prorate(full, proration)
+    submitted = _parse_dollar(salaries[yr])
+    if prorated == submitted or not (prorated < submitted <= full):
+        return None
+    details.contract.salaries = {**salaries, yr: f"${prorated:,}"}
+    return prorated
+
+
 def _check_minimum_salary(contract, player: str, bios: dict, season: str,
                           cap_levels: dict, txn_date: Optional[str] = None,
                           signing_method: Optional[str] = None) -> Optional[CheckResult]:
@@ -6695,7 +6732,10 @@ def apply_sign(details: SignDetails, txn_date: str, info: dict, *,
     merely advisory (level="warning", e.g. "below minimum but above the
     floor — double check"). Passing this clears warning-level failures
     automatically while still hard-blocking any real error, unlike plain
-    `force` which would waive both indiscriminately."""
+    `force` which would waive both indiscriminately.
+
+    An in-season minimum's Year 1 is set to its prorated figure for
+    `txn_date` before anything is checked (`_prorate_minimum_year1`)."""
     val_ctx = {
         "bios":        load_player_bios(),
         "team_state":  load_team_state(),
@@ -6704,6 +6744,7 @@ def apply_sign(details: SignDetails, txn_date: str, info: dict, *,
         "txn_date":    txn_date,
         "trade_exceptions": load_trade_exceptions(),
     }
+    _prorate_minimum_year1(details, val_ctx["bios"], val_ctx["cap_levels"], txn_date)
     checks = _run_validation("sign", details, val_ctx)
     failed = [c for c in checks if not c.passed]
     blocking = [c for c in failed if c.level == "error"] if force_warnings_only else failed
@@ -7645,12 +7686,15 @@ def validate_sign(body: SignDetails):
     change, and no auth, exactly like `/api/validate/trade`."""
     ctx = _validation_ctx()
     _require_validatable(body.team, body.player, ctx)
+    # Judged as it would be signed today, Year 1 prorated as apply_sign does.
+    prorated = _prorate_minimum_year1(body, ctx["bios"], ctx["cap_levels"], ctx["txn_date"])
     fact_sheet = _signing_fact_sheet(
         body.team.upper(), body.player, body.contract, ctx,
         signing_method=body.signing_method,
         bird_rights_type=body.bird_rights_type,
         eaps_assumption=body.eaps_assumption,
     )
+    fact_sheet["prorated_year1"] = prorated
     return _validation_result(_validate_sign(body, ctx), fact_sheet)
 
 
