@@ -45,6 +45,7 @@ from .transactions import (AcceptQualifyingOfferDetails, ContractIn, OfferSheetD
                            _qo_amount, _qo_record, _qo_status,
                            _signee_existing_hold, _signing_fact_sheet,
                            _validate_sign, _validation_ctx, apply_offer_sheet,
+                           _prorate_minimum_year1,
                            _refuse_unlock_over_txn, notify_offer_sheet_received,
                            apply_accept_qo, apply_sign, apply_with_warning_confirm)
 
@@ -502,6 +503,10 @@ def _run_validation(offer: dict, ctx: dict) -> dict:
     which is why nothing in this module does cap math of its own."""
     details = _sign_details(offer)
     _require_validatable(details.team, details.player, ctx)
+    # A minimum's Year 1 is prorated on the day it is signed, not the day the
+    # offer is filed, so the offer keeps the full figure and is judged as it
+    # would be signed today (apply_sign prorates again at declare-winner).
+    prorated = _prorate_minimum_year1(details, ctx["bios"], ctx["cap_levels"], ctx.get("txn_date"))
     checks = [c.model_dump() for c in _validate_sign(details, ctx)]
     sheet = _signing_fact_sheet(
         details.team.upper(), details.player, details.contract, ctx,
@@ -509,6 +514,7 @@ def _run_validation(offer: dict, ctx: dict) -> dict:
         bird_rights_type=details.bird_rights_type,
         eaps_assumption=details.eaps_assumption,
     )
+    sheet["prorated_year1"] = prorated
     return {
         "legal": not any(not c["passed"] and c["level"] == "error" for c in checks),
         "checks": checks,
