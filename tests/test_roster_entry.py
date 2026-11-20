@@ -1,7 +1,7 @@
 """The streamer's queue of roster moves to make in 2K.
 
 - Only moves of a player count: an extension, an option, a picks-only or
-  backfilled trade, an unclaimed waiver clear, a matched offer sheet and a
+  backfilled entry of any type, an unclaimed waiver clear, a matched offer sheet and a
   voided transaction never show.
 - Nothing from before SINCE shows.
 - The queue is oldest first.
@@ -74,6 +74,8 @@ LEDGER = [
     txn("moved", "offer_sheet_decision", "2026-11-07T00:00:00Z", player="e", outcome="not_matched"),
     {**txn("void", "sign", "2026-11-08T00:00:00Z", player="f", team="ATL"), "voided": True},
     txn("conv", "convert_twoway", "2026-11-08T00:00:00Z", player="g", team="ATL"),
+    txn("histsign", "sign", "2026-11-08T00:00:00Z", player="g2", team="ATL", historical=True),
+    txn("histconv", "convert_twoway", "2026-11-08T00:00:00Z", player="g3", team="ATL", historical=True),
     txn("sign3", "sign", "2026-11-09T00:00:00Z", player="h", team="ATL"),
     txn("rel2", "release", "2026-11-09T00:00:00Z", player="i", team="ATL"),
 ]

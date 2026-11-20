@@ -236,6 +236,8 @@ class SetHardCapDetails(BaseModel):
 class ConvertTwoWayDetails(BaseModel):
     player: str
     contract: ContractIn
+    # Historical backfill only. A live conversion takes the team from the roster.
+    team: Optional[str] = None
     signing_method: Optional[str] = None
     bird_rights_type: Optional[str] = None
     eaps_assumption: Optional[str] = None  # "above" or "below" — see SignDetails

@@ -6715,6 +6715,19 @@ def _create_historical_option(details: OptionDetails, body: TransactionIn, info:
     return _append_historical("option", stored_details, body, info)
 
 
+def _create_historical_convert_twoway(details: ConvertTwoWayDetails, body: TransactionIn, info: dict) -> dict:
+    # The player has usually moved on since, so the roster can't name the team
+    # the way _apply_convert_twoway's lookup does; the backfill must.
+    bios = load_player_bios()
+    if not details.player or details.player not in bios:
+        raise HTTPException(status_code=422, detail=f"Unknown player slug: {details.player!r}")
+    if not details.team or details.team.upper() not in VALID_TEAMS:
+        raise HTTPException(status_code=422, detail=f"Unknown team: {details.team!r}")
+    stored_details = details.model_dump()
+    stored_details["team"] = details.team.upper()
+    return _append_historical("convert_twoway", stored_details, body, info)
+
+
 # ── Transaction routes ────────────────────────────────────────────────────────
 
 def apply_sign(details: SignDetails, txn_date: str, info: dict, *,
@@ -7148,8 +7161,8 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
     if body.type not in ("sign", "pick", "option", "guarantee", "release", "renounce", "rescind_renounce", "trade", "convert_twoway", "sign_pick", "void_player", "stash", "set_hard_cap_level", "offer_sheet", "offer_sheet_decision", "extension", "qualifying_offer", "accept_qo"):
         raise HTTPException(status_code=422, detail=f"Unsupported transaction type: {body.type!r}")
 
-    if body.historical and body.type not in ("trade", "sign", "option"):
-        raise HTTPException(status_code=422, detail="historical backfill only supports type=trade, sign, option")
+    if body.historical and body.type not in ("trade", "sign", "option", "convert_twoway"):
+        raise HTTPException(status_code=422, detail="historical backfill only supports type=trade, sign, option, convert_twoway")
 
     _detail_models = {
         "sign":           (SignDetails,           "Invalid sign details"),
@@ -7186,6 +7199,8 @@ def create_transaction(body: TransactionIn, info: dict = Depends(require_role("r
             return _create_historical_sign(parsed_details, body, info)
         if body.type == "option":
             return _create_historical_option(parsed_details, body, info)
+        if body.type == "convert_twoway":
+            return _create_historical_convert_twoway(parsed_details, body, info)
 
     if body.type == "trade":
         return apply_trade(parsed_details, body.date, info, description=body.description,

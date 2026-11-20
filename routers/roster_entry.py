@@ -47,12 +47,12 @@ def needs_2k_entry(txn: dict) -> bool:
         return False
     ttype = txn.get("type")
     d = txn.get("details") or {}
+    # A backfilled entry of any type was in 2K long before the ledger had it.
+    if d.get("historical"):
+        return False
     if ttype in _ALWAYS:
         return True
     if ttype == "trade":
-        # A backfilled trade was in 2K long before the ledger had it.
-        if d.get("historical"):
-            return False
         return any(a.get("type") == "player"
                    for tr in d.get("transfers") or [] for a in tr.get("assets") or [])
     if ttype == "waiver_clear":
