@@ -798,6 +798,9 @@ def _diff_all_ratings(history: dict, bios: dict) -> list[dict]:
             # module docstring) -- never reconstructed here, so it's null for any
             # snapshot taken before "team" started being recorded.
             change["team"] = cur.get("team")
+            # The real NBA team 2K listed him on when this snapshot was taken
+            # (null for 2K's free agents, and for snapshots before 2026-11-21).
+            change["nba_team"] = cur.get("nba_team")
             # True when this change was a not-yet-rated stub (2K hadn't assigned
             # the player a real rating -- see scrape_2k_attributes.py's
             # STUB_OVR_THRESHOLD/DIVERGENCE_THRESHOLD) and so was never synced

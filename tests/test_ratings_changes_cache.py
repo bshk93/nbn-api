@@ -5,6 +5,7 @@
   next call; the committee's ticks are never cached.
 - One request's ticks never leak into the shared list.
 - `latest=1` keeps only the newest scrape date (after `slug`/`since`/`until`).
+- Each change carries the snapshot's `nba_team`, null when the snapshot has none.
 
 Files live in a temp directory; nothing here touches live data.
 
@@ -48,7 +49,8 @@ def write(path, data):
 
 
 ATTRS = {
-    "doe-john": [snap("2026-10-01", 80), snap("2026-11-01", 82), snap("2026-11-05", 84)],
+    "doe-john": [snap("2026-10-01", 80), snap("2026-11-01", 82),
+                 {**snap("2026-11-05", 84), "team": "BOS", "nba_team": "LAL"}],
     "roe-jane": [snap("2026-10-01", 70), snap("2026-11-05", 68)],
 }
 write(players.ATTRIBUTES_FILE, ATTRS)
@@ -71,6 +73,9 @@ b = players.get_ratings_changes(slug=None, since=None, until=None, limit=2000, l
 check("three changes, newest first", [e["date"] for e in a["entries"]] == ["2026-11-05", "2026-11-05", "2026-11-01"])
 check("second call is the same answer", a == b)
 check("second call didn't re-read the attributes", calls["n"] == 1)
+check("nba_team comes off the snapshot",
+      {(e["slug"], e["date"]): e["nba_team"] for e in a["entries"]}
+      == {("doe-john", "2026-11-05"): "LAL", ("roe-jane", "2026-11-05"): None, ("doe-john", "2026-11-01"): None})
 check("names come from the bios", {e["name"] for e in a["entries"]} == {"DOE, JOHN", "ROE, JANE"})
 fresh = players._diff_all_ratings(ATTRS, json.loads(players.PLAYER_BIOS_FILE.read_text()))
 check("cached list equals a fresh diff", players.all_ratings_changes() == fresh)
