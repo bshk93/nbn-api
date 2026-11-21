@@ -147,6 +147,10 @@ IRL_DIR = DATA_DIR / "irl"
 # put into the league's 2K roster file: {"slug|date": {by, at}}. Hand-kept, so
 # backed up.
 RATINGS_UPDATED_FILE = DATA_DIR / "ratings-updated.json"
+# Which ratings changes the updates committee has flagged as a special request:
+# {"slug|date": {by, at}}. Only `updates` and admin can read or change it, so
+# it is kept off the public GET /api/ratings-changes. Hand-kept, so backed up.
+RATINGS_SPECIAL_FILE = DATA_DIR / "ratings-special.json"
 # Which roster-changing transactions a streamer has put into the league's 2K
 # roster file (routers/roster_entry.py): {txn_id: {by, at}}. Hand-kept, so
 # backed up.
@@ -160,6 +164,7 @@ _txn_lock           = threading.Lock()
 _manual_queue_lock  = threading.Lock()
 _ovr_lock      = threading.Lock()
 _ratings_updated_lock = threading.Lock()
+_ratings_special_lock = threading.Lock()
 _roster_entry_lock = threading.Lock()
 _state_lock    = threading.Lock()
 _deadcap_lock  = threading.Lock()

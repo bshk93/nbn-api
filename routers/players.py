@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from .constants import (
     DATA_DIR, PLAYER_BIOS_FILE, OVR_FILE, ATTRIBUTES_FILE, VALID_TEAMS,
     RATINGS_UPDATED_FILE, _ratings_updated_lock,
+    RATINGS_SPECIAL_FILE, _ratings_special_lock,
     _ovr_lock, _txn_lock, CURATOR_FIELDS, BIO_REWARD_FIELDS, BIO_REWARDS_FILE, _bio_rewards_lock, logger,
 )
 from .storage import _load_json, _load_json_shared, _save_json, read_csv, log_write, shared_json_response
@@ -855,6 +856,19 @@ def get_ratings_changes(
     return {"count": len(entries), "entries": entries[:limit]}
 
 
+def _require_ratings_change(slug: str, date: str) -> str:
+    """The "slug|date" key of a real change, or 404, so a typo can't leave a
+    tick nothing will ever show."""
+    snapshots = load_attributes().get(slug) or []
+    is_change = any(
+        cur.get("date") == date and _diff_2k_snapshots(prev, cur)
+        for prev, cur in zip(snapshots, snapshots[1:])
+    )
+    if not is_change:
+        raise HTTPException(status_code=404, detail=f"No ratings change for {slug} on {date}")
+    return f"{slug}|{date}"
+
+
 class RatingsUpdatedBody(BaseModel):
     slug: str
     date: str
@@ -868,14 +882,7 @@ def set_ratings_updated(body: RatingsUpdatedBody, info: dict = Depends(require_r
     A change is one player's snapshot on one date, so (slug, date) names it.
     Refuses a pair that isn't a real change, so a typo can't leave a tick
     nothing will ever show."""
-    snapshots = load_attributes().get(body.slug) or []
-    is_change = any(
-        cur.get("date") == body.date and _diff_2k_snapshots(prev, cur)
-        for prev, cur in zip(snapshots, snapshots[1:])
-    )
-    if not is_change:
-        raise HTTPException(status_code=404, detail=f"No ratings change for {body.slug} on {body.date}")
-    key = f"{body.slug}|{body.date}"
+    key = _require_ratings_change(body.slug, body.date)
     with _ratings_updated_lock:
         data = _load_json(RATINGS_UPDATED_FILE, {})
         if body.updated:
@@ -897,6 +904,34 @@ def set_ratings_updated(body: RatingsUpdatedBody, info: dict = Depends(require_r
     except Exception as exc:
         logger.warning("dna position check failed for %s: %s", key, exc)
     return {"slug": body.slug, "date": body.date, "updated": data.get(key)}
+
+
+class RatingsSpecialBody(BaseModel):
+    slug: str
+    date: str
+    special: bool
+
+
+@router.get("/api/ratings-changes/special")
+def get_ratings_special(info: dict = Depends(require_role("updates"))):
+    """Every change flagged as a special request: {"slug|date": {by, at}}.
+    Behind the role, unlike the public list, which never carries it."""
+    return _load_json(RATINGS_SPECIAL_FILE, {})
+
+
+@router.put("/api/ratings-changes/special")
+def set_ratings_special(body: RatingsSpecialBody, info: dict = Depends(require_role("updates"))):
+    """Flag (or unflag) one change on /ratings-changes as a special request."""
+    key = _require_ratings_change(body.slug, body.date)
+    with _ratings_special_lock:
+        data = _load_json(RATINGS_SPECIAL_FILE, {})
+        if body.special:
+            data[key] = {"by": info.get("name"), "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        else:
+            data.pop(key, None)
+        _save_json(RATINGS_SPECIAL_FILE, data)
+    log_write(info, f"ratings change {key} {'flagged' if body.special else 'unflagged'} special request")
+    return {"slug": body.slug, "date": body.date, "special": data.get(key)}
 
 
 # ── Team map ──────────────────────────────────────────────────────────────────
