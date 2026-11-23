@@ -26,7 +26,8 @@ The model, in full:
     its player to that season's top eight: OVR from the pick number
     (`rookie_ovr`, fit on the last two classes), aged like everyone else. Where
     it lands, and whose it is, come from `DRAFT_SAMPLES` simulated draft
-    orders of the season before (fewest wins first; there is no lottery), each
+    orders of the season before (fewest wins first: the lottery is not modelled
+    yet, see nbn-today BACKLOG.md "Lottery in the pick models"), each
     put through the conveyance model's draft-time resolver (`pick_odds`), so a
     top-4 protection or a swap counts by how often it actually conveys. Only
     the next two drafts land inside the horizon, so picks move a price a little.
@@ -380,8 +381,8 @@ def pick_odds(store: Optional[dict], first_year: int,
               orders: list[list[list[str]]]) -> list[dict[str, dict[tuple, dict[int, float]]]]:
     """For each draft from `first_year` on: team -> pick -> {slot: probability}.
 
-    `orders[d]` is draft d's sampled orders, fewest wins first (the league has
-    no lottery). Sample i of every draft is put through the conveyance model's
+    `orders[d]` is draft d's sampled orders, fewest wins first (the 3-2-1
+    lottery is not modelled yet). Sample i of every draft is put through the conveyance model's
     own draft-time resolver together, so a protection, a swap or a ladder that
     runs across drafts lands where the rules send it in that sample. A pick
     the resolver can't place is nobody's in that sample.
