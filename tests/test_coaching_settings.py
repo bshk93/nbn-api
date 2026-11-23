@@ -351,15 +351,24 @@ check("an exception is listed for the streamer, flagged illegal", item["changed"
 check("a legal one isn't flagged", all(i["legal"] for s, i in items().items() if s != "far-sf"))
 view = c.get("/api/position-checks/BOS").json()
 check("the team sees it as an exception waiting for an OK",
-      view["exceptions"] == {"far-sf": {"secondary": "C", "approved": False}})
+      view["exceptions"] == {"far-sf": {"secondary": "C", "approved": False, "starts_at": None}})
 r = c.put("/api/coaching-settings/BOS", json=five(C="far-sf"), headers=BOS)
-check("it doesn't count for starting before the OK",
-      r.status_code == 422 and "counts once a streamer has OK'd it" in r.json()["detail"])
+check("he may be saved starting there before the OK", r.status_code == 200)
+check("...and the save says that slot waits on a streamer",
+      r.json()["pending_starts"] == {"far-sf": "C"} and "pending_starts" not in rec("BOS"))
+view = c.get("/api/position-checks/BOS").json()
+check("the streamer sees which slot rides on the exception",
+      view["exceptions"]["far-sf"]["starts_at"] == "C"
+      and next(i for i in view["items"] if i["slug"] == "far-sf")["starts_at"] == "C")
+r = c.put("/api/coaching-settings/BOS", json=five(PG="far-sf"), headers=BOS)
+check("a slot that isn't his secondary is still refused",
+      r.status_code == 422 and "can't start at PG" in r.json()["detail"])
 c.post("/api/position-checks/BOS/confirm", json={"seen": {"far-sf": "C"}}, headers=STREAM)
-check("setting it in 2K is the OK",
-      c.get("/api/position-checks/BOS").json()["exceptions"]["far-sf"]["approved"] is True)
-check("...and then he may start there",
-      c.put("/api/coaching-settings/BOS", json=five(C="far-sf"), headers=BOS).status_code == 200)
+view = c.get("/api/position-checks/BOS").json()
+check("setting it in 2K is the OK", view["exceptions"]["far-sf"]["approved"] is True)
+check("...and then nothing is pending", view["exceptions"]["far-sf"]["starts_at"] is None)
+check("...and he may start there",
+      c.put("/api/coaching-settings/BOS", json=five(C="far-sf"), headers=BOS).json()["pending_starts"] == {})
 BIOS["far-sf"]["secondary_pos"] = "PG"
 check("a different exception needs a new OK",
       c.get("/api/position-checks/BOS").json()["exceptions"]["far-sf"]["approved"] is False)
