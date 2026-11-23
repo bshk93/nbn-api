@@ -179,7 +179,8 @@ SECTION_ENFORCED_BY: dict[str, str] = {
     "2.3": "the primary is never entered: it is taken from the 2K scrape, "
            "first automatically and after that only when his team chooses "
            "(`take_2k_position` in `routers/players.py`); a starter out of position is refused "
-           "(`_illegal_starters` in `routers/coaching_settings.py`)",
+           "(`_illegal_starters` in `routers/coaching_settings.py`), and one at an exception "
+           "secondary not yet OK'd is shown to the streamer (`pending_starts`)",
     "5.2": "dead cap is computed at release by `_dead_cap_from_schedule` / "
            "`_apply_release`, never entered by hand, so there is no submission "
            "to reject",

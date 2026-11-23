@@ -50,8 +50,10 @@ class CoachingSettingsBody(BaseModel):
 
 # A starter has to play near his slot: his primary position, one step
 # either side of it (PG-SG-SF-PF-C), or the secondary his team gave him. A
-# secondary outside § 2.3's one step counts only once a streamer has OK'd it
-# (`counted_secondary`). The one rule this schema-blind store enforces,
+# secondary outside § 2.3's pool counts only once a streamer has OK'd it
+# (`counted_secondary`), but the team may save a lineup that leans on it
+# before then: the slot is pending (`pending_starts`), and the streamer sees
+# it next to the exception. The one rule this schema-blind store enforces,
 # because it is a league rule rather than a coaching preference.
 STARTER_SLOTS = ("PG", "SG", "SF", "PF", "C")
 
@@ -86,7 +88,6 @@ def _illegal_starters(minutes: dict, prev_minutes: dict, team: str = "") -> list
     primary yet can't be checked, and isn't blocked."""
     from .players import _primary_pos, effective_secondary, load_player_bios
     bios = None
-    entered = None
     problems = []
     for slot in STARTER_SLOTS:
         row = minutes.get(slot)
@@ -98,20 +99,38 @@ def _illegal_starters(minutes: dict, prev_minutes: dict, team: str = "") -> list
             continue
         if bios is None:
             bios = load_player_bios()
-            entered = (load_position_checks().get(team) or {}).get("entered") or {}
         bio = bios.get(slug) or {}
         primary = _primary_pos(slug, None, bio)
         if primary is None:
             continue
-        sec = counted_secondary(slug, bio, None, entered)
-        legal = starter_positions(primary, sec)
+        # His team's secondary counts here even when it is an exception the
+        # streamer hasn't OK'd yet: that slot is pending, not illegal.
+        legal = starter_positions(primary, effective_secondary(slug, bio))
         if slot not in legal:
-            line = (f"{bio.get('name') or slug} can't start at {slot}: "
-                    f"his primary is {primary}, so he can start at {', '.join(legal)}")
-            if effective_secondary(slug, bio) == slot:
-                line += f" ({slot} counts once a streamer has OK'd it)"
-            problems.append(line)
+            problems.append(f"{bio.get('name') or slug} can't start at {slot}: "
+                            f"his primary is {primary}, so he can start at {', '.join(legal)}")
     return problems
+
+
+def pending_starts(minutes: dict, rec: dict, bios: dict, attrs: Optional[dict] = None) -> dict:
+    """slug → slot for each starter who is there only through a secondary
+    outside § 2.3 that no streamer has OK'd yet. `rec` is the team's
+    position-checks record."""
+    from .players import _primary_pos, effective_secondary
+    entered = (rec or {}).get("entered") or {}
+    out = {}
+    for slot in STARTER_SLOTS:
+        row = (minutes or {}).get(slot)
+        slug = row.get("slug") if isinstance(row, dict) else None
+        if not slug:
+            continue
+        bio = bios.get(slug) or {}
+        primary = _primary_pos(slug, attrs, bio)
+        if primary is None or slot in starter_positions(primary, counted_secondary(slug, bio, attrs, entered)):
+            continue
+        if effective_secondary(slug, bio, attrs) == slot:
+            out[slug] = slot
+    return out
 
 
 class EnterBody(BaseModel):
@@ -209,6 +228,12 @@ def put_coaching_settings(
         save_coaching_settings(data)
         rec = data[team]
     log_write(info, f"PUT coaching-settings/{team}")
+    try:
+        from .players import load_player_bios
+        waiting = pending_starts(rec.get("minutes") or {}, load_position_checks().get(team) or {},
+                                 load_player_bios())
+    except Exception:
+        waiting = {}
     # One message per batch of changes: a team that already has positions
     # waiting has already pinged the streamer, who will see these with them.
     try:
@@ -216,7 +241,8 @@ def put_coaching_settings(
     except Exception:
         was_pending = True
     game_day_notify.coaching_saved(team, was_pending, info.get("name"))
-    return rec
+    # Not stored: the starters waiting on a streamer's OK of their secondary.
+    return {**rec, "pending_starts": waiting}
 
 
 @router.post("/api/coaching-settings/{team}/enter")
@@ -396,24 +422,28 @@ def position_items(team: str, rec: dict, bios: dict, roster: list[str], today: s
     return items
 
 
-def position_exceptions(rec: dict, bios: dict, roster: list[str], attrs: dict) -> dict:
-    """slug → {secondary, approved} for each roster player whose secondary is
-    outside the pool (§ 2.3). Approved once a streamer has set that exact
-    position in 2K, which is how a streamer OKs an exception."""
+def position_exceptions(rec: dict, bios: dict, roster: list[str], attrs: dict,
+                        starts: Optional[dict] = None) -> dict:
+    """slug → {secondary, approved, starts_at} for each roster player whose
+    secondary is outside the pool (§ 2.3). Approved once a streamer has set
+    that exact position in 2K, which is how a streamer OKs an exception.
+    `starts_at` is the lineup slot waiting on that OK, if any."""
     from .players import effective_secondary, secondary_is_legal
     entered = rec.get("entered") or {}
+    starts = starts or {}
     out = {}
     for slug in roster:
         bio = bios.get(slug) or {}
         sec = effective_secondary(slug, bio, attrs)
         if secondary_is_legal(slug, bio, sec, attrs):
             continue
-        out[slug] = {"secondary": sec, "approved": slug in entered and entered[slug] == sec}
+        out[slug] = {"secondary": sec, "approved": slug in entered and entered[slug] == sec,
+                     "starts_at": starts.get(slug)}
     return out
 
 
 def team_positions_view(team: str, data: Optional[dict] = None, bios: Optional[dict] = None,
-                        attrs: Optional[dict] = None) -> dict:
+                        attrs: Optional[dict] = None, coaching: Optional[dict] = None) -> dict:
     from .players import load_player_bios, load_attributes
     data = load_position_checks() if data is None else data
     bios = load_player_bios() if bios is None else bios
@@ -421,9 +451,15 @@ def team_positions_view(team: str, data: Optional[dict] = None, bios: Optional[d
     rec = data.get(team) or {}
     roster = _roster_slugs(team)
     pins = set(rec.get("pins") or [])
+    if coaching is None:
+        coaching = load_coaching_settings()
+    starts = pending_starts((coaching.get(team) or {}).get("minutes") or {}, rec, bios, attrs)
+    items = position_items(team, rec, bios, roster, league_today_str(), attrs)
+    for i in items:
+        i["starts_at"] = starts.get(i.get("slug"))
     return {
-        "items": position_items(team, rec, bios, roster, league_today_str(), attrs),
-        "exceptions": position_exceptions(rec, bios, roster, attrs),
+        "items": items,
+        "exceptions": position_exceptions(rec, bios, roster, attrs, starts),
         "pinned": [s for s in roster if s in pins],
         "checked_at": rec.get("checked_at"),
         "checked_by": rec.get("checked_by"),
@@ -496,7 +532,8 @@ def get_position_checks():
     are, and a lock says nothing a team needs to keep to itself."""
     from .players import load_player_bios, load_attributes
     data, bios, attrs = load_position_checks(), load_player_bios(), load_attributes()
-    return {team: team_positions_view(team, data, bios, attrs) for team in sorted(VALID_TEAMS)}
+    coaching = load_coaching_settings()
+    return {team: team_positions_view(team, data, bios, attrs, coaching) for team in sorted(VALID_TEAMS)}
 
 
 @router.get("/api/position-checks/{team}")

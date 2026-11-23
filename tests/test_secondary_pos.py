@@ -356,6 +356,7 @@ def test_a_jersey_save_records_what_2k_had(monkeypatch):
     monkeypatch.setattr(coaching_settings, "_roster_slugs", lambda team: ["p0"])
     monkeypatch.setattr(coaching_settings, "position_items",
                         lambda team, rec, bios, roster, today, attrs=None: [{"changed": False, "primary_changed": False, "jersey_changed": bool(rec.get("jerseys")), "dna": None}])
+    monkeypatch.setattr(coaching_settings, "load_coaching_settings", lambda: {})
     sent = []
     monkeypatch.setattr(game_day_notify, "positions_changed", lambda team, by: sent.append(team))
     info = {"roles": ["mil"], "name": "owner"}
