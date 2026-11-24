@@ -26,7 +26,7 @@ from .constants import COACHING_SETTINGS_FILE, COACHING_NOTES_FILE, POSITION_CHE
 from .storage import _load_json, _save_json, log_write, read_csv
 from .league_time import league_today_str
 from .auth import _resolve_token, get_token_info, has_role, require_role
-from . import game_day_notify
+from . import coaching_history, game_day_notify
 
 router = APIRouter()
 
@@ -227,6 +227,8 @@ def put_coaching_settings(
             data[team]["entered_values"], data[team]["entered_minutes"] = entered
         save_coaching_settings(data)
         rec = data[team]
+        coaching_history.record(team, "saved", rec["updated_at"], rec["updated_by"],
+                                values=rec["values"], minutes=rec["minutes"])
     log_write(info, f"PUT coaching-settings/{team}")
     try:
         from .players import load_player_bios
@@ -268,6 +270,9 @@ def enter_coaching_settings(
         rec["entered_values"] = rec.get("values") or {}
         rec["entered_minutes"] = rec.get("minutes") or {}
         save_coaching_settings(data)
+        coaching_history.record(team, "entered", rec["entered_at"], rec["entered_by"],
+                                values=rec["entered_values"], minutes=rec["entered_minutes"],
+                                version=rec.get("updated_at"))
     log_write(info, f"POST coaching-settings/{team}/enter")
     if was_pending:
         game_day_notify.coaching_entered(team, info.get("name"))
@@ -701,6 +706,9 @@ def put_coaching_note(team: str, body: NoteBody, info: dict = Depends(get_token_
             data.pop(team, None)
         save_coaching_notes(data)
         rec = data.get(team)
+        if text or prev.get("text"):
+            coaching_history.record(team, "note", rec["updated_at"] if rec else _now(),
+                                    info.get("name"), text=text)
     log_write(info, f"PUT coaching-notes/{team}" + ("" if text else " — deleted"))
     if text and not was_open:
         try:
@@ -728,6 +736,8 @@ def clear_coaching_note(team: str, body: ClearNoteBody = ClearNoteBody(),
         rec["cleared_at"] = _now()
         rec["cleared_by"] = info.get("name")
         save_coaching_notes(data)
+        coaching_history.record(team, "note_cleared", rec["cleared_at"], rec["cleared_by"],
+                                text=rec.get("text") or "")
     log_write(info, f"POST coaching-notes/{team}/clear")
     if was_open:
         game_day_notify.note_cleared(team, info.get("name"))

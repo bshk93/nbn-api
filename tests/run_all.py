@@ -21,7 +21,7 @@ MODULES = [
     "test_minimum_contract_raises", "test_tradeblock_notify", "test_tradeblock_nudge",
     "test_roster_move_notify", "test_waivers", "test_one_year_min_cap_hit_consistency",
     "test_inbox", "test_inbox_wiring", "test_discord_lineups", "test_schedule",
-    "test_stream_sim", "test_coaching_settings", "test_ratings_updated", "test_ratings_special",
+    "test_stream_sim", "test_coaching_settings", "test_coaching_history", "test_ratings_updated", "test_ratings_special",
     "test_ratings_changes_cache", "test_roster_entry", "test_dna_position_check",
     "test_irl", "test_streaming_days", "test_stream_planner", "test_youtube_vods",
     "test_donations", "test_news_rankings", "test_tips", "test_nbyen", "test_markets",

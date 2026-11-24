@@ -61,6 +61,9 @@ auth.load_members = lambda: MEMBERS
 TMP = Path(tempfile.mkdtemp(prefix="nbn-coaching-settings-test-"))
 cs.COACHING_SETTINGS_FILE = TMP / "coaching-settings.json"
 cs.COACHING_NOTES_FILE = TMP / "coaching-notes.json"
+# Saves append to the history; keep that off the live file.
+import routers.coaching_history as ch  # noqa: E402
+ch.COACHING_HISTORY_FILE = TMP / "coaching-history.jsonl"
 cs.log_write = lambda info, msg: None
 # The routes under test send game-day inbox messages. Stub them: the real
 # ones read the live members.json and write the live inboxes.json.

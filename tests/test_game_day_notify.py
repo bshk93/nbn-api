@@ -88,6 +88,8 @@ TMP = Path(tempfile.mkdtemp(prefix="nbn-gameday-test-"))
 cs.POSITION_CHECKS_FILE = TMP / "position-checks.json"
 cs._roster_slugs = lambda team: ["booker-devin", "beal-bradley"] if team == "PHX" else []
 cs.COACHING_SETTINGS_FILE = TMP / "coaching.json"
+import routers.coaching_history as ch  # noqa: E402
+ch.COACHING_HISTORY_FILE = TMP / "coaching-history.jsonl"
 # The roster above, as bios too. Left to the live file, a coaching save asked
 # whether positions were waiting and read the real bios: once Beal was traded
 # to SAS, his frozen position named SAS, PHX looked like it had a change

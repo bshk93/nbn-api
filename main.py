@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from etag import ETagMiddleware
 
 from routers import audit as audit_ctx
-from routers import auth, players, roster_picks, picks_structure, transactions, boxscores, game_highs, player_insights, playoff_odds, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, og, discord, trade_finder, picks_preview, suggestions, google_sheets, free_agency, roster_log_relay, waivers, inbox, poext, themes, cap_history, poopoo, schedule, coaching_settings, streaming_days, donations, nbnfl, irl, trade_requests, nbyen, markets, lore, game_starters, on_this_day, fair_value, stream_live, game_day, stream_notify, pickem, youtube_vods, injuries, tetris, headshots, quadrants, tweets, arenas, bird_rights, home, stream_sim, stream_planner, roster_entry, years_of_service, tonight, tonight_card, parse_request, picks_resolve
+from routers import auth, players, roster_picks, picks_structure, transactions, boxscores, game_highs, player_insights, playoff_odds, bets, proposals, misc, tips, perry, poeltl, strikes, draft, invest, news, og, discord, trade_finder, picks_preview, suggestions, google_sheets, free_agency, roster_log_relay, waivers, inbox, poext, themes, cap_history, poopoo, schedule, coaching_settings, coaching_history, streaming_days, donations, nbnfl, irl, trade_requests, nbyen, markets, lore, game_starters, on_this_day, fair_value, stream_live, game_day, stream_notify, pickem, youtube_vods, injuries, tetris, headshots, quadrants, tweets, arenas, bird_rights, home, stream_sim, stream_planner, roster_entry, years_of_service, tonight, tonight_card, parse_request, picks_resolve
 from routers.picks_scheduler import start_picks_horizon_scheduler
 from routers.roster_log_relay import start_roster_log_relay
 from routers.youtube_vods import start_youtube_vods
@@ -119,6 +119,7 @@ app.include_router(poopoo.router)          # read-only slice of build/poopoo.py'
 app.include_router(schedule.router)        # the league game schedule, seeded from the NBA's and editable from there
 app.include_router(roster_entry.router)  # roster moves a streamer still has to make in 2K
 app.include_router(coaching_settings.router)  # per-team 2K coach profile, team-submitted, streamer-entered
+app.include_router(coaching_history.router)   # every version of it, private to the team
 app.include_router(youtube_vods.router)  # finds each game's YouTube video from the channel feed
 app.include_router(streaming_days.router)  # per-date streaming status: day marked done, YouTube VOD link
 app.include_router(donations.router)       # league funding tracker — GET public, POST/PUT gated to bod
