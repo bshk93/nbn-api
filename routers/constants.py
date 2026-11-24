@@ -122,6 +122,9 @@ COACHING_SETTINGS_FILE = DATA_DIR / "coaching-settings.json"
 POSITION_CHECKS_FILE = DATA_DIR / "position-checks.json"
 # A team's free-text note to whoever streams its games, cleared by a streamer.
 COACHING_NOTES_FILE = DATA_DIR / "coaching-notes.json"
+# Every version of a team's coach profile, rotation and streamer note, one
+# line per save/entry, append-only — see routers/coaching_history.py.
+COACHING_HISTORY_FILE = DATA_DIR / "coaching-history.jsonl"
 # Per-date streaming status — a day of games marked done, and its YouTube VOD
 # link. Keyed by date — see routers/streaming_days.py.
 STREAMING_DAYS_FILE = DATA_DIR / "streaming-days.json"

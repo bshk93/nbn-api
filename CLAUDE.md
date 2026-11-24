@@ -164,6 +164,7 @@ without reading it.
 | Stats build (`stats_build/`) | same | change `pipeline.py` without `python3 -m stats_build.harness port`; add pandas/numpy |
 | Parse now (`parse_request.py`) | same | put member text in the fire request |
 | Who started each game (`game_starters.py`), 6MOY eligibility | same | guess a five 2K never saw; change `sixth_man_row` without `award-race.js` (pinned by `test_js_mirrors`) |
+| Coaching history (`coaching_history.py`, `seed_coaching_history.py`) | the module docstring | serve it to anyone but the team's own role, streamers and admin; write it through `_atomic_write` (that would put a private profile in the public edit log); let a failed history write fail a save |
 | Injury report (`injuries.py`) | same | heal a long injury without `confirm_heals` |
 | Discord slash commands (`discord.py`) | `docs/discord-and-twitch.md` | let `_compute_starting_five` drift from `lineup.js` (`test_js_mirrors`) |
 | #roster-log mirror (`roster_log_relay.py`) | same | summarise or interpret a message; advance the cursor past an unsent one |
