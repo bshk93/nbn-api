@@ -132,6 +132,28 @@ check("every index names only real teams, and has a label",
 check("the state indexes are the Texas and California teams",
       inv.INDEXES["TX"] == ["DAL", "HOU", "SAS"] and inv.INDEXES["CA"] == ["GSW", "LAC", "LAL", "SAC"])
 
+print("\nOwner indexes")
+# AA follows owners.csv: BOS is Kman's throughout, NYK becomes bryn's on
+# 2026-11-02 (name case doesn't matter), ORL was AJGoh's and isn't any more.
+(D / "owners.csv").write_text(
+    "team,owner,start_date\n"
+    "BOS,Kman,7/1/2020\n"
+    "NYK,someone,7/1/2020\n"
+    "NYK,BRYN,11/2/2026\n"
+    "ORL,AJGoh,7/1/2020\n"
+    "ORL,nobody,7/26/2022\n")
+inv._price_cache["prices"] = None
+prices, current = inv._get_prices()
+# BOS's moves count all along; NYK's only from 2026-11-03, when NYK lost by
+# 10 to a +20 team (dd +10) and cancelled BOS's -10 on the day.
+check("an owner index counts a team only while the group owns it",
+      abs(current["AA"] - 100 * (1 - 15 / inv.MOVE_DIVISOR)) < 1e-9)
+check("an owner index skips days none of its teams played",
+      [h["date"] for h in prices["AA"]] == ["2026-01-01", "2026-01-03", "2026-11-01", "2026-11-03"])
+check("an owner index holds the group's current teams",
+      sorted(inv._index_teams("AA")) == ["BOS", "NYK"])
+check("an owner index has a label", "AA" in inv.INDEX_META)
+
 print("\nPlayoffs")
 # Two good teams (both +20 a game) meet in the playoffs. The old formula
 # credited both sides for the strong opponent; now a game is zero-sum.

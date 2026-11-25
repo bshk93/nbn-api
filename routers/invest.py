@@ -90,7 +90,43 @@ INDEX_META: dict[str, dict] = {
     "SW":   {"name": "Southwest Division", "conf": "West", "div": "Southwest"},
     "TX":   {"name": "Texas",              "group": "State"},
     "CA":   {"name": "California",         "group": "State"},
+    "AA":   {"name": "AA Group",           "group": "Owners"},
 }
+
+# Owner indexes: the teams a group of owners held, day by day. A team counts
+# only for games on days one of the group owned it (owners.csv tenures), so
+# the membership changes with the league's history. Names match owners.csv,
+# ignoring case.
+OWNER_INDEXES: dict[str, list[str]] = {
+    "AA": ["bryn", "hkd", "killerdawg7", "KVL", "Kman", "AJGoh"],
+}
+_FOREVER = "9999-12-31"
+
+
+def _owner_windows(owners: list[str]) -> list[tuple[str, str, str]]:
+    """(team, first day, last day) for each tenure of these owners, ISO dates.
+    A current owner's tenure runs on with no end."""
+    from datetime import date
+    from stats_build.pipeline import load_owner_tenures
+    want = {o.lower() for o in owners}
+    return [(t["TEAM"], t["start"].isoformat(),
+             _FOREVER if t["end"] == date.max else t["end"].isoformat())
+            for t in load_owner_tenures(DATA_DIR, date.max) if t["owner"].lower() in want]
+
+
+def _index_windows() -> dict[str, list[tuple[str, str, str]]]:
+    """Every index ticker → (team, first day, last day) it counts for."""
+    out = {k: [(t, "", _FOREVER) for t in teams] for k, teams in INDEXES.items()}
+    for k, owners in OWNER_INDEXES.items():
+        out[k] = _owner_windows(owners)
+    return out
+
+
+def _index_teams(ticker: str) -> list[str]:
+    """The teams a ticker holds today: itself for a team."""
+    if ticker in OWNER_INDEXES:
+        return [t for t, _, end in _owner_windows(OWNER_INDEXES[ticker]) if end == _FOREVER]
+    return INDEXES.get(ticker, [ticker])
 
 from .bets import DISCORD_BETS_WEBHOOK
 from . import wallet
@@ -182,7 +218,11 @@ _price_cache_lock = threading.Lock()
 
 
 def _allstats_max_mtime() -> float:
-    return max((p.stat().st_mtime for _, _, p in _raw_files()), default=0.0)
+    """Newest input to the prices: the box scores, and owners.csv for the
+    owner indexes."""
+    owners = DATA_DIR / "owners.csv"
+    return max([p.stat().st_mtime for _, _, p in _raw_files()]
+               + ([owners.stat().st_mtime] if owners.exists() else []), default=0.0)
 
 
 def _load_game_data() -> list[dict]:
@@ -306,11 +346,13 @@ def _compute_prices(own_avg: bool = False) -> tuple[dict, dict]:
 def _inject_index_prices(team_games: dict, prices: dict, current: dict) -> None:
     """Compute index price histories from constituent team game data and inject into prices/current."""
     from collections import defaultdict
-    for idx_ticker, idx_teams in INDEXES.items():
+    for idx_ticker, windows in _index_windows().items():
         date_chgs:    dict[str, list[float]] = defaultdict(list)
         date_playoff: dict[str, bool]         = {}
-        for team in idx_teams:
+        for team, first, last in windows:
             for g in team_games.get(team, []):
+                if not first <= g["date"] <= last:
+                    continue
                 date_chgs[g["date"]].append(g["pct_chg"])
                 if g["is_playoff"]:
                     date_playoff[g["date"]] = True
@@ -439,7 +481,7 @@ def _pending_games(prices_hist: dict) -> dict[str, dict]:
 
 
 def _ticker_pending(ticker: str, pending: dict) -> Optional[dict]:
-    for team in INDEXES.get(ticker, [ticker]):
+    for team in _index_teams(ticker):
         if team in pending:
             return pending[team]
     return None
@@ -571,7 +613,7 @@ def get_market(algo: str = "current"):
 @router.get("/api/invest/prices/{team}")
 def get_team_prices(team: str, algo: str = "current"):
     team = team.upper()
-    if team not in VALID_TEAMS and team not in INDEXES:
+    if team not in VALID_TEAMS and team not in INDEX_META:
         raise HTTPException(status_code=404, detail="Unknown team or index")
     prices_hist, _ = _get_prices(algo)
     return {"team": team, "history": prices_hist.get(team, [])}
@@ -922,7 +964,7 @@ def _open_position(body, info: dict, side: str) -> dict:
     """Buy (side "long") or short. `body.nbyen` goes into the position; the
     fee is charged on top. Every refusal comes before any NB¥ moves."""
     team = body.team.upper()
-    if team not in VALID_TEAMS and team not in INDEXES:
+    if team not in VALID_TEAMS and team not in INDEX_META:
         raise HTTPException(status_code=400, detail="Unknown team or index")
     if body.nbyen <= 0:
         raise HTTPException(status_code=400, detail="Amount must be positive")
@@ -977,7 +1019,7 @@ def _open_position(body, info: dict, side: str) -> dict:
 def _close_position(body, info: dict, side: str) -> dict:
     """Sell (side "long") or cover. The fee comes out of what is paid back."""
     team = body.team.upper()
-    if team not in VALID_TEAMS and team not in INDEXES:
+    if team not in VALID_TEAMS and team not in INDEX_META:
         raise HTTPException(status_code=400, detail="Unknown team or index")
     if body.shares <= 0:
         raise HTTPException(status_code=400, detail="Shares must be positive")
