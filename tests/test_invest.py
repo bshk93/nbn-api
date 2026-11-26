@@ -6,6 +6,8 @@ What must keep being true:
     from its first game;
   * a price is the full-precision product of `1 + diff_diff / MOVE_DIVISOR`,
     and nothing a member does moves it;
+  * an index's points carry their season, like a team's, so the chart's
+    Season range works for it;
   * a playoff game moves by its margin alone, doubled, so it is zero-sum;
   * a team can't be traded while a played game of its has no box score, and
     an index can't while any of its teams can't; today's games only count as
@@ -127,6 +129,9 @@ check("price is the unrounded product of the game factors", abs(current["BOS"] -
 # BOS and NYK are both Atlantic and every move is one beating the other, so the
 # index's daily average of their factors is exactly 1.
 check("an index is the daily average of its teams' moves", abs(current["ATLC"] - 100) < 1e-9)
+# The chart's Season range filters on it; without it an index's Season view was empty.
+check("an index's points carry their season",
+      [h["season"] for h in prices["ATLC"]] == ["25-26", "25-26", "26-27", "26-27"])
 check("every index names only real teams, and has a label",
       all(set(t) <= set(inv.VALID_TEAMS) and k in inv.INDEX_META for k, t in inv.INDEXES.items()))
 check("the state indexes are the Texas and California teams",

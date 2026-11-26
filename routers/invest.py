@@ -349,11 +349,13 @@ def _inject_index_prices(team_games: dict, prices: dict, current: dict) -> None:
     for idx_ticker, windows in _index_windows().items():
         date_chgs:    dict[str, list[float]] = defaultdict(list)
         date_playoff: dict[str, bool]         = {}
+        date_season:  dict[str, str]          = {}
         for team, first, last in windows:
             for g in team_games.get(team, []):
                 if not first <= g["date"] <= last:
                     continue
                 date_chgs[g["date"]].append(g["pct_chg"])
+                date_season[g["date"]] = g["season_year"]
                 if g["is_playoff"]:
                     date_playoff[g["date"]] = True
         if not date_chgs:
@@ -370,6 +372,7 @@ def _inject_index_prices(team_games: dict, prices: dict, current: dict) -> None:
                 "is_playoff": date_playoff.get(date, False),
                 "diff":       None,
                 "diff_diff":  None,
+                "season":     date_season[date],
             })
         prices[idx_ticker]  = idx_history
         current[idx_ticker] = idx_price
