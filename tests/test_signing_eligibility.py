@@ -155,9 +155,14 @@ def main():
     check("Year 1 below the prorated floor is now an error, not a warning",
           r is not None and not r.passed and r.level == "error"
           and "prorated" in r.message)
-    r = mins({"26-27": f"${floor:,}", "27-28": "$1,000"}, date="2027-04-14", exp=0)
-    check("only Year 1 is prorated: a later year below the floor still errors",
-          r is not None and not r.passed and r.level == "error" and "never prorated" in r.message)
+    r = mins({"26-27": f"${floor:,}", "27-28": "$1,357,763"}, date="2027-04-14", exp=0)
+    check("a multi-year deal pays a full Year 1: a prorated one errors (killerdawg7, 2026-11-27)",
+          r is not None and not r.passed and r.level == "error" and "multi-year" in r.message)
+    check("...while a trailing hold doesn't make a 1-year deal multi-year",
+          T._check_minimum_salary(T.ContractIn(salaries={"26-27": f"${floor:,}"},
+                                               cap_holds={"27-28": "UFA"}, years_experience=0),
+                                  "rookie", bios2, "26-27", CAP_LEVELS,
+                                  txn_date="2027-04-14").passed)
     r = mins({"26-27": "$30,000"}, date="2027-04-14", exp=10)
     check("a prorated Year 1 below the player's prorated tier warns",
           r is not None and not r.passed and r.level == "warning")
@@ -177,7 +182,10 @@ def main():
     check("the contract record carries the proration",
           T._proration_record({"26-27": "$1"}, "2027-04-14") == {"proration": p}
           and T._proration_record({"27-28": "$1"}, "2027-04-14") == {}
-          and T._proration_record({"26-27": "$1"}, "2026-08-01") == {})
+          and T._proration_record({"26-27": "$1"}, "2026-08-01") == {}
+          and T._proration_record({"26-27": "$1", "27-28": "$1"}, "2027-04-14") == {}
+          and T._proration_record({"26-27": "$1", "27-28": "$1"}, "2027-04-14",
+                                  {"27-28": "UFA"}) == {"proration": p})
     check("a league year with no schedule falls back to the month rule",
           T._signed_after_opening_night("2026-04-11")
           and not T._signed_after_opening_night("2025-08-01"))

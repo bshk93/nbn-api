@@ -946,7 +946,7 @@ def _apply_convert_twoway(details: ConvertTwoWayDetails, txn_date: str, info: di
         "guarantee_schedule": details.contract.guarantee_schedule,
         "cap_holds": details.contract.cap_holds,
         "years_experience": details.contract.years_experience,
-        **_proration_record(details.contract.salaries, txn_date),
+        **_proration_record(details.contract.salaries, txn_date, details.contract.cap_holds),
         "txn_id": txn_id,
     }]
 
@@ -1183,7 +1183,7 @@ def _apply_sign(details: SignDetails, txn_date: str, info: dict, txn_id: Optiona
         "guarantee_schedule": details.contract.guarantee_schedule,
         "cap_holds": details.contract.cap_holds,
         "years_experience": details.contract.years_experience,
-        **_proration_record(details.contract.salaries, txn_date),
+        **_proration_record(details.contract.salaries, txn_date, details.contract.cap_holds),
         "txn_id": txn_id,
     }]
 
@@ -3706,10 +3706,22 @@ def _minimum_proration(txn_date: Optional[str]) -> Optional[dict]:
     return {"season": _season_for_date(txn_date), "days": d[0], "of": d[1]}
 
 
-def _proration_record(salaries: dict, txn_date: Optional[str]) -> dict:
+def _is_one_year_deal(salaries: dict, cap_holds: Optional[dict] = None) -> bool:
+    """One contract year, not counting a trailing UFA/RFA hold season. Only a
+    1-year deal is prorated in-season (§ 3.12): killerdawg7 ruled 2026-11-27
+    that a multi-year deal pays a full Year 1, as Leaky Black's, Bradley
+    Beal's and Chaney Johnson's in-season minimums already had."""
+    holds = cap_holds or {}
+    return len([s for s in (salaries or {}) if holds.get(s) not in ("UFA", "RFA")]) == 1
+
+
+def _proration_record(salaries: dict, txn_date: Optional[str],
+                      cap_holds: Optional[dict] = None) -> dict:
     """`{"proration": ...}` for a contract entry whose Year 1 is prorated,
     else `{}`. Recorded so `reprice_minimum_salaries.py` re-prices that year
     as the prorated figure, not a full season."""
+    if not _is_one_year_deal(salaries, cap_holds):
+        return {}
     p = _minimum_proration(txn_date)
     return {"proration": p} if p and p["season"] in (salaries or {}) else {}
 
@@ -3737,14 +3749,14 @@ def _prorate_minimum_year1(details: SignDetails, bios: dict, cap_levels: dict,
     if details.signing_method != "minimum" or details.contract.type == "two-way":
         return None
     salaries = details.contract.salaries or {}
+    if not _is_one_year_deal(salaries, details.contract.cap_holds):
+        return None     # a multi-year deal pays a full Year 1
     proration = _minimum_proration(txn_date)
     if not proration or proration["season"] not in salaries:
         return None
     yr = proration["season"]
     bio = bios.get(details.player) or {}
-    full = (_one_year_min_cap_hit(bio, yr, cap_levels, details.contract)
-            if len(salaries) == 1 else
-            _min_salary_for(bio, yr, cap_levels, details.contract))
+    full = _one_year_min_cap_hit(bio, yr, cap_levels, details.contract)
     if not full:
         return None
     prorated = _prorate(full, proration)
@@ -3763,8 +3775,9 @@ def _check_minimum_salary(contract, player: str, bios: dict, season: str,
     Proration is the wrinkle. A minimum signed after opening night pays only
     the days left in the regular season (§ 3.12, `_minimum_proration`), so
     Year 1 of an in-season signing is checked against the prorated floor.
-    That applies to **Year 1 only**: every later year of the contract is a
-    full season, so the floor is hard there regardless.
+    That applies to **Year 1 of a 1-year deal only**: every later year is a
+    full season, and a multi-year deal pays a full Year 1 too (killerdawg7,
+    2026-11-27; `_is_one_year_deal`), so the floor is hard there regardless.
 
     Hence the split:
       * Year 1, signed in-season   -> below the *prorated* floor is an error
@@ -3791,12 +3804,13 @@ def _check_minimum_salary(contract, player: str, bios: dict, season: str,
         return None
     check_name = "minimum_salary"
     is_one_year_min = signing_method == "minimum" and len(contract.salaries or {}) == 1
-    proration = _minimum_proration(txn_date)
+    one_year = _is_one_year_deal(contract.salaries, getattr(contract, "cap_holds", None))
+    proration = _minimum_proration(txn_date) if one_year else None
     # In-season, but the days can't be counted: no schedule for that league
     # year, or the signing came after its last game.
     bounds = (season_calendar.regular_season_bounds(_season_for_date(txn_date))
               if txn_date else None)
-    in_season = (_signed_after_opening_night(txn_date)
+    in_season = (one_year and _signed_after_opening_night(txn_date)
                  and not (bounds and txn_date <= bounds[1]))
 
     for yr, raw in sorted((contract.salaries or {}).items()):
@@ -3828,7 +3842,9 @@ def _check_minimum_salary(contract, player: str, bios: dict, season: str,
                     ),
                 )
             when = ("signed before the season started, so no proration applies"
-                    if yr == season else "a full contract year, which is never prorated")
+                    if yr == season and one_year else
+                    "a multi-year deal, which pays a full Year 1" if yr == season else
+                    "a full contract year, which is never prorated")
             return CheckResult(
                 check=check_name, passed=False, level="error",
                 message=(

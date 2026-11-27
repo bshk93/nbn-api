@@ -59,10 +59,13 @@ def main():
         check("an already-correct figure is left alone",
               T._prorate_minimum_year1(d, bios, CAP_LEVELS, "2026-11-19") is None)
 
-        d = sign({"26-27": "$2,185,116", "27-28": "$2,571,892"}, exp=1)
-        r = T._prorate_minimum_year1(d, bios, CAP_LEVELS, "2026-11-19")
-        check("a multi-year minimum prorates Year 1 on its own tier, not later years",
-              r == 1808372 and d.contract.salaries["27-28"] == "$2,571,892")
+        # killerdawg7, 2026-11-27: a multi-year deal pays a full Year 1.
+        # Sochan's IND 1+1 (4 YOE, signed 2026-11-26) was cut to $2,067,304.
+        d = sign({"26-27": "$2625627", "27-28": "$2988177"}, exp=4)
+        d.contract.cap_holds = {"27-28": "TEAM_OPT", "28-29": "UFA"}
+        check("a multi-year minimum is not prorated (Sochan's 1+1 keeps $2,625,627)",
+              T._prorate_minimum_year1(d, bios, CAP_LEVELS, "2026-11-26") is None
+              and d.contract.salaries["26-27"] == "$2625627")
 
         d = sign({"26-27": "$5,000,000"})
         check("a figure above the full minimum isn't a minimum and is left for the checks",
