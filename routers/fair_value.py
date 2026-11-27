@@ -26,8 +26,8 @@ The model, in full:
     its player to that season's top eight: OVR from the pick number
     (`rookie_ovr`, fit on the last two classes), aged like everyone else. Where
     it lands, and whose it is, come from `DRAFT_SAMPLES` simulated draft
-    orders of the season before (fewest wins first: the lottery is not modelled
-    yet, see nbn-today BACKLOG.md "Lottery in the pick models"), each
+    orders of the season before (the 3-2-1 lottery on each simulated
+    season's standings and play-in, `playoff_odds.lottery_order`), each
     put through the conveyance model's draft-time resolver (`pick_odds`), so a
     top-4 protection or a swap counts by how often it actually conveys. Only
     the next two drafts land inside the horizon, so picks move a price a little.
@@ -70,8 +70,10 @@ The model, in full:
     base merch also scale with buzz: today's for the next ten games, then what
     the team's rating sustains (`rest_of_season_buzz`), and a later season's
     rating's.
-    NBNTV is left out, as in the ledger's valuation, and so is the tax share,
-    which would need every other team's payroll projected too. Every figure
+    NBNTV is left out, as in the ledger's valuation. The tax share is in:
+    every team's projected tax, paid out in equal shares to the teams that
+    paid none, as the ledger does; it counts as profit but not as revenue for
+    the sale's revenue multiple, as in the ledger's valuation. Every figure
     grows with the cap past 26-27 (`fin.price_level`), as the ledger's does,
     so revenue keeps pace with the payroll it pays, and from 27-28 most of
     the national TV deal is local media, scaled by market (`fin.media_revenue`).
@@ -85,7 +87,8 @@ The model, in full:
     carries the growth. `SALE_PROFIT_WEIGHT` of it is priced on the three
     seasons' mean profit instead, at `SALE_PROFIT_MULTIPLE` times the revenue
     multiple (set so the average team sells for about the same), so payroll
-    reaches the sale and not only the three seasons' profit.
+    reaches the sale and not only the three seasons' profit. A loss takes
+    the sale down, to at most `SALE_LOSS_FLOOR` of the revenue part.
   * **Discounting** at `DISCOUNT_RATE` per season, mid-season convention, to
     opening night: this season counts whole (what is played at what the
     ledger booked, the rest projected), and the sale is three seasons out.
@@ -146,7 +149,7 @@ from season_clock import season_shift, season_starting
 
 router = APIRouter()
 
-MODEL = "fv6"
+MODEL = "fv7"
 
 # ── The model's constants. Every figure is NB¥. ──────────────────────────────
 
@@ -175,10 +178,16 @@ DRAFT_SAMPLES = 400             # simulated draft orders each contingent pick is
 # 0.25 in fv5; raised to 0.35 in fv6 to widen the spread (the user asked).
 SALE_PROFIT_WEIGHT = 0.35
 # The profit share's multiple, as a multiple of revenue's: the league's mean
-# revenue over its mean profit, measured 2026-10-29 (fv6). Fixed, not measured
+# revenue over its mean profit, measured 2026-11-27 (fv7; 3.04 in fv6, before
+# the tax share was profit and the tax simply vanished). Fixed, not measured
 # each run: as the league's profit thins, a measured ratio blows up and prices
 # the teams that still earn at many times the rest.
-SALE_PROFIT_MULTIPLE = 3.04
+SALE_PROFIT_MULTIPLE = 2.55
+# A team losing money sells for less, not just for nothing extra (until fv7 a
+# loss counted as zero profit). The profit part can take the sale down to this
+# share of what the revenue part alone would fetch: a buyer still gets the
+# crowds, and can cut the payroll.
+SALE_LOSS_FLOOR = 0.5
 
 PRIOR_FLOOR = 0.5               # the roster's least weight in this season's rating
 REVERT = 0.75                   # a later season keeps this much of its rating, per season out
@@ -1026,6 +1035,22 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
                                                rows[-1][t]["proj_w"] / (rows[-1][t]["games"] or 82),
                                                buzz[-1][t]["season"]) for t in teams})
 
+    # Payroll and tax for every team first: the tax is paid out in equal
+    # shares to every team that paid none, as the ledger's TAX_SHARE is.
+    pay = [{} for _ in range(total)]
+    tax_share = [{} for _ in range(total)]
+    for k, s in enumerate(seasons):
+        for t in teams:
+            contracted, dead = _payroll(t, bios, s)
+            payroll = float(contracted)
+            if k:
+                bk = later_books[s][t]
+                payroll += bk["resign_money"] + bk["fa_money"] + max(0, ROSTER_FILL - bk["standard"]) * rep_pay_in(s)
+            pay[k][t] = (payroll, dead, fin.luxury_tax(payroll, aprons(s, season)[0], cap_level(s, season)))
+        clean = [t for t in teams if pay[k][t][2] <= 0]
+        pool = sum(v[2] for v in pay[k].values())
+        tax_share[k] = {t: (pool / len(clean) if clean and t in clean else 0.0) for t in teams}
+
     out_teams = []
     for t in teams:
         r0 = rows[0][t]
@@ -1059,19 +1084,16 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
                                                           mkt[k][t] * (1 + buzz[k][t]["rest"]))
             rev = {key: v * p for key, v in season_revenue(gate, r, stars[k][t], mkt[k][t],
                                                             buzz[k][t]["season"], s).items()}
+            # The tax share is profit, not revenue the sale's multiple prices (the ledger's valuation).
+            share = tax_share[k][t]
 
-            contracted, dead = _payroll(t, bios, s)
-            payroll = float(contracted)
-            if k:
-                bk = later_books[s][t]
-                payroll += bk["resign_money"] + bk["fa_money"] + max(0, ROSTER_FILL - bk["standard"]) * rep_pay_in(s)
-            tax = fin.luxury_tax(payroll, aprons(s, season)[0], cap_level(s, season))
+            payroll, dead, tax = pay[k][t]
             ops = p * fin.ARENA_OPS_PER_GAME * fin.REG_HOME_GAMES
             costs = payroll + tax + ops
 
             # Valued as of opening night (the docstring's Discounting): this season counts
             # whole, the part already played at what the ledger booked.
-            cash_rev, cash_cost = rev["revenue"], costs
+            cash_rev, cash_cost = rev["revenue"] + share, costs
             when = k + 0.5
             years.append({
                 "season": s, "strength": None if strengths[k][t] is None else round(strengths[k][t], 2),
@@ -1081,8 +1103,9 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
                 "stars": stars[k][t], "bandwagon": round(bw, 4), "market": round(mkt[k][t], 3),
                 "buzz": round(buzz[k][t]["season"], 4),
                 **{key: round(v) for key, v in rev.items()},
+                "tax_share": round(share),
                 "payroll": round(payroll), "dead_money": dead, "tax": round(tax), "ops": round(ops),
-                "costs": round(costs), "profit": round(rev["revenue"] - costs),
+                "costs": round(costs), "profit": round(rev["revenue"] + share - costs),
                 "cash_in": round(cash_rev), "cash_out": round(cash_cost),
                 "pv_in": round(cash_rev * discount(when)), "pv_out": round(cash_cost * discount(when)),
                 "players": (len(later_books[s][t]["players"]) if k else None),
@@ -1130,14 +1153,15 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
         })
 
     # The sale (SALE_PROFIT_WEIGHT): part revenue multiple, part profit
-    # multiple (SALE_PROFIT_MULTIPLE times revenue's). A loss sells for nothing
-    # extra, never for less.
+    # multiple (SALE_PROFIT_MULTIPLE times revenue's). A loss sells for less,
+    # down to SALE_LOSS_FLOOR of what the revenue part alone would fetch.
     lg_rev = sum(x["trailing_revenue"] for x in out_teams) / len(out_teams)
     lg_profit = sum(x["trailing_profit"] for x in out_teams) / len(out_teams)
     w = SALE_PROFIT_WEIGHT
     for x in out_teams:
-        earns = max(0.0, x["trailing_profit"] * SALE_PROFIT_MULTIPLE)
-        sale = x.pop("_multiple") * x.pop("_brand") * ((1 - w) * x["trailing_revenue"] + w * earns)
+        rev_part = (1 - w) * x["trailing_revenue"]
+        earns = max((SALE_LOSS_FLOOR - 1) * rev_part, w * x["trailing_profit"] * SALE_PROFIT_MULTIPLE)
+        sale = x.pop("_multiple") * x.pop("_brand") * (rev_part + earns)
         pv_sale = sale * discount(HORIZON)
         value = x["pv_in"] - x["pv_out"] + pv_sale
         x.update({"price": round(value / SHARES, 4), "value": round(value),
