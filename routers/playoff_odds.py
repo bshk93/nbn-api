@@ -45,7 +45,7 @@ import math
 import random
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -154,15 +154,59 @@ def game_line(home: str, away: str, ratings: dict[str, float]) -> dict:
     }
 
 
+# The draft lottery: the NBA's 3-2-1 format, which NBN uses from the 2027
+# draft (nbn-today lottery/index.html, `field()` and `draw()`). 16 teams and
+# 37 balls, and every one of the first 16 picks is drawn.
+LOTTERY_SIZE = 16
+
+
+def lottery_order(ranked: dict[str, list[str]], losers: dict[str, str],
+                  worst: Callable, rand: Callable) -> list[str]:
+    """One draft order, pick 1 first, from each conference's teams best first.
+
+    The ten teams below the play-in get 3 balls, except the three worst
+    records, which get 2; the 9 and 10 seeds get 2; the 7-vs-8 losers get 1,
+    even when they go on to make the playoffs. Each draw takes a team by its
+    balls and removes it. Everyone else follows worst first. `worst` is the
+    sort key for "worst first". The format's bars on repeat top picks are not
+    modelled: they depend on drafts the simulation doesn't know.
+    """
+    non_pi, nine_ten, lost, rest = [], [], [], []
+    for conf, teams in ranked.items():
+        for i, t in enumerate(teams):
+            if i >= 10:
+                non_pi.append(t)
+            elif i >= 8:
+                nine_ten.append(t)
+            elif i in (6, 7) and t == losers.get(conf):
+                lost.append(t)
+            else:
+                rest.append(t)
+    non_pi.sort(key=worst)
+    pool = ([(t, 2 if i < 3 else 3) for i, t in enumerate(non_pi)]
+            + [(t, 2) for t in sorted(nine_ten, key=worst)] + [(t, 1) for t in sorted(lost, key=worst)])
+    order = []
+    while pool:
+        x = rand() * sum(b for _, b in pool)
+        k = 0
+        while x >= pool[k][1] and k < len(pool) - 1:
+            x -= pool[k][1]
+            k += 1
+        order.append(pool.pop(k)[0])
+    return order + sorted(rest, key=worst)
+
+
 def simulate(results: list[dict], schedule: list[dict], priors: dict[str, float],
              sims: int = SIMS, seed: int = 0,
              playoff_bonus: Optional[dict[str, float]] = None, draft_samples: int = 0) -> dict:
     """`playoff_bonus` adds points a game to a team in playoff series only
     (fair value's playoff edge). The odds published here never pass it.
 
-    `draft_samples` keeps the first that many sims' draft orders, fewest wins
-    first (ties to the weaker team), as `draft_orders`. It draws nothing from
-    the generator, so the odds are the same with or without it."""
+    `draft_samples` keeps the first that many sims' draft orders as
+    `draft_orders`: the lottery (`lottery_order`) on that sim's final
+    standings and play-in, or fewest wins first (ties to the weaker team) for
+    a league too small for a play-in. The lottery draws from its own
+    generator, so the odds are the same with or without it."""
     teams = sorted(priors)
     rng = random.Random(seed)
 
@@ -200,6 +244,7 @@ def simulate(results: list[dict], schedule: list[dict], priors: dict[str, float]
     seed_count = {t: defaultdict(int) for t in teams}
     draft_orders: list[list[str]] = []
     gauss, rand = rng.gauss, rng.random
+    lot_rand = random.Random(seed * 7919 + 1).random
 
     for _ in range(sims):
         true = {t: rating[t] + gauss(0.0, spread[t]) for t in teams}
@@ -211,8 +256,9 @@ def simulate(results: list[dict], schedule: list[dict], priors: dict[str, float]
                 wins[a] = wins.get(a, 0) + 1
         for t in teams:
             wins_total[t] += wins.get(t, 0)
-        if len(draft_orders) < draft_samples:
-            draft_orders.append(sorted(teams, key=lambda t: (wins.get(t, 0), true[t], t)))
+        keep_draft = len(draft_orders) < draft_samples
+        worst = lambda t: (wins.get(t, 0), true[t], t)
+        lot_ranked, lot_losers = {}, {}
 
         def p_home(h, a):
             return _phi((true[h] - true[a] + HOME_EDGE) / GAME_SD)
@@ -247,6 +293,7 @@ def simulate(results: list[dict], schedule: list[dict], priors: dict[str, float]
             s7, s8, s9, s10 = ranked[6:10]
             win78 = s7 if rand() < p_home(s7, s8) else s8
             lose78 = s8 if win78 == s7 else s7
+            lot_ranked[conf], lot_losers[conf] = ranked, lose78
             win910 = s9 if rand() < p_home(s9, s10) else s10
             last = lose78 if rand() < p_home(lose78, win910) else win910
             count[win78]["playoffs"] += 1
@@ -264,6 +311,9 @@ def simulate(results: list[dict], schedule: list[dict], priors: dict[str, float]
             champ = series(*better(r2[0], r2[1]))
             count[champ]["finals"] += 1
             champs[conf] = champ
+        if keep_draft:
+            draft_orders.append(lottery_order(lot_ranked, lot_losers, worst, lot_rand)
+                                if len(lot_ranked) == 2 else sorted(teams, key=worst))
         if len(champs) == 2:
             e, w = champs["East"], champs["West"]
             hi, lo = (e, w) if (wins.get(e, 0), rand()) >= (wins.get(w, 0), rand()) else (w, e)

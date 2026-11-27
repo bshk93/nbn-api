@@ -281,6 +281,27 @@ check("sampling draft orders leaves the odds alone", plain["teams"] == drafty["t
 check("and keeps as many as asked, every team once",
       len(drafty["draft_orders"]) == 50 and all(sorted(o) == ["AAA", "BBB", "CCC"] for o in drafty["draft_orders"]))
 
+print("\nthe lottery")
+import random as _random  # noqa: E402
+# Two conferences of 15, best first; team names sort worst first by their number.
+conf = {c: [f"{c}{i:02d}" for i in range(15)] for c in "EW"}
+wins_of = {t: 60 - 3 * int(t[1:]) - (c == "W") for c, ts in conf.items() for t in ts}
+worst = lambda t: (wins_of[t], t)
+losers = {"E": "E07", "W": "W06"}
+order = po.lottery_order(conf, losers, worst, _random.Random(1).random)
+lottery = set(order[:16])
+check("16 teams in the lottery: ten below the play-in, the 9s and 10s, the 7-v-8 losers",
+      lottery == {f"{c}{i:02d}" for c in "EW" for i in range(8, 15)} | {"E07", "W06"})
+check("the rest follow worst first", order[16:] == sorted(set(order) - lottery, key=worst))
+first = {}
+rnd = _random.Random(2).random
+for _ in range(20000):
+    t = po.lottery_order(conf, losers, worst, rnd)[0]
+    first[t] = first.get(t, 0) + 1
+check("the three worst have 2 balls in 37, the next seven 3", abs(first.get("W14", 0) / 20000 - 2 / 37) < 0.01
+      and abs(first.get("E12", 0) / 20000 - 3 / 37) < 0.01)
+check("a 7-v-8 loser has 1", abs(first.get("W06", 0) / 20000 - 1 / 37) < 0.008)
+
 print("\nthe market price")
 def days(prices, wl=None, proj=41.0):
     wl = wl or [(0, 0)] * len(prices)
