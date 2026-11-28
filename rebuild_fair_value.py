@@ -14,8 +14,11 @@ games played by its end (game date). A day with no record stops the rebuild
 before anything is written.
 
 Every run prints each team's biggest one-day moves in roster strength, so a
-trade or a ratings update shows up on its own day before anything is saved.
-Read them: a rebuild where no team moves on the day of a trade is wrong.
+trade or a ratings update shows up on its own day before anything is saved,
+and every correction it applied back to an earlier day (`corrections`), with
+any it could not (`correction_notes`). Read them: a rebuild where no team
+moves on the day of a trade is wrong, and so is a correction that is really
+a move.
 `--check` recomputes the days the current model already priced and fails if
 any team's strength, injured strength or payroll differs from its row, or its
 price by more than CHECK_PRICE_TOLERANCE.
@@ -90,13 +93,16 @@ def main() -> int:
         # wait for it rather than both writing at once.
         lock = open(fair_value.DATA_DIR / ".playoff-odds.lock", "w")
         fcntl.flock(lock, fcntl.LOCK_EX)
+    applied: dict[str, list[str]] = {}
     try:
-        rows = fair_value.rebuild_history(season, days, write=not (args.dry_run or args.check))
+        rows = fair_value.rebuild_history(season, days, write=not (args.dry_run or args.check), report=applied)
     except fair_value.MissingInputs as e:
         print(f"refusing to rebuild: {e}", file=sys.stderr)
         return 1
     report = {"season": season, "days": [r["date"] for r in rows], "written": not (args.dry_run or args.check),
-              "strength_moves": strength_moves(rows)}
+              "strength_moves": strength_moves(rows),
+              "corrections": {d: v for d, v in applied.items() if v},
+              "correction_notes": fair_value.RebuildContext(season).notes}
     if args.check:
         report["mismatches"] = check(rows, season)
     print(json.dumps(report, indent=1))

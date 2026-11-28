@@ -14,9 +14,10 @@ has every roster, dead cap and contract write in that window. Ratings are the
 OVR log's last entries as the snapshot held them; inside the gap, the log as
 the first snapshot after it held it, read by date (see `ovr_in_gap`).
 
-The rule throughout is "as it stood": a correction (a staff tenure added
-later, a fixed pick ladder, a repriced contract) counts from the day it was
-made, as it did for the live run, not back to the start.
+A record is the league as it stood, as the live run saw it. Corrections
+made later (a repriced contract, a fixed pick ladder, a staff tenure added)
+are not folded in here: a rebuild applies them back to the start
+(`fair_value.RebuildContext`), as it does for every recorded day.
 
 Nothing is written unless every check passes:
 
@@ -61,18 +62,19 @@ TRADE_54_PICKS = (108, 169, 173, 296)
 LANDED_DAY_BEFORE = {"2026-11-07"}
 
 
-def ovr_in_gap(history: dict, day: str) -> dict[str, float]:
-    """slug -> OVR at the end of `day`, from a log kept after it."""
+def ovr_in_gap(history: dict, day: str) -> dict[str, list]:
+    """slug -> [index, date, OVR] of his rating at the end of `day`, from a
+    log kept after it (`fair_value.ovr_refs`'s form)."""
     out = {}
     for s, h in history.items():
         e = None
-        for x in h or []:
+        for i, x in enumerate(h or []):
             label = x.get("date") or ""
             landed = (date.fromisoformat(label) - timedelta(days=1)).isoformat() if label in LANDED_DAY_BEFORE else label
             if landed <= day:
-                e = x
-        if e is not None and e.get("ovr") is not None:
-            out[s] = float(e["ovr"])
+                e = (i, x)
+        if e is not None and e[1].get("ovr") is not None:
+            out[s] = [e[0], e[1].get("date"), float(e[1]["ovr"])]
     return out
 
 
@@ -273,20 +275,18 @@ def main() -> int:
             failures.append(f"{d}: {len(unapplied)} edits unapplied")
         in_gap = datetime.fromisoformat(GAP[0]) <= end < datetime.fromisoformat(GAP[1])
         later = post if in_gap else sha
-        members = json.loads(show(sha, "members.json"))
         # Injuries are dated, not recorded; the check below reads the list as
         # the snapshot held it, to compare with what the live run saw. The log
         # began 2026-10-23, before the first day the live run priced.
         log = show(later, "injury-history.jsonl") or show(post, "injury-history.jsonl")
         injury_log = [json.loads(x) for x in log.splitlines() if x.strip()]
         ovr_history = json.loads(show(later, "ovr-history.json"))
-        ovr = ovr_in_gap(ovr_history, d) if in_gap else fv.ovr_now(ovr_history)
+        ovr = ovr_in_gap(ovr_history, d) if in_gap else fv.ovr_refs(ovr_history)
         schedule = [g for g in json.loads(show(sha, "schedule-26-27.json")).get("games", [])
                     if g.get("home_team") and g.get("away_team")]
         inputs = fv.gather_inputs(
             league["rosters"], league["deadcap"], league["bios"], ovr, picks_for(end, sha, pre, post),
-            json.loads(show(sha, "cap-levels.json")), schedule,
-            fv.playoff_edges(season, d, TEAMS, members=members))
+            json.loads(show(sha, "cap-levels.json")), schedule)
         records[d] = inputs
 
         # Check 2: what the live run saw that day.
@@ -312,7 +312,7 @@ def main() -> int:
         late = []
         bad = []
         for t in TEAMS:
-            rostered = {s: inputs["ovr"][s] for s in inputs["rosters"][t] if s in inputs["ovr"]
+            rostered = {s: inputs["ovr"][s][2] for s in inputs["rosters"][t] if s in inputs["ovr"]
                         and (inputs["bios"].get(s) or {}).get("type") not in ("draft-rights", "dead")}
             mine = {"strength": round(fv._strength(list(rostered.values())), 2),
                     "strength_injured": round(fv.injured_strength(t, rostered, then[1], then[0])[0], 2),

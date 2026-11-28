@@ -345,25 +345,36 @@ check("nothing random: the same history gives the same series",
 print("\nratings on file")
 hist = {"a": [{"date": "2026-10-01", "ovr": 80}, {"date": "2026-11-07", "ovr": 84}],
         "c": [{"date": "2026-10-01", "ovr": 75}, {"date": "2026-10-05", "ovr": None}]}
-check("the last entry on file, even one dated tomorrow (the 2K sync dates in UTC)",
-      fv.ovr_now(hist) == {"a": 84.0})
-check("a last entry with no OVR leaves none", "c" not in fv.ovr_now(hist))
+check("the last entry on file, even one dated tomorrow (the 2K sync dates in UTC), with where it came from",
+      fv.ovr_refs(hist) == {"a": [1, "2026-11-07", 84.0]})
+check("a last entry with no OVR leaves none", "c" not in fv.ovr_refs(hist))
+rec = {"ovr": {"a": [1, "2026-11-07", 84.0]}}
+fv.resolve_ovr(rec, {"a": hist["a"] + [{"date": "2026-11-21", "ovr": 86}]})
+check("a rating added since is a later update, not this day's", rec["ovr"]["a"][2] == 84.0)
+rec = {"ovr": {"a": [1, "2026-11-07", 84.0]}}
+fv.resolve_ovr(rec, {"a": [hist["a"][0], {"date": "2026-11-07", "ovr": 82}]})
+check("an entry fixed in place reaches the day that used it", rec["ovr"]["a"][2] == 82.0)
+rec = {"ovr": {"a": [1, "2026-11-07", 84.0]}}
+fv.resolve_ovr(rec, {"a": [hist["a"][0], {"date": "2026-11-08", "ovr": 83}]})
+check("so does one replaced in place (--replace-last-ovr)", rec["ovr"]["a"][2] == 83.0)
+rec = {"ovr": {"a": [1, "2026-11-07", 84.0]}}
+fv.resolve_ovr(rec, {"a": [hist["a"][0], {"date": "2026-10-15", "ovr": 81}, hist["a"][1]]})
+check("an older entry inserted before it is not mistaken for a fix", rec["ovr"]["a"][2] == 84.0)
 
 print("\nthe inputs a day is priced on")
 teams3 = {"AAA": ["a", "b"], "BBB": ["c"]}
 full_bios = {s: {"name": s.upper(), "type": "player", "dob": "2000-01-01", "salaries": {"26-27": "$1"},
                  "cap_holds": {}, "pos": ["PG"], "college": "X"} for s in ("a", "b", "c", "z")}
-g = fv.gather_inputs(teams3, {"AAA": [], "BBB": [{"SLUG": "d", "26-27": "5"}]}, full_bios, fv.ovr_now(hist),
+g = fv.gather_inputs(teams3, {"AAA": [], "BBB": [{"SLUG": "d", "26-27": "5"}]}, full_bios, fv.ovr_refs(hist),
                      {"picks": []}, {"26-27": {"cap": 1}}, [{"date": "2026-11-21", "home_team": "AAA",
-                                                          "away_team": "BBB", "stream": True}],
-                     {"AAA": {"points": 1.5}})
+                                                          "away_team": "BBB", "stream": True}])
 check("every part is there", set(fv.INPUT_PARTS) <= set(g))
 check("only rostered players' bios, only the fields the model reads",
       set(g["bios"]) == {"a", "b", "c"} and set(g["bios"]["a"]) == set(fv.BIO_FIELDS))
-check("ratings are the day's", g["ovr"] == {"a": 84.0})
+check("ratings are the day's", g["ovr"] == {"a": [1, "2026-11-07", 84.0]})
 check("the schedule keeps what the simulator reads", g["schedule"] == [{"date": "2026-11-21", "home_team": "AAA",
                                                                        "away_team": "BBB"}])
-check("injuries are not recorded: they are dated", "injuries" not in g)
+check("injuries and staff are not recorded: they are dated", "injuries" not in g and "edges" not in g)
 
 with tempfile.TemporaryDirectory() as tmp, mock.patch.object(fv, "INPUTS_DIR", Path(tmp)):
     fv.record_inputs("26-27", "2026-11-20", g)
@@ -384,7 +395,7 @@ with tempfile.TemporaryDirectory() as tmp, mock.patch.object(fv, "INPUTS_DIR", P
     except fv.MissingInputs:
         check("a day never recorded raises", True)
     try:
-        fv.compute("26-27", "2026-11-20", {**back, "injuries": {}})
+        fv.compute("26-27", "2026-11-20", {**back, "injuries": {}, "edges": {}})
         check("a recorded day without its games and ledger is refused", False)
     except fv.MissingInputs:
         check("a recorded day without its games and ledger is refused", True)
@@ -401,7 +412,11 @@ with tempfile.TemporaryDirectory() as tmp, mock.patch.object(fv, "INPUTS_DIR", P
         seen[day] = inputs
         return {"date": day, "season": season, "model": fv.MODEL, "teams": []}
 
+    edge_days = []
     with mock.patch.object(fv, "compute", fake_compute), \
+            mock.patch.object(fv, "load_edits", lambda: []), \
+            mock.patch("routers.auth.load_members", lambda: {}), \
+            mock.patch.object(fv, "playoff_edges", lambda season, day, teams, members=None: edge_days.append(day) or {}), \
             mock.patch.object(fv, "load_ledger", lambda: []), \
             mock.patch.object(fv, "read_history", lambda season=None: []), \
             mock.patch.object(fv, "ATTENDANCE_CSV", Path(tmp) / "none.csv"), \
@@ -410,7 +425,7 @@ with tempfile.TemporaryDirectory() as tmp, mock.patch.object(fv, "INPUTS_DIR", P
             mock.patch.object(fv, "_history_row", lambda run: {"date": run["date"], "teams": {}}), \
             mock.patch.object(fv, "_roster", side_effect=AssertionError("read today's roster")), \
             mock.patch.object(fv, "load_player_bios", side_effect=AssertionError("read today's bios")), \
-            mock.patch.object(fv, "load_ovr", side_effect=AssertionError("read today's ratings")):
+            mock.patch.object(fv, "load_ovr", lambda: {"a": hist["a"] + [{"date": "2026-11-28", "ovr": 99}]}):
         fv.rebuild_history("26-27", ["2026-11-21", "2026-11-22"], results=[], write=False)
         check("the day before the trade is priced on the roster before it", seen["2026-11-21"]["rosters"]["BBB"] == ["c"])
         check("the day of the trade on the roster after it", seen["2026-11-22"]["rosters"]["BBB"] == ["c", "b"])
@@ -418,6 +433,8 @@ with tempfile.TemporaryDirectory() as tmp, mock.patch.object(fv, "INPUTS_DIR", P
               all("results" in i and "ledger" in i and i.get("recorded") for i in seen.values()))
         check("and the injury list by report date",
               seen["2026-11-21"]["injuries"] == {} and set(seen["2026-11-22"]["injuries"]) == {"b"})
+        check("and staff by tenure dates, for each day", edge_days == ["2026-11-21", "2026-11-22"])
+        check("a rating update since is not read back into the day", seen["2026-11-21"]["ovr"]["a"][2] == 84.0)
         seen.clear()
         try:
             fv.rebuild_history("26-27", ["2026-11-19", "2026-11-21"], results=[], write=False)
@@ -430,6 +447,78 @@ check("compute reads no league file except through live_inputs",
       not any(f in body for f in ("_roster(", "load_player_bios", "load_ovr", "load_pick_store", "injuries_as_of",
                                   "playoff_edges(", "_load_json", "read_csv", "load_schedule")))
 check("payroll in compute is the day's roster and dead cap", "_payroll(t, bios, s, rosters[t], deadcap[t])" in body)
+
+print("\ncorrections count back to the start")
+check("a script is a correction", fv.is_correction({"method": "SCRIPT", "path": "reprice"}))
+check("so is the office CLI", fv.is_correction({"method": "CLI", "path": "fix hold tags"}))
+check("so is a direct bio edit", fv.is_correction({"method": "PUT", "path": "/api/players/slawson-jalen"}))
+check("so is the pick-structure tool", fv.is_correction({"method": "POST", "path": "/api/picks/structure/apply"}))
+for m, path in (("POST", "/api/transactions"), ("POST", "/api/fa/players/x/declare-winner"),
+                ("POST", "/api/trade-requests/1/finalize"), ("POST", "/api/self/release"), (None, None),
+                ("PUT", "/api/roster/TOR"), ("PUT", "/api/players/x/team-settings")):
+    check(f"{m} {path} is a move", not fv.is_correction({"method": m, "path": path}))
+
+def edit(ts, method, path, file, diff, ledger=()):
+    return fv.classify([{"ts": ts, "method": method, "path": path, "file": file, "diff": diff}], list(ledger))[0]
+
+def rec():
+    return {"rosters": {"AAA": ["a", "b"], "BBB": ["c"]},
+            "deadcap": {"AAA": [{"SLUG": "x", "26-27": "$1,000"}], "BBB": []},
+            "bios": {"a": {"type": "player", "salaries": {"26-27": "$1,342,157"}, "cap_holds": {"27-28": "RFA"}},
+                     "b": {"type": "player", "salaries": {"26-27": "$5"}, "cap_holds": {}},
+                     "c": {"type": "player", "salaries": {"26-27": "$9"}, "cap_holds": {}}}}
+
+reprice = edit("2026-11-14T03:47:00+00:00", "SCRIPT", "reprice", "player-bios.json",
+               [{"key": "a.salaries.26-27", "from": "$1,342,157", "to": "$2,160,000"},
+                {"key": "a.cap_holds.27-28", "from": "RFA", "to": "UFA"}])
+signing = edit("2026-11-14T05:00:00+00:00", "POST", "/api/fa/players/b/declare-winner", "player-bios.json",
+               [{"key": "b.salaries.26-27", "from": "$5", "to": "$7"}])
+dead = edit("2026-11-14T03:48:00+00:00", "SCRIPT", "dead cap follows", "aaa-deadcap.csv",
+            [{"key": "x.26-27", "from": "$1,000", "to": "$2,000"}])
+early = rec()
+done = fv.apply_field_corrections(early, "2026-10-25", [reprice, signing, dead])
+check("a contract fix reaches a day before it", early["bios"]["a"]["salaries"]["26-27"] == "$2,160,000"
+      and early["bios"]["a"]["cap_holds"]["27-28"] == "UFA")
+check("a dead cap fix too", early["deadcap"]["AAA"][0]["26-27"] == "$2,000")
+check("a real move does not", early["bios"]["b"]["salaries"]["26-27"] == "$5")
+check("and says what it applied", len(done) == 3)
+other = rec()
+other["bios"]["a"]["salaries"]["26-27"] = "$3"
+fv.apply_field_corrections(other, "2026-10-25", [reprice])
+check("a day when the field held something else is left alone", other["bios"]["a"]["salaries"]["26-27"] == "$3")
+office = edit("2026-11-04T01:13:53+00:00", "CLI", "reverse auto-declined team options", "player-bios.json",
+              [{"key": "a.cap_holds.27-28", "from": "RFA"}], ledger=["2026-11-04T01:13:54Z"])
+kept = rec()
+fv.apply_field_corrections(kept, "2026-10-25", [office])
+check("a script that writes a new ledger transaction is a move, not a fix",
+      not office["correction"] and kept["bios"]["a"]["cap_holds"]["27-28"] == "RFA")
+late = rec()
+fv.apply_field_corrections(late, "2026-11-15", [reprice])
+check("a fix made before the day is already in its record, not applied again",
+      late["bios"]["a"]["salaries"]["26-27"] == "$1,342,157")
+moved = rec()
+fv.apply_field_corrections(moved, "2026-10-25", [edit("2026-11-01T12:00:00+00:00", "SCRIPT", "fix", "bbb-roster.csv",
+                                                     [{"key": "z", "to": '{"SLUG":"z"}'}, {"key": "c", "from": '{"SLUG":"c"}'}])])
+check("a roster fix adds and removes back to the start", moved["rosters"]["BBB"] == ["z"])
+
+store = lambda t: {"version": 0, "picks": [{"year": 2027, "round": 2, "orig": "DEN", "conveyance": {"team": t}},
+                                           {"year": 2027, "round": 1, "orig": "SAS", "conveyance": {"team": "SAS"}}],
+                   "ladders": [{"id": "l1", "to": "TOR"}], "swap_groups": {}, "binary_swaps": {}, "chains": {}}
+records = {"2026-10-28": {"picks": store("MEM")}, "2026-10-29": {"picks": store("GSW")}}
+fix = edit("2026-10-29T15:50:00+00:00", "SCRIPT", "restructure_picks.py x.json", "draft-conveyance-registry.json", [])
+fixes, notes = fv.pick_corrections("26-27", [fix], sorted(records), records.__getitem__)
+check("a pick correction is the entries it changed", [list(f["after"]) for f in fixes] == [[("pick", 2027, 2, "DEN")]])
+old = {"picks": store("MEM")}
+fv.apply_pick_corrections(old, "2026-10-21", fixes)
+check("and reaches the days before it", old["picks"]["picks"][0]["conveyance"]["team"] == "GSW")
+check("leaving the rest of the store as it was", old["picks"]["picks"][1] == store("MEM")["picks"][1]
+      and old["picks"]["ladders"] == store("MEM")["ladders"])
+traded = {"picks": store("BOS")}
+fv.apply_pick_corrections(traded, "2026-10-21", fixes)
+check("an entry that held something else that day is left alone", traded["picks"]["picks"][0]["conveyance"]["team"] == "BOS")
+trade = edit("2026-10-29T16:00:00+00:00", "POST", "/api/trade-requests/1/finalize", "draft-picks.csv", [])
+fixes, notes = fv.pick_corrections("26-27", [fix, trade], sorted(records), records.__getitem__)
+check("a day with a real pick move too is not applied back, and says so", not fixes and "real pick move" in notes[0])
 
 print("\nthe gate so far, cut to the day")
 att = [{"SEASON": "26-27", "DATE": "2026-11-01", "gametype": "REG", "HOME": "AAA", "AWAY": "BBB", "HOME_KNOWN": "TRUE",
