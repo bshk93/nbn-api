@@ -131,6 +131,7 @@ that arrives the next morning is recomputed into its own day by the next run
 """
 from __future__ import annotations
 
+import bisect
 import gzip
 import hashlib
 import logging
@@ -147,7 +148,8 @@ from . import game_highs as gh
 from . import injuries as inj
 from . import playoff_odds as po
 from .cap_history import _cap_levels_for, _payroll
-from .constants import CAP_LEVELS_FILE, DATA_DIR, DERIVED_DIR, VALID_TEAMS
+from .constants import CAP_LEVELS_FILE, DATA_DIR, DERIVED_DIR, TRANSACTIONS_FILE, VALID_TEAMS
+from .league_time import LEAGUE_TZ
 from .players import load_ovr, load_player_bios
 from .storage import _atomic_write, _load_json, _parse_dollar, read_csv
 from stats_build import finances as fin
@@ -519,13 +521,6 @@ def books(team: str, season: str, years_out: int, bios: dict, ovr_now: dict,
             "standard": sum(1 for p in players if not p["two_way"])}
 
 
-def ovr_now(history: dict) -> dict[str, float]:
-    """slug -> OVR: the last entry on file. A player whose last entry has no OVR
-    has none. Not cut by date: the 2K sync dates an entry by the server's (UTC)
-    day, so an evening update carries tomorrow's league date and is current
-    from the moment it lands."""
-    return {s: float(h[-1]["ovr"]) for s, h in history.items() if h and h[-1].get("ovr") is not None}
-
 
 def replacement(teams: list[str], bios: dict, ovr_now: dict, season: str,
                 rosters: dict[str, list[str]]) -> tuple[float, int]:
@@ -796,14 +791,18 @@ def _num(x) -> float:
 #
 # Not recorded, because they are already dated: game results (a day counts the
 # games played by its end, by game date), injury reports (by report date, so a
-# report filed after midnight counts on its own day, as a late box score does)
-# and the ledger's this-season lines, recounted from those games in
-# `rebuild_history`, so a change to the ledger's formulas still reaches a
-# rebuilt day. A part added to INPUT_PARTS later has to be backfilled for every
-# recorded day before a rebuild will run.
+# report filed after midnight counts on its own day, as a late box score does),
+# staff tenures (the playoff edge, from members.json by date) and the ledger's
+# this-season lines, recounted from those games in `rebuild_history`, so a
+# change to the ledger's formulas still reaches a rebuilt day. A part added to
+# INPUT_PARTS later has to be backfilled for every recorded day before a
+# rebuild will run.
+#
+# A record is the league as it stood; a correction made later counts back to
+# the start of the season (`RebuildContext`): see "Corrections" below.
 
 INPUTS_DIR = DATA_DIR / "fair-value-inputs"
-INPUT_PARTS = ("rosters", "deadcap", "bios", "ovr", "picks", "cap_levels", "schedule", "edges")
+INPUT_PARTS = ("rosters", "deadcap", "bios", "ovr", "picks", "cap_levels", "schedule")
 BIO_FIELDS = ("name", "type", "dob", "cap_holds", "salaries")
 SCHEDULE_FIELDS = ("date", "home_team", "away_team")
 
@@ -817,11 +816,21 @@ def _deadcap_rows(team: str) -> list[dict]:
     return read_csv(path)[1] if path.exists() else []
 
 
-def gather_inputs(rosters: dict, deadcap: dict, bios: dict, ovr: dict[str, float],
-                  picks: Optional[dict], cap_levels: dict, schedule: list[dict], edges: dict) -> dict:
+def ovr_refs(history: dict) -> dict[str, list]:
+    """slug -> [index, date, OVR] of his last entry on file, the form a record
+    keeps a rating in: the entry it came from is how a later fix to that entry
+    reaches the day (`resolve_ovr`). Not cut by date: the 2K sync dates an
+    entry by the server's (UTC) day, so an evening update carries tomorrow's
+    league date and is current from the moment it lands."""
+    return {s: [len(h) - 1, h[-1].get("date"), float(h[-1]["ovr"])]
+            for s, h in history.items() if h and h[-1].get("ovr") is not None}
+
+
+def gather_inputs(rosters: dict, deadcap: dict, bios: dict, ovr: dict[str, list],
+                  picks: Optional[dict], cap_levels: dict, schedule: list[dict]) -> dict:
     """The parts `compute` reads, cut to what it uses, in the form they are
     recorded in (a JSON round trip, so a rebuilt day sees exactly what the
-    live run saw). Pure."""
+    live run saw). `ovr` is `ovr_refs`'s form. Pure."""
     slugs = sorted({s for r in rosters.values() for s in r})
     parts = {
         "rosters": rosters, "deadcap": deadcap,
@@ -829,19 +838,18 @@ def gather_inputs(rosters: dict, deadcap: dict, bios: dict, ovr: dict[str, float
         "ovr": {s: ovr[s] for s in slugs if s in ovr},
         "picks": picks, "cap_levels": cap_levels,
         "schedule": [{k: g.get(k) for k in SCHEDULE_FIELDS} for g in schedule],
-        "edges": edges,
     }
     return json.loads(json.dumps(parts))
 
 
 def live_inputs(season: str, today: str) -> dict:
     """Today's league, from the data dir: what the hourly run prices and records,
-    plus today's injury list, which is dated and not recorded."""
+    plus today's injury list and staff edges, which are dated and not recorded."""
     teams = sorted(VALID_TEAMS)
     parts = gather_inputs({t: _roster(t) for t in teams}, {t: _deadcap_rows(t) for t in teams},
-                          load_player_bios(), ovr_now(load_ovr()), load_pick_store(), _load_json(CAP_LEVELS_FILE, {}),
-                          po.load_schedule(season), playoff_edges(season, today, teams))
-    return {**parts, "injuries": injuries_as_of(today)}
+                          load_player_bios(), ovr_refs(load_ovr()), load_pick_store(), _load_json(CAP_LEVELS_FILE, {}),
+                          po.load_schedule(season))
+    return {**parts, "injuries": injuries_as_of(today), "edges": playoff_edges(season, today, teams)}
 
 
 def _manifest_path(season: str):
@@ -868,7 +876,7 @@ def _put_object(obj) -> str:
 def record_inputs(season: str, day: str, inputs: dict) -> None:
     """Make `inputs` the day's record. The hourly run rewrites it each hour, so
     a day ends recorded as it stood at its last run."""
-    entry = {k: _put_object(inputs[k]) for k in INPUT_PARTS}  # `injuries` is dated, not recorded
+    entry = {k: _put_object(inputs[k]) for k in INPUT_PARTS}  # injuries and edges are dated, not recorded
     manifest = _load_json(_manifest_path(season), {})
     if manifest.get(day) != entry:
         manifest[day] = entry
@@ -927,6 +935,264 @@ def gate_as_of(season: str, day: str, market: dict[str, float], buzz_before: dic
     return out
 
 
+# ── Corrections count back to the start ──────────────────────────────────────
+#
+# A record is the league as it stood that day. When something on it turns out
+# to have been wrong and is fixed later (a contract repriced under a ruling, a
+# hold tag fixed, a pick's protection corrected, a staff tenure added), a
+# rebuild applies the fix to every earlier day where the fixed field still held
+# the value the fix replaced. A real move (a trade, a signing, a release, an
+# option, anything a timer does) keeps its date.
+#
+# Which is which comes from the edit log (`edits.jsonl`, routers/audit.py),
+# by how the write was made (`is_correction`), and a fix-shaped write that the
+# transaction ledger records as a new transaction is a move all the same (the
+# office exercising an option an owner missed, 2026-11-04, ran as a CLI script
+# and was applied back to opening night until this rule). In doubt it is a move: applying
+# a move back to the start is the bug this module's records exist to prevent.
+# Staff tenures aren't in the edit log and need no rule: they carry their own
+# dates, so the playoff edge is read from members.json by date. A rating fixed
+# in place (`--replace-last-ovr`) reaches the days that used the entry
+# (`resolve_ovr`); a new rating is a move.
+
+EDITS_FILE = DATA_DIR / "edits.jsonl"
+LEDGER_MATCH_SECONDS = 5          # an edit this close to a new ledger transaction is that transaction
+PICK_FILES = ("draft-picks.csv", "draft-conveyance-registry.json", "draft-conveyance.json")
+
+
+def is_correction(e: dict) -> bool:
+    """A write that fixes data rather than records a move: a script or the
+    office's CLI, a direct bio edit (`PUT /api/players/{slug}`), or the
+    pick-structure tool. A transaction, the FA, PDC and TRC paths, waivers,
+    a direct roster or pick edit and every timer are moves."""
+    m, path = e.get("method"), e.get("path") or ""
+    return (m in ("SCRIPT", "CLI") or (m == "PUT" and re.fullmatch(r"/api/players/[^/]+", path) is not None)
+            or path.startswith("/api/picks/structure/"))
+
+
+def league_day_of(ts: str) -> str:
+    return datetime.fromisoformat(ts).astimezone(LEAGUE_TZ).date().isoformat()
+
+
+def classify(edits: list[dict], ledger_created: list[str]) -> list[dict]:
+    """Mark each edit, in place, with its league `day` and whether it is a
+    `correction`: fix-shaped (`is_correction`) and not written with a new
+    ledger transaction (one created within LEDGER_MATCH_SECONDS)."""
+    created = sorted(datetime.fromisoformat(c.replace("Z", "+00:00")) for c in ledger_created if c)
+    for e in edits:
+        e["day"] = league_day_of(e["ts"])
+        at = datetime.fromisoformat(e["ts"])
+        i = bisect.bisect_left(created, at)
+        with_txn = any(abs((created[j] - at).total_seconds()) <= LEDGER_MATCH_SECONDS
+                       for j in (i - 1, i) if 0 <= j < len(created))
+        e["correction"] = is_correction(e) and not with_txn
+    return edits
+
+
+def load_edits() -> list[dict]:
+    """The edit log, classified against the transaction ledger."""
+    if not EDITS_FILE.exists():
+        return []
+    edits = [json.loads(line) for line in EDITS_FILE.read_text().splitlines() if line.strip()]
+    ledger = _load_json(TRANSACTIONS_FILE, [])
+    rows = ledger if isinstance(ledger, list) else ledger.get("transactions", [])
+    return classify(edits, [r.get("created_at") for r in rows])
+
+
+def _team_of(file: str) -> Optional[str]:
+    for suffix in ("-roster.csv", "-deadcap.csv"):
+        if file.endswith(suffix):
+            return file[:-len(suffix)].upper()
+    return None
+
+
+def _parsed(v):
+    if isinstance(v, str) and v[:1] in ("{", "["):
+        return json.loads(v)
+    return v
+
+
+def apply_field_corrections(record: dict, day: str, edits: list[dict]) -> list[str]:
+    """Apply, in place, every correction to a roster, dead cap or contract
+    field made on or after `day`, where the record still holds the value it
+    replaced. A record written after the fix already has it and is left alone.
+    Returns what changed."""
+    applied = []
+    for e in edits:
+        if e["day"] < day or not e["correction"]:
+            continue
+        f, team = e.get("file") or "", _team_of(e.get("file") or "")
+        for d in e.get("diff") or []:
+            key, has_from, has_to = d["key"], "from" in d, "to" in d
+            if f.endswith("-roster.csv") and team in record["rosters"]:
+                roster = record["rosters"][team]
+                if has_to and not has_from and key not in roster:
+                    roster.append(key)
+                elif has_from and not has_to and key in roster:
+                    roster.remove(key)
+                else:
+                    continue
+            elif f.endswith("-deadcap.csv") and team in record["deadcap"]:
+                rows = record["deadcap"][team]
+                slug, _, col = key.partition(".")
+                mine = [r for r in rows if r.get("SLUG") == slug]
+                if not col and has_to and not has_from and not mine:
+                    rows.append(_parsed(d["to"]))
+                elif not col and has_from and not has_to and len(mine) == 1 and mine[0] == _parsed(d["from"]):
+                    rows.remove(mine[0])
+                elif col and len(mine) == 1 and (mine[0].get(col) or "") == (d.get("from") or ""):
+                    mine[0][col] = d.get("to") or ""
+                else:
+                    continue
+            elif f == "player-bios.json":
+                slug, _, rest = key.partition(".")
+                field, _, sub = rest.partition(".")
+                bio = record["bios"].get(slug)
+                if bio is None or field not in BIO_FIELDS or field == "name":
+                    continue
+                if sub:
+                    part = bio.get(field) or {}
+                    if part.get(sub) != d.get("from"):
+                        continue
+                    if has_to and d["to"] is not None:
+                        part[sub] = d["to"]
+                    else:
+                        part.pop(sub, None)
+                    bio[field] = part
+                else:
+                    if bio.get(field) != _parsed(d.get("from")):
+                        continue
+                    if has_to:
+                        bio[field] = _parsed(d["to"])
+                    else:
+                        bio.pop(field, None)
+            else:
+                continue
+            applied.append(f"{e['ts'][:16]} {e.get('path') or e.get('method')}: {f} {key}")
+    return applied
+
+
+def _store_entries(store: Optional[dict]) -> dict:
+    """The pick store as entries a correction can replace one at a time."""
+    if not store:
+        return {}
+    out = {("pick", p["year"], p["round"], p["orig"]): p for p in store.get("picks") or []}
+    for part in ("swap_groups", "binary_swaps", "chains"):
+        out.update({(part, k): v for k, v in (store.get(part) or {}).items()})
+    out.update({("ladder", x.get("id")): x for x in store.get("ladders") or []})
+    return out
+
+
+def _store_from(entries: dict, template: dict) -> dict:
+    """A pick store from entries, in the template's order, new ones after."""
+    picks = [entries[k] for k in (("pick", p["year"], p["round"], p["orig"]) for p in template.get("picks") or [])
+             if k in entries]
+    seen = {("pick", p["year"], p["round"], p["orig"]) for p in picks}
+    picks += [v for k, v in sorted(entries.items(), key=lambda kv: str(kv[0])) if k[0] == "pick" and k not in seen]
+    ladders = [entries[("ladder", x.get("id"))] for x in template.get("ladders") or [] if ("ladder", x.get("id")) in entries]
+    seen = {("ladder", x.get("id")) for x in ladders}
+    ladders += [v for k, v in sorted(entries.items(), key=lambda kv: str(kv[0])) if k[0] == "ladder" and k not in seen]
+    out = {**template, "picks": picks, "ladders": ladders}
+    for part in ("swap_groups", "binary_swaps", "chains"):
+        out[part] = {k[1]: v for k, v in entries.items() if k[0] == part}
+    return out
+
+
+def pick_corrections(season: str, edits: list[dict], days: list[str], record_of) -> tuple[list[dict], list[str]]:
+    """Each pick-structure correction as the entries it changed: (day, before,
+    after), read off the records of the day before it and the day it was made.
+    A day that also had a real pick move can't be told apart and is skipped,
+    with a note; so is a correction with no record either side of it."""
+    fixed = sorted({e["day"] for e in edits if e["correction"] and e.get("file") in PICK_FILES})
+    moved = {e["day"] for e in edits if not e["correction"] and e.get("file") in PICK_FILES}
+    out, notes = [], []
+    for D in fixed:
+        if not days or D <= days[0] or D > days[-1]:
+            continue          # every record already has it, or none is old enough to need it
+        before_days = [d for d in days if d < D]
+        if D not in days:
+            notes.append(f"pick correction on {D}: no record that day, not applied back")
+            continue
+        P = before_days[-1]
+        if any(P < m <= D for m in moved):
+            notes.append(f"pick correction on {D}: a real pick move the same day, not applied back")
+            continue
+        a, b = _store_entries(record_of(P)["picks"]), _store_entries(record_of(D)["picks"])
+        changed = {k for k in set(a) | set(b) if a.get(k) != b.get(k)}
+        out.append({"day": D, "before": {k: a.get(k) for k in changed}, "after": {k: b.get(k) for k in changed}})
+    return out, notes
+
+
+def apply_pick_corrections(record: dict, day: str, fixes: list[dict]) -> list[str]:
+    """Apply, in place, every later pick correction whose entries the record
+    still holds as they were before it."""
+    applied = []
+    if not record.get("picks"):
+        return applied
+    entries = _store_entries(record["picks"])
+    for fx in fixes:
+        if fx["day"] <= day:
+            continue
+        for k, was in fx["before"].items():
+            if entries.get(k) != was:
+                continue
+            if fx["after"][k] is None:
+                entries.pop(k, None)
+            else:
+                entries[k] = fx["after"][k]
+            applied.append(f"pick correction {fx['day']}: {'/'.join(map(str, k))}")
+    if applied:
+        record["picks"] = _store_from(entries, record["picks"])
+    return applied
+
+
+def resolve_ovr(record: dict, history: dict) -> list[str]:
+    """Set each recorded rating, in place, to its entry as the OVR log holds it
+    now, so an entry fixed in place reaches every day that used it. The entry
+    is found by its index and date; one replaced in place (same index, a date
+    no older) is the fix. A rating appended since is a later update and is left
+    out. Returns what changed."""
+    applied = []
+    for s, ref in record["ovr"].items():
+        i, label, value = ref
+        h = history.get(s) or []
+        if i is None or i >= len(h) or h[i].get("ovr") is None:
+            continue
+        if h[i].get("date") == label or (h[i].get("date") or "") >= (label or ""):
+            new = float(h[i]["ovr"])
+            if new != value:
+                applied.append(f"rating {s}: {value} -> {new} (entry {i} fixed)")
+                ref[2] = new
+    return applied
+
+
+class RebuildContext:
+    """What a rebuild reads once: the edit log's corrections, the OVR and
+    injury logs, members.json. `inputs(day)` is the day's record with every
+    later correction applied, plus its injuries and staff edges."""
+
+    def __init__(self, season: str):
+        from .auth import load_members
+        self.season = season
+        self.edits = load_edits()
+        self.ovr_log = load_ovr()
+        self.injury_log = inj.load_history()
+        self.members = load_members()
+        self.teams = sorted(VALID_TEAMS)
+        self.days = sorted(recorded_days(season))
+        self.picks, self.notes = pick_corrections(season, self.edits, self.days,
+                                                  lambda d: recorded_inputs(season, d))
+
+    def inputs(self, day: str) -> tuple[dict, list[str]]:
+        record = recorded_inputs(self.season, day)
+        applied = apply_field_corrections(record, day, self.edits)
+        applied += apply_pick_corrections(record, day, self.picks)
+        applied += resolve_ovr(record, self.ovr_log)
+        record["injuries"] = injuries_as_of(day, self.injury_log)
+        record["edges"] = playoff_edges(self.season, day, self.teams, members=self.members)
+        return record, applied
+
+
 # ── The run ──────────────────────────────────────────────────────────────────
 
 def _rating_inputs(results: list[dict]) -> tuple[dict, dict]:
@@ -974,18 +1240,19 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
     """Every team's fair value on `today`. Pure; writes nothing.
 
     `inputs` is the league it is priced on: `live_inputs` (what the hourly run
-    passes, and what None means) or `recorded_inputs` plus the day's injury
-    list (a rebuilt day). A recorded day must also carry `results`, the games
+    passes, and what None means) or a rebuilt day's (`RebuildContext.inputs`:
+    its record with later corrections applied, plus its injuries and staff). A recorded day must also carry `results`, the games
     played by its end, and `ledger`, with this season's lines recounted to them
     (`rebuild_history`); without them it raises rather than read today's.
     """
     inputs = live_inputs(season, today) if inputs is None else inputs
-    missing = [k for k in INPUT_PARTS + ("injuries",) if k not in inputs]
+    missing = [k for k in INPUT_PARTS + ("injuries", "edges") if k not in inputs]
     if inputs.get("recorded"):
         missing += [k for k in ("results", "ledger") if k not in inputs]
     if missing:
         raise MissingInputs(f"{season} {today}: compute needs {', '.join(missing)}")
-    bios, ovr_now, rosters, deadcap = inputs["bios"], inputs["ovr"], inputs["rosters"], inputs["deadcap"]
+    bios, rosters, deadcap = inputs["bios"], inputs["rosters"], inputs["deadcap"]
+    ovr_now = {s: float(r[2]) for s, r in inputs["ovr"].items()}
     levels, schedule, store, injuries, edges = (inputs["cap_levels"], inputs["schedule"], inputs["picks"],
                                                 inputs["injuries"], inputs["edges"])
     if "results" in inputs:
@@ -1504,17 +1771,20 @@ def _refresh_current_market() -> None:
 
 
 def rebuild_history(season: str, days: list[str], results: Optional[list[dict]] = None,
-                    write: bool = True) -> list[dict]:
+                    write: bool = True, report: Optional[dict] = None) -> list[dict]:
     """Recompute the history rows for `days` with the current model and save them.
 
     Each day is priced on its own recorded inputs (`recorded_inputs`): the
     rosters, contracts, ratings and picks as they stood at its end, never
-    today's; injuries by report date (`injuries_as_of`). If any day has none, MissingInputs is raised before anything
+    today's, with every correction made since applied back
+    (`RebuildContext`); injuries by report date and staff by tenure dates.
+    `report`, when given, is filled with day -> the corrections applied to it. If any day has none, MissingInputs is raised before anything
     is computed or written. A day's row holds the games played by the end of
     that day (game date, not when the box score was committed), with buzz,
     home games and the gate so far recounted from them as the ledger counts
     them. A day with no row yet is marked `backfill`; a day that already had
     one keeps its mark. `write=False` returns the rows and saves nothing.
+    The record check comes first, so a missing day stops it before anything.
     """
     have = recorded_days(season)
     missing = [d for d in days if d not in have]
@@ -1526,11 +1796,13 @@ def rebuild_history(season: str, days: list[str], results: Optional[list[dict]] 
     ledger = load_ledger()
     attendance = read_csv(ATTENDANCE_CSV)[1] if ATTENDANCE_CSV.exists() else []
     market = {r["TEAM"]: _num(r.get("MARKET")) or 1.0 for r in ledger if r["SEASON"] == season}
-    injury_log = inj.load_history()
+    ctx = RebuildContext(season)
     old = {r["date"]: r for r in read_history(season)}
     new = {}
     for d in days:
-        inputs = {**recorded_inputs(season, d), "injuries": injuries_as_of(d, injury_log)}
+        inputs, applied = ctx.inputs(d)
+        if report is not None:
+            report[d] = applied
         played = [g for g in results if g["date"] <= d]
         home = {}
         for g in played:
