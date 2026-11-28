@@ -59,15 +59,22 @@ def main() -> int:
     print(json.dumps({"date": run["date"], "season": season, "games_played": run["games_played"], "seconds": took}))
     try:
         t0 = time.time()
-        fv = fair_value.compute(season, run["date"])
-        fair_value.save_run(fv)
+        inputs = fair_value.live_inputs(season, run["date"])
+        fv = fair_value.compute(season, run["date"], inputs)
+        fair_value.save_run(fv, inputs)
         index, _ = gh.get_index()
         results = playoff_odds.season_results(index, season)
         late = fair_value.stale_days(season, fv["date"], results)
+        # A day is only ever repriced on its own recorded league. One the
+        # hourly run never recorded stays as it is (or missing) rather than
+        # be priced on today's rosters.
+        have = fair_value.recorded_days(season)
+        unrecorded = [d for d in late if d not in have]
+        late = [d for d in late if d in have]
         if late:
             fair_value.rebuild_history(season, late, results)
         print(json.dumps({"fair_value": fv["date"], "model": fv["model"], "late_days": late,
-                          "seconds": round(time.time() - t0, 1)}))
+                          "late_days_unrecorded": unrecorded, "seconds": round(time.time() - t0, 1)}))
     except Exception:
         traceback.print_exc()
         print(json.dumps({"fair_value": "failed"}))

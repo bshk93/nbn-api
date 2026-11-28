@@ -119,18 +119,24 @@ Run hourly by `snapshot_playoff_odds.py`, after the odds. One row per team per
 day is kept in `fair-value-history.jsonl` (a later run replaces the day's row),
 so the page can show what moved each day and why. The simulation's seed is
 fixed for the season (`season_seed`), so a day's move is what changed and not
-sampling noise. After a model change, rebuild the season's rows so the change
-does not read as a move: `venv/bin/python rebuild_fair_value.py`. A day is
-its game date: a box score that arrives the next morning is recomputed into
-its own day by the next run (`stale_days`), not counted on the day it arrived.
+sampling noise. Each run also records the league it priced (rosters,
+contracts, ratings, picks: `record_inputs`), and any recomputed day
+is priced on its own record, never on today's files. After a model change,
+rebuild the season's rows so the change does not read as a move:
+`venv/bin/python rebuild_fair_value.py`. A day is its game date: a box score
+that arrives the next morning is recomputed into its own day by the next run
+(`stale_days`), on that day's record, not counted on the day it arrived.
 
     venv/bin/python -m tests.test_fair_value
 """
 from __future__ import annotations
 
+import gzip
+import hashlib
 import logging
 import json
 import math
+import os
 import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
@@ -141,7 +147,7 @@ from . import game_highs as gh
 from . import injuries as inj
 from . import playoff_odds as po
 from .cap_history import _cap_levels_for, _payroll
-from .constants import DATA_DIR, DERIVED_DIR, VALID_TEAMS
+from .constants import CAP_LEVELS_FILE, DATA_DIR, DERIVED_DIR, VALID_TEAMS
 from .players import load_ovr, load_player_bios
 from .storage import _atomic_write, _load_json, _parse_dollar, read_csv
 from stats_build import finances as fin
@@ -467,7 +473,7 @@ def hold_amount(bio: dict, season: str, since: str) -> int:
 
 def books(team: str, season: str, years_out: int, bios: dict, ovr_now: dict,
           contracted: float, ceiling: Optional[float], kept: set,
-          gone: frozenset = frozenset(), cap: Optional[float] = None) -> dict:
+          gone: frozenset = frozenset(), cap: Optional[float] = None, *, roster: list[str]) -> dict:
     """Players on the books for `season`: OVRs (aged), re-signing money, standard count.
 
     A team re-signs its free agents best OVR first, while payroll (`contracted`
@@ -475,11 +481,12 @@ def books(team: str, season: str, years_out: int, bios: dict, ovr_now: dict,
     a player whose market price on `cap` is at least his hold. The rest walk,
     and are returned as `walked`, the free agency pool. Anyone in `kept`,
     re-signed the season before, stays: that money is committed. Anyone in
-    `gone` signed elsewhere in an earlier projected season.
+    `gone` signed elsewhere in an earlier projected season. `roster` is the
+    team's slugs on the day being priced.
     """
     since = season_after(season, -years_out)
     players, candidates = [], []
-    for slug in _roster(team):
+    for slug in roster:
         if slug in gone:
             continue
         bio = bios.get(slug) or {}
@@ -512,16 +519,21 @@ def books(team: str, season: str, years_out: int, bios: dict, ovr_now: dict,
             "standard": sum(1 for p in players if not p["two_way"])}
 
 
-def _ovr_now(ovr: dict) -> dict:
-    return {s: float(h[-1]["ovr"]) for s, h in ovr.items() if h and h[-1].get("ovr") is not None}
+def ovr_now(history: dict) -> dict[str, float]:
+    """slug -> OVR: the last entry on file. A player whose last entry has no OVR
+    has none. Not cut by date: the 2K sync dates an entry by the server's (UTC)
+    day, so an evening update carries tomorrow's league date and is current
+    from the moment it lands."""
+    return {s: float(h[-1]["ovr"]) for s, h in history.items() if h and h[-1].get("ovr") is not None}
 
 
-def replacement(teams: list[str], bios: dict, ovr_now: dict, season: str) -> tuple[float, int]:
+def replacement(teams: list[str], bios: dict, ovr_now: dict, season: str,
+                rosters: dict[str, list[str]]) -> tuple[float, int]:
     """(OVR, salary) of a bench player: the league's 6th to 8th men this season."""
     ovrs, pays = [], []
     for t in teams:
         rows = []
-        for slug in _roster(t):
+        for slug in rosters[t]:
             bio = bios.get(slug) or {}
             if contract_year(bio, season) == "contract" and slug in ovr_now and bio.get("type") != "two-way":
                 rows.append((ovr_now[slug], _parse_dollar((bio.get("salaries") or {}).get(season, ""))))
@@ -535,33 +547,32 @@ def replacement(teams: list[str], bios: dict, ovr_now: dict, season: str) -> tup
     return sum(ovrs) / len(ovrs), pays[len(pays) // 2]
 
 
-def aprons(season: str, base_season: str) -> tuple[Optional[float], Optional[float]]:
-    lv = _cap_levels_for(season)
+def aprons(season: str, base_season: str, levels: dict) -> tuple[Optional[float], Optional[float]]:
+    """`levels` is the cap-levels record (`cap-levels.json`) the day is priced on."""
+    lv = _cap_levels_for(season, levels)
     if lv["apron1"] and lv["apron2"]:
         return lv["apron1"], lv["apron2"]
-    base = _cap_levels_for(base_season)
+    base = _cap_levels_for(base_season, levels)
     if not (base["apron1"] and base["apron2"]):
         return None, None
     g = (1 + CAP_GROWTH) ** (season_index(season) - season_index(base_season))
     return base["apron1"] * g, base["apron2"] * g
 
 
-def cap_level(season: str, base_season: str) -> Optional[float]:
+def cap_level(season: str, base_season: str, levels: dict) -> Optional[float]:
     """The cap, grown like `aprons` when the season isn't on file. The tax's
     brackets are a share of it."""
-    cap = _cap_levels_for(season)["cap"]
+    cap = _cap_levels_for(season, levels)["cap"]
     if cap:
         return cap
-    base = _cap_levels_for(base_season)["cap"]
+    base = _cap_levels_for(base_season, levels)["cap"]
     if not base:
         return None
     return base * (1 + CAP_GROWTH) ** (season_index(season) - season_index(base_season))
 
 
-def exceptions(season: str, base_season: str) -> dict[str, float]:
+def exceptions(season: str, base_season: str, levels: dict) -> dict[str, float]:
     """The two MLEs, grown like `aprons` when the season isn't on file."""
-    from .cap_history import CAP_LEVELS_FILE
-    levels = _load_json(CAP_LEVELS_FILE, {})
     on_file = levels.get(season) or {}
     base = levels.get(base_season) or {}
     g = (1 + CAP_GROWTH) ** (season_index(season) - season_index(base_season))
@@ -773,6 +784,149 @@ def _num(x) -> float:
         return 0.0
 
 
+# ── What a day is priced on ──────────────────────────────────────────────────
+#
+# A past day's price has to come from that day's league: who was on which
+# roster, on what contract, at what rating, owning which picks. The hourly run
+# records exactly what it priced on (`record_inputs`, from `save_run`), and a
+# rebuild reads only that (`recorded_inputs`), never today's files. Until
+# 2026-11-28 the rebuild read today's files for every day, so the fv7 rebuild
+# put Brunson on WAS and Harden on SAS from opening night, gave October the
+# November ratings, and erased both trades from the chart.
+#
+# Not recorded, because they are already dated: game results (a day counts the
+# games played by its end, by game date), injury reports (by report date, so a
+# report filed after midnight counts on its own day, as a late box score does)
+# and the ledger's this-season lines, recounted from those games in
+# `rebuild_history`, so a change to the ledger's formulas still reaches a
+# rebuilt day. A part added to INPUT_PARTS later has to be backfilled for every
+# recorded day before a rebuild will run.
+
+INPUTS_DIR = DATA_DIR / "fair-value-inputs"
+INPUT_PARTS = ("rosters", "deadcap", "bios", "ovr", "picks", "cap_levels", "schedule", "edges")
+BIO_FIELDS = ("name", "type", "dob", "cap_holds", "salaries")
+SCHEDULE_FIELDS = ("date", "home_team", "away_team")
+
+
+class MissingInputs(LookupError):
+    """A day with no recorded inputs: it can't be priced as it stood."""
+
+
+def _deadcap_rows(team: str) -> list[dict]:
+    path = DATA_DIR / f"{team.lower()}-deadcap.csv"
+    return read_csv(path)[1] if path.exists() else []
+
+
+def gather_inputs(rosters: dict, deadcap: dict, bios: dict, ovr: dict[str, float],
+                  picks: Optional[dict], cap_levels: dict, schedule: list[dict], edges: dict) -> dict:
+    """The parts `compute` reads, cut to what it uses, in the form they are
+    recorded in (a JSON round trip, so a rebuilt day sees exactly what the
+    live run saw). Pure."""
+    slugs = sorted({s for r in rosters.values() for s in r})
+    parts = {
+        "rosters": rosters, "deadcap": deadcap,
+        "bios": {s: {k: bios[s][k] for k in BIO_FIELDS if k in bios[s]} for s in slugs if s in bios},
+        "ovr": {s: ovr[s] for s in slugs if s in ovr},
+        "picks": picks, "cap_levels": cap_levels,
+        "schedule": [{k: g.get(k) for k in SCHEDULE_FIELDS} for g in schedule],
+        "edges": edges,
+    }
+    return json.loads(json.dumps(parts))
+
+
+def live_inputs(season: str, today: str) -> dict:
+    """Today's league, from the data dir: what the hourly run prices and records,
+    plus today's injury list, which is dated and not recorded."""
+    teams = sorted(VALID_TEAMS)
+    parts = gather_inputs({t: _roster(t) for t in teams}, {t: _deadcap_rows(t) for t in teams},
+                          load_player_bios(), ovr_now(load_ovr()), load_pick_store(), _load_json(CAP_LEVELS_FILE, {}),
+                          po.load_schedule(season), playoff_edges(season, today, teams))
+    return {**parts, "injuries": injuries_as_of(today)}
+
+
+def _manifest_path(season: str):
+    return INPUTS_DIR / f"{season}.json"
+
+
+def _object_path(key: str):
+    return INPUTS_DIR / "objects" / f"{key}.json.gz"
+
+
+def _put_object(obj) -> str:
+    """Store one part under the hash of its content; an unchanged part costs nothing."""
+    raw = json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()
+    key = hashlib.sha256(raw).hexdigest()[:24]
+    path = _object_path(key)
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+        tmp.write_bytes(gzip.compress(raw, mtime=0))
+        os.replace(tmp, path)
+    return key
+
+
+def record_inputs(season: str, day: str, inputs: dict) -> None:
+    """Make `inputs` the day's record. The hourly run rewrites it each hour, so
+    a day ends recorded as it stood at its last run."""
+    entry = {k: _put_object(inputs[k]) for k in INPUT_PARTS}  # `injuries` is dated, not recorded
+    manifest = _load_json(_manifest_path(season), {})
+    if manifest.get(day) != entry:
+        manifest[day] = entry
+        _atomic_write(_manifest_path(season), json.dumps(manifest, indent=1, sort_keys=True))
+
+
+def recorded_days(season: str) -> set[str]:
+    return {d for d, e in _load_json(_manifest_path(season), {}).items() if set(INPUT_PARTS) <= set(e)}
+
+
+def recorded_inputs(season: str, day: str) -> dict:
+    """The league `day` was priced on, as recorded. Raises MissingInputs if it wasn't."""
+    entry = _load_json(_manifest_path(season), {}).get(day) or {}
+    if not set(INPUT_PARTS) <= set(entry):
+        raise MissingInputs(f"{season} {day}: no recorded inputs")
+    out = {k: json.loads(gzip.decompress(_object_path(entry[k]).read_bytes())) for k in INPUT_PARTS}
+    out["recorded"] = True
+    return out
+
+
+def price_level_of(season: str, levels: dict) -> float:
+    """The ledger's money level for `season` (`fin.price_level`), on `levels`."""
+    return fin.price_level(season, cap_level(season, season, levels), _cap_levels_for(fin.PRICE_BASE, levels)["cap"])
+
+
+ATTENDANCE_CSV = DERIVED_DIR / fin.ATTENDANCE_FILE
+
+
+def gate_as_of(season: str, day: str, market: dict[str, float], buzz_before: dict, level: float,
+               attendance: Optional[list[dict]] = None) -> dict[str, float]:
+    """team -> GATE as the ledger books it at the end of `day`.
+
+    The ledger's own sum, cut to the games played by then: each home game's
+    crowd (the ledger's attendance file) at the ticket price, the team's market
+    and its buzz going into the game, projected to a full season and put in
+    `level`'s money. Without this a rebuilt day took the gate per game of every
+    game played up to now.
+    """
+    if attendance is None:
+        attendance = read_csv(ATTENDANCE_CSV)[1] if ATTENDANCE_CSV.exists() else []
+    gate: dict[str, float] = {}
+    home: dict[str, float] = {}
+    for r in attendance:
+        if r["SEASON"] != season or r["gametype"] != "REG" or r["DATE"] > day:
+            continue
+        h, a = r["HOME"], r["AWAY"]
+        g = _num(r["ATTENDANCE"]) * fin.TICKET * market.get(h, 1.0) * (1 + buzz_before.get((season, r["DATE"], h), 0.0))
+        for t, share in ([(h, 1.0)] if r["HOME_KNOWN"] == "TRUE" else [(h, 0.5), (a, 0.5)]):
+            gate[t] = gate.get(t, 0.0) + share * g
+            home[t] = home.get(t, 0.0) + share
+    league = sum(gate.values()) / max(1.0, sum(home.values()))
+    out = {}
+    for t in market:
+        per_game = gate[t] / home[t] if home.get(t) else league
+        out[t] = level * per_game * fin.REG_HOME_GAMES
+    return out
+
+
 # ── The run ──────────────────────────────────────────────────────────────────
 
 def _rating_inputs(results: list[dict]) -> tuple[dict, dict]:
@@ -817,37 +971,51 @@ def season_seed(season: str) -> int:
 
 
 def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
-    """Every team's fair value. Pure apart from reading the data dir; writes nothing.
+    """Every team's fair value on `today`. Pure; writes nothing.
 
-    `inputs` replaces any of the loaded data (tests): bios, ovr, results,
-    schedule, ledger.
+    `inputs` is the league it is priced on: `live_inputs` (what the hourly run
+    passes, and what None means) or `recorded_inputs` plus the day's injury
+    list (a rebuilt day). A recorded day must also carry `results`, the games
+    played by its end, and `ledger`, with this season's lines recounted to them
+    (`rebuild_history`); without them it raises rather than read today's.
     """
-    inputs = inputs or {}
-    bios = inputs.get("bios") or load_player_bios()
-    ovr_now = _ovr_now(inputs.get("ovr") or load_ovr())
+    inputs = live_inputs(season, today) if inputs is None else inputs
+    missing = [k for k in INPUT_PARTS + ("injuries",) if k not in inputs]
+    if inputs.get("recorded"):
+        missing += [k for k in ("results", "ledger") if k not in inputs]
+    if missing:
+        raise MissingInputs(f"{season} {today}: compute needs {', '.join(missing)}")
+    bios, ovr_now, rosters, deadcap = inputs["bios"], inputs["ovr"], inputs["rosters"], inputs["deadcap"]
+    levels, schedule, store, injuries, edges = (inputs["cap_levels"], inputs["schedule"], inputs["picks"],
+                                                inputs["injuries"], inputs["edges"])
     if "results" in inputs:
         results = inputs["results"]
     else:
         index, _ = gh.get_index()
         results = po.season_results(index, season)
-    schedule = inputs.get("schedule") or po.load_schedule(season)
-    ledger = inputs.get("ledger") if "ledger" in inputs else load_ledger()
+    ledger = inputs["ledger"] if "ledger" in inputs else load_ledger()
     teams = sorted(VALID_TEAMS)
     seed = season_seed(season)
-    edges = inputs["playoff_edges"] if "playoff_edges" in inputs else playoff_edges(season, today, teams)
     bonus = {t: e["points"] for t, e in edges.items()}
+
+    def payroll_of(t: str, s: str) -> tuple[int, int]:
+        return _payroll(t, bios, s, rosters[t], deadcap[t])
+
+    def aprons_in(s: str) -> tuple[Optional[float], Optional[float]]:
+        return aprons(s, season, levels)
+
+    def cap_in(s: str) -> Optional[float]:
+        return cap_level(s, season, levels)
 
     total = HORIZON
     seasons = [season_after(season, k) for k in range(total)]
-    store = inputs["pick_store"] if "pick_store" in inputs else load_pick_store()
     first_draft = 2000 + int(season[3:5])
 
     # This season: the odds model with the roster floored in.
-    rostered = {t: {s: ovr_now[s] for s in _roster(t) if s in ovr_now
+    rostered = {t: {s: ovr_now[s] for s in rosters[t] if s in ovr_now
                     and (bios.get(s) or {}).get("type") not in ("draft-rights", "dead")} for t in teams}
     strength0 = {t: _strength(list(rostered[t].values())) for t in teams}
     # This season's rating is the rest of it, so it counts who is hurt for how much of that.
-    injuries = inputs["injuries"] if "injuries" in inputs else injuries_as_of(today)
     left = unplayed_games(schedule, results)
     healthy_or_not = {t: injured_strength(t, rostered[t], injuries, left) for t in teams}
     priors0 = po.roster_priors({t: v[0] for t, v in healthy_or_not.items()})
@@ -856,19 +1024,19 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
                         playoff_bonus=bonus, draft_samples=DRAFT_SAMPLES)]
 
     # Later seasons: who is on the books, aged, filled and pulled to the middle.
-    rep_ovr, rep_pay = replacement(teams, bios, ovr_now, season)
-    cap_now = cap_level(season, season)
+    rep_ovr, rep_pay = replacement(teams, bios, ovr_now, season, rosters)
+    cap_now = cap_in(season)
 
     def rep_pay_in(s: str) -> float:
         """Replacement salary, grown with the cap like every other salary."""
-        cap_s = cap_level(s, season)
+        cap_s = cap_in(s)
         return rep_pay * (cap_s / cap_now) if cap_s and cap_now else rep_pay
 
     # Every NB¥ the ledger's formulas give is PRICE_BASE money (fin.price_level).
-    base_cap = _cap_levels_for(fin.PRICE_BASE)["cap"]
+    base_cap = _cap_levels_for(fin.PRICE_BASE, levels)["cap"]
 
     def level(s: str) -> float:
-        return fin.price_level(s, cap_level(s, season), base_cap)
+        return fin.price_level(s, cap_in(s), base_cap)
     later_books, strengths = {}, [strength0]
     kept = {t: set() for t in teams}
     signed: dict[str, list[dict]] = {t: [] for t in teams}   # free agents signed so far, with their base OVR
@@ -910,11 +1078,11 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
         # Every draft before season k, resolved on the simulated seasons before it.
         odds = pick_odds(store, first_draft, draft_orders(k))
         s = seasons[k]
-        a1, a2 = aprons(s, season)
-        cap_s = cap_level(s, season)
+        a1, a2 = aprons_in(s)
+        cap_s = cap_in(s)
         carried = {t: sum(p["money"] for p in signed[t]) for t in teams}
-        bk = {t: books(t, s, k, bios, ovr_now, _payroll(t, bios, s)[0] + carried[t], a2, kept[t],
-                       frozenset(gone), cap_s) for t in teams}
+        bk = {t: books(t, s, k, bios, ovr_now, payroll_of(t, s)[0] + carried[t], a2, kept[t],
+                       frozenset(gone), cap_s, roster=rosters[t]) for t in teams}
         kept = {t: bk[t]["resigned"] for t in teams}
         # Free agents signed in an earlier projected season stay, a year older.
         for t in teams:
@@ -925,8 +1093,8 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
             bk[t]["fa_money"] = carried[t]
             bk[t]["fa_signed"] = []
         if cap_s:
-            exc = exceptions(s, season)
-            pay_now = {t: _payroll(t, bios, s)[0] + bk[t]["resign_money"] + carried[t] for t in teams}
+            exc = exceptions(s, season, levels)
+            pay_now = {t: payroll_of(t, s)[0] + bk[t]["resign_money"] + carried[t] for t in teams}
             budgets = {t: fa_budget(pay_now[t], cap_s, a1, a2, exc) for t in teams}
             spots = {t: max(0, ROSTER_FILL - bk[t]["standard"]) for t in teams}
             pool = [p for t in teams for p in bk[t]["walked"] if p["slug"] not in gone]
@@ -983,7 +1151,7 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
         pool = []
         for t in teams:
             if k == 0:
-                pool += [(ovr_now[s], t) for s in _roster(t) if s in ovr_now
+                pool += [(ovr_now[s], t) for s in rosters[t] if s in ovr_now
                          and contract_year(bios.get(s) or {}, season) == "contract"]
             else:
                 pool += [(p["ovr"], t) for p in later_books[seasons[k]][t]["players"] if p["ovr"] is not None]
@@ -1041,12 +1209,12 @@ def compute(season: str, today: str, inputs: Optional[dict] = None) -> dict:
     tax_share = [{} for _ in range(total)]
     for k, s in enumerate(seasons):
         for t in teams:
-            contracted, dead = _payroll(t, bios, s)
+            contracted, dead = payroll_of(t, s)
             payroll = float(contracted)
             if k:
                 bk = later_books[s][t]
                 payroll += bk["resign_money"] + bk["fa_money"] + max(0, ROSTER_FILL - bk["standard"]) * rep_pay_in(s)
-            pay[k][t] = (payroll, dead, fin.luxury_tax(payroll, aprons(s, season)[0], cap_level(s, season)))
+            pay[k][t] = (payroll, dead, fin.luxury_tax(payroll, aprons_in(s)[0], cap_in(s)))
         clean = [t for t in teams if pay[k][t][2] <= 0]
         pool = sum(v[2] for v in pay[k].values())
         tax_share[k] = {t: (pool / len(clean) if clean and t in clean else 0.0) for t in teams}
@@ -1308,8 +1476,10 @@ def read_history(season: Optional[str] = None) -> list[dict]:
     return out
 
 
-def save_run(run: dict) -> None:
-    """Write the current run and make it the day's row in the history (one row per date)."""
+def save_run(run: dict, inputs: dict) -> None:
+    """Write the current run and make it the day's row in the history (one row
+    per date), with `inputs`, what it was priced on, as the day's record."""
+    record_inputs(run["season"], run["date"], inputs)
     rows = [r for r in read_history() if not (r["date"] == run["date"] and r["season"] == run["season"])]
     rows.append(_history_row(run))
     write_history(rows)
@@ -1333,42 +1503,55 @@ def _refresh_current_market() -> None:
         _atomic_write(CURRENT_FILE, json.dumps(run, indent=1))
 
 
-def rebuild_history(season: str, days: list[str], results: Optional[list[dict]] = None) -> list[dict]:
+def rebuild_history(season: str, days: list[str], results: Optional[list[dict]] = None,
+                    write: bool = True) -> list[dict]:
     """Recompute the history rows for `days` with the current model and save them.
 
-    A day's row holds the games played by the end of that day, with buzz
-    recounted from them (game date, not
-    when the box score was committed), and the ledger's home games to match.
-    Rosters, OVRs and contracts are today's, so a row for a day before a move
-    shows the move early. A day with no row yet is marked `backfill`; a day
-    that already had one keeps its mark.
+    Each day is priced on its own recorded inputs (`recorded_inputs`): the
+    rosters, contracts, ratings and picks as they stood at its end, never
+    today's; injuries by report date (`injuries_as_of`). If any day has none, MissingInputs is raised before anything
+    is computed or written. A day's row holds the games played by the end of
+    that day (game date, not when the box score was committed), with buzz,
+    home games and the gate so far recounted from them as the ledger counts
+    them. A day with no row yet is marked `backfill`; a day that already had
+    one keeps its mark. `write=False` returns the rows and saves nothing.
     """
+    have = recorded_days(season)
+    missing = [d for d in days if d not in have]
+    if missing:
+        raise MissingInputs(f"{season}: no recorded inputs for {', '.join(missing)}")
     if results is None:
         index, _ = gh.get_index()
         results = po.season_results(index, season)
     ledger = load_ledger()
+    attendance = read_csv(ATTENDANCE_CSV)[1] if ATTENDANCE_CSV.exists() else []
+    market = {r["TEAM"]: _num(r.get("MARKET")) or 1.0 for r in ledger if r["SEASON"] == season}
+    injury_log = inj.load_history()
     old = {r["date"]: r for r in read_history(season)}
     new = {}
     for d in days:
+        inputs = {**recorded_inputs(season, d), "injuries": injuries_as_of(d, injury_log)}
         played = [g for g in results if g["date"] <= d]
         home = {}
         for g in played:
             home[g["home"]] = home.get(g["home"], 0) + 1
         # Buzz as it stood that day, from the same games, as the ledger counts it.
-        _, b_avg, b_last = fin.buzz_series(sorted(
+        b_before, b_avg, b_last = fin.buzz_series(sorted(
             ({"season": season, "date": g["date"], "home": g["home"], "away": g["away"],
               "pts": {g["home"]: g["home_pts"], g["away"]: g["away_pts"]}, "wl": {}} for g in played),
             key=lambda g: (g["date"], g["home"], g["away"])))
-        led = [dict(r, HOME_GAMES=str(home.get(r["TEAM"], 0)),
+        gates = gate_as_of(season, d, market, b_before, price_level_of(season, inputs["cap_levels"]), attendance)
+        led = [dict(r, GATE=gates.get(r["TEAM"], 0.0), HOME_GAMES=str(home.get(r["TEAM"], 0)),
                     BUZZ=b_last.get((season, r["TEAM"]), 0.0), BUZZ_AVG=b_avg.get((season, r["TEAM"]), 0.0))
                if r["SEASON"] == season else r for r in ledger]
-        row = _history_row(compute(season, d, {"results": played, "ledger": led}))
+        row = _history_row(compute(season, d, {**inputs, "results": played, "ledger": led}))
         if old.get(d, {"backfill": True}).get("backfill"):
             row["backfill"] = True
         new[d] = row
-    rows = [r for r in read_history() if not (r["season"] == season and r["date"] in new)] + list(new.values())
-    write_history(rows)
-    _refresh_current_market()
+    if write:
+        rows = [r for r in read_history() if not (r["season"] == season and r["date"] in new)] + list(new.values())
+        write_history(rows)
+        _refresh_current_market()
     return list(new.values())
 
 

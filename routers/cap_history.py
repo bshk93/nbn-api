@@ -52,8 +52,10 @@ router = APIRouter()
 HISTORY_FILE = DATA_DIR / "cap-history.jsonl"
 
 
-def _cap_levels_for(season: str) -> dict:
-    levels = _load_json(CAP_LEVELS_FILE, {}).get(season, {})
+def _cap_levels_for(season: str, levels: Optional[dict] = None) -> dict:
+    """`levels` is the whole cap-levels record, when the caller already holds
+    one (fair value prices a past day on the record as it stood that day)."""
+    levels = (_load_json(CAP_LEVELS_FILE, {}) if levels is None else levels).get(season, {})
     # 27-28 onward are on file with cap/apron1/apron2 all literally 0 — the
     # committee figures have not been entered yet. A 0 threshold is "unknown",
     # not "every team is over it", so it is normalised to None here; the rest of
@@ -130,7 +132,8 @@ _NOT_MONEY_TYPES = {"draft-rights"}
 _HOLD_TAGS = {"UFA", "RFA"}
 
 
-def _payroll(team: str, bios: dict, season: str) -> tuple[int, int]:
+def _payroll(team: str, bios: dict, season: str, roster: Optional[list[str]] = None,
+             deadcap: Optional[list[dict]] = None) -> tuple[int, int]:
     """(payroll, dead cap): what the team actually pays this season.
 
     Not a cap figure, and not to be used as one. Cap math counts placeholders
@@ -139,23 +142,26 @@ def _payroll(team: str, bios: dict, season: str) -> tuple[int, int]:
     left out here. Kept for the Front Office Ledger (`stats_build/finances.py`),
     which shows payroll as money spent. Dead cap is in the total, because it is
     money owed, and is also returned on its own so the ledger can show it.
+
+    `roster` (slugs) and `deadcap` (the dead cap CSV's rows) replace reading
+    the team's two files, for a caller pricing a day on what was true then.
     """
     payroll = dead = 0
-    path = DATA_DIR / f"{team.lower()}-roster.csv"
-    if path.exists():
-        _, rows = read_csv(path)
-        for row in rows:
-            bio = bios.get((row.get("SLUG") or "").strip(), {})
-            if bio.get("type") in _NOT_MONEY_TYPES:
-                continue
-            if (bio.get("cap_holds") or {}).get(season) in _HOLD_TAGS:
-                continue
-            payroll += _parse_dollar((bio.get("salaries") or {}).get(season, ""))
-    dc_path = DATA_DIR / f"{team.lower()}-deadcap.csv"
-    if dc_path.exists():
-        _, dc_rows = read_csv(dc_path)
-        for row in dc_rows:
-            dead += _parse_dollar(row.get(season, ""))
+    if roster is None:
+        path = DATA_DIR / f"{team.lower()}-roster.csv"
+        roster = [(r.get("SLUG") or "").strip() for r in read_csv(path)[1]] if path.exists() else []
+    for slug in roster:
+        bio = bios.get(slug, {})
+        if bio.get("type") in _NOT_MONEY_TYPES:
+            continue
+        if (bio.get("cap_holds") or {}).get(season) in _HOLD_TAGS:
+            continue
+        payroll += _parse_dollar((bio.get("salaries") or {}).get(season, ""))
+    if deadcap is None:
+        dc_path = DATA_DIR / f"{team.lower()}-deadcap.csv"
+        deadcap = read_csv(dc_path)[1] if dc_path.exists() else []
+    for row in deadcap:
+        dead += _parse_dollar(row.get(season, ""))
     return payroll + dead, dead
 
 

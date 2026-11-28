@@ -1,17 +1,22 @@
 """Fair value — the pieces of the DCF, on synthetic inputs.
 
-Pins: the floored prior lands the simulator on the floored rating; who counts
+Pins: a rebuilt day is priced on its own recorded league, never today's
+(rosters, contracts and ratings as they stood; the gate so far cut to the
+day; nothing missing is quietly read from the data dir); the floored prior lands the simulator on the floored rating; who counts
 as under contract or re-signed in a later season; re-signing stops at the
 ceiling, best OVR first, a kept player stays and a bargain is kept past it;
 who walks and who signs them in free agency; the staff playoff edge; ageing;
 draft pick odds through the conveyance resolver; the bandwagon and playoff
-gate on expected finishes; discounting. Nothing reads the data dir.
+gate on expected finishes; discounting. Nothing reads the data dir: the
+recorded-inputs store is a temporary directory.
 
     venv/bin/python -m tests.test_fair_value
 """
 from __future__ import annotations
 
+import inspect
 import sys
+import tempfile
 from pathlib import Path
 from unittest import mock
 
@@ -76,27 +81,27 @@ bios = {
     "kid": {"type": "player", "dob": "2005-01-01", "salaries": {"26-27": "$2,000,000", "27-28": "$2,000,000"}},
 }
 ovr = {"star": 92.0, "role": 78.0, "vet": 85.0, "kid": 70.0}
-with mock.patch.object(fv, "_roster", return_value=list(bios)):
-    bk = fv.books("AAA", "27-28", 1, bios, ovr, contracted=150_000_000, ceiling=210_000_000, kept=set())
-    on = {p["slug"] for p in bk["players"]}
-    check("the best free agent re-signs first", "star" in on)
-    check("the next one that fits is skipped once the ceiling is hit", "role" not in on)
-    check("contract players are always on", "kid" in on)
-    check("too old to re-sign", "vet" not in on)
-    check("re-signing money is the hold", bk["resign_money"] == 50_000_000)
-    kept = fv.books("AAA", "27-28", 1, bios, ovr, contracted=200_000_000, ceiling=210_000_000, kept={"role"})
-    check("a player kept last season stays, ceiling or not", "role" in {p["slug"] for p in kept["players"]})
-    check("the young player is aged up", next(p for p in bk["players"] if p["slug"] == "kid")["ovr"] > 70.0)
+R = list(bios)
+bk = fv.books("AAA", "27-28", 1, bios, ovr, contracted=150_000_000, ceiling=210_000_000, kept=set(), roster=R)
+on = {p["slug"] for p in bk["players"]}
+check("the best free agent re-signs first", "star" in on)
+check("the next one that fits is skipped once the ceiling is hit", "role" not in on)
+check("contract players are always on", "kid" in on)
+check("too old to re-sign", "vet" not in on)
+check("re-signing money is the hold", bk["resign_money"] == 50_000_000)
+kept = fv.books("AAA", "27-28", 1, bios, ovr, contracted=200_000_000, ceiling=210_000_000, kept={"role"}, roster=R)
+check("a player kept last season stays, ceiling or not", "role" in {p["slug"] for p in kept["players"]})
+check("the young player is aged up", next(p for p in bk["players"] if p["slug"] == "kid")["ovr"] > 70.0)
 
-    check("a player who walks is in the pool, with his team",
-          [(p["slug"], p["from"]) for p in bk["walked"]] == [("role", "AAA")])
-    check("one signed elsewhere is gone",
-          "star" not in {p["slug"] for p in fv.books("AAA", "27-28", 1, bios, ovr, 150_000_000, 210_000_000,
-                                                      set(), frozenset({"star"}))["players"]})
-    over = fv.books("AAA", "27-28", 1, bios, ovr, contracted=200_000_000, ceiling=210_000_000, kept=set(),
-                    cap=170_000_000)
-    check("a bargain is kept past the ceiling", "star" in {p["slug"] for p in over["players"]})
-    check("one worth less than his hold still walks", "role" not in {p["slug"] for p in over["players"]})
+check("a player who walks is in the pool, with his team",
+      [(p["slug"], p["from"]) for p in bk["walked"]] == [("role", "AAA")])
+check("one signed elsewhere is gone",
+      "star" not in {p["slug"] for p in fv.books("AAA", "27-28", 1, bios, ovr, 150_000_000, 210_000_000,
+                                                  set(), frozenset({"star"}), roster=R)["players"]})
+over = fv.books("AAA", "27-28", 1, bios, ovr, contracted=200_000_000, ceiling=210_000_000, kept=set(),
+                cap=170_000_000, roster=R)
+check("a bargain is kept past the ceiling", "star" in {p["slug"] for p in over["players"]})
+check("one worth less than his hold still walks", "role" not in {p["slug"] for p in over["players"]})
 
 print("\nfree agency")
 cap = 170_000_000
@@ -336,6 +341,109 @@ check("the glow goes to last season's finalists",
       fv.title_glow("26-27", br) == {"BBB": fv.GLOW["Champion"], "AAA": fv.GLOW["Runner-Up"]})
 check("nothing random: the same history gives the same series",
       mkt(fv.market_series(days([100.0, 101.0, 99.0]))) == mkt(fv.market_series(days([100.0, 101.0, 99.0]))))
+
+print("\nratings on file")
+hist = {"a": [{"date": "2026-10-01", "ovr": 80}, {"date": "2026-11-07", "ovr": 84}],
+        "c": [{"date": "2026-10-01", "ovr": 75}, {"date": "2026-10-05", "ovr": None}]}
+check("the last entry on file, even one dated tomorrow (the 2K sync dates in UTC)",
+      fv.ovr_now(hist) == {"a": 84.0})
+check("a last entry with no OVR leaves none", "c" not in fv.ovr_now(hist))
+
+print("\nthe inputs a day is priced on")
+teams3 = {"AAA": ["a", "b"], "BBB": ["c"]}
+full_bios = {s: {"name": s.upper(), "type": "player", "dob": "2000-01-01", "salaries": {"26-27": "$1"},
+                 "cap_holds": {}, "pos": ["PG"], "college": "X"} for s in ("a", "b", "c", "z")}
+g = fv.gather_inputs(teams3, {"AAA": [], "BBB": [{"SLUG": "d", "26-27": "5"}]}, full_bios, fv.ovr_now(hist),
+                     {"picks": []}, {"26-27": {"cap": 1}}, [{"date": "2026-11-21", "home_team": "AAA",
+                                                          "away_team": "BBB", "stream": True}],
+                     {"AAA": {"points": 1.5}})
+check("every part is there", set(fv.INPUT_PARTS) <= set(g))
+check("only rostered players' bios, only the fields the model reads",
+      set(g["bios"]) == {"a", "b", "c"} and set(g["bios"]["a"]) == set(fv.BIO_FIELDS))
+check("ratings are the day's", g["ovr"] == {"a": 84.0})
+check("the schedule keeps what the simulator reads", g["schedule"] == [{"date": "2026-11-21", "home_team": "AAA",
+                                                                       "away_team": "BBB"}])
+check("injuries are not recorded: they are dated", "injuries" not in g)
+
+with tempfile.TemporaryDirectory() as tmp, mock.patch.object(fv, "INPUTS_DIR", Path(tmp)):
+    fv.record_inputs("26-27", "2026-11-20", g)
+    back = fv.recorded_inputs("26-27", "2026-11-20")
+    check("a recorded day reads back exactly", {k: back[k] for k in fv.INPUT_PARTS} == g)
+    check("and says it was recorded", back.get("recorded") is True)
+    fv.record_inputs("26-27", "2026-11-21", g)
+    check("an unchanged part is stored once", len(list((Path(tmp) / "objects").iterdir())) == len(fv.INPUT_PARTS))
+    traded = {**g, "rosters": {"AAA": ["a"], "BBB": ["c", "b"]}}
+    fv.record_inputs("26-27", "2026-11-22", traded)
+    check("a changed roster is its own record",
+          fv.recorded_inputs("26-27", "2026-11-22")["rosters"]["BBB"] == ["c", "b"]
+          and fv.recorded_inputs("26-27", "2026-11-21")["rosters"]["BBB"] == ["c"])
+    check("the days on record", fv.recorded_days("26-27") == {"2026-11-20", "2026-11-21", "2026-11-22"})
+    try:
+        fv.recorded_inputs("26-27", "2026-11-19")
+        check("a day never recorded raises", False)
+    except fv.MissingInputs:
+        check("a day never recorded raises", True)
+    try:
+        fv.compute("26-27", "2026-11-20", {**back, "injuries": {}})
+        check("a recorded day without its games and ledger is refused", False)
+    except fv.MissingInputs:
+        check("a recorded day without its games and ledger is refused", True)
+    try:
+        fv.compute("26-27", "2026-11-20", {"results": [], "ledger": []})
+        check("compute refuses a partial league rather than read today's files", False)
+    except fv.MissingInputs:
+        check("compute refuses a partial league rather than read today's files", True)
+
+    # The rebuild: every day priced on its own record, nothing on today's files.
+    seen = {}
+
+    def fake_compute(season, day, inputs):
+        seen[day] = inputs
+        return {"date": day, "season": season, "model": fv.MODEL, "teams": []}
+
+    with mock.patch.object(fv, "compute", fake_compute), \
+            mock.patch.object(fv, "load_ledger", lambda: []), \
+            mock.patch.object(fv, "read_history", lambda season=None: []), \
+            mock.patch.object(fv, "ATTENDANCE_CSV", Path(tmp) / "none.csv"), \
+            mock.patch.object(fv.inj, "load_history", lambda: [
+                {"date": "2026-11-22", "slug": "b", "kind": "new", "after": {"status": "Out"}}]), \
+            mock.patch.object(fv, "_history_row", lambda run: {"date": run["date"], "teams": {}}), \
+            mock.patch.object(fv, "_roster", side_effect=AssertionError("read today's roster")), \
+            mock.patch.object(fv, "load_player_bios", side_effect=AssertionError("read today's bios")), \
+            mock.patch.object(fv, "load_ovr", side_effect=AssertionError("read today's ratings")):
+        fv.rebuild_history("26-27", ["2026-11-21", "2026-11-22"], results=[], write=False)
+        check("the day before the trade is priced on the roster before it", seen["2026-11-21"]["rosters"]["BBB"] == ["c"])
+        check("the day of the trade on the roster after it", seen["2026-11-22"]["rosters"]["BBB"] == ["c", "b"])
+        check("each with the games and ledger of its own day",
+              all("results" in i and "ledger" in i and i.get("recorded") for i in seen.values()))
+        check("and the injury list by report date",
+              seen["2026-11-21"]["injuries"] == {} and set(seen["2026-11-22"]["injuries"]) == {"b"})
+        seen.clear()
+        try:
+            fv.rebuild_history("26-27", ["2026-11-19", "2026-11-21"], results=[], write=False)
+            check("a rebuild with an unrecorded day stops before computing anything", False)
+        except fv.MissingInputs:
+            check("a rebuild with an unrecorded day stops before computing anything", not seen)
+
+body = inspect.getsource(fv.compute)
+check("compute reads no league file except through live_inputs",
+      not any(f in body for f in ("_roster(", "load_player_bios", "load_ovr", "load_pick_store", "injuries_as_of",
+                                  "playoff_edges(", "_load_json", "read_csv", "load_schedule")))
+check("payroll in compute is the day's roster and dead cap", "_payroll(t, bios, s, rosters[t], deadcap[t])" in body)
+
+print("\nthe gate so far, cut to the day")
+att = [{"SEASON": "26-27", "DATE": "2026-11-01", "gametype": "REG", "HOME": "AAA", "AWAY": "BBB", "HOME_KNOWN": "TRUE",
+        "ATTENDANCE": "19000"},
+       {"SEASON": "26-27", "DATE": "2026-11-03", "gametype": "REG", "HOME": "AAA", "AWAY": "BBB", "HOME_KNOWN": "TRUE",
+        "ATTENDANCE": "9500"},
+       {"SEASON": "25-26", "DATE": "2026-04-01", "gametype": "REG", "HOME": "BBB", "AWAY": "AAA", "HOME_KNOWN": "TRUE",
+        "ATTENDANCE": "1"}]
+gate = fv.gate_as_of("26-27", "2026-11-02", {"AAA": 1.0, "BBB": 1.0}, {}, 1.0, att)
+check("a later game is left out", gate["AAA"] == 19000 * fin_mod.TICKET * fin_mod.REG_HOME_GAMES)
+check("a team with no home game yet takes the league's", gate["BBB"] == gate["AAA"])
+both = fv.gate_as_of("26-27", "2026-11-03", {"AAA": 1.2, "BBB": 1.0}, {("26-27", "2026-11-03", "AAA"): 0.1}, 2.0, att)
+check("market, buzz going in and the money level, as the ledger books it",
+      abs(both["AAA"] - 2.0 * (19000 * 120 * 1.2 + 9500 * 120 * 1.2 * 1.1) / 2 * 41) < 1e-6)
 
 if FAILS:
     print(f"\n{len(FAILS)} FAILED")
